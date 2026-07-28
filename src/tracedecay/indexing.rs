@@ -3,6 +3,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(test, feature = "test-transport"))]
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,6 +23,14 @@ const MIGRATION_REINDEX_CHECKPOINT_DIR: &str = "migration-reindex-checkpoint-v1"
 const MIGRATION_REINDEX_CHECKPOINT_BATCH_SIZE: usize = 1_024;
 static MIGRATION_REINDEX_WORKERS: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+#[cfg(any(test, feature = "test-transport"))]
+static MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, feature = "test-transport"))]
+static MIGRATION_REINDEX_TEST_EXTRACTIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, feature = "test-transport"))]
+static MIGRATION_REINDEX_TEST_HOLD_LEASE_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, feature = "test-transport"))]
+static MIGRATION_REINDEX_TEST_DISABLE_SPAWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct MigrationReindexCheckpointEntryV1 {
@@ -337,8 +347,41 @@ fn should_use_subprocess() -> bool {
 }
 
 impl TraceDecay {
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub fn configure_migration_reindex_for_test(
+        abort_after_batches: usize,
+        hold_lease_ms: u64,
+        disable_spawn: bool,
+    ) {
+        MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES.store(abort_after_batches, Ordering::SeqCst);
+        MIGRATION_REINDEX_TEST_HOLD_LEASE_MS.store(hold_lease_ms, Ordering::SeqCst);
+        MIGRATION_REINDEX_TEST_DISABLE_SPAWN.store(disable_spawn, Ordering::SeqCst);
+        MIGRATION_REINDEX_TEST_EXTRACTIONS.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub fn migration_reindex_extractions_for_test() -> usize {
+        MIGRATION_REINDEX_TEST_EXTRACTIONS.load(Ordering::SeqCst)
+    }
+
     pub async fn migration_reindex_status(&self) -> Result<MigrationReindexStatusV1> {
         let Some(encoded) = self.db.get_metadata(MIGRATION_REINDEX_STATE_KEY).await? else {
+            let generation_is_current = self
+                .db
+                .get_metadata(crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY)
+                .await?
+                .and_then(|value| value.parse::<u32>().ok())
+                == Some(crate::db::migrations::LATEST_VERSION);
+            if !generation_is_current {
+                return Ok(MigrationReindexStatusV1::Indexing {
+                    schema_version: crate::db::migrations::LATEST_VERSION,
+                    completed_files: 0,
+                    total_files: None,
+                    availability: self.migration_reindex_availability().await?,
+                });
+            }
             let completed_at = self
                 .db
                 .get_metadata("last_full_sync_at")
@@ -396,18 +439,13 @@ impl TraceDecay {
             return Ok(());
         }
         if let Err(error) = self.ensure_branch_writable("schedule migration re-index") {
-            let availability = match status {
-                MigrationReindexStatusV1::Indexing { availability, .. }
-                | MigrationReindexStatusV1::Failed { availability, .. } => availability,
-                MigrationReindexStatusV1::Current { .. } => return Ok(()),
-            };
-            self.write_migration_reindex_status(&MigrationReindexStatusV1::Failed {
-                schema_version: crate::db::migrations::LATEST_VERSION,
-                availability,
-                retryable: true,
-                reason: error.to_string(),
-            })
-            .await?;
+            eprintln!(
+                "[tracedecay] migration re-index remains pending on a read-only branch: {error}"
+            );
+            return Ok(());
+        }
+        #[cfg(any(test, feature = "test-transport"))]
+        if MIGRATION_REINDEX_TEST_DISABLE_SPAWN.load(Ordering::SeqCst) {
             return Ok(());
         }
         let key = self.active_graph_layout.sync_lock_path.clone();
@@ -457,6 +495,13 @@ impl TraceDecay {
         match result {
             Ok(_) => {
                 eprintln!("[tracedecay] background migration re-index complete");
+            }
+            Err(TraceDecayError::SyncLock { message })
+                if message.contains("another sync is already in progress") =>
+            {
+                eprintln!(
+                    "[tracedecay] background migration re-index deferred while another sync is active"
+                );
             }
             Err(error) => {
                 eprintln!("[tracedecay] background migration re-index failed: {error}");
@@ -532,9 +577,14 @@ impl TraceDecay {
             .filter(|path| !completed.contains_key(*path))
             .cloned()
             .collect::<Vec<_>>();
-        for batch in pending.chunks(MIGRATION_REINDEX_CHECKPOINT_BATCH_SIZE) {
+        for (batch_index, batch) in pending
+            .chunks(MIGRATION_REINDEX_CHECKPOINT_BATCH_SIZE)
+            .enumerate()
+        {
             let (extractions, _skipped) =
                 extract_files_isolated(&self.project_root, &self.registry, batch.to_vec());
+            #[cfg(any(test, feature = "test-transport"))]
+            MIGRATION_REINDEX_TEST_EXTRACTIONS.fetch_add(extractions.len(), Ordering::SeqCst);
             let entries = extractions
                 .into_iter()
                 .map(MigrationReindexCheckpointEntryV1::from)
@@ -551,6 +601,14 @@ impl TraceDecay {
                 availability,
             })
             .await?;
+            #[cfg(any(test, feature = "test-transport"))]
+            if MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES.load(Ordering::SeqCst) == batch_index + 1
+            {
+                return Err(TraceDecayError::Database {
+                    operation: "test migration re-index interruption".to_owned(),
+                    message: format!("aborted after {} checkpoint batch(es)", batch_index + 1),
+                });
+            }
         }
 
         Ok(files
@@ -724,6 +782,13 @@ impl TraceDecay {
         );
         self.ensure_branch_writable("full index")?;
         let sync_lease = self.begin_active_sync()?;
+        #[cfg(any(test, feature = "test-transport"))]
+        if migration_availability.is_some() {
+            let hold_ms = MIGRATION_REINDEX_TEST_HOLD_LEASE_MS.load(Ordering::SeqCst);
+            if hold_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+            }
+        }
         let start = Instant::now();
 
         // 1. Scan for source files
@@ -870,6 +935,13 @@ impl TraceDecay {
                 &transaction,
                 UNRESOLVED_REFS_PERSISTED_KEY,
                 UNRESOLVED_REFS_PERSISTED_VALUE,
+            )
+            .await?;
+        self.db
+            .set_metadata_unguarded(
+                &transaction,
+                crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY,
+                &crate::db::migrations::LATEST_VERSION.to_string(),
             )
             .await?;
         if migration_availability.is_some() {
