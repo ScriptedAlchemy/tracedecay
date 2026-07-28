@@ -82,6 +82,14 @@ impl RegisteredSchemaConvergenceMaintenance {
             .cloned()
     }
 
+    fn defer(&self, shard_id: StoreShardIdV1) {
+        self.statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(shard_id)
+            .or_insert(RegisteredSchemaConvergenceStatus::Pending);
+    }
+
     fn schedule(
         &self,
         database: Arc<RegisteredGlobalDb>,
@@ -502,8 +510,18 @@ impl DaemonSessionRuntimeRegistryV1 {
         };
         let database = Arc::new(database);
         if long_lived {
+            #[cfg(test)]
+            if self
+                .long_lived_session_maintenance_for_test
+                .load(Ordering::Relaxed)
+            {
+                self.registered_schema_convergence
+                    .schedule(Arc::clone(&database), convergence);
+                return Ok(database);
+            }
+            let _ = convergence;
             self.registered_schema_convergence
-                .schedule(Arc::clone(&database), convergence);
+                .defer(database.binding().shard_id.clone());
         }
         Ok(database)
     }
