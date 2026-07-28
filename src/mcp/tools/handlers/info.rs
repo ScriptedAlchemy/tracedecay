@@ -206,11 +206,14 @@ pub(super) async fn handle_status(
                                     "message": error.to_string(),
                                 })
                             });
-                        if ingest.max_transcript_pending_bytes
-                            > crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES
+                        // `session_ingest` stays cursor-scoped so it keeps matching the
+                        // doctor-owned `cursor_session_ingest` signal, but a stalled
+                        // backlog on any provider still starves recall, so the warning
+                        // is measured across every tracked transcript.
+                        if let Some(warning) =
+                            stalled_session_ingest_warning(db, cg.project_root()).await
                         {
-                            output["session_ingest_warning"] =
-                                json!(session_ingest_warning(&ingest, cg.project_root()));
+                            output["session_ingest_warning"] = json!(warning);
                         }
                     }
                     Err(error) => {
@@ -262,6 +265,22 @@ pub(super) async fn handle_status(
         }),
         vec![],
     ))
+}
+
+/// Warns when any provider's transcript backlog has outgrown what automatic
+/// catch-up drains, so recall gaps are reported instead of read as healthy.
+async fn stalled_session_ingest_warning(
+    db: &RegisteredGlobalDb,
+    project_root: &Path,
+) -> Option<String> {
+    const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+    match db.session_ingest_health_for_provider(None).await {
+        Ok(ingest) => (ingest.max_transcript_pending_bytes > THRESHOLD)
+            .then(|| session_ingest_warning(&ingest, project_root)),
+        Err(error) => Some(format!(
+            "session transcript ingest backlog could not be measured across providers: {error}"
+        )),
+    }
 }
 
 fn session_ingest_warning(ingest: &SessionIngestHealth, project_root: &Path) -> String {
