@@ -642,6 +642,24 @@ async fn migration_reindex_only_follows_graph_invalidating_versions() {
 }
 
 #[tokio::test]
+async fn compatible_migration_skips_generation_stamp_without_graph_metadata() {
+    let (conn, _dir) = create_raw_db().await;
+    create_v19_memory_schema_for_v20_test(&conn).await;
+    assert!(!table_exists(&conn, "metadata").await);
+
+    assert!(
+        migrate_connection(&conn)
+            .await
+            .expect("a memory-only database owns no graph generation to stamp")
+    );
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
+    assert!(
+        !table_exists(&conn, "metadata").await,
+        "a compatible migration must not invent graph metadata in a memory-only database"
+    );
+}
+
+#[tokio::test]
 async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
     let (conn, _dir) = create_raw_db().await;
     super::configure_fresh_auto_vacuum(&conn, "test interrupted fresh schema")
