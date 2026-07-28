@@ -50,10 +50,7 @@ fn head_sha(cwd: &Path) -> String {
 }
 
 fn commit_all(project: &Path, message: &str) {
-    git(
-        project,
-        &["add", "--all", "--", ".", ":(exclude).tracedecay"],
-    );
+    git(project, &["add", "--all"]);
     git(project, &["commit", "-m", message]);
 }
 
