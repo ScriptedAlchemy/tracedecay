@@ -151,6 +151,27 @@ impl LspSemanticRequestError {
     }
 }
 
+impl std::fmt::Display for LspSemanticRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("analyzer request was cancelled"),
+            Self::TimedOut => f.write_str("analyzer request timed out"),
+            Self::Remote {
+                code: Some(code),
+                message,
+            } => write!(f, "analyzer returned error {code}: {message}"),
+            Self::Remote {
+                code: None,
+                message,
+            } => write!(f, "analyzer returned an error: {message}"),
+            Self::Transport { class } => write!(f, "analyzer transport failed: {class}"),
+            Self::InvalidResponse { class } => {
+                write!(f, "analyzer returned an invalid response: {class}")
+            }
+        }
+    }
+}
+
 pub async fn collect_document_diagnostics(
     command: &str,
     args: &[String],
