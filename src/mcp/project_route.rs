@@ -16,6 +16,8 @@ pub(crate) struct ResolvedProjectRoute {
     pub(crate) graph: Arc<TraceDecay>,
     pub(crate) owner: ProjectRegistryContext,
     pub(crate) requested_root: PathBuf,
+    pub(crate) requested_git_common_dir: Option<PathBuf>,
+    pub(crate) requested_branch: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

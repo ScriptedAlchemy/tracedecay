@@ -238,6 +238,17 @@ async fn resolve_project_registry_context(
                 .project_registry_context_by_id(&resolution.project.project_id)
                 .await;
         }
+        let canonical_path = selector_path
+            .canonicalize()
+            .unwrap_or_else(|_| selector_path.to_path_buf());
+        for parent in canonical_path.ancestors().skip(1) {
+            if let Some(store) = db
+                .try_resolve_project_store_record_by_alias(parent)
+                .await?
+            {
+                return db.project_registry_context_by_id(&store.project_id).await;
+            }
+        }
     }
     let Some(basename) = bare_project_name(project_path) else {
         return Ok(None);

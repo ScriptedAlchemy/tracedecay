@@ -84,7 +84,11 @@ impl DashboardRuntime {
                 "registered project graph is not mounted: {project_id}"
             ))
         })?;
-        let cg = resolver(project_root.clone()).await.ok_or_else(|| {
+        let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
+            context.clone(),
+            project_root.clone(),
+        );
+        let cg = resolver(request).await.ok_or_else(|| {
             config_error(format!(
                 "registered project graph is not mounted: {project_id}"
             ))

@@ -328,9 +328,15 @@ pub(crate) async fn selected_registered_project_reader(
         .or_else(|| args.get("project_root"))
         .and_then(Value::as_str)
         .map(Path::new)
-        .and_then(|path| crate::worktree::git_worktree_root(path).or_else(|| path.canonicalize().ok()))
+        .and_then(|path| {
+            crate::worktree::git_worktree_root(path).or_else(|| path.canonicalize().ok())
+        })
         .unwrap_or_else(|| Path::new(&context.project.canonical_root).to_path_buf());
-    let graph = resolver(requested_path.clone()).await.ok_or_else(|| {
+    let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
+        context.clone(),
+        requested_path.clone(),
+    );
+    let graph = resolver(request.clone()).await.ok_or_else(|| {
         TraceDecayError::project_route(
             "project_route_unavailable",
             true,
@@ -345,6 +351,8 @@ pub(crate) async fn selected_registered_project_reader(
         graph,
         owner: context,
         requested_root: requested_path,
+        requested_git_common_dir: request.requested_git_common_dir,
+        requested_branch: request.requested_branch,
     }))
 }
 
@@ -1566,8 +1574,8 @@ mod tests {
                 .map(|graph| (graph.project_root().to_path_buf(), graph))
                 .collect::<BTreeMap<_, _>>(),
         );
-        let resolver: crate::mcp::server::RetainedProjectGraphResolver = Arc::new(move |root| {
-            let graph = graphs.get(&root).cloned();
+        let resolver: crate::mcp::server::RetainedProjectGraphResolver = Arc::new(move |request| {
+            let graph = graphs.get(&request.registered_root).cloned();
             Box::pin(async move { graph })
         });
         ToolCallRegistryOptions {

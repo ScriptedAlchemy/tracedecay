@@ -327,11 +327,11 @@ impl DashboardTestProjectGraphsV1 {
 
     fn resolver(&self) -> crate::mcp::server::RetainedProjectGraphResolver {
         let graphs = Arc::clone(&self.graphs);
-        Arc::new(move |project_root| {
+        Arc::new(move |request| {
             let graph = graphs
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&project_root)
+                .get(&request.registered_root)
                 .cloned();
             Box::pin(async move { graph })
         })
