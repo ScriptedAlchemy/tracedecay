@@ -4,14 +4,20 @@
 //! integrations, and network connectivity.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+#[cfg(unix)]
+use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::application::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
+use crate::diagnostics::lsp::adapters::builtin_adapters;
+use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
 use crate::display::{format_bytes, format_token_count};
 #[cfg(test)]
 use crate::storage::StoreLayout;
-#[cfg(test)]
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[cfg(test)]
@@ -123,6 +129,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     check_watcher(&mut dc);
     check_user_config(&mut dc);
     check_external_tools(&mut dc);
+    check_language_analyzers(&mut dc, &project_path).await;
 
     // Agent-specific health checks
     if let Some(ref home) = agents::home_dir() {
@@ -1633,6 +1640,345 @@ fn check_external_tools(dc: &mut DoctorCounters) {
     }
     dc.info(message);
     dc.info("Install or update ast-grep to >= 0.44, then rerun `tracedecay install` or `tracedecay update-plugin` if your agent integration caches tool metadata.");
+}
+
+const LANGUAGE_ANALYZER_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LanguageAnalyzerSpec {
+    command: String,
+    probe_command: String,
+    version_args: &'static [&'static str],
+    languages: Vec<String>,
+    remedy: Option<String>,
+    rustup_component: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LanguageAnalyzerProbe {
+    Present { version: String },
+    Missing,
+    RustupComponentMissing,
+    Broken { detail: String },
+    TimedOut,
+}
+
+fn configured_language_analyzers(settings: &CodeDiagnosticsSettings) -> Vec<LanguageAnalyzerSpec> {
+    let mut adapters = builtin_adapters();
+    adapters.extend(settings.custom_adapters.clone());
+    let mut analyzers = Vec::<LanguageAnalyzerSpec>::new();
+
+    for adapter in adapters {
+        if !settings.language_enabled(&adapter.language) {
+            continue;
+        }
+        let command = settings.command_for(&adapter.language, &adapter.command);
+        if let Some(existing) = analyzers
+            .iter_mut()
+            .find(|analyzer| analyzer.command == command)
+        {
+            if !existing.languages.contains(&adapter.language) {
+                existing.languages.push(adapter.language);
+            }
+            continue;
+        }
+        let remedy = adapter
+            .install_options
+            .first()
+            .map(|option| option.command.clone());
+        let (probe_command, version_args) = analyzer_version_probe(&adapter.command);
+        analyzers.push(LanguageAnalyzerSpec {
+            probe_command: probe_command.unwrap_or(&command).to_string(),
+            version_args,
+            rustup_component: adapter.command == "rust-analyzer",
+            command,
+            languages: vec![adapter.language],
+            remedy,
+        });
+    }
+
+    analyzers
+}
+
+fn analyzer_version_probe(command: &str) -> (Option<&'static str>, &'static [&'static str]) {
+    match command {
+        "gopls" => (None, &["version"]),
+        "intelephense" => (
+            Some("npm"),
+            &["list", "--global", "--depth=0", "intelephense"],
+        ),
+        "pyright-langserver" => (Some("pyright"), &["--version"]),
+        _ => (None, &["--version"]),
+    }
+}
+
+async fn check_language_analyzers(dc: &mut DoctorCounters, project_path: &Path) {
+    eprintln!("\n\x1b[1mLanguage analyzers\x1b[0m");
+    let settings = match language_analyzer_settings(project_path).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            dc.warn(&format!(
+                "Code diagnostics settings could not be loaded: {error}; probing built-in analyzers only"
+            ));
+            CodeDiagnosticsSettings::default()
+        }
+    };
+    dc.info(
+        "Project-active language evidence is not available to this Doctor path; enabled analyzers are graded as warnings when unavailable.",
+    );
+
+    for analyzer in configured_language_analyzers(&settings) {
+        let languages = analyzer.languages.join(", ");
+        match probe_language_analyzer_with_path(
+            &analyzer.command,
+            &analyzer.probe_command,
+            analyzer.version_args,
+            analyzer.rustup_component,
+            None,
+        )
+        .await
+        {
+            LanguageAnalyzerProbe::Present { version } => {
+                dc.pass(&format!(
+                    "{} ({languages}) is executable: {version}",
+                    analyzer.command
+                ));
+            }
+            LanguageAnalyzerProbe::Missing => {
+                dc.warn(&analyzer_warning(
+                    &analyzer,
+                    &languages,
+                    "was not found on PATH",
+                ));
+            }
+            LanguageAnalyzerProbe::RustupComponentMissing => {
+                dc.warn(
+                    "rust-analyzer resolves to a rustup shim, but the active toolchain does not have the rust-analyzer component installed; LSP context projection for rust is unavailable. Run `rustup component add rust-analyzer`.",
+                );
+            }
+            LanguageAnalyzerProbe::Broken { detail } => {
+                dc.warn(&analyzer_warning(
+                    &analyzer,
+                    &languages,
+                    &format!("resolved, but its version probe failed: {detail}"),
+                ));
+            }
+            LanguageAnalyzerProbe::TimedOut => {
+                dc.warn(&analyzer_warning(
+                    &analyzer,
+                    &languages,
+                    &format!(
+                        "resolved, but its version probe timed out after {}s",
+                        LANGUAGE_ANALYZER_PROBE_TIMEOUT.as_secs()
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+async fn language_analyzer_settings(
+    project_path: &Path,
+) -> crate::errors::Result<CodeDiagnosticsSettings> {
+    let Some(layout) = TraceDecay::try_initialized_store_layout_with_options(
+        project_path,
+        &TraceDecayOpenOptions::default(),
+    )
+    .await?
+    else {
+        return Ok(CodeDiagnosticsSettings::default());
+    };
+    crate::diagnostics::lsp::settings::load_settings(&layout.dashboard_root).await
+}
+
+fn analyzer_warning(analyzer: &LanguageAnalyzerSpec, languages: &str, problem: &str) -> String {
+    let mut message = format!(
+        "{} {problem}; LSP context projection for {languages} is unavailable.",
+        analyzer.command
+    );
+    if let Some(remedy) = &analyzer.remedy {
+        message.push_str(&format!(" Install with `{remedy}`."));
+    } else {
+        message.push_str(" No install remedy is configured for this custom adapter.");
+    }
+    message
+}
+
+async fn probe_language_analyzer_with_path(
+    command: &str,
+    probe_command: &str,
+    version_args: &[&str],
+    rustup_component: bool,
+    path: Option<&OsStr>,
+) -> LanguageAnalyzerProbe {
+    match resolve_executable(command, path) {
+        ExecutableResolution::Missing => return LanguageAnalyzerProbe::Missing,
+        ExecutableResolution::NotExecutable(path) => {
+            return LanguageAnalyzerProbe::Broken {
+                detail: format!("{} is not executable", path.display()),
+            };
+        }
+        ExecutableResolution::Executable => {}
+    }
+
+    let mut process = tokio::process::Command::new(probe_command);
+    process.args(version_args).kill_on_drop(true);
+    if let Some(path) = path {
+        process.env("PATH", path);
+    }
+    let output = match tokio::time::timeout(LANGUAGE_ANALYZER_PROBE_TIMEOUT, process.output()).await
+    {
+        Err(_) => return LanguageAnalyzerProbe::TimedOut,
+        Ok(Err(error)) if error.kind() == ErrorKind::NotFound => {
+            return LanguageAnalyzerProbe::Broken {
+                detail: format!("equivalent version probe `{probe_command}` was not found"),
+            };
+        }
+        Ok(Err(error)) => {
+            return LanguageAnalyzerProbe::Broken {
+                detail: format!("could not execute: {error}"),
+            };
+        }
+        Ok(Ok(output)) => output,
+    };
+
+    if output.status.success() {
+        let version = command_output_detail(&output);
+        return LanguageAnalyzerProbe::Present {
+            version: if version.is_empty() {
+                format!("version probe exited successfully ({})", output.status)
+            } else {
+                version
+            },
+        };
+    }
+
+    let detail = command_output_detail(&output);
+    if rustup_component
+        && rustup_missing_component_message(&detail)
+        && !rustup_component_is_installed(path).await
+    {
+        return LanguageAnalyzerProbe::RustupComponentMissing;
+    }
+    LanguageAnalyzerProbe::Broken {
+        detail: if detail.is_empty() {
+            format!("version probe exited with {}", output.status)
+        } else {
+            format!("{}: {detail}", output.status)
+        },
+    }
+}
+
+enum ExecutableResolution {
+    Executable,
+    Missing,
+    NotExecutable(PathBuf),
+}
+
+fn resolve_executable(command: &str, path: Option<&OsStr>) -> ExecutableResolution {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return classify_executable_path(command_path);
+    }
+    let paths = path
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    let Some(paths) = paths else {
+        return ExecutableResolution::Missing;
+    };
+    let mut not_executable = None;
+    for directory in std::env::split_paths(&paths) {
+        for candidate in executable_candidates(command) {
+            match classify_executable_path(&directory.join(candidate)) {
+                ExecutableResolution::Executable => {
+                    return ExecutableResolution::Executable;
+                }
+                ExecutableResolution::NotExecutable(path) => {
+                    not_executable.get_or_insert(path);
+                }
+                ExecutableResolution::Missing => {}
+            }
+        }
+    }
+    not_executable.map_or(
+        ExecutableResolution::Missing,
+        ExecutableResolution::NotExecutable,
+    )
+}
+
+fn classify_executable_path(path: &Path) -> ExecutableResolution {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return ExecutableResolution::Missing;
+    };
+    if !metadata.is_file() || !permissions_are_executable(metadata.permissions()) {
+        return ExecutableResolution::NotExecutable(path.to_path_buf());
+    }
+    ExecutableResolution::Executable
+}
+
+#[cfg(unix)]
+fn permissions_are_executable(permissions: Permissions) -> bool {
+    permissions.mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn permissions_are_executable(_permissions: std::fs::Permissions) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn executable_candidates(command: &str) -> Vec<String> {
+    if Path::new(command).extension().is_some() {
+        return vec![command.to_string()];
+    }
+    ["", ".exe", ".cmd", ".bat", ".com"]
+        .into_iter()
+        .map(|extension| format!("{command}{extension}"))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn executable_candidates(command: &str) -> Vec<String> {
+    vec![command.to_string()]
+}
+
+fn rustup_missing_component_message(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("rust-analyzer")
+        && (detail.contains("rustup component add rust-analyzer")
+            || detail.contains("not installed for the toolchain"))
+}
+
+async fn rustup_component_is_installed(path: Option<&OsStr>) -> bool {
+    let mut process = tokio::process::Command::new("rustup");
+    process
+        .args(["component", "list", "--installed"])
+        .kill_on_drop(true);
+    if let Some(path) = path {
+        process.env("PATH", path);
+    }
+    let Ok(Ok(output)) =
+        tokio::time::timeout(LANGUAGE_ANALYZER_PROBE_TIMEOUT, process.output()).await
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim_start().starts_with("rust-analyzer"))
+}
+
+fn command_output_detail(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    detail.chars().take(500).collect()
 }
 
 fn json_bool(value: &serde_json::Value, key: &str) -> bool {
