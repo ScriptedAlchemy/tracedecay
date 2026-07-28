@@ -43,9 +43,9 @@ use super::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrationError,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
     DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
-    Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationPortV1,
-    Pr13AdvisoryCycleInvocationRequestV1, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1,
+    Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationOutcomeV1,
+    Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
+    Pr13AdvisoryCycleTerminalV1, Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -71,8 +71,8 @@ use crate::application::advisory::{
     CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
     GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
     GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryCycleControlV1,
-    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
-    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
+    Pr13AdvisoryCycleOutcomeV1, Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1,
+    Pr13AdvisoryHookNoticeQueueV1, Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
     Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
@@ -259,25 +259,47 @@ impl Pr13AdvisoryCycleInvocationPortV1 for ProjectOpenAdvisoryFeedbackCycleV1 {
                     ),
                 )
                 .await
-                .map_err(|_| advisory_cycle_problem())?;
-            let publication = outcome.publication().ok_or_else(advisory_cycle_problem)?;
-            self.feedback_runtime
+                .map_err(|failure| advisory_cycle_problem(failure.class()))?;
+            // A cycle only earns a shared-store publication when every pillar
+            // reported complete coverage. Incomplete coverage is a truthful
+            // terminal state of a cycle that did run, so the surface reports
+            // that canonical result and its typed states instead of hiding the
+            // cycle behind an "unavailable" problem.
+            let cycle = match &outcome {
+                Pr13AdvisoryCycleOutcomeV1::Cancelled { .. } => {
+                    return Err(ApplicationProblem::cancelled_before_admission());
+                }
+                Pr13AdvisoryCycleOutcomeV1::TimedOut { .. } => {
+                    return Err(ApplicationProblem::timed_out_before_admission());
+                }
+                Pr13AdvisoryCycleOutcomeV1::Completed { cycle, .. } => cycle,
+            };
+            let request_handle = self
+                .feedback_runtime
                 .mint_diagnostics(
                     format!("{}.diagnostics", request.request_id),
                     FeedbackDiagnosticsReadRequestV1 {
-                        head_commit_id: publication.result.scope.head_commit_id.clone(),
+                        head_commit_id: cycle.cycle.scope.head_commit_id.clone(),
                     },
                     request.observed_at,
                 )
-                .map_err(|_| advisory_cycle_problem())
+                .map_err(|_| advisory_cycle_problem("diagnostics-handle"))?;
+            Ok(Pr13AdvisoryCycleInvocationOutcomeV1 {
+                request_handle,
+                cycle: Pr13AdvisoryCycleTerminalV1 {
+                    termination: cycle.cycle.termination,
+                    provider_states: cycle.cycle.provider_states.clone(),
+                    published: outcome.publication().is_some(),
+                },
+            })
         })
     }
 }
 
-fn advisory_cycle_problem() -> ApplicationProblem {
+fn advisory_cycle_problem(reason: &str) -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "feedback.advisory_cycle_unavailable".to_owned(),
-        message: "The advisory feedback cycle did not publish a canonical result".to_owned(),
+        message: format!("The advisory feedback cycle produced no canonical result ({reason})"),
     })
 }
 
