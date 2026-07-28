@@ -516,7 +516,10 @@ async fn assert_daemon_crash_stage(
     )
     .await;
     let payload = json_tool_payload(&search, "message search");
-    assert_eq!(payload["status"], "ok");
+    assert_eq!(
+        payload["status"], "ok",
+        "{barrier_stage} retry must leave the user session readable: {payload}"
+    );
     assert_eq!(payload["count"], 1, "retry must remain exactly once");
     assert_eq!(payload["results"][0]["session"]["session_id"], session_id);
 }

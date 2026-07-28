@@ -8,6 +8,8 @@ pub mod configuration;
 pub mod diagnostics;
 pub mod evidence_assembly;
 pub mod external_source;
+#[cfg(tracedecay_observation_fault_harness)]
+pub mod fault_harness;
 pub mod git_index_transactions;
 pub mod memory;
 pub mod observation;
