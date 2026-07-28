@@ -333,9 +333,7 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
-    pub(super) fn project_routes(
-        &self,
-    ) -> crate::mcp::project_route::SharedHookProjectRouteCache {
+    pub(super) fn project_routes(&self) -> crate::mcp::project_route::SharedHookProjectRouteCache {
         self.project_routes.clone()
     }
 

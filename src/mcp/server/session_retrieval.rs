@@ -42,8 +42,8 @@ use crate::mcp::tools::{
     SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
     SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
     SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
-    SessionRetrievalWorkerRetryClass,
-    SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
+    SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ports::TemporalExecutionSnapshot;
@@ -632,9 +632,7 @@ impl DaemonSessionRetrievalService {
                         continue;
                     }
                 };
-                let Some(result) = self
-                    .hydrate_result(&item.snapshot, ranked, hydrated)
-                    .await
+                let Some(result) = self.hydrate_result(&item.snapshot, ranked, hydrated).await
                 else {
                     skipped = skipped.saturating_add(1);
                     rendering_omitted = rendering_omitted.saturating_add(1);
