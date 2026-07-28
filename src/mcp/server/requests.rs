@@ -4,9 +4,6 @@
 use super::*;
 use crate::mcp::ToolResult;
 
-fn assert_send<T: Send>(_: T) {}
-fn assert_send_ref<T: Send>(_: &T) {}
-
 struct PreparedToolCall {
     tool_name: String,
     arguments: Value,
@@ -959,8 +956,6 @@ impl McpServer {
                 ),
             },
         );
-        assert_send_ref(&dispatch);
-
         if let Some(read_flight) = read_flight {
             match read_flight {
                 ReadFlightClaim::Leader(leader) => match dispatch.await {
@@ -1013,16 +1008,6 @@ impl McpServer {
         pre_cancelled: bool,
         publish_activity: bool,
     ) -> DispatchedToolCall {
-        assert_send(self.reopen_if_branch_drifted());
-        assert_send(self.route_tool_arguments(
-            id,
-            tool_name,
-            arguments.clone(),
-            route_cache,
-            memory_request_scope,
-        ));
-        assert_send(self.server_stats_json());
-
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
         // this call reads the right index. Cheap no-op check when no drift.
@@ -1052,12 +1037,6 @@ impl McpServer {
         );
         let project_reader_preselected = routed.selected_project.is_some();
 
-        assert_send(self.begin_tool_dispatch(
-            tool_name,
-            &cg,
-            project_reader_preselected,
-            publish_activity,
-        ));
         self.begin_tool_dispatch(tool_name, &cg, project_reader_preselected, publish_activity)
             .await;
 
@@ -1070,13 +1049,6 @@ impl McpServer {
         // `timings_enabled` was initialized from the server's pinned resolved
         // snapshot (or an explicit transport override). Do not synchronously
         // re-read legacy configuration for every tool call.
-        assert_send(self.prepare_application_surface_dispatch(
-            &cg,
-            id,
-            tool_name,
-            memory_request_scope,
-            pre_cancelled,
-        ));
         let ApplicationSurfaceDispatch {
             request_id: application_request_id,
             deadline: application_deadline,
@@ -1092,18 +1064,6 @@ impl McpServer {
                 pre_cancelled,
             )
             .await;
-        assert_send(self.execute_tool_dispatch(
-            &cg,
-            tool_name,
-            routed.arguments.clone(),
-            project_reader_preselected,
-            server_stats.clone(),
-            implicit_project_path,
-            application_invocation_executor,
-            application_request_id.clone(),
-            application_deadline.clone(),
-            application_cancellation.clone(),
-        ));
         let outcome = self
             .execute_tool_dispatch(
                 &cg,
