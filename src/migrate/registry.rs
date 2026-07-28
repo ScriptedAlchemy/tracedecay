@@ -819,6 +819,16 @@ where
         )
         .unwrap_or(usize::MAX);
         for scope in &plan.graph_scopes {
+            if query_optional_text(
+                conn,
+                "SELECT graph_scope_id FROM graph_scopes WHERE graph_scope_id=?1",
+                params![scope.graph_scope_id.as_str()],
+            )
+            .await?
+            .is_some()
+            {
+                continue;
+            }
             applied.graph_scopes += usize::try_from(
                 conn.execute(
                     "INSERT OR IGNORE INTO graph_scopes(
