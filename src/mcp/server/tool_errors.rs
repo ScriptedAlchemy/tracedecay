@@ -99,6 +99,24 @@ pub(crate) fn tool_error_response(
     tool_name: &str,
     error: &TraceDecayError,
 ) -> JsonRpcResponse {
+    if let Some((reason_code, retryable, detail)) = error.project_route_context() {
+        let code = if retryable {
+            ErrorCode::InternalError
+        } else {
+            ErrorCode::InvalidParams
+        };
+        return JsonRpcResponse::error_with_data(
+            id,
+            code,
+            format!("tool project route failed: {detail}"),
+            Some(json!({
+                "tool": tool_name,
+                "reason_code": reason_code,
+                "retryable": retryable,
+                "detail": detail,
+            })),
+        );
+    }
     if tool_name == "tracedecay_hook_runtime"
         && let Some(data) = crate::mcp::tools::structured_hook_error_data(error)
     {

@@ -41,6 +41,13 @@ pub enum TraceDecayError {
     #[error("config error: {message}")]
     Config { message: String },
 
+    #[error("project route error ({reason_code}): {detail}")]
+    ProjectRoute {
+        reason_code: String,
+        retryable: bool,
+        detail: String,
+    },
+
     #[error("sync lock: {message}")]
     SyncLock { message: String },
 
@@ -88,6 +95,30 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
 }
 
 impl TraceDecayError {
+    pub(crate) fn project_route(
+        reason_code: impl Into<String>,
+        retryable: bool,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::ProjectRoute {
+            reason_code: reason_code.into(),
+            retryable,
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn project_route_context(&self) -> Option<(&str, bool, &str)> {
+        let Self::ProjectRoute {
+            reason_code,
+            retryable,
+            detail,
+        } = self
+        else {
+            return None;
+        };
+        Some((reason_code, *retryable, detail))
+    }
+
     pub(crate) fn database_operation(
         operation: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,

@@ -13,8 +13,14 @@ struct PreparedToolCall {
 
 struct DispatchedToolCall {
     cg: Arc<TraceDecay>,
+    selected_owner: Option<crate::global_db::ProjectRegistryContext>,
     outcome: Result<ToolResult>,
     elapsed_us: Option<u64>,
+}
+
+struct RoutedToolCall {
+    arguments: Value,
+    selected_project: Option<crate::mcp::project_route::ResolvedProjectRoute>,
 }
 
 struct ToolTokenAccounting {
@@ -434,6 +440,19 @@ impl McpServer {
             Self::report_host_admission_outcome(outcome);
             return outcome;
         };
+        // Connection routing is identity for subsequent tool calls on this
+        // connection: publish it before durable admission, even when effect
+        // processing is deferred, retained, or the spool is unavailable. A
+        // spool outage must never leave follow-up reads silently pinned to
+        // the active project — that would present wrong-project data as
+        // success instead of a typed unavailable outcome.
+        if let Err(error) = self.update_hook_workspace_route(&event, route_cache).await {
+            tracing::warn!(error = %error, "hook project registry route resolution failed");
+            let outcome =
+                HostAdmissionOutcome::retained_unavailable("project_registry_route_unavailable");
+            Self::report_host_admission_outcome(outcome);
+            return outcome;
+        }
         let admission_source = event.admission_source();
         let admitted = match self.host_admission_broker.as_ref() {
             Some(broker) => broker.admit(&admission_source, &payload).await,
@@ -448,17 +467,6 @@ impl McpServer {
                 return outcome;
             }
         };
-        // Connection routing is identity for subsequent tool calls on this
-        // connection: publish it as soon as the routing event is durably
-        // appended, even when effect processing is deferred/retained. Do not
-        // wait for Committed — delayed replay must not leave tools unrouted.
-        if let Err(error) = self.update_hook_workspace_route(&event, route_cache).await {
-            tracing::warn!(error = %error, "hook project registry route resolution failed");
-            let outcome =
-                HostAdmissionOutcome::retained_unavailable("project_registry_route_unavailable");
-            Self::report_host_admission_outcome(outcome);
-            return outcome;
-        }
         let outcome = Box::pin(self.replay_host_admission(Some(admitted.seq))).await;
         // Route analytics + span observations are side writes: only after the
         // durable spool record is authoritatively committed (Committed or
@@ -823,15 +831,16 @@ impl McpServer {
         })
     }
 
-    fn route_tool_arguments(
+    async fn route_tool_arguments(
         &self,
         id: &Value,
         tool_name: &str,
         arguments: Value,
         route_cache: &HookProjectRouteCache,
         memory_request_scope: &str,
-    ) -> Value {
-        let mut handler_arguments = route_cache.apply_to_tool_arguments(tool_name, arguments);
+    ) -> Result<RoutedToolCall> {
+        let (mut handler_arguments, routed_project) =
+            route_cache.route_tool_arguments(tool_name, arguments)?;
         if crate::analytics::is_skill_view_tool(tool_name)
             && let Some(request_id) = json_rpc_request_id_string(id)
             && let Some(map) = handler_arguments.as_object_mut()
@@ -846,7 +855,20 @@ impl McpServer {
                 map.insert("__mcp_request_id".to_owned(), json!(request_id));
             }
         }
-        handler_arguments
+        let selected_project = match routed_project {
+            Some(project) => Some(project),
+            None => crate::mcp::tools::handlers::selected_registered_project_reader(
+                tool_name,
+                &handler_arguments,
+                self.registry_db.as_deref(),
+                self.retained_project_graph_resolver.as_ref(),
+            )
+            .await?,
+        };
+        Ok(RoutedToolCall {
+            arguments: handler_arguments,
+            selected_project,
+        })
     }
 
     async fn execute_tool_dispatch(
@@ -854,6 +876,7 @@ impl McpServer {
         cg: &TraceDecay,
         tool_name: &str,
         handler_arguments: Value,
+        preselected_project_reader: bool,
         server_stats: Option<Value>,
         implicit_project_path: Option<&Path>,
         application_invocation_executor: Option<
@@ -909,6 +932,7 @@ impl McpServer {
                     .cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
+                preselected_project_reader,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),
                     self.user_session_db.as_ref(),
@@ -957,6 +981,7 @@ impl McpServer {
             cg.as_ref(),
             tool_name,
             arguments,
+            false,
             None,
             None,
             None,
@@ -978,20 +1003,45 @@ impl McpServer {
         implicit_project_path: Option<&Path>,
         memory_request_scope: &str,
         pre_cancelled: bool,
+        publish_activity: bool,
     ) -> DispatchedToolCall {
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
         // this call reads the right index. Cheap no-op check when no drift.
-        let cg = self.reopen_if_branch_drifted().await;
+        let active_cg = self.reopen_if_branch_drifted().await;
+        let handler_start = timings_enabled.then(std::time::Instant::now);
+        let routed = match self
+            .route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope)
+            .await
+        {
+            Ok(routed) => routed,
+            Err(error) => {
+                return DispatchedToolCall {
+                    cg: active_cg,
+                    selected_owner: None,
+                    outcome: Err(error),
+                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                };
+            }
+        };
+        let selected_owner = routed
+            .selected_project
+            .as_ref()
+            .map(|selected| selected.owner.clone());
+        let cg = routed
+            .selected_project
+            .as_ref()
+            .map_or_else(|| Arc::clone(&active_cg), |selected| Arc::clone(&selected.graph));
+        let project_reader_preselected = routed.selected_project.is_some();
 
         // Notification-free freshness is useful before tools that edit source
         // files in the index. Read-only graph queries should not block behind
         // a full project walk; on very large indexes (especially when
         // node_modules was intentionally included) that turns diagnostics and
         // search into sync operations.
-        if needs_lazy_sync_before_dispatch(tool_name) {
+        if !project_reader_preselected && needs_lazy_sync_before_dispatch(tool_name) {
             self.maybe_sync_if_stale().await;
-        } else {
+        } else if !project_reader_preselected {
             // D4: sync-on-read (never blocking). Read tools serve the current
             // answer IMMEDIATELY and, when the read-refresh cooldown has
             // elapsed, kick a single-flighted background refresh so the *next*
@@ -1006,6 +1056,9 @@ impl McpServer {
         if let Ok(mut counts) = self.tool_call_counts.lock() {
             *counts.entry(tool_name.to_string()).or_insert(0) += 1;
         }
+        if publish_activity {
+            self.publish_tool_call_activity(tool_name, &cg).await;
+        }
 
         let server_stats = if tool_name == "tracedecay_status" {
             Some(self.server_stats_json().await)
@@ -1016,14 +1069,6 @@ impl McpServer {
         // `timings_enabled` was initialized from the server's pinned resolved
         // snapshot (or an explicit transport override). Do not synchronously
         // re-read legacy configuration for every tool call.
-        let timings_active = timings_enabled;
-        let handler_start = if timings_active {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let handler_arguments =
-            self.route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope);
         let ApplicationSurfaceDispatch {
             request_id: application_request_id,
             deadline: application_deadline,
@@ -1043,7 +1088,8 @@ impl McpServer {
             .execute_tool_dispatch(
                 &cg,
                 tool_name,
-                handler_arguments,
+                routed.arguments,
+                project_reader_preselected,
                 server_stats,
                 implicit_project_path,
                 application_invocation_executor,
@@ -1054,6 +1100,7 @@ impl McpServer {
             .await;
         DispatchedToolCall {
             cg,
+            selected_owner,
             outcome,
             elapsed_us: handler_start.map(|t| t.elapsed().as_micros() as u64),
         }
@@ -1416,7 +1463,12 @@ impl McpServer {
         }
     }
 
-    async fn prepend_index_warnings(&self, cg: &TraceDecay, result: &mut ToolResult) {
+    async fn prepend_index_warnings(
+        &self,
+        cg: &TraceDecay,
+        include_connection_worktree_warning: bool,
+        result: &mut ToolResult,
+    ) {
         // Warn if serving from a fallback (ancestor) branch DB.
         if let Some(warning) = cg.fallback_warning() {
             let warning = format!("WARNING: {warning}");
@@ -1479,7 +1531,9 @@ impl McpServer {
         // appears FIRST in the response — the index serving the
         // wrong branch is the most serious of these warnings to
         // surface to the agent.
-        if let Some(ref m) = self.worktree_mismatch {
+        if include_connection_worktree_warning
+            && let Some(ref m) = self.worktree_mismatch
+        {
             let notice = crate::worktree::worktree_mismatch_notice(m);
             if let Some(content) = result
                 .value
@@ -1501,6 +1555,7 @@ impl McpServer {
     ) -> JsonRpcResponse {
         let DispatchedToolCall {
             cg,
+            selected_owner,
             outcome,
             elapsed_us,
         } = dispatch;
@@ -1523,14 +1578,17 @@ impl McpServer {
                     .await;
                 self.append_per_file_staleness_notice(&cg, &mut result)
                     .await;
-                self.prepend_index_warnings(&cg, &mut result).await;
+                self.prepend_index_warnings(&cg, selected_owner.is_none(), &mut result)
+                    .await;
                 mark_semantic_tool_error(&mut result);
-                self.refresh_after_live_transcript_projection(
-                    &tool_name,
-                    &analytics_arguments,
-                    &result,
-                )
-                .await;
+                if selected_owner.is_none() {
+                    self.refresh_after_live_transcript_projection(
+                        &tool_name,
+                        &analytics_arguments,
+                        &result,
+                    )
+                    .await;
+                }
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => {
@@ -1576,14 +1634,13 @@ impl McpServer {
         }
     }
 
-    async fn publish_tool_call_activity(&self, tool_name: &str) {
+    async fn publish_tool_call_activity(&self, tool_name: &str, cg: &TraceDecay) {
         if !crate::application::event_lane::enabled(self.session_db.as_deref()) {
             return;
         }
         let Some(activity_db) = self.session_db.as_deref() else {
             return;
         };
-        let cg = self.cg_snapshot().await;
         crate::application::event_lane::publish(
             activity_db,
             crate::application::event_lane::ActivityFamilyV1::ToolCall,
@@ -1630,10 +1687,6 @@ impl McpServer {
         };
 
         let fast_unavailable = self.message_search_worker_is_unavailable(&tool_name, &arguments);
-        if !fast_unavailable {
-            self.publish_tool_call_activity(&tool_name).await;
-        }
-
         let dispatch = self
             .dispatch_tool_call(
                 &id,
@@ -1644,6 +1697,7 @@ impl McpServer {
                 implicit_project_path,
                 memory_request_scope,
                 pre_cancelled,
+                !fast_unavailable,
             )
             .await;
         if fast_unavailable {

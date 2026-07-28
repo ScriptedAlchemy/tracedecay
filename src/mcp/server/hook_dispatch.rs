@@ -9,58 +9,54 @@ impl McpServer {
         event: &hook_events::HookEvent,
         route_cache: &mut HookProjectRouteCache,
     ) -> crate::errors::Result<()> {
-        let route_cwd = HookProjectRouteCache::route_cwd(event);
-        let project_path = match route_cwd {
-            Some(cwd) => self.registered_project_containing_path(cwd).await?,
-            None => None,
+        let route = match HookProjectRouteCache::route_cwd(event) {
+            Some(cwd) => {
+                let arguments = json!({
+                    "project_selector": {
+                        "path": cwd.to_string_lossy(),
+                    }
+                });
+                match crate::mcp::tools::handlers::selected_registered_project_reader(
+                    "tracedecay_files",
+                    &arguments,
+                    self.registry_db.as_deref(),
+                    self.retained_project_graph_resolver.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(route)) => {
+                        crate::mcp::project_route::WorkspaceProjectRoute::Resolved(route)
+                    }
+                    Ok(None) => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
+                        crate::mcp::project_route::ProjectRouteFailure {
+                            kind: crate::mcp::project_route::ProjectRouteFailureKind::NotFound,
+                            detail: format!(
+                                "workspace {} did not resolve to a registered project",
+                                cwd.display()
+                            ),
+                        },
+                    ),
+                    Err(error) => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
+                        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error),
+                    ),
+                }
+            }
+            None => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
+                crate::mcp::project_route::ProjectRouteFailure {
+                    kind: crate::mcp::project_route::ProjectRouteFailureKind::Unavailable,
+                    detail: "hook workspace route did not include a working directory".to_owned(),
+                },
+            ),
         };
-        route_cache.observe_hook_event(event, project_path);
+        let failure = match &route {
+            crate::mcp::project_route::WorkspaceProjectRoute::Resolved(_) => None,
+            crate::mcp::project_route::WorkspaceProjectRoute::Failed(failure) => {
+                Some(failure.clone())
+            }
+        };
+        route_cache.observe_workspace_route(event, route);
         self.hook_project_routes.store(route_cache);
-        Ok(())
-    }
-
-    pub(crate) async fn registered_project_containing_path(
-        &self,
-        cwd: &Path,
-    ) -> crate::errors::Result<Option<String>> {
-        let Some(registry) = self.registry_db.as_deref() else {
-            return Ok(None);
-        };
-        let mut candidate = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-        loop {
-            if let Some(context) = registry
-                .project_registry_context_by_alias(&candidate)
-                .await?
-            {
-                return Ok(Some(context.project.canonical_root));
-            }
-            if !candidate.pop() {
-                return Ok(None);
-            }
-        }
-    }
-
-    /// Resolves the registered project for a hook route `cwd`, first by the
-    /// parent-directory alias walk (see
-    /// [`Self::registered_project_containing_path`]) and, when that misses,
-    /// by git-common-dir identity. A linked worktree lives at a sibling path,
-    /// so the alias walk never reaches its main checkout; identity resolution
-    /// maps it back to the registered project through the shared common dir.
-    pub(crate) async fn registered_project_for_route_cwd(
-        &self,
-        cwd: &Path,
-    ) -> crate::errors::Result<Option<String>> {
-        if let Some(root) = self.registered_project_containing_path(cwd).await? {
-            return Ok(Some(root));
-        }
-        let Some(registry) = self.registry_db.as_deref() else {
-            return Ok(None);
-        };
-        let git_common_dir = crate::worktree::git_common_dir(cwd);
-        let context = registry
-            .project_registry_context_by_identity(cwd, git_common_dir.as_deref())
-            .await?;
-        Ok(context.map(|context| context.project.canonical_root))
+        failure.map_or(Ok(()), |failure| Err(failure.into_error()))
     }
 
     pub(crate) async fn run_hook_event_plan(

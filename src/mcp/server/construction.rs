@@ -71,6 +71,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     #[cfg(any(test, feature = "test-transport"))]
@@ -104,6 +105,7 @@ pub(crate) struct McpServerDaemonAuthority {
     pub(crate) user_session_refresh_wake:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
+    pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) writers: McpServerWriters,
 }
 
@@ -156,6 +158,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
@@ -192,6 +195,7 @@ impl McpServerConstructionContext {
             project_session_refresh_wake,
             user_session_refresh_wake,
             database_owner_reconciler,
+            project_routes,
             writers,
         } = authority;
         let profile_root = profile_identity.profile_root().to_path_buf();
@@ -229,6 +233,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            project_routes,
             application_invocation_executor: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
