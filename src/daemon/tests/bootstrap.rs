@@ -1,6 +1,8 @@
 use super::*;
+#[cfg(unix)]
 use crate::application::context::CancellationToken;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
+#[cfg(unix)]
 use crate::errors::TraceDecayError;
 use crate::mcp::JsonRpcResponse;
 use std::process::Command;
@@ -57,6 +59,7 @@ fn run_git(root: &std::path::Path, args: &[&str]) {
     );
 }
 
+#[cfg(unix)]
 fn assert_missing_enrollment_admission(error: &TraceDecayError) {
     match error {
         TraceDecayError::Config { message } => {
@@ -70,6 +73,7 @@ fn assert_missing_enrollment_admission(error: &TraceDecayError) {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
     let home = TempDir::new().expect("isolated home");
@@ -102,6 +106,7 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
     let home = TempDir::new().expect("isolated home");
