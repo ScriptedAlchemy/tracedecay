@@ -201,18 +201,15 @@ impl CodeIndexSchedulerRegistryV1 {
             super::scoped_code_index_store_root(&store_root, &project_root),
         )?;
         if let Some(hook) = semantic_schedule {
-            if let Some(latest) = opened.latest_complete() {
-                let _ = hook(&latest.generation);
-            }
             opened.replace_semantic_schedule_hook(Some(hook));
         }
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        let retained_generation = opened.latest_complete();
-        let needs_initial_reconcile = retained_generation.is_none();
-        let serving_generation = Arc::new(RwLock::new(retained_generation));
+        let needs_initial_reconcile =
+            active_generation_encoded_bytes.load(Ordering::Acquire) == 0;
+        let serving_generation = Arc::new(RwLock::new(None));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let (wake, shutting_down) = {
