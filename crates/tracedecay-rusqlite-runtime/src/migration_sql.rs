@@ -1868,6 +1868,7 @@ fn authorize_migration_writer(
 
 fn is_allowed_migration_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
     is_migration_read_pragma(pragma_name, pragma_value)
+        || (pragma_value.is_none() && pragma_name.eq_ignore_ascii_case("shrink_memory"))
         || pragma_value.is_some_and(|value| {
             (pragma_name.eq_ignore_ascii_case("auto_vacuum")
                 && (value.eq_ignore_ascii_case("incremental") || value == "2"))
@@ -2993,6 +2994,16 @@ mod tests {
                 "{pragma} must be denied, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn connection_local_memory_release_pragma_is_allowed() {
+        let fixture = fixture('a', 'a');
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+
+        channel
+            .execute_batch("PRAGMA shrink_memory".to_owned())
+            .expect("connection-local cache release must be authorized");
     }
 
     #[test]
