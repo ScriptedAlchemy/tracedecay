@@ -1625,7 +1625,7 @@ impl Database {
             .lock()
             .await;
         let wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        tracing::warn!(
+        tracing::debug!(
             event = "database_health_check",
             phase = "start",
             operation,
@@ -1644,7 +1644,7 @@ impl Database {
                 })?;
         let result = database_health(&snapshot, operation).await;
         let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        tracing::warn!(
+        tracing::debug!(
             event = "database_health_check",
             phase = "complete",
             operation,
