@@ -634,6 +634,26 @@ impl McpServer {
         let mut context = runtime
             .mcp_server_context_for_test(cg, scope_prefix)
             .expect("MCP test runtime must retain exact profile and session authorities");
+        // Hook notifications require a durable admission spool before their
+        // plans replay and their post-commit side writes (route analytics,
+        // span observations) run. Mount one on the runtime's project
+        // sessions database, exactly like the daemon does in production.
+        if context.host_admission_broker.is_none()
+            && let Some(session_db) = context.session_db.as_ref()
+        {
+            let database_path = session_db.db_path().to_path_buf();
+            let (admission_runtime, _) = tokio::task::spawn_blocking(move || {
+                crate::application::host_admission::HostAdmissionRuntime::open_for_database(
+                    &database_path,
+                )
+            })
+            .await
+            .expect("test server host-admission task completes")
+            .expect("test server host-admission spool opens");
+            context.host_admission_broker = Some(Arc::new(
+                crate::application::host_admission::HostAdmissionBroker::new(admission_runtime),
+            ));
+        }
         if !retained.is_empty() {
             let resolver: RetainedProjectGraphResolver = Arc::new(move |requested_root| {
                 let requested = canonical_or_original(&requested_root);
