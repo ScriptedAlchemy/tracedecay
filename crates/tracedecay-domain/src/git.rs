@@ -285,6 +285,21 @@ impl GitCoverageV1 {
         self.degradations.is_empty()
     }
 
+    /// Whether any recorded degradation means state was left unread.
+    ///
+    /// `IgnoredCollision` only records that Git may collapse the untracked and
+    /// ignored view when ignored content shares a directory with live entries.
+    /// Tracked entries, the index tree, and the index checksum are all still
+    /// captured exactly, so it is not evidence that a read failed. Counting it
+    /// as one made every index transaction ineligible in any repository that
+    /// keeps an ignored directory beside tracked files — `target/`,
+    /// `node_modules/`, `.tracedecay/`.
+    pub fn leaves_state_unread(&self) -> bool {
+        self.degradations
+            .iter()
+            .any(|degradation| *degradation != GitDegradationV1::IgnoredCollision)
+    }
+
     pub fn records(&self, degradation: GitDegradationV1) -> bool {
         self.degradations.contains(&degradation)
     }
