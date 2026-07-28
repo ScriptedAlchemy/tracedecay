@@ -544,7 +544,9 @@ pub(super) const ROOT_SUMMARY_CANDIDATE_QUERY: &str = "
 pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
            first_occurrence.knowledge_at,
-           NULL, NULL, evidence.session_id, evidence.evidence_kind,
+           CASE WHEN evidence.member_count = 1
+                THEN first_occurrence.message_id ELSE NULL END,
+           NULL, evidence.session_id, evidence.evidence_kind,
            COALESCE(json_extract(
                provider_observation.observation_json, '$.identity.source.provider'
            ), 'claude')
@@ -588,7 +590,9 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
 pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
            first_occurrence.knowledge_at,
-           NULL, NULL, evidence.session_id, evidence.evidence_kind,
+           CASE WHEN evidence.member_count = 1
+                THEN first_occurrence.message_id ELSE NULL END,
+           NULL, evidence.session_id, evidence.evidence_kind,
            authority_session.provider
     FROM session_temporal_generations AS frozen
     JOIN session_derived_evidence AS evidence

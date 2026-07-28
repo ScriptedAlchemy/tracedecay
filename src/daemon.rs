@@ -5392,7 +5392,8 @@ async fn serve_broker_socket_client(
             return Ok(());
         }
     }
-    let server = if handshake.project_path.is_some() {
+    let user_session_request = projectless_user_session_request(&first_request_line);
+    let server = if handshake.project_path.is_some() && !user_session_request {
         match Box::pin(engine.project_server_for_request(&handshake)).await {
             Ok(server) => Some(server),
             Err(error) => {
@@ -5732,7 +5733,8 @@ async fn serve_windows_broker_client_with_class_and_invocation(
             return Ok(());
         }
     }
-    if handshake.project_path.is_some() {
+    let user_session_request = projectless_user_session_request(&first_request_line);
+    if handshake.project_path.is_some() && !user_session_request {
         let server = match Box::pin(portable_project_server_for_request(
             lifecycle.clone(),
             store_administration.clone(),
@@ -6556,6 +6558,13 @@ async fn projectless_user_lcm_tools_call_response(
             Arc::clone(&user_session_db),
         )
         .await;
+    if tool_name == "tracedecay_message_search" {
+        // Joining retained temporal projection is part of reopening the mounted
+        // profile store. It does not ingest provider history or widen scope.
+        let _ = refresh_wake
+            .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
+            .await;
+    }
     let retrieval_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
         .and_then(|root| root.with_profile_runtime_shard(profile_identity))
@@ -6618,6 +6627,23 @@ fn projectless_tool_call(
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     Ok((tool_name, arguments))
+}
+
+fn projectless_user_session_request(request_line: &str) -> bool {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+        return false;
+    };
+    if request.method != "tools/call" {
+        return false;
+    }
+    let Ok((tool_name, arguments)) = projectless_tool_call(request.params.as_ref()) else {
+        return false;
+    };
+    (tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
+        && arguments
+            .get("storage_scope")
+            .and_then(serde_json::Value::as_str)
+            == Some("user")
 }
 
 struct BrokerStreamTransport {
