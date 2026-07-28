@@ -614,8 +614,6 @@ mod tests {
         // passes. Convergence must come from committed pages surviving those
         // cancellations, never from any single open finishing the whole table.
         let conn = TestConnection::open(&path);
-        let availability_json =
-            default_availability_json().map_err(|err| format!("availability: {err}"))?;
         let mut previous_watermark = 0_i64;
         let mut interrupted_opens = 0_usize;
         let mut opens = 0_usize;

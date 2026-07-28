@@ -125,7 +125,7 @@ impl SourceEditFileAuthority {
         }
         let mut options = CapOpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
-        let mut input = self
+        let input = self
             .parent
             .open_with(&self.name, &options)
             .map_err(|error| {
