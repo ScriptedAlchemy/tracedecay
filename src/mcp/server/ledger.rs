@@ -366,10 +366,10 @@ impl McpServer {
             }
         });
         let Ok(Some(selected)) = crate::mcp::tools::handlers::selected_registered_project_reader(
-            "tracedecay_files",
-            &arguments,
+            "tracedecay_files".to_owned(),
+            arguments,
             self.registry_db.as_deref(),
-            self.retained_project_graph_resolver.as_ref(),
+            self.retained_project_graph_resolver.clone(),
         )
         .await
         else {

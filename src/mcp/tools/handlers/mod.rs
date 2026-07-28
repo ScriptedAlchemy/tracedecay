@@ -290,16 +290,16 @@ fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool
 }
 
 pub(crate) async fn selected_registered_project_reader(
-    tool_name: &str,
-    args: &Value,
+    tool_name: String,
+    args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    resolver: Option<&crate::mcp::server::RetainedProjectGraphResolver>,
+    resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
 ) -> Result<Option<crate::mcp::project_route::ResolvedProjectRoute>> {
-    if !tool_dispatches_registered_project_reader(tool_name) {
+    if !tool_dispatches_registered_project_reader(&tool_name) {
         return Ok(None);
     }
     let Some(context) =
-        project_registry_context(args, &["project_path", "project_root"], global_db)
+        project_registry_context(&args, &["project_path", "project_root"], global_db)
             .await
             .map_err(|error| {
                 crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error)
@@ -548,14 +548,15 @@ impl Default for ToolCallRegistryOptions<'_> {
     }
 }
 
-pub async fn handle_tool_call_with_registry_and_implicit_project(
-    cg: &TraceDecay,
-    tool_name: &str,
+pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
+    cg: &'a TraceDecay,
+    tool_name: &'a str,
     mut args: Value,
     server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
+    scope_prefix: Option<&'a str>,
+    options: ToolCallRegistryOptions<'a>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
+    Box::pin(async move {
     for removed in ["hermes_home"] {
         if args.get(removed).is_some() {
             return Err(TraceDecayError::Config {
@@ -576,24 +577,32 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                     None => support::profile_root_for_global_db(options.global_db)?,
                 };
                 if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
-                    return dispatch_profile_retained_application_tool(
+                    let dispatch: std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = Result<ToolResult>>
+                                + Send
+                                + '_,
+                        >,
+                    > = Box::pin(dispatch_profile_retained_application_tool(
                         operation,
                         tool_name,
                         args,
                         &profile_root,
-                        &options,
-                    )
-                    .await;
+                        options.clone(),
+                    ));
+                    return dispatch.await;
                 }
-                return handle_user_lcm_tool_with_db(
+                let dispatch: std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
+                > = Box::pin(handle_user_lcm_tool_with_db(
                     tool_name,
                     args,
                     &profile_root,
                     options.session_authorities.user,
                     options.global_db,
                     options.session_authorities.profile_retrieval,
-                )
-                .await;
+                ));
+                return dispatch.await;
             }
             "project" => {
                 if let Some(object) = args.as_object_mut() {
@@ -630,10 +639,10 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         None
     } else {
         selected_registered_project_reader(
-            tool_name,
-            &args,
+            tool_name.to_owned(),
+            args.clone(),
             options.global_db,
-            options.retained_project_graph_resolver.as_ref(),
+            options.retained_project_graph_resolver.clone(),
         )
         .await?
     };
@@ -667,7 +676,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
         return expect_classified_dispatch(
             tool_name,
-            dispatch_application_surface_tools(tool_name, cg, args, &options).await,
+            dispatch_application_surface_tools(tool_name, cg, args, options.clone()).await,
         );
     }
     // Catalog-declared compatibility operations must resolve the MCP binding
@@ -714,13 +723,13 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                 scope_prefix,
                 selected_scope_prefix,
                 active_project_session_db,
-                &options,
+                options.clone(),
             )
             .await,
         ),
         Some(McpToolDispatchGroup::Admin) => expect_classified_dispatch(
             tool_name,
-            dispatch_admin_tools(tool_name, cg, args, &options).await,
+            dispatch_admin_tools(tool_name, cg, args, options.clone()).await,
         ),
         Some(McpToolDispatchGroup::Analysis) => expect_classified_dispatch(
             tool_name,
@@ -730,17 +739,17 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                 args,
                 scope_prefix,
                 active_project_session_db,
-                &options,
+                options.clone(),
             )
             .await,
         ),
         Some(McpToolDispatchGroup::Git) => expect_classified_dispatch(
             tool_name,
-            dispatch_git_tools(tool_name, cg, args, &options).await,
+            dispatch_git_tools(tool_name, cg, args, options.clone()).await,
         ),
         Some(McpToolDispatchGroup::Edit) => expect_classified_dispatch(
             tool_name,
-            dispatch_edit_tools(tool_name, cg, args, &options).await,
+            dispatch_edit_tools(tool_name, cg, args, options.clone()).await,
         ),
         Some(McpToolDispatchGroup::Health) => expect_classified_dispatch(
             tool_name,
@@ -750,7 +759,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                 args,
                 scope_prefix,
                 active_project_session_db,
-                &options,
+                options.clone(),
             )
             .await,
         ),
@@ -763,17 +772,17 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                 scope_prefix,
                 active_project_session_db,
                 active_lcm_context,
-                &options,
+                options.clone(),
             )
             .await,
         ),
         Some(McpToolDispatchGroup::Memory) => expect_classified_dispatch(
             tool_name,
-            dispatch_memory_tools(tool_name, cg, args, &options).await,
+            dispatch_memory_tools(tool_name, cg, args, options.clone()).await,
         ),
         Some(McpToolDispatchGroup::SessionWorkflow) => expect_classified_dispatch(
             tool_name,
-            dispatch_session_workflow_tools(tool_name, cg, args, &options).await,
+            dispatch_session_workflow_tools(tool_name, cg, args, options.clone()).await,
         ),
         None if tool_name.starts_with("tracedecay_lcm_") => {
             dispatch_lcm_tool(tool_name, args, active_lcm_context).await
@@ -782,6 +791,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             message: format!("unknown tool: {tool_name}"),
         }),
     }
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1075,13 +1085,13 @@ async fn dispatch_profile_retained_application_tool(
     tool_name: &str,
     args: Value,
     profile_root: &Path,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     invoke_retained_mcp_request(
         RetainedMcpExecutionContext::Profile {
             tool_name,
             profile_root,
-            options,
+            options: &options,
         },
         operation,
         args,
@@ -1188,7 +1198,7 @@ async fn dispatch_info_tools(
     scope_prefix: Option<&str>,
     selected_scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_status" => {
@@ -1239,7 +1249,7 @@ async fn dispatch_admin_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_hook_runtime" => {
@@ -1282,7 +1292,7 @@ async fn dispatch_application_surface_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
     if operation == ApplicationSurfaceOperation::DiagnosticsRead
@@ -1321,7 +1331,7 @@ async fn dispatch_analysis_tools(
     args: Value,
     scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
@@ -1367,7 +1377,7 @@ async fn dispatch_git_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    _options: &ToolCallRegistryOptions<'_>,
+    _options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
@@ -1390,9 +1400,9 @@ async fn dispatch_edit_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
-    let invocation = || edit::SourceEditInvocationContext {
+    let invocation = edit::SourceEditInvocationContext {
         executor: options.source_edit_executor.clone(),
         reconciliation_executor: options.source_edit_reconciliation_executor.clone(),
         request_id: options.application_request_id.clone(),
@@ -1400,25 +1410,27 @@ async fn dispatch_edit_tools(
         cancellation: options.application_cancellation.clone(),
     };
     let result = match tool_name {
-        "tracedecay_str_replace" => edit::handle_str_replace(cg, args, invocation()).await,
+        "tracedecay_str_replace" => edit::handle_str_replace(cg, args, invocation.clone()).await,
         "tracedecay_multi_str_replace" => {
-            edit::handle_multi_str_replace(cg, args, invocation()).await
+            edit::handle_multi_str_replace(cg, args, invocation.clone()).await
         }
-        "tracedecay_insert_at" => edit::handle_insert_at(cg, args, invocation()).await,
+        "tracedecay_insert_at" => edit::handle_insert_at(cg, args, invocation.clone()).await,
         "tracedecay_ast_grep_rewrite" => {
-            edit::handle_ast_grep_rewrite(cg, args, invocation()).await
+            edit::handle_ast_grep_rewrite(cg, args, invocation.clone()).await
         }
-        "tracedecay_replace_symbol" => edit::handle_replace_symbol(cg, args, invocation()).await,
+        "tracedecay_replace_symbol" => {
+            edit::handle_replace_symbol(cg, args, invocation.clone()).await
+        }
         "tracedecay_insert_at_symbol" => {
-            edit::handle_insert_at_symbol(cg, args, invocation()).await
+            edit::handle_insert_at_symbol(cg, args, invocation.clone()).await
         }
-        "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args, invocation()).await,
+        "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args, invocation.clone()).await,
         "tracedecay_api_migration_plan" => edit::handle_api_migration_plan(cg, args).await,
         "tracedecay_api_migration_apply" => {
-            edit::handle_api_migration_apply(cg, args, invocation()).await
+            edit::handle_api_migration_apply(cg, args, invocation.clone()).await
         }
         "tracedecay_source_edit_reconcile" => {
-            edit::handle_source_edit_reconcile(cg, args, invocation()).await
+            edit::handle_source_edit_reconcile(cg, args, invocation).await
         }
         _ => return None,
     };
@@ -1433,7 +1445,7 @@ async fn dispatch_health_tools(
     args: Value,
     scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_test_map" => health::handle_test_map(cg, args, scope_prefix).await,
@@ -1469,7 +1481,7 @@ async fn dispatch_retained_application_tools(
     scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     active_lcm_context: session::LcmHandlerContext<'_>,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let operation = RetainedSurfaceOperation::from_name(tool_name)?;
     Some(
@@ -1480,7 +1492,7 @@ async fn dispatch_retained_application_tools(
                 scope_prefix,
                 active_project_session_db,
                 active_lcm_context,
-                options,
+                options: &options,
             },
             operation,
             args,
@@ -1574,7 +1586,7 @@ async fn dispatch_memory_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_automation_run_artifact_view" => {
@@ -1601,7 +1613,7 @@ async fn dispatch_session_workflow_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    options: &ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_diagnose" => {
