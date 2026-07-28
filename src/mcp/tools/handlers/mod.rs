@@ -272,6 +272,15 @@ pub(super) fn json_result(value: &Value) -> ToolResult {
     text_tool_result(&serde_json::to_string(value).unwrap_or_default())
 }
 
+fn boxed_send<'a, T, F>(
+    future: F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
+where
+    F: std::future::Future<Output = T> + Send + 'a,
+{
+    Box::pin(future)
+}
+
 const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
     "tracedecay_admin_branch_add",
     "tracedecay_admin_cli",
@@ -298,13 +307,14 @@ pub(crate) async fn selected_registered_project_reader(
     if !tool_dispatches_registered_project_reader(&tool_name) {
         return Ok(None);
     }
-    let Some(context) =
-        project_registry_context(&args, &["project_path", "project_root"], global_db)
-            .await
-            .map_err(|error| {
-                crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error)
-                    .into_error()
-            })?
+    let context = boxed_send(project_registry_context(
+        &args,
+        &["project_path", "project_root"],
+        global_db,
+    ));
+    let Some(context) = context.await.map_err(|error| {
+        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error).into_error()
+    })?
     else {
         return Ok(None);
     };
@@ -557,240 +567,251 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     Box::pin(async move {
-    for removed in ["hermes_home"] {
-        if args.get(removed).is_some() {
-            return Err(TraceDecayError::Config {
-                message: format!("unknown parameter `{removed}` for `{tool_name}`"),
-            });
-        }
-    }
-    if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
-        if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search" {
-            return Err(TraceDecayError::Config {
-                message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
-            });
-        }
-        match storage_scope {
-            "user" => {
-                let profile_root = match options.profile_root {
-                    Some(profile_root) => profile_root.to_path_buf(),
-                    None => support::profile_root_for_global_db(options.global_db)?,
-                };
-                if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
-                    let dispatch: std::pin::Pin<
-                        Box<
-                            dyn std::future::Future<Output = Result<ToolResult>>
-                                + Send
-                                + '_,
-                        >,
-                    > = Box::pin(dispatch_profile_retained_application_tool(
-                        operation,
-                        tool_name,
-                        args,
-                        &profile_root,
-                        options.clone(),
-                    ));
-                    return dispatch.await;
-                }
-                let dispatch: std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-                > = Box::pin(handle_user_lcm_tool_with_db(
-                    tool_name,
-                    args,
-                    &profile_root,
-                    options.session_authorities.user,
-                    options.global_db,
-                    options.session_authorities.profile_retrieval,
-                ));
-                return dispatch.await;
-            }
-            "project" => {
-                if let Some(object) = args.as_object_mut() {
-                    object.remove("storage_scope");
-                }
-            }
-            _ => {
+        for removed in ["hermes_home"] {
+            if args.get(removed).is_some() {
                 return Err(TraceDecayError::Config {
-                    message: "storage_scope must be one of project, user".to_string(),
+                    message: format!("unknown parameter `{removed}` for `{tool_name}`"),
                 });
             }
         }
-    }
-    if !tool_accepts_registered_project_selector(tool_name)
-        && rejected_tool_project_selector_present(tool_name, &args)
-    {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{tool_name} is scoped to the active project and does not accept project selectors"
-            ),
-        });
-    }
-    if let Some(project_path) = options.implicit_project_path
-        && tool_dispatches_registered_project_reader(tool_name)
-        && !rejected_tool_project_selector_present(tool_name, &args)
-        && let Some(map) = args.as_object_mut()
-    {
-        map.insert(
-            "project_path".to_string(),
-            json!(project_path.to_string_lossy().to_string()),
-        );
-    }
-    let selected_project = if options.preselected_project_reader {
-        None
-    } else {
-        selected_registered_project_reader(
-            tool_name.to_owned(),
-            args.clone(),
-            options.global_db,
-            options.retained_project_graph_resolver.clone(),
-        )
-        .await?
-    };
-    let selected_scope_prefix = if options.preselected_project_reader || selected_project.is_some()
-    {
-        None
-    } else {
-        scope_prefix
-    };
-    let cg = selected_project
-        .as_ref()
-        .map_or(cg, |selected| selected.graph.as_ref());
-    let active_project_session_db = (!options.preselected_project_reader
-        && selected_project.is_none())
-    .then(|| {
-        options
-            .registered_project_session_db
-            .as_ref()
-            .or(options.session_authorities.project)
-    })
-    .flatten();
-    let active_lcm_context = session::LcmHandlerContext::active(
-        cg,
-        active_project_session_db,
-        options.session_authorities.project_retrieval,
-    );
-    // Classify before moving `args` so large payloads are not cloned into every
-    // group probe. Application-surface tools still run before catalog checks;
-    // diagnostics_read without an executor falls through to analysis.
-    let dispatch_group = classify_mcp_tool_dispatch_group(tool_name, &options);
-    if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
-        return expect_classified_dispatch(
-            tool_name,
-            dispatch_application_surface_tools(tool_name, cg, args, options.clone()).await,
-        );
-    }
-    // Catalog-declared compatibility operations must resolve the MCP binding
-    // before reaching their retained typed handler. Operations without an
-    // application-catalog contract remain under the explicit root MCP
-    // migration owner until their family receives one.
-    if let Err(error) = resolve_catalog_tool_binding(BindingSurface::Mcp, tool_name) {
-        return Err(TraceDecayError::Config {
-            message: error.to_string(),
-        });
-    }
-    if !LegacyToolCompatibilityOwner::admits(tool_name)
-        && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name)
-    {
-        return Err(TraceDecayError::Config {
-            message: format!("unknown tool: {tool_name}"),
-        });
-    }
-    match dispatch_group {
-        Some(McpToolDispatchGroup::ApplicationSurface) => Err(TraceDecayError::Config {
-            message: format!("internal: application-surface tool `{tool_name}` escaped early dispatch"),
-        }),
-        Some(McpToolDispatchGroup::Graph) => expect_classified_dispatch(
-            tool_name,
-            dispatch_graph_tools(
-                tool_name,
-                cg,
-                args,
-                selected_scope_prefix,
-                options.code_index_search_executor.as_ref(),
-                options.code_index_search_authority.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await,
-        ),
-        Some(McpToolDispatchGroup::Info) => expect_classified_dispatch(
-            tool_name,
-            dispatch_info_tools(
-                tool_name,
-                cg,
-                args,
-                server_stats,
-                scope_prefix,
-                selected_scope_prefix,
-                active_project_session_db,
-                options.clone(),
-            )
-            .await,
-        ),
-        Some(McpToolDispatchGroup::Admin) => expect_classified_dispatch(
-            tool_name,
-            dispatch_admin_tools(tool_name, cg, args, options.clone()).await,
-        ),
-        Some(McpToolDispatchGroup::Analysis) => expect_classified_dispatch(
-            tool_name,
-            dispatch_analysis_tools(
-                tool_name,
-                cg,
-                args,
-                scope_prefix,
-                active_project_session_db,
-                options.clone(),
-            )
-            .await,
-        ),
-        Some(McpToolDispatchGroup::Git) => expect_classified_dispatch(
-            tool_name,
-            dispatch_git_tools(tool_name, cg, args, options.clone()).await,
-        ),
-        Some(McpToolDispatchGroup::Edit) => expect_classified_dispatch(
-            tool_name,
-            dispatch_edit_tools(tool_name, cg, args, options.clone()).await,
-        ),
-        Some(McpToolDispatchGroup::Health) => expect_classified_dispatch(
-            tool_name,
-            dispatch_health_tools(
-                tool_name,
-                cg,
-                args,
-                scope_prefix,
-                active_project_session_db,
-                options.clone(),
-            )
-            .await,
-        ),
-        Some(McpToolDispatchGroup::RetainedApplication) => expect_classified_dispatch(
-            tool_name,
-            dispatch_retained_application_tools(
-                tool_name,
-                cg,
-                args,
-                scope_prefix,
-                active_project_session_db,
-                active_lcm_context,
-                options.clone(),
-            )
-            .await,
-        ),
-        Some(McpToolDispatchGroup::Memory) => expect_classified_dispatch(
-            tool_name,
-            dispatch_memory_tools(tool_name, cg, args, options.clone()).await,
-        ),
-        Some(McpToolDispatchGroup::SessionWorkflow) => expect_classified_dispatch(
-            tool_name,
-            dispatch_session_workflow_tools(tool_name, cg, args, options.clone()).await,
-        ),
-        None if tool_name.starts_with("tracedecay_lcm_") => {
-            dispatch_lcm_tool(tool_name, args, active_lcm_context).await
+        if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
+            if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search"
+            {
+                return Err(TraceDecayError::Config {
+                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
+                });
+            }
+            match storage_scope {
+                "user" => {
+                    let profile_root = match options.profile_root {
+                        Some(profile_root) => profile_root.to_path_buf(),
+                        None => support::profile_root_for_global_db(options.global_db)?,
+                    };
+                    if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
+                        let dispatch: std::pin::Pin<
+                            Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
+                        > = Box::pin(dispatch_profile_retained_application_tool(
+                            operation,
+                            tool_name,
+                            args,
+                            &profile_root,
+                            options.clone(),
+                        ));
+                        return dispatch.await;
+                    }
+                    let dispatch: std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
+                    > = Box::pin(handle_user_lcm_tool_with_db(
+                        tool_name,
+                        args,
+                        &profile_root,
+                        options.session_authorities.user,
+                        options.global_db,
+                        options.session_authorities.profile_retrieval,
+                    ));
+                    return dispatch.await;
+                }
+                "project" => {
+                    if let Some(object) = args.as_object_mut() {
+                        object.remove("storage_scope");
+                    }
+                }
+                _ => {
+                    return Err(TraceDecayError::Config {
+                        message: "storage_scope must be one of project, user".to_string(),
+                    });
+                }
+            }
         }
-        None => Err(TraceDecayError::Config {
-            message: format!("unknown tool: {tool_name}"),
-        }),
-    }
+        if !tool_accepts_registered_project_selector(tool_name)
+            && rejected_tool_project_selector_present(tool_name, &args)
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "{tool_name} is scoped to the active project and does not accept project selectors"
+                ),
+            });
+        }
+        if let Some(project_path) = options.implicit_project_path
+            && tool_dispatches_registered_project_reader(tool_name)
+            && !rejected_tool_project_selector_present(tool_name, &args)
+            && let Some(map) = args.as_object_mut()
+        {
+            map.insert(
+                "project_path".to_string(),
+                json!(project_path.to_string_lossy().to_string()),
+            );
+        }
+        let selected_project = if options.preselected_project_reader {
+            None
+        } else {
+            boxed_send(selected_registered_project_reader(
+                tool_name.to_owned(),
+                args.clone(),
+                options.global_db,
+                options.retained_project_graph_resolver.clone(),
+            ))
+            .await?
+        };
+        let selected_scope_prefix =
+            if options.preselected_project_reader || selected_project.is_some() {
+                None
+            } else {
+                scope_prefix
+            };
+        let cg = selected_project
+            .as_ref()
+            .map_or(cg, |selected| selected.graph.as_ref());
+        let active_project_session_db = (!options.preselected_project_reader
+            && selected_project.is_none())
+        .then(|| {
+            options
+                .registered_project_session_db
+                .as_ref()
+                .or(options.session_authorities.project)
+        })
+        .flatten();
+        let active_lcm_context = session::LcmHandlerContext::active(
+            cg,
+            active_project_session_db,
+            options.session_authorities.project_retrieval,
+        );
+        // Classify before moving `args` so large payloads are not cloned into every
+        // group probe. Application-surface tools still run before catalog checks;
+        // diagnostics_read without an executor falls through to analysis.
+        let dispatch_group = classify_mcp_tool_dispatch_group(tool_name, &options);
+        if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
+            return expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_application_surface_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    options.clone(),
+                ))
+                .await,
+            );
+        }
+        // Catalog-declared compatibility operations must resolve the MCP binding
+        // before reaching their retained typed handler. Operations without an
+        // application-catalog contract remain under the explicit root MCP
+        // migration owner until their family receives one.
+        if let Err(error) = resolve_catalog_tool_binding(BindingSurface::Mcp, tool_name) {
+            return Err(TraceDecayError::Config {
+                message: error.to_string(),
+            });
+        }
+        if !LegacyToolCompatibilityOwner::admits(tool_name)
+            && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name)
+        {
+            return Err(TraceDecayError::Config {
+                message: format!("unknown tool: {tool_name}"),
+            });
+        }
+        match dispatch_group {
+            Some(McpToolDispatchGroup::ApplicationSurface) => Err(TraceDecayError::Config {
+                message: format!(
+                    "internal: application-surface tool `{tool_name}` escaped early dispatch"
+                ),
+            }),
+            Some(McpToolDispatchGroup::Graph) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_graph_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    selected_scope_prefix,
+                    options.code_index_search_executor.as_ref(),
+                    options.code_index_search_authority.as_ref(),
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                ))
+                .await,
+            ),
+            Some(McpToolDispatchGroup::Info) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_info_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    server_stats,
+                    scope_prefix,
+                    selected_scope_prefix,
+                    active_project_session_db,
+                    options.clone(),
+                ))
+                .await,
+            ),
+            Some(McpToolDispatchGroup::Admin) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await,
+            ),
+            Some(McpToolDispatchGroup::Analysis) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_analysis_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    scope_prefix,
+                    active_project_session_db,
+                    options.clone(),
+                ))
+                .await,
+            ),
+            Some(McpToolDispatchGroup::Git) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await,
+            ),
+            Some(McpToolDispatchGroup::Edit) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await,
+            ),
+            Some(McpToolDispatchGroup::Health) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_health_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    scope_prefix,
+                    active_project_session_db,
+                    options.clone(),
+                ))
+                .await,
+            ),
+            Some(McpToolDispatchGroup::RetainedApplication) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_retained_application_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    scope_prefix,
+                    active_project_session_db,
+                    active_lcm_context,
+                    options.clone(),
+                ))
+                .await,
+            ),
+            Some(McpToolDispatchGroup::Memory) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await,
+            ),
+            Some(McpToolDispatchGroup::SessionWorkflow) => expect_classified_dispatch(
+                tool_name,
+                boxed_send(dispatch_session_workflow_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    options.clone(),
+                ))
+                .await,
+            ),
+            None if tool_name.starts_with("tracedecay_lcm_") => {
+                boxed_send(dispatch_lcm_tool(tool_name, args, active_lcm_context)).await
+            }
+            None => Err(TraceDecayError::Config {
+                message: format!("unknown tool: {tool_name}"),
+            }),
+        }
     })
 }
 
@@ -1595,12 +1616,8 @@ async fn dispatch_memory_tools(
         "tracedecay_analytics" => {
             analytics::handle_analytics(cg, args, options.global_db, options.accounting_db).await
         }
-        "tracedecay_skill_list" => {
-            skills::handle_skill_list(cg, args, options.accounting_db).await
-        }
-        "tracedecay_skill_view" => {
-            skills::handle_skill_view(cg, args, options.accounting_db).await
-        }
+        "tracedecay_skill_list" => skills::handle_skill_list(cg, args, options.accounting_db).await,
+        "tracedecay_skill_view" => skills::handle_skill_view(cg, args, options.accounting_db).await,
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
         _ => return None,
     };
@@ -1617,12 +1634,8 @@ async fn dispatch_session_workflow_tools(
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_diagnose" => {
-            workflow::handle_diagnose(
-                cg,
-                args,
-                options.code_index_publication_identity.as_deref(),
-            )
-            .await
+            workflow::handle_diagnose(cg, args, options.code_index_publication_identity.as_deref())
+                .await
         }
         "tracedecay_run_affected_tests" => {
             workflow::handle_run_affected_tests(

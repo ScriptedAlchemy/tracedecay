@@ -838,7 +838,7 @@ async fn managed_test_document_content_digests(
                 message: format!("managed test-run path is invalid: {changed_path}"),
             });
         }
-        validated.push((changed_path.as_str(), root.join(relative)));
+        validated.push((changed_path.clone(), root.join(relative)));
     }
 
     let mut outcomes: Vec<(
@@ -853,9 +853,7 @@ async fn managed_test_document_content_digests(
                         crate::code_index::intake::content_digest(&bytes),
                     ))),
                     Err(()) => Err(TraceDecayError::Config {
-                        message: format!(
-                            "managed test-run source URI is invalid: {changed_path}"
-                        ),
+                        message: format!("managed test-run source URI is invalid: {changed_path}"),
                     }),
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
