@@ -90,6 +90,31 @@ impl TemporalHydratedResult {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn available_for_test(
+        rank: u32,
+        stable_id: impl Into<String>,
+        anchor_id: RetrievalAnchorId,
+        content: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::available(
+            rank,
+            stable_id.into(),
+            anchor_id,
+            Zeroizing::new(content.into()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_test(
+        rank: u32,
+        stable_id: impl Into<String>,
+        anchor_id: RetrievalAnchorId,
+        state: HydrationStateV1,
+    ) -> Self {
+        Self::unavailable(rank, stable_id.into(), anchor_id, state)
+    }
+
     pub const fn rank(&self) -> u32 {
         self.rank
     }

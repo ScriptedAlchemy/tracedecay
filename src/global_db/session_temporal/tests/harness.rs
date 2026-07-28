@@ -151,28 +151,32 @@ impl RegisteredTemporalHarness {
     pub(super) async fn seed_root_fixture(&self) -> [u8; 32] {
         self.seed_cursor_key("application-root-key", 1, 0x45).await;
         let mut digest = None;
-        for (session_id, provider, record_id, receipt_id) in [
+        for (session_id, provider, message_id, record_id, receipt_id, payload) in [
             (
                 "session.root.a",
                 "provider.application",
+                "message-root-a",
                 "record-root-a",
                 "receipt-root-a",
+                "root-wide payload from session alpha",
             ),
             (
                 "session.root.b",
                 "provider.other",
+                "message-root-b",
                 "record-root-b",
                 "receipt-root-b",
+                "root-wide payload from session beta",
             ),
         ] {
             let observation = fixture_observation(
                 1,
                 session_id,
                 provider,
-                "duplicate-message",
+                message_id,
                 record_id,
                 receipt_id,
-                "duplicate root-wide payload",
+                payload,
                 false,
             );
             let anchor = self.persist_observation(&observation).await;
@@ -187,12 +191,39 @@ impl RegisteredTemporalHarness {
             self.seed_occurrence(
                 &observation,
                 &anchor,
-                "duplicate-message",
-                "duplicate root-wide payload",
+                message_id,
+                payload,
                 1,
             )
             .await;
         }
+        let foreign = fixture_observation(
+            1,
+            "session.root.foreign",
+            "provider.application",
+            "message-root-foreign",
+            "record-root-foreign",
+            "receipt-root-foreign",
+            "root-wide payload from another project",
+            false,
+        );
+        let foreign_anchor = self.persist_observation(&foreign).await;
+        self.seed_session_in_project(
+            "session.root.foreign",
+            "provider.application",
+            "project.foreign",
+            "application-root-key",
+            1,
+        )
+        .await;
+        self.seed_occurrence(
+            &foreign,
+            &foreign_anchor,
+            "message-root-foreign",
+            "root-wide payload from another project",
+            1,
+        )
+        .await;
         digest.expect("root fixture policy digest")
     }
 
@@ -344,6 +375,18 @@ impl RegisteredTemporalHarness {
     }
 
     async fn seed_session(&self, session_id: &str, provider: &str, key_id: &str, version: i64) {
+        self.seed_session_in_project(session_id, provider, PROJECT_ID, key_id, version)
+            .await;
+    }
+
+    async fn seed_session_in_project(
+        &self,
+        session_id: &str,
+        provider: &str,
+        project_key: &str,
+        key_id: &str,
+        version: i64,
+    ) {
         let transaction = self
             .registered
             .begin_write_transaction()
@@ -353,7 +396,7 @@ impl RegisteredTemporalHarness {
             .execute(
                 "INSERT INTO sessions (provider, session_id, project_key, project_path)
                  VALUES (?1, ?2, ?3, '/fixture')",
-                params![provider, session_id, PROJECT_ID],
+                params![provider, session_id, project_key],
             )
             .await
             .expect("seed session");

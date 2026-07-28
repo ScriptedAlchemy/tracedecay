@@ -227,6 +227,7 @@ fn lcm_temporal_fields(temporal: &SessionTemporalMetadataView) -> Value {
         "coverage": temporal.coverage,
         "source_coverage": temporal.source_coverage,
         "explanations": temporal.explanations,
+        "omissions": temporal.omissions,
         "next_cursor": temporal.cursor,
     })
 }
@@ -243,6 +244,7 @@ fn apply_lcm_temporal_fields(payload: &mut Value, temporal: &SessionTemporalMeta
         "coverage",
         "source_coverage",
         "explanations",
+        "omissions",
         "next_cursor",
     ] {
         payload.insert(key.to_string(), fields[key].clone());
@@ -1046,6 +1048,11 @@ fn merge_temporal_metadata(
             target.explanations.push(explanation);
         }
     }
+    for omission in incoming.omissions {
+        if !target.omissions.contains(&omission) {
+            target.omissions.push(omission);
+        }
+    }
     true
 }
 
@@ -1596,6 +1603,7 @@ mod compatibility_tests {
                 anchor: RetrievalAnchorId::new("anchor.compatibility.1").unwrap(),
                 summary: "exact canonical occurrence".to_string(),
             }],
+            omissions: Vec::new(),
             authorized_root: Some("/project".to_string()),
         }
     }
