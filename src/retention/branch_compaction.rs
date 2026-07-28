@@ -500,6 +500,7 @@ mod tests {
     /// The active store is the daemon writer-actor's; excluding it only by
     /// string equality misses a path that reaches the same file through a
     /// symlinked profile directory.
+    #[cfg(unix)]
     #[test]
     fn the_active_database_is_excluded_through_a_symlinked_profile_dir() {
         let dir = tempfile::tempdir().unwrap();

@@ -4153,7 +4153,7 @@ impl ProductionProjectCompositionRuntime {
         &self,
         store_administration: &StoreAdministration,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
+        _current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
         handshake: DaemonHandshake,
     ) -> crate::mcp::DatabaseOwnerReconciler {
@@ -4161,7 +4161,7 @@ impl ProductionProjectCompositionRuntime {
             #[cfg(unix)]
             Self::Unix(engine) => engine.database_owner_reconciler(
                 current_key,
-                current_project_path,
+                _current_project_path,
                 route_registered,
                 handshake,
             ),
@@ -4177,16 +4177,16 @@ impl ProductionProjectCompositionRuntime {
 
     fn automation_scheduler_reconciler(
         &self,
-        current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
-        handshake: DaemonHandshake,
+        _current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
+        _current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
+        _handshake: DaemonHandshake,
     ) -> Option<crate::dashboard::AutomationSchedulerReconciler> {
         match self {
             #[cfg(unix)]
             Self::Unix(engine) => Some(engine.automation_scheduler_reconciler(
-                current_key,
-                current_project_path,
-                handshake,
+                _current_key,
+                _current_project_path,
+                _handshake,
             )),
             #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable { .. } => None,
