@@ -102,8 +102,8 @@ fn git_read_bounds() -> serde_json::Value {
         "max_bytes": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 4194304,
-            "default": 4194304,
+            "maximum": 4_194_304,
+            "default": 4_194_304,
             "description": "Maximum serialized typed result bytes."
         }
     })
