@@ -520,6 +520,17 @@ impl DaemonSessionRuntimeRegistryV1 {
                 return Ok(database);
             }
             let _ = convergence;
+            if let Err(error) = database.release_connection_memory().await {
+                crate::daemon::log_daemon_event(
+                    "registered_schema_admission_memory_release",
+                    &[
+                        ("outcome", "degraded".to_owned()),
+                        ("database", database.db_path().display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+            }
+            release_process_allocator_memory();
             self.registered_schema_convergence
                 .defer(database.binding().shard_id.clone());
         }
