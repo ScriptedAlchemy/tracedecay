@@ -78,7 +78,7 @@ const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 /// clear. Reopening re-runs the exhaustive authority audit over every
 /// `observations` row and fails on the same row every time, so the debounce
 /// cadence above would saturate a core for as long as the daemon runs.
-const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_secs(300);
+const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_mins(5);
 const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
     "project route open is backed off after an invariant rejection";
 
@@ -160,8 +160,8 @@ fn code_index_search_hydration_budget(
     pr9_budget: &tracedecay_domain::RetrievalBudget,
 ) -> tracedecay_domain::RetrievalBudget {
     accepted_semantic_budget
-        .cloned()
-        .unwrap_or_else(|| pr9_budget.clone())
+        .copied()
+        .unwrap_or(*pr9_budget)
 }
 
 struct CodeIndexSearchHydrationSourceV1<A, P, H> {
@@ -817,7 +817,7 @@ fn code_index_search_executor(
                 accepted_semantic_budget,
                 &hydration_request.budget,
             );
-            hydration_request.budget = hydration_budget.clone();
+            hydration_request.budget = hydration_budget;
             let authorize =
                 |request: &tracedecay_domain::RetrievalRequest,
                  _candidate: &tracedecay_domain::RankedCandidate| {
@@ -1109,7 +1109,7 @@ pub fn mark_process_long_lived_for_session_maintenance() {
     store_runtime::session_registry::mark_process_long_lived_for_session_maintenance();
 }
 
-const SEMANTIC_ARTIFACT_GC_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+const SEMANTIC_ARTIFACT_GC_PERIOD: Duration = Duration::from_hours(24);
 
 struct SemanticArtifactGcMaintenanceTask(JoinHandle<()>);
 
@@ -3885,8 +3885,7 @@ async fn ensure_registered_project_route(
             .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
         let is_project_root = crate::worktree::git_worktree_root(&project_path)
-            .map(|git_root| git_root == project_path)
-            .unwrap_or(true);
+            .is_none_or(|git_root| git_root == project_path);
         let owns_repository_identity =
             crate::worktree::repository_identity_root(&project_path).is_none();
         if allow_init && is_project_root && owns_repository_identity {

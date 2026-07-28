@@ -720,8 +720,9 @@ impl StdioLspClient {
         loop {
             let now = tokio::time::Instant::now();
             let deadline = quiet_deadline
-                .map(|deadline: tokio::time::Instant| deadline.min(refresh_deadline))
-                .unwrap_or(refresh_deadline);
+                .map_or(refresh_deadline, |deadline: tokio::time::Instant| {
+                    deadline.min(refresh_deadline)
+                });
             if now >= deadline {
                 break;
             }

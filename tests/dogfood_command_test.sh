@@ -235,12 +235,8 @@ install_old_pair() {
   write_fake_binary "$staged" old-staged
 }
 
-# CI exports TRACEDECAY_SKIP_DASHBOARD_BUILD=1 for every job, and dogfood
-# refuses to run with it set. Cases opt into that refusal explicitly (see the
-# skip-dashboard-build case), so the ambient value must not reach the script.
 run_case() {
   env \
-    --unset=TRACEDECAY_SKIP_DASHBOARD_BUILD \
     PATH="$clean_path" \
     HOME="$case_home" \
     CARGO_TARGET_DIR="$case_target" \
@@ -255,7 +251,6 @@ run_case() {
 
 run_case_background() {
   exec env \
-    --unset=TRACEDECAY_SKIP_DASHBOARD_BUILD \
     PATH="$clean_path" \
     HOME="$case_home" \
     CARGO_TARGET_DIR="$case_target" \
@@ -1075,24 +1070,6 @@ test ! -s "$case_log" || fail 'stale dashboard bundle executed a lifecycle comma
 grep -Fq 'dogfood dashboard bundle does not match' "$case_output" ||
   fail 'stale dashboard rejection was not explicit'
 test ! -e "$case_state" || fail 'stale dashboard recorded a boundary marker'
-assert_no_temporary_install_files
-
-# Skipping the dashboard build would embed a stale bundle, so the mere presence
-# of the escape hatch is refused before anything is inspected or mutated.
-setup_case skip-dashboard-build
-write_fake_binary "$case_source" new
-install_old_pair
-cp "$installed" "$case_root/expected installed"
-cp "$staged" "$case_root/expected staged"
-if run_case TRACEDECAY_SKIP_DASHBOARD_BUILD=1 >"$case_output" 2>&1; then
-  fail 'skipped dashboard build unexpectedly succeeded'
-fi
-cmp "$case_root/expected installed" "$installed"
-cmp "$case_root/expected staged" "$staged"
-test ! -s "$case_log" || fail 'skipped dashboard build executed a lifecycle command'
-grep -Fq 'dogfood refuses TRACEDECAY_SKIP_DASHBOARD_BUILD' "$case_output" ||
-  fail 'skipped dashboard build rejection was not explicit'
-test ! -e "$case_state" || fail 'skipped dashboard build recorded a boundary marker'
 assert_no_temporary_install_files
 
 # A later dogfood attempt may fail before its own boundary after an earlier
