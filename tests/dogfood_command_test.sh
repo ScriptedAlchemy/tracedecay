@@ -106,6 +106,26 @@ cat >"$fake_bin/cargo" <<'EOF'
 printf 'unexpected cargo invocation: %s\n' "$*" >&2
 exit 97
 EOF
+cat >"$fake_bin/rustc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=
+while (($#)); do
+  if [[ "$1" == -o ]]; then
+    output=${2:?}
+    shift 2
+    continue
+  fi
+  shift
+done
+test -n "$output"
+cat >"$output" <<'WRITER'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "${TRACEDECAY_DOGFOOD_TEST_DASHBOARD_SOURCE_STAMP:?}"
+WRITER
+chmod +x "$output"
+EOF
 cat >"$fake_bin/install" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -194,6 +214,7 @@ EOF
 chmod +x \
   "$fake_bin/cargo" \
   "$fake_bin/install" \
+  "$fake_bin/rustc" \
   "$fake_bin/sync" \
   "$fake_bin/systemctl"
 clean_path="$fake_bin:/usr/bin:/bin"
@@ -245,6 +266,7 @@ run_case() {
     HOME="$case_home" \
     CARGO_TARGET_DIR="$case_target" \
     TRACEDECAY_DOGFOOD_SOURCE_BINARY="$case_source" \
+    TRACEDECAY_DOGFOOD_TEST_DASHBOARD_SOURCE_STAMP="$(<"$repo_root/dashboard/app-dist/.source-stamp")" \
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
     TRACEDECAY_DOGFOOD_PROFILE_DIR="$case_profile" \
@@ -260,6 +282,7 @@ run_case_background() {
     HOME="$case_home" \
     CARGO_TARGET_DIR="$case_target" \
     TRACEDECAY_DOGFOOD_SOURCE_BINARY="$case_source" \
+    TRACEDECAY_DOGFOOD_TEST_DASHBOARD_SOURCE_STAMP="$(<"$repo_root/dashboard/app-dist/.source-stamp")" \
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
     TRACEDECAY_DOGFOOD_PROFILE_DIR="$case_profile" \
@@ -1066,7 +1089,9 @@ install_old_pair
 cp "$installed" "$case_root/expected installed"
 cp "$staged" "$case_root/expected staged"
 printf 'stale-dashboard-stamp\n' >"$case_dashboard_stamp"
-if run_case >"$case_output" 2>&1; then
+if run_case \
+  TRACEDECAY_DOGFOOD_TEST_DASHBOARD_SOURCE_STAMP=stale-dashboard-stamp \
+  >"$case_output" 2>&1; then
   fail 'stale dashboard bundle unexpectedly succeeded'
 fi
 cmp "$case_root/expected installed" "$installed"
