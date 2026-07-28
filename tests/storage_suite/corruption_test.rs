@@ -66,6 +66,41 @@ fn truncate_fixture_wal(db_path: &std::path::Path) {
     assert_eq!(checkpoint, (0, 0, 0), "fixture WAL must be fully truncated");
 }
 
+fn structured_dirty_marker(pid: u32, epoch: &str) -> String {
+    format!(
+        r#"{{"schema":2,"owner":{{"pid":{pid}}},"epoch":"{epoch}","state":"dirty","time":0,"version":"test"}}"#
+    )
+}
+
+/// Returns the PID of a process that has already exited, so a fixture marker
+/// describes a crashed owner rather than work still in flight.
+fn exited_process_id() -> u32 {
+    #[cfg(unix)]
+    let (program, args): (&str, &[&str]) = ("sh", &["-c", "exit 0"]);
+    #[cfg(windows)]
+    let (program, args): (&str, &[&str]) = ("cmd", &["/C", "exit", "0"]);
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .expect("spawn fixture owner process");
+    let pid = child.id();
+    assert!(child.wait().expect("await fixture owner process").success());
+    pid
+}
+
+/// Spawns a process that outlives the caller's assertions, so a fixture marker
+/// describes a foreign owner that is still running.
+fn spawn_live_foreign_owner() -> std::process::Child {
+    #[cfg(unix)]
+    let (program, args): (&str, &[&str]) = ("sleep", &["120"]);
+    #[cfg(windows)]
+    let (program, args): (&str, &[&str]) = ("cmd", &["/C", "timeout", "/T", "120", "/NOBREAK"]);
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .expect("spawn live fixture owner process")
+}
+
 /// Helper: create a sample node.
 fn sample_node(id: &str, name: &str) -> Node {
     Node {
@@ -527,10 +562,7 @@ async fn structured_dirty_marker_is_cleared_after_epoch_owned_recovery()
 
     std::fs::write(
         &layout.dirty_path,
-        format!(
-            r#"{{"schema":2,"owner":{{"pid":{}}},"epoch":"fixture-epoch","state":"dirty","time":0,"version":"test"}}"#,
-            std::process::id()
-        ),
+        structured_dirty_marker(exited_process_id(), "fixture-epoch"),
     )?;
     let recovered = TraceDecay::open_with_options(&project_root, open_options).await?;
     assert!(
@@ -538,6 +570,75 @@ async fn structured_dirty_marker_is_cleared_after_epoch_owned_recovery()
         "recovery may clear only the epoch it adopted under the lock lease"
     );
     recovered.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_preserves_a_dirty_marker_owned_by_a_live_foreign_writer()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.checkpoint().await?;
+    ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
+
+    let mut owner = spawn_live_foreign_owner();
+    let foreign = structured_dirty_marker(owner.id(), "foreign-writer-epoch");
+    std::fs::write(&layout.dirty_path, &foreign)?;
+
+    let opened = TraceDecay::open_with_options(&project_root, open_options).await?;
+    let observed = std::fs::read_to_string(&layout.dirty_path);
+    opened.close();
+    let _ = owner.kill();
+    let _ = owner.wait();
+
+    assert_eq!(
+        observed?, foreign,
+        "an open must not clear a marker owned by another live writer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_recovery_retains_the_structured_dirty_marker()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.checkpoint().await?;
+    ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
+
+    let mut corrupted = std::fs::read(&layout.graph_db_path)?;
+    corrupted[..16].copy_from_slice(b"not-a-sqlite-db!");
+    std::fs::write(&layout.graph_db_path, &corrupted)?;
+    let abandoned = structured_dirty_marker(exited_process_id(), "abandoned-epoch");
+    std::fs::write(&layout.dirty_path, &abandoned)?;
+
+    assert!(
+        TraceDecay::open_with_options(&project_root, open_options)
+            .await
+            .is_err(),
+        "a damaged store must fail recovery instead of opening"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&layout.dirty_path)?,
+        abandoned,
+        "a failed recovery must leave its adopted epoch as repair evidence"
+    );
     Ok(())
 }
 

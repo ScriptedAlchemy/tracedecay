@@ -28,7 +28,7 @@ use crate::storage::{self, StoreLayout};
 use tracedecay_store::ProjectId;
 
 use super::locking::{
-    clear_dirty_sentinel_at, dirty_marker_owner_is_live, has_dirty_sentinel_at,
+    adopt_dirty_marker_at, dirty_marker_owner_is_live, has_dirty_sentinel_at,
     try_acquire_graph_sync_locks,
 };
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
@@ -958,6 +958,18 @@ impl TraceDecay {
         } else {
             None
         };
+        // Recovery owns exactly the markers it observed once the lease was
+        // held. A marker republished after this point describes a newer
+        // writer's work and must survive this recovery, so the clear below is
+        // scoped to these adopted epochs rather than to whatever the paths
+        // happen to hold at commit time.
+        let mut adopted_dirty_markers = Vec::new();
+        if crashed {
+            adopted_dirty_markers.extend(adopt_dirty_marker_at(&active_graph_layout.dirty_path));
+            if active_graph_layout.dirty_path != store_layout.dirty_path {
+                adopted_dirty_markers.extend(adopt_dirty_marker_at(&store_layout.dirty_path));
+            }
+        }
         // SQLite may rewrite a WAL-index sidecar while opening a recovery set,
         // even when the subsequent integrity check rejects the main database.
         // Preserve an obviously invalid derived store before any SQLite handle
@@ -1189,8 +1201,9 @@ impl TraceDecay {
         }
 
         if crashed && crash_preflight_healthy {
-            clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
-            clear_dirty_sentinel_at(&store_layout.dirty_path);
+            for marker in &adopted_dirty_markers {
+                marker.clear();
+            }
         }
 
         // If the sentinel was set but the read-only preflight could not prove
@@ -1229,8 +1242,9 @@ impl TraceDecay {
             }
             match integrity {
                 Ok(None) => {
-                    clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
-                    clear_dirty_sentinel_at(&store_layout.dirty_path);
+                    for marker in &adopted_dirty_markers {
+                        marker.clear();
+                    }
                 }
                 Ok(Some(problem)) => {
                     db.close();

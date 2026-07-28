@@ -72,18 +72,39 @@ fn write_dirty_sentinel_for_epoch(path: &Path, epoch: &str) -> std::io::Result<(
     publish_marker(path, &contents)
 }
 
-/// Removes the dirty sentinel after a successful sync/index.
-///
-/// A clear is authorized only for the exact marker observed while holding its
-/// sync lease (or written by this process). This prevents a delayed cleanup
-/// from deleting a newer writer's marker after an epoch change.
-pub(super) fn clear_dirty_sentinel_at(path: &Path) {
-    let contents = match std::fs::read(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(_) => return,
-    };
-    let _ = clear_marker_if_matches(path, &marker_identity(&contents));
+/// A dirty marker a recovery attempt claimed while holding the store's sync
+/// lease.
+pub(super) struct AdoptedDirtyMarker {
+    path: PathBuf,
+    identity: MarkerIdentity,
+}
+
+/// Records the marker currently at `path` so that a later successful recovery
+/// can clear that exact epoch and nothing else. Callers must already hold the
+/// sync lease covering `path`; otherwise the adopted identity can go stale
+/// before the recovery commits. Returns `None` when no marker is present.
+pub(super) fn adopt_dirty_marker_at(path: &Path) -> Option<AdoptedDirtyMarker> {
+    let contents = std::fs::read(path).ok()?;
+    Some(AdoptedDirtyMarker {
+        path: path.to_path_buf(),
+        identity: marker_identity(&contents),
+    })
+}
+
+impl AdoptedDirtyMarker {
+    /// Removes the adopted dirty sentinel after a successful recovery.
+    ///
+    /// A marker republished under a different epoch belongs to a newer writer
+    /// and is left in place, so a delayed cleanup can never erase another
+    /// owner's recovery evidence.
+    pub(super) fn clear(&self) {
+        if let Err(error) = clear_marker_if_matches(&self.path, &self.identity) {
+            eprintln!(
+                "[tracedecay] left dirty marker '{}' in place: {error}",
+                self.path.display()
+            );
+        }
+    }
 }
 
 fn clear_marker_if_matches(path: &Path, expected: &MarkerIdentity) -> std::io::Result<()> {
@@ -611,6 +632,41 @@ mod tests {
         );
         clear_marker_if_matches(&path, &marker_identity(&current)).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn adopted_marker_clears_its_own_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db.dirty");
+        write_dirty_sentinel_for_epoch(&path, "recovery-epoch").unwrap();
+
+        adopt_dirty_marker_at(&path)
+            .expect("marker to adopt")
+            .clear();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn adopted_marker_clear_preserves_a_newer_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.db.dirty");
+        write_dirty_sentinel_for_epoch(&path, "recovery-epoch").unwrap();
+        let adopted = adopt_dirty_marker_at(&path).expect("marker to adopt");
+
+        write_dirty_sentinel_for_epoch(&path, "newer-writer-epoch").unwrap();
+        adopted.clear();
+
+        assert!(matches!(
+            marker_identity(&std::fs::read(&path).unwrap()),
+            MarkerIdentity::Epoch(epoch) if epoch == "newer-writer-epoch"
+        ));
+    }
+
+    #[test]
+    fn adopting_an_absent_marker_yields_nothing_to_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(adopt_dirty_marker_at(&dir.path().join("graph.db.dirty")).is_none());
     }
 
     #[test]
