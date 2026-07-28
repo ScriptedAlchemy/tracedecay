@@ -34,7 +34,19 @@ impl ProjectExecutor {
         savepoint: &Savepoint<'_>,
         write: &AnchoredObservationWrite,
     ) -> rusqlite::Result<()> {
-        self.observation.execute_write(savepoint, write)
+        self.observation.execute_write(savepoint, write)?;
+        // Rows are staged and the enclosing transaction is still open: this is
+        // the only place the daemon-crash harness can prove that killing a
+        // writer here leaves no partially visible authority behind.
+        #[cfg(tracedecay_observation_fault_harness)]
+        tracedecay_store::fault_harness::wait_at_observation_persist_barrier(
+            tracedecay_store::fault_harness::ObservationPersistBarrierStageV1::PostWritePreCommit,
+            write.observation().source().session_id().as_str(),
+        )
+        .map_err(|(operation, detail)| {
+            rusqlite::Error::InvalidParameterName(format!("{operation}: {detail}"))
+        })?;
+        Ok(())
     }
 
     pub fn execute_observation_cursor_advance(
