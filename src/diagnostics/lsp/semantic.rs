@@ -538,6 +538,7 @@ impl LspSemanticRequestAuthority for DatabaseGraphSemanticAuthority {
                 LspSemanticOperationOutcome::Partial {
                     value: Value::Null,
                     coverage: "graph-root-mismatch".to_owned(),
+                    detail: None,
                 }
             });
         }
@@ -560,6 +561,7 @@ impl LspSemanticRequestAuthority for DatabaseGraphSemanticAuthority {
                     LspSemanticOperationOutcome::Partial {
                         value: Value::Null,
                         coverage: "graph-runtime-busy".to_owned(),
+                        detail: None,
                     }
                 });
             }
@@ -569,6 +571,7 @@ impl LspSemanticRequestAuthority for DatabaseGraphSemanticAuthority {
                 LspSemanticOperationOutcome::Partial {
                     value: Value::Null,
                     coverage: "graph-duplicate-operation".to_owned(),
+                    detail: None,
                 }
             });
         }
@@ -581,6 +584,7 @@ impl LspSemanticRequestAuthority for DatabaseGraphSemanticAuthority {
                 () = cancellation.cancelled() => LspSemanticOperationOutcome::Partial {
                     value: Value::Null,
                     coverage: "graph-cancelled".to_owned(),
+                    detail: None,
                 },
                 outcome = graph_semantic_request(&database, &project_root, request) => outcome,
             };
@@ -865,10 +869,12 @@ async fn graph_semantic_request(
         Ok(projection) => LspSemanticOperationOutcome::Partial {
             value: projection.value,
             coverage: format!("graph-results-truncated-{}", projection.omitted),
+            detail: None,
         },
         Err(error) => LspSemanticOperationOutcome::Partial {
             value: Value::Null,
             coverage: format!("graph-read-{}", bounded_graph_failure(&error.to_string())),
+            detail: LspSemanticOperationOutcome::bounded_detail(&error.to_string()),
         },
     }
 }
@@ -1635,6 +1641,7 @@ mod tests {
                 LspSemanticOperationOutcome::Partial {
                     value: Value::Null,
                     coverage: "analyzer-stale-result".to_owned(),
+                    detail: None,
                 },
                 LspSemanticOperationOutcome::Complete(Value::Null),
             ),

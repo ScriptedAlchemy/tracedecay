@@ -71,10 +71,12 @@ pub(super) fn response_value<T>(
 ) -> Result<Value, RpcFailure> {
     match response {
         GatewayResponse::Value(value) => Ok(project(value)),
-        GatewayResponse::Partial { coverage, .. } => Err(RpcFailure {
+        GatewayResponse::Partial {
+            coverage, detail, ..
+        } => Err(RpcFailure {
             code: -32802,
             message: "Server cancelled request",
-            data: json!({ "retriggerRequest": true, "coverage": coverage }),
+            data: partial_failure_data(coverage, detail),
         }),
         GatewayResponse::Pending => Err(RpcFailure {
             code: -32802,
@@ -90,6 +92,17 @@ pub(super) fn response_value<T>(
         )),
         GatewayResponse::RequestFailed(failure) => Err(RpcFailure::request_failure(failure)),
     }
+}
+
+/// JSON-RPC error `data` for a partial semantic outcome: the stable coverage
+/// token, plus the bounded human-readable `detail` when the provider supplied
+/// one (omitted, never null, when absent).
+pub(super) fn partial_failure_data(coverage: String, detail: Option<String>) -> Value {
+    let mut data = json!({ "retriggerRequest": true, "coverage": coverage });
+    if let Some(detail) = detail {
+        data["detail"] = Value::String(detail);
+    }
+    data
 }
 
 pub(super) fn semantic_response_value(response: SemanticResponse) -> Value {

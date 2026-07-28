@@ -276,6 +276,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     LspSemanticOperationOutcome::Partial {
                         value: serde_json::Value::Null,
                         coverage: "semantic-runtime-busy".to_owned(),
+                        detail: None,
                     }
                 });
             }
@@ -285,6 +286,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                 LspSemanticOperationOutcome::Partial {
                     value: serde_json::Value::Null,
                     coverage: "semantic-duplicate-operation".to_owned(),
+                    detail: None,
                 }
             });
         }
@@ -296,6 +298,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                     LspSemanticOperationOutcome::Partial {
                         value: serde_json::Value::Null,
                         coverage: "semantic-cancelled".to_owned(),
+                        detail: None,
                     }
                 }
                 slot = inner.client.lock() => {
@@ -334,6 +337,7 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                         Ok(None) => LspSemanticOperationOutcome::Partial {
                             value: serde_json::Value::Null,
                             coverage: "semantic-cancelled".to_owned(),
+                            detail: None,
                         },
                         Err(error) => {
                             // Coverage is a stable token vocabulary that callers
@@ -341,15 +345,18 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             // in it: slugifying stripped the punctuation and cut it
                             // mid-word, and a message happening to contain "stale"
                             // steered rename candidates down the wrong branch.
-                            // The daemon installs no tracing subscriber, so this
-                            // goes to its event channel; through tracing the
-                            // analyzer's own message would be lost entirely.
+                            // The bounded human-readable message rides in `detail`
+                            // to LSP callers; the event line keeps the full text
+                            // on the daemon's stderr channel.
                             eprintln!(
                                 "[tracedecay] event=analyzer_start_failed error={error}"
                             );
                             LspSemanticOperationOutcome::Partial {
                                 value: serde_json::Value::Null,
                                 coverage: "analyzer-start-failed".to_owned(),
+                                detail: LspSemanticOperationOutcome::bounded_detail(
+                                    &error.to_string(),
+                                ),
                             }
                         }
                     }
@@ -388,6 +395,7 @@ fn semantic_operation_outcome(
         Err(error) => LspSemanticOperationOutcome::Partial {
             value: serde_json::Value::Null,
             coverage: format!("analyzer-{}", error.class()),
+            detail: LspSemanticOperationOutcome::bounded_detail(&error.to_string()),
         },
     }
 }

@@ -49,8 +49,8 @@ use super::rpc::{
     DiagnosticSerializationCapabilities, RpcFailure, diagnostic_result_id, diagnostic_value,
     document_diagnostic_report_value, document_position, document_uri, error_response,
     incoming_calls_value, initialized_root_uri, outgoing_calls_value, overlay_failure,
-    parse_call_item, parse_overlay_change, parse_type_item, request_id, request_id_value,
-    required_i64, required_nonempty_string, required_string, response_value,
+    parse_call_item, parse_overlay_change, parse_type_item, partial_failure_data, request_id,
+    request_id_value, required_i64, required_nonempty_string, required_string, response_value,
     semantic_response_value, success_response, text_document, type_items_value,
 };
 use super::session::{
@@ -1500,10 +1500,12 @@ where
     ) -> Result<Option<Value>, RpcFailure> {
         match self.gateway.semantic_request(request_id, request) {
             GatewayResponse::Value(value) => Ok(Some(semantic_response_value(value))),
-            GatewayResponse::Partial { coverage, .. } => Err(RpcFailure {
+            GatewayResponse::Partial {
+                coverage, detail, ..
+            } => Err(RpcFailure {
                 code: -32802,
                 message: "Server cancelled request",
-                data: json!({ "retriggerRequest": true, "coverage": coverage }),
+                data: partial_failure_data(coverage, detail),
             }),
             GatewayResponse::Pending => Ok(None),
             GatewayResponse::Unavailable(unavailable) => Err(RpcFailure::unavailable(
