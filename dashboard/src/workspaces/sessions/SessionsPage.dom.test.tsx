@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionsPage } from './SessionsPage.tsx';
 
@@ -95,6 +95,62 @@ describe('SessionsPage degraded states', () => {
     expect(screen.getByText(/3 undated messages are separate/i)).toBeTruthy();
     expect(screen.queryByText(/^messages tracked$/i)).toBeNull();
     expect(screen.queryByText(/^daily volume$/i)).toBeNull();
+  });
+
+  it('keeps search selection distinct when providers reuse a message id', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/search')) {
+          return jsonResponse({
+            matches: {
+              messages: [
+                {
+                  store_id: 'store-claude',
+                  message_id: 'shared-message',
+                  source: 'claude',
+                  role: 'assistant',
+                  snippet: 'Claude result',
+                },
+                {
+                  store_id: 'store-codex',
+                  message_id: 'shared-message',
+                  source: 'codex',
+                  role: 'assistant',
+                  snippet: 'Codex result',
+                },
+              ],
+            },
+            total: { messages: 2, summary_nodes: 0 },
+          });
+        }
+        return jsonResponse(
+          url.includes('/timeline')
+            ? timeline()
+            : { exists: true, latest_sessions: [] },
+        );
+      }),
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <SessionsPage />
+      </QueryClientProvider>,
+    );
+
+    const search = screen.getByRole('searchbox', { name: 'Search transcripts' });
+    fireEvent.change(search, { target: { value: 'shared-message' } });
+    fireEvent.submit(search.closest('form')!);
+
+    const claude = await screen.findByRole('button', { name: /claude.*Claude result/i });
+    const codex = screen.getByRole('button', { name: /codex.*Codex result/i });
+    fireEvent.click(claude);
+
+    expect(claude.getAttribute('aria-pressed')).toBe('true');
+    expect(codex.getAttribute('aria-pressed')).toBe('false');
   });
 });
 
