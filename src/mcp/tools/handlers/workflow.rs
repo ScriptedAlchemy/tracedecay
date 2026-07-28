@@ -750,17 +750,22 @@ async fn wait_for_test_run_cancellation(
     mut emitter: OperationEmitter,
     cancellation: Option<CancellationSignal>,
 ) {
+    // CancellationSignal is still a polled atomic (no event wait API on this
+    // type without changing application crate callers we do not own). When no
+    // signal is attached, wait only on the emitter. Otherwise poll at 50ms —
+    // same cancel semantics, ~10x fewer timers than the prior 5ms wakeups.
+    let Some(cancellation) = cancellation else {
+        emitter.cancelled().await;
+        return;
+    };
     loop {
-        if cancellation
-            .as_ref()
-            .is_some_and(CancellationSignal::is_cancelled)
-        {
+        if cancellation.is_cancelled() {
             let _ = emitter.request_managed_test_cancellation().await;
             return;
         }
         tokio::select! {
             () = emitter.cancelled() => return,
-            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
     }
 }

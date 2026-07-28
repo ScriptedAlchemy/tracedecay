@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -58,8 +58,25 @@ struct GitFixture {
     root: TempDir,
 }
 
+/// Most scheduler tests share this one-file lib fixture. Build the git repo
+/// once per process and filesystem-copy it so each test avoids five fresh
+/// `git` subprocesses.
+const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
+const RETAINED_REVISION_0: &[(&str, &str)] =
+    &[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")];
+
 impl GitFixture {
     fn new(files: &[(&str, &str)]) -> Self {
+        if files == ALPHA_LIB_V1 {
+            return Self::from_template(alpha_lib_v1_template());
+        }
+        if files == RETAINED_REVISION_0 {
+            return Self::from_template(retained_revision_0_template());
+        }
+        Self::build_fresh(files)
+    }
+
+    fn build_fresh(files: &[(&str, &str)]) -> Self {
         let root = TempDir::new().expect("fixture root");
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.name", "TraceDecay Test"]);
@@ -75,6 +92,12 @@ impl GitFixture {
         Self { root }
     }
 
+    fn from_template(template: &Path) -> Self {
+        let root = TempDir::new().expect("fixture root");
+        copy_dir_recursive(template, root.path());
+        Self { root }
+    }
+
     fn path(&self) -> &Path {
         self.root.path()
     }
@@ -84,8 +107,36 @@ impl GitFixture {
     }
 }
 
+fn alpha_lib_v1_template() -> &'static Path {
+    static TEMPLATE: OnceLock<TempDir> = OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| GitFixture::build_fresh(ALPHA_LIB_V1).root)
+        .path()
+}
+
+fn retained_revision_0_template() -> &'static Path {
+    static TEMPLATE: OnceLock<TempDir> = OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| GitFixture::build_fresh(RETAINED_REVISION_0).root)
+        .path()
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create fixture copy root");
+    for entry in std::fs::read_dir(src).expect("read fixture template") {
+        let entry = entry.expect("fixture template entry");
+        let file_type = entry.file_type().expect("fixture template entry type");
+        let destination = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &destination);
+        } else {
+            std::fs::copy(entry.path(), &destination).expect("copy fixture template file");
+        }
+    }
+}
+
 fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = Command::new(crate::git::git_program())
         .current_dir(root)
         .args(args)
         .status()
@@ -94,7 +145,7 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = Command::new(crate::git::git_program())
         .current_dir(root)
         .args(args)
         .output()
@@ -1236,24 +1287,7 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
             .await
             .expect("mount daemon-owned scheduler")
     );
-    assert!(
-        registry
-            .latest_generation_id(fixture.path())
-            .await
-            .is_some(),
-        "mount completion must publish the initial PR9 fallback generation"
-    );
-
-    let first = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(fixture.path()).await {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("initial generation published");
+    let first = wait_for_initial_generation(&registry, fixture.path()).await;
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     assert!(
@@ -1261,18 +1295,7 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await
     );
-    let second = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(fixture.path()).await
-                && generation != first
-            {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("saved edit generation published");
+    let second = wait_for_generation_change(&registry, fixture.path(), &first).await;
 
     assert_ne!(first, second);
     registry.shutdown().await;
@@ -1339,14 +1362,10 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await
     );
+    let second_generation =
+        wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
     tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if registry.latest_generation_id(fixture.path()).await.as_ref()
-                != Some(&first_generation)
-                && second_calls.load(Ordering::SeqCst) >= 2
-            {
-                break;
-            }
+        while second_calls.load(Ordering::SeqCst) < 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -1357,10 +1376,6 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
         retired_calls,
         "retired hook must not receive later generations"
     );
-    let second_generation = registry
-        .latest_generation_id(fixture.path())
-        .await
-        .expect("edited generation");
     let disabled_calls = second_calls.load(Ordering::SeqCst);
     assert!(
         !registry
@@ -1374,15 +1389,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await
     );
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while registry.latest_generation_id(fixture.path()).await.as_ref()
-            == Some(&second_generation)
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("generation published with semantics disabled");
+    let _ = wait_for_generation_change(&registry, fixture.path(), &second_generation).await;
     assert_eq!(
         second_calls.load(Ordering::SeqCst),
         disabled_calls,
@@ -1412,20 +1419,7 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
     // Let both workers publish their initial generation so neither scheduler is
     // mid-reconcile when the test grabs a lock.
     for fixture in [&slow, &fast] {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if registry
-                    .latest_generation_id(fixture.path())
-                    .await
-                    .is_some()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("initial generation published");
+        let _ = wait_for_initial_generation(&registry, fixture.path()).await;
     }
 
     // Hold the slow worktree's scheduler lock on a dedicated thread to model a
@@ -1609,24 +1603,8 @@ async fn background_reconciles_are_globally_bounded_across_worktrees() {
 
     release_tx.send(()).expect("release first scheduler");
     lock_thread.join().expect("first lock thread joins");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let first_advanced = registry
-                .latest_generation_id(first.path())
-                .await
-                .is_some_and(|generation| generation != first_generation);
-            let second_advanced = registry
-                .latest_generation_id(second.path())
-                .await
-                .is_some_and(|generation| generation != second_generation);
-            if first_advanced && second_advanced {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("both queued worktrees reconcile");
+    let _ = wait_for_generation_change(&registry, first.path(), &first_generation).await;
+    let _ = wait_for_generation_change(&registry, second.path(), &second_generation).await;
     registry.shutdown().await;
 }
 
@@ -1659,20 +1637,7 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .notify_path(fixture.path().join("src/lib.rs"));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if registry
-                .latest_generation_id(fixture.path())
-                .await
-                .is_some_and(|generation| generation != initial)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("worker recovers and publishes after poison");
+    let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
     registry.shutdown().await;
 }
 
@@ -1834,16 +1799,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
         .await
         .expect("mount daemon-owned scheduler");
-    let generation = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(fixture.path()).await {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("initial generation published");
+    let generation = wait_for_initial_generation(&registry, fixture.path()).await;
     let latest = registry
         .latest_complete_fresh(fixture.path())
         .await
@@ -2671,21 +2627,64 @@ fn reparse_matches_full_parse_chunks() {
 // is served generation-bound and read-only, bypassing freshness entirely.
 // ---------------------------------------------------------------------------
 
+fn canonical_fixture_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Wait for the registry-mounted worktree to publish its first generation.
+/// Prefers the existing generation-publication broadcast over sleep polling.
 async fn wait_for_initial_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> tracedecay_domain::CodeGenerationId {
+    if let Some(generation) = registry.latest_generation_id(path).await {
+        return generation;
+    }
+    let mut publications = registry.subscribe_generation_publications();
+    if let Some(generation) = registry.latest_generation_id(path).await {
+        return generation;
+    }
+    let canonical = canonical_fixture_path(path);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(generation) = registry.latest_generation_id(path).await {
-                break generation;
+            let event = publications.recv().await.expect("generation publication");
+            if event.project_root == canonical {
+                break event.generation_id;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .expect("initial generation published")
+}
+
+/// Wait until the mounted worktree publishes a generation distinct from `previous`.
+async fn wait_for_generation_change(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+    previous: &tracedecay_domain::CodeGenerationId,
+) -> tracedecay_domain::CodeGenerationId {
+    if let Some(generation) = registry.latest_generation_id(path).await
+        && &generation != previous
+    {
+        return generation;
+    }
+    let mut publications = registry.subscribe_generation_publications();
+    if let Some(generation) = registry.latest_generation_id(path).await
+        && &generation != previous
+    {
+        return generation;
+    }
+    let canonical = canonical_fixture_path(path);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = publications.recv().await.expect("generation publication");
+            if event.project_root == canonical && &event.generation_id != previous {
+                break event.generation_id;
+            }
+        }
+    })
+    .await
+    .expect("changed generation published")
 }
 
 #[tokio::test]
