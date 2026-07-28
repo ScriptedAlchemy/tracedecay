@@ -182,6 +182,7 @@ const UNRESOLVED_REFS_PERSISTED_KEY: &str = "unresolved_refs_persisted";
 /// future change requires the ref set to be repopulated again on upgrade.
 const UNRESOLVED_REFS_PERSISTED_VALUE: &str = "1";
 const BRANCH_SYNC_WRITE_PAGE_ROWS: usize = 256;
+const BRANCH_SYNC_EXTRACTION_PAGE_FILES: usize = 8;
 
 /// The final `::`-separated segment of a reference name. Every resolver
 /// strategy ultimately binds a reference to a target whose short name equals
@@ -1546,6 +1547,93 @@ impl TraceDecay {
         let to_index: Vec<String> = stale.iter().chain(new_files.iter()).cloned().collect();
         let registry = &self.registry;
         let phase_start = Instant::now();
+        if checkpoint_writes {
+            for path in &mtime_only_changed {
+                if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path))
+                {
+                    self.db
+                        .upsert_file(&FileRecord {
+                            modified_at: mtime,
+                            size,
+                            ..record.clone()
+                        })
+                        .await?;
+                }
+            }
+            for path in &removed {
+                on_progress(0, 0, &format!("removing {path}"));
+                self.db.delete_file(path).await?;
+            }
+
+            let mut indexed = 0_usize;
+            for paths in to_index.chunks(BRANCH_SYNC_EXTRACTION_PAGE_FILES) {
+                let (extractions, batch_skipped) =
+                    extract_files_isolated(project_root, registry, paths.to_vec());
+                skipped.extend(batch_skipped);
+                let mut batch_edges = Vec::new();
+                let mut batch_paths = Vec::new();
+                for (file_path, result, hash, size, mtime) in &extractions {
+                    indexed += 1;
+                    on_progress(indexed, to_index.len(), file_path);
+                    self.db.delete_nodes_by_file(file_path).await?;
+                    for page in result.nodes.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
+                        self.db.insert_nodes(page).await?;
+                    }
+                    self.db
+                        .insert_unresolved_refs(&result.unresolved_refs)
+                        .await?;
+                    self.db
+                        .upsert_file(&FileRecord {
+                            path: file_path.clone(),
+                            content_hash: hash.clone(),
+                            size: *size,
+                            modified_at: *mtime,
+                            indexed_at: current_timestamp(),
+                            node_count: result.nodes.len() as u32,
+                        })
+                        .await?;
+                    batch_edges.extend(result.edges.iter().cloned());
+                    batch_paths.push(file_path.clone());
+                }
+                for page in batch_edges.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
+                    self.db.insert_edges(page).await?;
+                }
+                if !batch_paths.is_empty() {
+                    let (short, keys) = reindexed_symbol_scope(&extractions);
+                    self.reresolve_after_reindex(&batch_paths, &short, &keys)
+                        .await?;
+                }
+            }
+            if built_from_empty {
+                self.db
+                    .set_metadata(
+                        UNRESOLVED_REFS_PERSISTED_KEY,
+                        UNRESOLVED_REFS_PERSISTED_VALUE,
+                    )
+                    .await?;
+            }
+            let duration_ms = start.elapsed().as_millis() as u64;
+            self.db
+                .set_metadata("last_sync_at", &current_timestamp().to_string())
+                .await?;
+            self.stamp_last_synced_commit().await;
+            self.touch_branch_meta_synced();
+            self.db
+                .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
+                .await?;
+            self.db.checkpoint().await?;
+            sync_lease.commit()?;
+            return Ok(SyncResult {
+                files_added: new_files.len(),
+                files_modified: stale.len(),
+                files_removed: removed.len(),
+                duration_ms,
+                added_paths: new_files,
+                modified_paths: stale,
+                skipped_paths: skipped,
+                removed_paths: removed,
+            });
+        }
         let _ = stat_map; // worker re-stats internally
         let (sync_extractions, sync_skipped): (Vec<_>, Vec<_>) =
             extract_files_isolated(project_root, registry, to_index.clone());
