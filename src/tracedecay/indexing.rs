@@ -184,6 +184,17 @@ const UNRESOLVED_REFS_PERSISTED_VALUE: &str = "1";
 const BRANCH_SYNC_WRITE_PAGE_ROWS: usize = 256;
 const BRANCH_SYNC_EXTRACTION_PAGE_FILES: usize = 8;
 
+fn release_process_allocator_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc allocator
+        // maintenance operation. It does not invalidate live allocations.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 /// The final `::`-separated segment of a reference name. Every resolver
 /// strategy ultimately binds a reference to a target whose short name equals
 /// this segment, so it is the key used to scope incremental re-resolution.
@@ -1623,6 +1634,7 @@ impl TraceDecay {
                 .await?;
             self.db.checkpoint().await?;
             sync_lease.commit()?;
+            release_process_allocator_memory();
             return Ok(SyncResult {
                 files_added: new_files.len(),
                 files_modified: stale.len(),
@@ -1806,6 +1818,7 @@ impl TraceDecay {
 
         self.db.checkpoint().await?;
         sync_lease.commit()?;
+        release_process_allocator_memory();
         Ok(SyncResult {
             files_added: new_files.len(),
             files_modified: stale.len(),
