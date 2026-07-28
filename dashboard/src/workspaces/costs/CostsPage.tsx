@@ -1,6 +1,7 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
+import { formatCount, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   SavingsOverviewPayloadSchema,
@@ -514,14 +515,12 @@ function ReadFailure({
 }
 
 /** Tokens abbreviate from a thousand rather than the ten thousand the shared
- * `formatCount` uses, because four-figure token counts are the exception on
- * this surface. `null` in, em dash out: an absent figure is never a zero. */
+ * magnitude language defaults to, because four-figure token counts are the
+ * exception on this surface. That threshold is the only thing this ledger
+ * disagrees with the rest of the dashboard about, so it is all this states —
+ * the ladder itself, and `null` in / em dash out, come from `format.ts`. */
 function formatTokens(tokens: number | null | undefined): string {
-  if (tokens == null || !Number.isFinite(tokens)) return '—';
-  if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(1)}B`;
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
-  return tokens.toLocaleString();
+  return formatCount(tokens, 1_000);
 }
 
 /** The same magnitude language with the unit split off, so the display tier can
@@ -530,12 +529,7 @@ function splitTokens(tokens: number | null | undefined): {
   value: string;
   unit?: string;
 } {
-  if (tokens == null || !Number.isFinite(tokens)) return { value: '—' };
-  if (tokens >= 1_000_000_000)
-    return { value: (tokens / 1_000_000_000).toFixed(1), unit: 'B' };
-  if (tokens >= 1_000_000) return { value: (tokens / 1_000_000).toFixed(1), unit: 'M' };
-  if (tokens >= 1_000) return { value: (tokens / 1_000).toFixed(1), unit: 'K' };
-  return { value: tokens.toLocaleString() };
+  return splitCount(tokens, 1_000);
 }
 
 /** A window's share of the lifetime figure it is nested inside. Null whenever
