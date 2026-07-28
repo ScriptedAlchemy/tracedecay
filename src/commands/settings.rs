@@ -1,3 +1,26 @@
+use std::path::{Path, PathBuf};
+
+use super::daemon::daemon_tool_json;
+
+async fn configuration_authority_root(project_path: &Path) -> tracedecay::errors::Result<PathBuf> {
+    let context = daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "registry_context",
+            "project_arg": project_path,
+        }),
+    )
+    .await?;
+    context
+        .pointer("/project/canonical_root")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "configuration authority omitted the canonical project root".to_string(),
+        })
+}
+
 pub(crate) fn handle_upload_counter(enable: bool) {
     let mut config = tracedecay::user_config::UserConfig::load();
     config.upload_enabled = enable;
@@ -23,9 +46,9 @@ pub(crate) async fn handle_gitignore(
     action: Option<String>,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
-    let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
     match action.as_deref() {
         Some("on") => {
+            let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
             let mut config = current.config.clone();
             config.git_ignore = true;
             tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
@@ -33,6 +56,7 @@ pub(crate) async fn handle_gitignore(
             eprintln!("Run `tracedecay sync` to re-index with the new setting.");
         }
         Some("off") => {
+            let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
             let mut config = current.config.clone();
             config.git_ignore = false;
             tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
@@ -45,11 +69,20 @@ pub(crate) async fn handle_gitignore(
             });
         }
         None => {
-            let status = if current.config.git_ignore {
-                "on"
-            } else {
-                "off"
-            };
+            let authority_root = configuration_authority_root(&project_path).await?;
+            let response = daemon_tool_json(
+                Some(&authority_root),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "gitignore_status" }),
+            )
+            .await?;
+            let enabled = response
+                .get("git_ignore")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon gitignore status omitted git_ignore".to_string(),
+                })?;
+            let status = if enabled { "on" } else { "off" };
             eprintln!("gitignore: {status}");
         }
     }
