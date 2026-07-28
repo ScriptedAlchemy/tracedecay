@@ -1582,6 +1582,53 @@ mod tests {
         );
     }
 
+    /// Reproduces the intermittent enrollment race: several independent paths
+    /// (CLI init, daemon first-touch open, enrollment-root repair) each write
+    /// the same marker file, and the resolver may read concurrently. The write
+    /// must be atomic — a reader must never observe a present-but-empty or
+    /// partially written marker as `InvalidEnrollment`/`MissingEnrollment`.
+    #[test]
+    fn concurrent_marker_rewrites_never_deny_an_enrolled_project() {
+        let fixture = Fixture::new();
+        let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
+        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+        let marker = storage::EnrollmentMarker {
+            project_id: fixture.project_id.as_str().to_owned(),
+            storage_mode: storage::StorageMode::ProfileSharded,
+        };
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let project_root = fixture.first_alias.clone();
+            let marker = marker.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    storage::write_enrollment_marker(&project_root, &marker)
+                        .expect("rewrite enrollment marker");
+                }
+            })
+        };
+
+        let mut denial = None;
+        for _ in 0..20_000 {
+            match resolve_as_local(&resolver, &key) {
+                LocalStoreLocatorResolutionV1::Resolved(_) => {}
+                LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
+                    denial = Some(unavailable.reason);
+                    break;
+                }
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().expect("marker writer thread");
+
+        assert!(
+            denial.is_none(),
+            "an enrolled project was denied during a concurrent marker rewrite: {denial:?}"
+        );
+    }
+
     #[test]
     fn missing_enrollment_is_typed_unavailable() {
         let temporary = tempfile::tempdir().expect("temporary fixture root");
