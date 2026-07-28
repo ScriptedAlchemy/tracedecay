@@ -85,18 +85,24 @@ fn match_initialize_root_to_registered_project(
     root: &Path,
     projects: &[crate::global_db::CodeProjectRecord],
 ) -> Option<PathBuf> {
+    // Canonicalize only the requested root. Registry rows already store the
+    // authoritative `canonical_root`; re-canonicalizing every row was an
+    // O(projects) filesystem walk on each connection initialize. Aliases and
+    // symlinks still resolve because the client root is canonicalized into the
+    // same form the registry persists.
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut matches: Vec<_> = projects
+    projects
         .iter()
         .filter_map(|project| {
             let project_path = PathBuf::from(&project.canonical_root);
-            let project_path = project_path
-                .canonicalize()
-                .unwrap_or_else(|_| project_path.clone());
-            (root == project_path || root.starts_with(&project_path))
-                .then(|| (project_path.components().count(), project_path))
+            (root == project_path || root.starts_with(&project_path)).then_some(project_path)
         })
-        .collect();
-    matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    matches.into_iter().map(|(_, path)| path).next()
+        // Longest ancestor wins; equal depth keeps the lexicographically first
+        // path (same tie-break as the previous collect-then-sort).
+        .max_by(|left, right| {
+            left.components()
+                .count()
+                .cmp(&right.components().count())
+                .then_with(|| right.cmp(left))
+        })
 }
