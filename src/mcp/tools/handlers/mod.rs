@@ -1489,6 +1489,7 @@ async fn dispatch_session_workflow_tools(
                 cg,
                 args.clone(),
                 options.application_cancellation.clone(),
+                options.code_index_publication_identity.as_deref(),
             )
             .await
         }
