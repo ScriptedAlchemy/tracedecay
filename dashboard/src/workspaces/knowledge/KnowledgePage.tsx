@@ -763,20 +763,11 @@ function CategoryBar({ row, ceiling }: { row: MemoryCategoryCount; ceiling: numb
   );
 }
 
+/** Trust as what it is: one measured quantity on the 0–1 scale, printed and
+ * given the same length every other readout in the product uses. */
 function TrustGauge({ score }: { score: number }) {
   const clamped = Math.max(0, Math.min(score, 1));
-  return (
-    <div className="flex items-center gap-2">
-      <span className="tabular text-lg font-semibold">{clamped.toFixed(2)}</span>
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-3">
-        <div
-          className="h-full rounded-full bg-accent"
-          style={{ width: `${clamped * 100}%` }}
-        />
-      </div>
-      <span className="text-2xs text-text-muted">trust</span>
-    </div>
-  );
+  return <Readout label="trust" size="lg" value={clamped.toFixed(2)} fraction={clamped} />;
 }
 
 /** Helpful vs unhelpful feedback as one proportional split bar. */
