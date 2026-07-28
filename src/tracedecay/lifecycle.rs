@@ -545,28 +545,35 @@ impl TraceDecay {
         .await
     }
 
-    pub(crate) async fn registered_enrollment_roots(
-        project_root: &Path,
-        store_layout: &StoreLayout,
-        project_id: &ProjectId,
-        registry_database: &RegisteredGlobalDb,
-    ) -> Result<Vec<PathBuf>> {
+    /// Candidate enrollment roots a registered project claims: its canonical
+    /// and display roots plus every registered alias.
+    pub(crate) fn registry_context_candidate_roots(
+        context: &crate::global_db::ProjectRegistryContext,
+    ) -> Vec<PathBuf> {
         let mut candidates = vec![
-            project_root.to_path_buf(),
-            store_layout.project_root.clone(),
+            PathBuf::from(&context.project.canonical_root),
+            PathBuf::from(&context.project.display_root),
         ];
-        if let Some(context) = registry_database
-            .project_registry_context_by_id(project_id.as_str())
-            .await?
-        {
-            candidates.push(PathBuf::from(context.project.canonical_root));
-            candidates.extend(
-                context
-                    .aliases
-                    .into_iter()
-                    .map(|alias| PathBuf::from(alias.alias_path)),
-            );
-        }
+        candidates.extend(
+            context
+                .aliases
+                .iter()
+                .map(|alias| PathBuf::from(&alias.alias_path)),
+        );
+        candidates
+    }
+
+    /// Filters candidate roots down to the ones that already carry a
+    /// profile-sharded enrollment marker naming exactly `project_id`.
+    ///
+    /// This never creates or repairs a marker, so a caller that must not mount
+    /// a store the profile has not enrolled — a cross-project memory reader,
+    /// for one — can tell "not enrolled here" apart from "enrolled".
+    pub(crate) fn enrolled_project_roots(
+        candidates: impl IntoIterator<Item = PathBuf>,
+        project_id: &ProjectId,
+    ) -> Result<Vec<PathBuf>> {
+        let mut candidates = candidates.into_iter().collect::<Vec<_>>();
         candidates.sort();
         candidates.dedup();
 
@@ -589,6 +596,27 @@ impl TraceDecay {
                 roots.push(canonical);
             }
         }
+        Ok(roots)
+    }
+
+    pub(crate) async fn registered_enrollment_roots(
+        project_root: &Path,
+        store_layout: &StoreLayout,
+        project_id: &ProjectId,
+        registry_database: &RegisteredGlobalDb,
+    ) -> Result<Vec<PathBuf>> {
+        let mut candidates = vec![
+            project_root.to_path_buf(),
+            store_layout.project_root.clone(),
+        ];
+        if let Some(context) = registry_database
+            .project_registry_context_by_id(project_id.as_str())
+            .await?
+        {
+            candidates.extend(Self::registry_context_candidate_roots(&context));
+        }
+
+        let mut roots = Self::enrolled_project_roots(candidates, project_id)?;
         if roots.is_empty() {
             let enrollment_root = crate::worktree::repository_identity_root(project_root)
                 .unwrap_or_else(|| project_root.to_path_buf());
