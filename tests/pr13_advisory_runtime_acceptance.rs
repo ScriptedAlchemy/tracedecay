@@ -895,6 +895,11 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         "github_review_ingest",
         "ci_failure_localize",
         "feedback_proximity",
+        // The four-pillar terminal state must stay visible, so a cycle whose
+        // remote pillars are unavailable can never read as clean and empty.
+        "termination",
+        "provider_states",
+        "published",
     ] {
         assert!(
             advisory.contains(required),
