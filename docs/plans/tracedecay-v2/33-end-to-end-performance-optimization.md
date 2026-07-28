@@ -301,6 +301,24 @@ sentinel values.
 
 #### Developer build and verification
 
+**Measured root-check baseline (2026-07-28).** On this Linux machine, with a
+warm target and an mtime-only touch of one root leaf file,
+`cargo check -p tracedecay --lib --all-features` took **121.35 s**. The
+`tracedecay` root then contained 824,173 lines in 1,142 `src/` files. As a
+contrast, touching one file in the roughly 37k-line `tracedecay-domain` crate
+and checking that crate took **20.19 s**. The ten existing workspace crates
+combined are roughly 147k lines, about one sixth of root. Root remains one
+compilation unit, so adding cores cannot shorten this wall by itself.
+
+This is the comparison point for the leaves-first extraction sequence in
+[Plan 12](12-root-compatibility-migration.md), not proof that a crate boundary
+will help. For each candidate slice, retain the same-host root baseline and
+measure a treatment with the same command, target warmth, leaf-touch edit
+class, features, toolchain, and correctness checks. Keep a boundary only when
+the measured frequently touched compile graph improves; otherwise report
+`pending` or reject it. Package count, source size, and the architectural
+sequence do not substitute for that comparison.
+
 - Record stock-Cargo clean, exact no-op, private body, public signature/type,
   macro/proc-macro, build-script/asset, feature/dependency/manifest, and
   focused-test edit classes with explicit package, target, features, test

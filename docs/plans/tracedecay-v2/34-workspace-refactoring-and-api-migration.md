@@ -13,6 +13,13 @@ active-band deliverable that PR19 consumes, not a defect-driven exception or a
 wholly later plan. Only PR19's temporary-alias deletion slices are SCOPE-OUT
 for PR8–PR14 audits.
 
+**Crate-extraction qualification (2026-07-28).** The
+`tracedecay_api_migration_plan` and `_apply` names in the tool vocabulary do
+not constitute a delivered API-migration implementation. The staged root
+extraction in [Plan 12](12-root-compatibility-migration.md) must use ordinary
+source moves, narrow typed ports, and explicit compatibility façades; it must
+not depend on this planner/apply journey.
+
 The canonical apply mechanism is Plan 09's journaled application edit
 transaction, fed by graph-backed preview evidence and followed by the owning
 formatter, diagnostics, verification, and optional Plan 36 Git operations.
