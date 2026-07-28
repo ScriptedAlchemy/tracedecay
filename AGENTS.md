@@ -46,3 +46,37 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   specific guidance; the deeper file wins.
 - Keep changes minimal and scoped; match surrounding style; run the checks
   that cover your change before calling it done.
+
+## Learned User Preferences
+
+- In shared checkouts, honor active file ownership: re-read before editing,
+  commit only self-consistent owned paths, and never sweep in peer work.
+- Before launching Cargo, check for an equivalent active run; reuse or wait
+  for it, avoid overlapping broad builds, and never kill peer build processes.
+- Require falsifiable verification and root-cause fixes; do not weaken
+  assertions, raise timeouts, ignore tests, or mask gate failures.
+- Keep every user-facing state truthful: unavailable, unsupported, partial,
+  or failed data must never render as successful zero, empty, or complete.
+- Verify cutovers through real production callers and every exposed surface;
+  compiled, unit-tested, or source-mentioned code alone is insufficient.
+- Audit all supported host integrations when changing shared host behavior;
+  do not treat one host as representative of the complete integration set.
+- Parallelize independent work aggressively, but keep file ownership disjoint
+  and coordinate shared integration centrally.
+- Commit coherent completed fixes incrementally with explanatory conventional
+  messages instead of holding a large mixed working tree.
+
+## Learned Workspace Facts
+
+- Durable facts are project-wide and must survive branch or worktree deletion;
+  branch stores are not their authoritative home.
+- Linked worktrees share the primary checkout's project/store identity while
+  retaining exact worktree snapshot authority.
+- Semantic model acquisition and indexing are background work and must not
+  block exact, lexical, graph, or ordinary retrieval.
+- Test fixtures must isolate home, profile, and session inputs and must never
+  read or mutate the operator's real TraceDecay or agent-host data.
+- Missing registries and unavailable authorities are typed states, not
+  transport errors or successful empty results.
+- Dogfood targets the real managed profile; back up live databases before
+  mutation and never run a second daemon against that profile.
