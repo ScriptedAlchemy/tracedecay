@@ -427,6 +427,13 @@ fn reconcile_current_projection(
     source: &MemoryV2ArchiveRecordV1,
     target: &MemoryV2ArchiveRecordV1,
 ) -> Option<bool> {
+    let source_event = current_lineage_event_id(source)?;
+    let target_event = current_lineage_event_id(target)?;
+    if source_event == target_event {
+        // Equivalent projections were handled before reconciliation. One
+        // canonical event cannot own two different current-fact states.
+        return None;
+    }
     let source_updated = match source.fields.get("updated_at")? {
         MemoryV2ArchiveScalarV1::Integer(value) => *value,
         _ => return None,
@@ -444,8 +451,32 @@ fn reconcile_current_projection(
         (source, target) if !terminal(source) && terminal(target) => Some(false),
         _ if source_updated > target_updated => Some(true),
         _ if source_updated < target_updated => Some(false),
-        _ => None,
+        // Memory V2 defines lineage order as (occurred_at, event_id). Current
+        // projections retain occurred_at as updated_at, so event identity is
+        // the authoritative tie-breaker when two stores observed concurrent
+        // events at the same timestamp.
+        _ => Some(source_event > target_event),
     }
+}
+
+fn current_lineage_event_id(record: &MemoryV2ArchiveRecordV1) -> Option<&str> {
+    let last_event_id = match record.fields.get("last_event_id")? {
+        MemoryV2ArchiveScalarV1::Text(value) => value.as_str(),
+        _ => return None,
+    };
+    let mut lineage = record
+        .references
+        .iter()
+        .filter(|reference| reference.family == MemoryV2ArchiveFamilyV1::LineageEvent);
+    let reference = lineage.next()?;
+    if lineage.next().is_some() {
+        return None;
+    }
+    let referenced_event_id = match reference.key.get("event_id")? {
+        MemoryV2ArchiveScalarV1::Text(value) => value.as_str(),
+        _ => return None,
+    };
+    (last_event_id == referenced_event_id).then_some(referenced_event_id)
 }
 
 fn current_payload_access(record: &MemoryV2ArchiveRecordV1) -> Option<&str> {
@@ -569,6 +600,60 @@ mod tests {
     fn archive(records: Vec<MemoryV2ArchiveRecordV1>) -> MemoryV2OwnerArchiveV1 {
         MemoryV2OwnerArchiveV1::new(owner(), authoritative_memory_v2_archive_families(), records)
             .unwrap()
+    }
+
+    fn projection_archive(
+        event_id: &str,
+        occurred_at: i64,
+        payload_access: &str,
+    ) -> MemoryV2OwnerArchiveV1 {
+        let fact = record(MemoryV2ArchiveFamilyV1::Fact, "fact.projection", "identity");
+        let event = MemoryV2ArchiveRecordV1::new(
+            MemoryV2ArchiveFamilyV1::LineageEvent,
+            BTreeMap::from([("event_id".to_owned(), scalar(event_id))]),
+            BTreeMap::from([
+                ("event_json".to_owned(), scalar(event_id)),
+                (
+                    "occurred_at".to_owned(),
+                    MemoryV2ArchiveScalarV1::Integer(occurred_at),
+                ),
+            ]),
+            vec![
+                MemoryV2ArchiveReferenceV1::new(MemoryV2ArchiveFamilyV1::Fact, fact.key().clone())
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let current = MemoryV2ArchiveRecordV1::new(
+            MemoryV2ArchiveFamilyV1::CurrentFact,
+            BTreeMap::from([("fact_id".to_owned(), scalar("fact.projection"))]),
+            BTreeMap::from([
+                ("payload_access".to_owned(), scalar(payload_access)),
+                ("last_event_id".to_owned(), scalar(event_id)),
+                (
+                    "updated_at".to_owned(),
+                    MemoryV2ArchiveScalarV1::Integer(occurred_at),
+                ),
+            ]),
+            vec![
+                MemoryV2ArchiveReferenceV1::new(MemoryV2ArchiveFamilyV1::Fact, fact.key().clone())
+                    .unwrap(),
+                MemoryV2ArchiveReferenceV1::new(
+                    MemoryV2ArchiveFamilyV1::LineageEvent,
+                    event.key().clone(),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        archive(vec![fact, event, current])
+    }
+
+    fn current_records(records: &[MemoryV2ArchiveRecordV1]) -> usize {
+        records
+            .iter()
+            .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::CurrentFact)
+            .count()
     }
 
     #[test]
@@ -942,6 +1027,68 @@ mod tests {
                 .unwrap()
                 .can_apply()
         );
+    }
+
+    #[test]
+    fn merge_planner_replays_the_same_current_event_idempotently() {
+        let source = projection_archive("event.same", 10, "eligible");
+        let target = source.clone();
+
+        let plan = plan_memory_v2_owner_merge(&source, &target).unwrap();
+
+        assert!(plan.can_apply());
+        assert!(plan.inserts().is_empty());
+        assert!(plan.updates().is_empty());
+        assert_eq!(current_records(plan.noops()), 1);
+    }
+
+    #[test]
+    fn merge_planner_orders_equal_timestamp_current_events_by_event_id() {
+        let earlier = projection_archive("event.a", 10, "eligible");
+        let later = projection_archive("event.b", 10, "eligible");
+
+        let advance = plan_memory_v2_owner_merge(&later, &earlier).unwrap();
+        assert!(advance.can_apply());
+        assert_eq!(current_records(advance.updates()), 1);
+        assert_eq!(current_records(advance.inserts()), 0);
+
+        let replay = plan_memory_v2_owner_merge(&earlier, &later).unwrap();
+        assert!(replay.can_apply());
+        assert!(replay.updates().is_empty());
+        assert_eq!(current_records(replay.noops()), 1);
+        assert_eq!(current_records(replay.inserts()), 0);
+    }
+
+    #[test]
+    fn merge_planner_supersedes_current_event_at_a_later_timestamp() {
+        let earlier = projection_archive("event.z", 10, "eligible");
+        let later = projection_archive("event.a", 11, "eligible");
+
+        let advance = plan_memory_v2_owner_merge(&later, &earlier).unwrap();
+        assert!(advance.can_apply());
+        assert_eq!(current_records(advance.updates()), 1);
+
+        let replay = plan_memory_v2_owner_merge(&earlier, &later).unwrap();
+        assert!(replay.can_apply());
+        assert!(replay.updates().is_empty());
+        assert_eq!(current_records(replay.noops()), 1);
+    }
+
+    #[test]
+    fn merge_planner_fails_closed_when_one_event_has_conflicting_current_payloads() {
+        let eligible = projection_archive("event.same", 10, "eligible");
+        let deleted = projection_archive("event.same", 10, "deleted");
+
+        for (source, target) in [(&eligible, &deleted), (&deleted, &eligible)] {
+            let plan = plan_memory_v2_owner_merge(source, target).unwrap();
+            assert!(!plan.can_apply());
+            assert!(plan.updates().is_empty());
+            assert_eq!(plan.conflicts().len(), 1);
+            assert_eq!(
+                plan.conflicts()[0].source().family(),
+                MemoryV2ArchiveFamilyV1::CurrentFact
+            );
+        }
     }
 
     #[test]
