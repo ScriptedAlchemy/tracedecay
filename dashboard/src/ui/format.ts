@@ -1,11 +1,16 @@
 /** Compact numeric language for brain-scale magnitudes (12.8M nodes, 932k
- * edges): tabular-friendly, one decimal only when it carries information. */
-export function formatCount(value: number | null | undefined): string {
+ * edges): tabular-friendly, one decimal only when it carries information.
+ *
+ * `thousandsAt` is the magnitude at which `k` takes over from the full number.
+ * It defaults to 10,000 because a four-figure count still reads exactly and
+ * "9,842" beats "9.8k" in a column; a ledger whose small end is already four
+ * figures — token counts — abbreviates from 1,000 instead. */
+export function formatCount(value: number | null | undefined, thousandsAt = 10_000): string {
   if (value == null || !Number.isFinite(value)) return '—';
   const abs = Math.abs(value);
   if (abs >= 1_000_000_000) return `${trim(value / 1_000_000_000)}B`;
   if (abs >= 1_000_000) return `${trim(value / 1_000_000)}M`;
-  if (abs >= 10_000) return `${trim(value / 1_000)}k`;
+  if (abs >= thousandsAt) return `${trim(value / 1_000)}k`;
   return value.toLocaleString();
 }
 
@@ -15,8 +20,12 @@ function trim(value: number): string {
 }
 
 /** The same magnitude language, split so the instrument can set the unit small
- * and quiet beside the number. `null` in, em dash out — never a zero. */
-export function splitCount(value: number | null | undefined): {
+ * and quiet beside the number. `null` in, em dash out — never a zero.
+ * `thousandsAt` means what it does in `formatCount`. */
+export function splitCount(
+  value: number | null | undefined,
+  thousandsAt = 10_000,
+): {
   value: string;
   unit?: string;
 } {
@@ -24,7 +33,7 @@ export function splitCount(value: number | null | undefined): {
   const abs = Math.abs(value);
   if (abs >= 1_000_000_000) return { value: trim(value / 1_000_000_000), unit: 'B' };
   if (abs >= 1_000_000) return { value: trim(value / 1_000_000), unit: 'M' };
-  if (abs >= 10_000) return { value: trim(value / 1_000), unit: 'K' };
+  if (abs >= thousandsAt) return { value: trim(value / 1_000), unit: 'K' };
   return { value: value.toLocaleString() };
 }
 
@@ -80,4 +89,16 @@ export function splitBytes(bytes: number | null | undefined): {
   if (bytes >= 1024 ** 2) return { value: (bytes / 1024 ** 2).toFixed(1), unit: 'MiB' };
   if (bytes >= 1024) return { value: (bytes / 1024).toFixed(1), unit: 'KiB' };
   return { value: String(bytes), unit: 'B' };
+}
+
+/** `splitBytes` for a figure whose direction is part of the reading: a store
+ * that shrank has to read as a shrink, and the magnitude language must not fork
+ * to say so. The sign rides on the value so the unit stays a bare unit. */
+export function splitSignedBytes(bytes: number | null | undefined): {
+  value: string;
+  unit?: string;
+} {
+  if (bytes == null || !Number.isFinite(bytes)) return { value: '—' };
+  const magnitude = splitBytes(Math.abs(bytes));
+  return bytes < 0 ? { ...magnitude, value: `-${magnitude.value}` } : magnitude;
 }
