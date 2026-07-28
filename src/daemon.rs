@@ -3928,7 +3928,8 @@ async fn ensure_registered_project_route(
 fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
-            "TraceDecay project '{}' is not enrolled in the authenticated profile",
+            "no TraceDecay index found at '{}': project is not enrolled in the authenticated \
+             profile; run 'tracedecay init' first",
             project_path.display()
         ),
     }

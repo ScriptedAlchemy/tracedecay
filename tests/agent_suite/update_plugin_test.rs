@@ -1151,7 +1151,7 @@ fn kimi_update_plugin_stages_bundle_and_preserves_official_host_state() {
     assert!(
         deferred
             .remediation
-            .contains("made no Kimi host-state changes")
+            .contains("made no current plugin registration changes")
     );
     let manifest = text(&staged.join(".kimi-plugin/plugin.json"));
     assert!(manifest.contains(NEW_BIN));
@@ -1253,9 +1253,7 @@ fn staged_host_source(host: &str) -> TempDir {
             copies.push(("mcp-cursor.json".into(), "mcp.json".into()));
             copies.push(("hooks/hooks-cursor.json".into(), "hooks/hooks.json".into()));
             copies.push(("README-cursor.md".into(), "README.md".into()));
-            for rule in ["tracedecay.mdc", "tracedecay-memory.mdc"] {
-                copies.push((format!("rules/{rule}"), format!("rules/{rule}")));
-            }
+            copies.push(("rules/tracedecay.mdc".into(), "rules/tracedecay.mdc".into()));
         }
         "codex" => {
             copies.push((
