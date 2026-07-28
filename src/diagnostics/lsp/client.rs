@@ -135,18 +135,13 @@ pub enum LspSemanticRequestError {
 }
 
 impl LspSemanticRequestError {
-    pub fn class(&self) -> String {
+    pub fn coverage_token(&self) -> &'static str {
         match self {
-            Self::Cancelled => "cancelled".to_owned(),
-            Self::TimedOut => "timeout".to_owned(),
-            Self::Remote { code, message } => match code {
-                Some(code) => format!("remote-{code}-{}", bounded_lsp_class(message)),
-                None => format!("remote-{}", bounded_lsp_class(message)),
-            },
-            Self::Transport { class } => format!("transport-{}", bounded_lsp_class(class)),
-            Self::InvalidResponse { class } => {
-                format!("invalid-response-{}", bounded_lsp_class(class))
-            }
+            Self::Cancelled => "analyzer-cancelled",
+            Self::TimedOut => "analyzer-timeout",
+            Self::Remote { .. } => "analyzer-remote-error",
+            Self::Transport { .. } => "analyzer-transport-failed",
+            Self::InvalidResponse { .. } => "analyzer-invalid-response",
         }
     }
 }
@@ -898,21 +893,6 @@ fn cancel_request_message(request_id: u64) -> Value {
     })
 }
 
-fn bounded_lsp_class(value: &str) -> String {
-    let mut class = String::with_capacity(value.len().min(96));
-    for character in value.chars() {
-        if class.len() >= 96 {
-            break;
-        }
-        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-            class.push(character.to_ascii_lowercase());
-        } else if !class.ends_with('-') {
-            class.push('-');
-        }
-    }
-    class.trim_matches('-').to_owned()
-}
-
 async fn read_message(
     reader: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<Option<JsonRpcMessage>> {
@@ -1173,8 +1153,52 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        cancel_request_message, file_uri_from_path_text, is_current_diagnostic_publication,
+        LspSemanticRequestError, cancel_request_message, file_uri_from_path_text,
+        is_current_diagnostic_publication,
     };
+
+    #[test]
+    fn semantic_error_coverage_ignores_free_form_error_text() {
+        let messages = [
+            "stale response: Bearer super-secret-token!",
+            "https://admin:hunter2@example.test/private?credential=yes",
+            "/home/alice/.aws/credentials: permission denied?!",
+            r"C:\Users\alice\secret.rs: unexpected !!!",
+        ];
+
+        for message in messages {
+            assert_eq!(
+                LspSemanticRequestError::Remote {
+                    code: Some(-32603),
+                    message: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-remote-error"
+            );
+            assert_eq!(
+                LspSemanticRequestError::Remote {
+                    code: None,
+                    message: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-remote-error"
+            );
+            assert_eq!(
+                LspSemanticRequestError::Transport {
+                    class: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-transport-failed"
+            );
+            assert_eq!(
+                LspSemanticRequestError::InvalidResponse {
+                    class: message.to_owned(),
+                }
+                .coverage_token(),
+                "analyzer-invalid-response"
+            );
+        }
+    }
 
     #[test]
     fn file_uri_encodes_lsp_paths() {
