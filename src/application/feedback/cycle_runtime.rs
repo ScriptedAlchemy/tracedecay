@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use thiserror::Error;
-use tokio::runtime::Handle;
 use tracedecay_application::diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, DiagnosticProviderIdentity,
 };
@@ -38,8 +37,8 @@ use tracedecay_domain::{
 use tracedecay_policy::CapabilityRoutingDecisionV1;
 
 use crate::daemon::lsp_gateway::{
-    DiagnosticTrigger, FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    LspRuntimeFailure, LspRuntimeFuture, Pr12FeedbackCycleAdapter,
+    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
+    LspRuntimeFuture,
 };
 use crate::db::Database;
 use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
@@ -321,10 +320,6 @@ impl Pr12FeedbackCycleRuntime {
         self.publications.clone()
     }
 
-    pub fn provider_identities(&self) -> &[DiagnosticProviderIdentity] {
-        &self.providers
-    }
-
     pub fn correlation_policy(&self) -> &PolicyEvaluationV1<CapabilityRoutingDecisionV1> {
         &self.correlation_policy
     }
@@ -443,20 +438,6 @@ impl Pr12FeedbackCycleRuntime {
                     == 1
             })
     }
-
-    /// Builds the LSP-facing trigger port and the runtime input used by the
-    /// shared diagnostics/context projection source.
-    pub fn lsp_registration(self: &Arc<Self>, runtime: Handle) -> Pr12FeedbackCycleLspRegistration {
-        let context_projection_input = self.context_projection_input();
-        let feedback_adapter = Arc::new(Pr12FeedbackCycleAdapter::new(
-            runtime,
-            context_projection_input.clone(),
-        ));
-        Pr12FeedbackCycleLspRegistration {
-            feedback_adapter,
-            context_projection_input,
-        }
-    }
 }
 
 fn feedback_handle_request_id(
@@ -566,29 +547,6 @@ impl FeedbackCycleRuntimePort for Pr12FeedbackCycleRuntime {
                 .map(|_| ())
                 .map_err(|error| LspRuntimeFailure::new(error.lsp_failure_class()))
         })
-    }
-}
-
-/// Registration output for the LSP gateway and the shared context-projection
-/// source. Both handles delegate to the same concrete runtime and store.
-#[derive(Clone)]
-pub struct Pr12FeedbackCycleLspRegistration {
-    feedback_adapter: Arc<Pr12FeedbackCycleAdapter>,
-    context_projection_input: Arc<dyn FeedbackCycleRuntimePort>,
-}
-
-impl Pr12FeedbackCycleLspRegistration {
-    pub fn feedback_adapter(&self) -> Arc<Pr12FeedbackCycleAdapter> {
-        Arc::clone(&self.feedback_adapter)
-    }
-
-    pub fn feedback_port(&self) -> Arc<dyn FeedbackCyclePort + Send + Sync> {
-        let port: Arc<dyn FeedbackCyclePort + Send + Sync> = self.feedback_adapter();
-        port
-    }
-
-    pub fn context_projection_input(&self) -> Arc<dyn FeedbackCycleRuntimePort> {
-        Arc::clone(&self.context_projection_input)
     }
 }
 
