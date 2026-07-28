@@ -2255,6 +2255,9 @@ struct ProjectOpenTaskRegistry {
     routes: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
 }
 
+type ProjectWarmupFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>>;
+
 struct ProjectOpenTaskEntry {
     state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
     cancellation: CancellationToken,
@@ -2418,8 +2421,9 @@ impl ProjectOpenTasks {
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
+        let open = open(task_cancellation);
         let task = tokio::spawn(async move {
-            let state = match open(task_cancellation).await {
+            let state = match open.await {
                 Ok(()) => ProjectOpenTaskState::Ready,
                 Err(error) => ProjectOpenTaskState::Failed(ProjectOpenFailure::from_error(&error)),
             };
@@ -3232,14 +3236,14 @@ impl DaemonEngine {
     }
 
     async fn begin_project_open(
-        &self,
-        handshake: DaemonHandshake,
+        self,
+        handshake: Arc<DaemonHandshake>,
         initialize_request: Option<JsonRpcRequest>,
     ) -> Result<ProjectOpenTaskClaim> {
-        let (project_path, route) = Self::project_route(&handshake)?;
+        let (project_path, route) = Self::project_route(handshake.as_ref())?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
         let engine = self.clone();
-        let open_handshake = handshake.clone();
+        let open_handshake = Arc::clone(&handshake);
         Ok(Box::pin(start_lifecycle_project_open(
             &tasks,
             self.lifecycle.clone(),
@@ -3248,7 +3252,7 @@ impl DaemonEngine {
             initialize_request,
             move |cancellation| async move {
                 engine
-                    .project_server_until_cancelled(&open_handshake, &cancellation)
+                    .project_server_until_cancelled(open_handshake.as_ref(), &cancellation)
                     .await
             },
         ))
@@ -3270,19 +3274,28 @@ impl DaemonEngine {
         ensure_registered_project_route(&self.store_administration, project_path, allow_init).await
     }
 
-    async fn schedule_project_server_warmup(
-        &self,
-        handshake: DaemonHandshake,
+    fn schedule_project_server_warmup(
+        self,
+        handshake: Arc<DaemonHandshake>,
         initialize_request: JsonRpcRequest,
-    ) -> Result<()> {
-        if self.cached_project_server(&handshake).await?.is_some() {
-            return Ok(());
-        }
-        match Box::pin(self.begin_project_open(handshake, Some(initialize_request))).await? {
-            ProjectOpenTaskClaim::InFlight(_) => Ok(()),
-            ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
-            ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
-        }
+    ) -> ProjectWarmupFuture {
+        Box::pin(async move {
+            if self
+                .cached_project_server(handshake.as_ref())
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+            match self
+                .begin_project_open(handshake, Some(initialize_request))
+                .await?
+            {
+                ProjectOpenTaskClaim::InFlight(_) => Ok(()),
+                ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
+                ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+            }
+        })
     }
 
     async fn project_server_for_request(
@@ -3296,7 +3309,11 @@ impl DaemonEngine {
         // Bound only the wait behind an unrelated writer. An uncontended open
         // is this request's own work and must run to completion.
         let contended = self.store_administration.writer_is_busy();
-        let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
+        let claim = Box::pin(
+            self.clone()
+                .begin_project_open(Arc::new(handshake.clone()), None),
+        )
+        .await?;
         match claim {
             ProjectOpenTaskClaim::InFlight(state) => {
                 let completion = ProjectOpenTasks::wait_for_completion(state);
@@ -3975,10 +3992,12 @@ where
             match result {
                 Ok(server) => {
                     project_open_cancellation_checkpoint(&cancellation)?;
-                    if let Some(initialize_request) = initialize_request {
+                    if let Some(initialize_request) = initialize_request
+                        && let Some(id) = initialize_request.id
+                    {
                         // Preserve the regular initialize side effect that records
                         // the negotiated MCP client name on the real server.
-                        let _ = server.handle_request(&initialize_request).await;
+                        let _ = server.handle_initialize(id, initialize_request.params.as_ref());
                     }
                     Ok(())
                 }
@@ -5417,10 +5436,10 @@ async fn serve_broker_socket_client(
                             McpMethod::Initialize
                         ) =>
                     {
-                        Box::pin(
-                            engine
-                                .schedule_project_server_warmup(handshake.clone(), request.clone()),
-                        )
+                        Box::pin(engine.clone().schedule_project_server_warmup(
+                            Arc::new(handshake.clone()),
+                            request.clone(),
+                        ))
                         .await
                         .err()
                     }
