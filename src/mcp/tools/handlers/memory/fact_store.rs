@@ -52,8 +52,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
             "cross-project fact_store writes are not supported; omit project_selector to write the active project",
         ));
     }
-    let target_memory =
-        open_target_memory_db(cg, &args, global_db).await?;
+    let target_memory = open_target_memory_db(cg, &args, global_db).await?;
     handle_fact_store_for_target(args, cross_project_selector, target_memory).await
 }
 

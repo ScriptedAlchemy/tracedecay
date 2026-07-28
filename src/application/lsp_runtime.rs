@@ -133,9 +133,10 @@ fn incomplete_read_projection(
         OperationTermination::Completed | OperationTermination::Partial => {
             (ContextCoverage::Partial, ContextProducerState::Partial)
         }
-        OperationTermination::Cancelled => {
-            (ContextCoverage::Unavailable, ContextProducerState::Cancelled)
-        }
+        OperationTermination::Cancelled => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Cancelled,
+        ),
         OperationTermination::TimedOut => {
             (ContextCoverage::Unavailable, ContextProducerState::TimedOut)
         }

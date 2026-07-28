@@ -774,13 +774,11 @@ pub(crate) fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
-    selected_layout_is_authoritative: bool,
 ) -> Result<(Vec<StoreLayout>, bool)> {
     matching_legacy_profile_layouts_with_git_resolver(
         project_root,
         profile_root,
         excluded_project_id,
-        selected_layout_is_authoritative,
         crate::worktree::is_detached_linked_worktree,
         crate::worktree::git_common_dir,
     )
@@ -790,7 +788,6 @@ fn matching_legacy_profile_layouts_with_git_resolver<D, G>(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
-    selected_layout_is_authoritative: bool,
     mut is_detached_linked_worktree: D,
     mut git_common_dir: G,
 ) -> Result<(Vec<StoreLayout>, bool)>
@@ -830,17 +827,12 @@ where
 
     // A linked worktree may have its own profile shard while sharing a Git
     // common directory with every sibling checkout. A non-excluded exact
-    // manifest overrides the selected identity. A healthy and populated
-    // marker/registry-selected layout is authoritative only when its manifest
-    // names this exact checkout; a sibling-root selection must retain the
-    // shared-Git recovery path.
+    // manifest overrides the selected identity. Otherwise the shared-Git
+    // recovery path still runs, and the caller decides whether a selected
+    // identity naming this exact checkout outranks what it finds.
     let selected_is_sole_exact_root =
         selected_manifest_matches_exact_root && exact_manifests.is_empty();
-    let matching_manifests = if !exact_manifests.is_empty()
-        || (selected_layout_is_authoritative && selected_manifest_matches_exact_root)
-    {
-        exact_manifests
-    } else {
+    let matching_manifests = if exact_manifests.is_empty() {
         let project_git_common_dir = (!is_detached_linked_worktree(project_root))
             .then(|| git_common_dir(project_root))
             .flatten();
@@ -863,6 +855,8 @@ where
                 })
             })
             .collect()
+    } else {
+        exact_manifests
     };
     let mut layouts = Vec::new();
     for (manifest_path, manifest) in matching_manifests {
@@ -1010,8 +1004,7 @@ fn resolve_enrolled_layout(
     if let Some(layout) = resolve_persisted_layout(project_root, profile_root)? {
         return Ok(Some(layout));
     }
-    let (mut candidates, _) =
-        matching_legacy_profile_layouts(project_root, profile_root, None, false)?;
+    let (mut candidates, _) = matching_legacy_profile_layouts(project_root, profile_root, None)?;
     match candidates.len() {
         0 => Ok(None),
         1 => Ok(Some(candidates.remove(0))),
@@ -1976,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_root_authority_controls_shared_git_discovery() {
+    fn exact_root_manifest_overrides_shared_git_discovery() {
         fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
             let data_root = profile_root.join("projects").join(project_id);
             fs::create_dir_all(&data_root).unwrap();
@@ -2012,7 +2005,6 @@ mod tests {
                 &project_root,
                 &profile_root,
                 None,
-                false,
                 |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
@@ -2037,28 +2029,6 @@ mod tests {
                 &project_root,
                 &profile_root,
                 Some("proj_exact"),
-                true,
-                |_| false,
-                |root| {
-                    resolver_calls.borrow_mut().push(root.to_path_buf());
-                    Some(dir.path().join("shared.git"))
-                },
-            )
-            .unwrap();
-        assert!(layouts.is_empty());
-        assert!(selected_is_sole_exact_root);
-        assert!(
-            resolver_calls.borrow().is_empty(),
-            "an authoritative selected exact root must not invoke shared-Git discovery"
-        );
-
-        resolver_calls.borrow_mut().clear();
-        let (layouts, selected_is_sole_exact_root) =
-            matching_legacy_profile_layouts_with_git_resolver(
-                &project_root,
-                &profile_root,
-                Some("proj_exact"),
-                false,
                 |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
@@ -2071,11 +2041,14 @@ mod tests {
             layouts[0].identity.project_id.as_deref(),
             Some("proj_unrelated")
         );
-        assert!(selected_is_sole_exact_root);
+        assert!(
+            selected_is_sole_exact_root,
+            "the caller decides whether the selected exact root outranks recovery"
+        );
         assert_eq!(
             resolver_calls.borrow().as_slice(),
             [project_root, unrelated_root],
-            "a non-authoritative selected exact root must retain shared-Git recovery"
+            "an excluded selected exact root must retain shared-Git recovery"
         );
     }
 
@@ -2107,7 +2080,6 @@ mod tests {
             &project_root,
             &profile_root,
             None,
-            false,
             |_| false,
             |_| None,
         )
@@ -2116,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_non_exact_identity_retains_historical_git_discovery() {
+    fn non_exact_identity_retains_historical_git_discovery() {
         fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
             let data_root = profile_root.join("projects").join(project_id);
             fs::create_dir_all(&data_root).unwrap();
@@ -2154,7 +2126,6 @@ mod tests {
                 &worktree_root,
                 &profile_root,
                 Some("proj_selected"),
-                true,
                 |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
@@ -2167,28 +2138,8 @@ mod tests {
         assert!(!selected_is_sole_exact_root);
         assert_eq!(
             resolver_calls.borrow().as_slice(),
-            [worktree_root.clone(), historical_root.clone()],
-            "a healthy selected identity from a sibling root must retain shared-Git recovery"
-        );
-
-        resolver_calls.borrow_mut().clear();
-        let (layouts, _) = matching_legacy_profile_layouts_with_git_resolver(
-            &worktree_root,
-            &profile_root,
-            Some("proj_selected"),
-            false,
-            |_| false,
-            |root| {
-                resolver_calls.borrow_mut().push(root.to_path_buf());
-                Some(dir.path().join("shared.git"))
-            },
-        )
-        .unwrap();
-        assert_eq!(layouts.len(), 1);
-        assert_eq!(
-            resolver_calls.borrow().as_slice(),
             [worktree_root, historical_root],
-            "an unhealthy or pristine selection must retain shared-Git recovery"
+            "a selected identity from a sibling root must retain shared-Git recovery"
         );
     }
 

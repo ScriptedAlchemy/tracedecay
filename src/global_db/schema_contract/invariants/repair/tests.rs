@@ -9,7 +9,9 @@
 //! open succeeding.
 
 use serde_json::Value;
-use tracedecay_domain::{DurableObservationV1, ObservationSourceCursorV1, ObservationSourceRangeV1};
+use tracedecay_domain::{
+    DurableObservationV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
+};
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
@@ -173,9 +175,9 @@ async fn cursor_coverage_validation_rejects_an_unexplained_frontier() {
         .expect_err("an uncovered frontier must not validate");
 
     assert!(
-        error.to_string().contains(
-            "source cursor does not exactly match committed or non-durable authority"
-        ),
+        error
+            .to_string()
+            .contains("source cursor does not exactly match committed or non-durable authority"),
         "{error}"
     );
 }

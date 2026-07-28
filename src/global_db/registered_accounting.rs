@@ -60,7 +60,8 @@ impl RegisteredGlobalDb {
         let total = row
             .get::<i64>(0)
             .map_err(|error| format!("failed to decode project tokens saved: {error}"))?;
-        u64::try_from(total).map_err(|_| format!("project tokens saved cannot be negative: {total}"))
+        u64::try_from(total)
+            .map_err(|_| format!("project tokens saved cannot be negative: {total}"))
     }
 
     pub(crate) async fn get_project_tokens(&self, project_path: &Path) -> Option<u64> {

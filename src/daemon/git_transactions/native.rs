@@ -369,6 +369,13 @@ impl GitIndexPreviewAssembler for DaemonProjectGitIndexPreviewAssembler {
     ) -> Result<MaterializedGitIndexPreview, GitIndexTransactionPortError> {
         let scope = request.context.scope();
         if scope.project_id != self.project_id {
+            // The daemon has no tracing subscriber; its diagnostic channel is
+            // this event line, so anything emitted through tracing here is
+            // unreadable in the process that runs it.
+            eprintln!(
+                "[tracedecay] event=git_index_preview_project_mismatch requested={} mounted={}",
+                scope.project_id, self.project_id
+            );
             return Err(GitIndexTransactionPortError::StalePreview);
         }
         NativeGitIndexPreviewAssembler::new(
@@ -447,6 +454,22 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         };
         let current = self.capture_snapshot(&request.repository_snapshot, &runner, &lock)?;
         if current != request.repository_snapshot {
+            if let (
+                Ok(serde_json::Value::Object(recaptured)),
+                Ok(serde_json::Value::Object(requested)),
+            ) = (
+                serde_json::to_value(&current),
+                serde_json::to_value(&request.repository_snapshot),
+            ) {
+                for (field, recaptured_value) in &recaptured {
+                    if requested.get(field) != Some(recaptured_value) {
+                        eprintln!(
+                            "[tracedecay] event=git_index_preview_snapshot_field_changed field={field} recaptured={recaptured_value} requested={:?}",
+                            requested.get(field)
+                        );
+                    }
+                }
+            }
             return Err(GitIndexTransactionPortError::StalePreview);
         }
         if let Some(reason) = unsupported_commit_preflight(request, &runner)? {

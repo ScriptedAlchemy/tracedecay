@@ -143,6 +143,12 @@ async fn git_runtime_fixture() -> RuntimeFixture {
         &project,
         &["config", "user.email", "tracedecay@example.com"],
     );
+    // Snapshot equality spans two processes with different homes: this test
+    // captures in-process under the developer's real HOME, while the daemon
+    // recaptures under the isolated one. Without pinning excludes, whatever
+    // the developer ignores globally is merely untracked to the daemon, and
+    // the same files land in different snapshot digests on every machine.
+    git(&project, &["config", "core.excludesFile", "/dev/null"]);
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "base"]);
 
@@ -2359,10 +2365,8 @@ async fn primitive_config_markdown_json_parity() {
     // them is outside this test.
     let cli_request_id =
         RequestId::new("request.primitive-config-parity.cli").expect("CLI request id");
-    let cli_deadline = Deadline::new(UtcMicros(
-        wall_clock_micros().0.saturating_add(60_000_000),
-    ))
-    .expect("CLI deadline");
+    let cli_deadline = Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(60_000_000)))
+        .expect("CLI deadline");
     let cli_dispatch = resolve_application_surface_dispatch_with_controls(
         BindingSurface::Cli,
         ApplicationSurfaceOperation::StorageStatus,

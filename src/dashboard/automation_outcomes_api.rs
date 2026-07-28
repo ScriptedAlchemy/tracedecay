@@ -46,8 +46,7 @@ async fn outcomes_payload(state: &DashboardState) -> Result<Value> {
     })?;
     let fact_outcomes = compute_fact_outcomes(&memory, now).await?;
 
-    let (snapshot, error) =
-        snapshot_fields(load_outcomes_snapshot(&state.dashboard_root).await);
+    let (snapshot, error) = snapshot_fields(load_outcomes_snapshot(&state.dashboard_root).await);
     Ok(json!({
         "generated_at": now,
         "skills": skill_outcomes,

@@ -51,9 +51,7 @@ async fn test_get_file_token_map_matches_full_file_materialization() {
             file
         })
         .collect();
-    db.upsert_files(&files)
-        .await
-        .expect("upsert_files failed");
+    db.upsert_files(&files).await.expect("upsert_files failed");
 
     let expected: HashMap<String, u64> = db
         .get_all_files()
@@ -81,9 +79,7 @@ async fn test_get_file_token_sizes_page_stays_within_limit() {
             file
         })
         .collect();
-    db.upsert_files(&files)
-        .await
-        .expect("upsert_files failed");
+    db.upsert_files(&files).await.expect("upsert_files failed");
 
     let page_limit = 2;
     let mut after: Option<String> = None;

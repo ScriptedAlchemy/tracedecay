@@ -335,10 +335,23 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             value: serde_json::Value::Null,
                             coverage: "semantic-cancelled".to_owned(),
                         },
-                        Err(error) => LspSemanticOperationOutcome::Partial {
-                            value: serde_json::Value::Null,
-                            coverage: format!("analyzer-start-{}", bounded_failure(&error.to_string())),
-                        },
+                        Err(error) => {
+                            // Coverage is a stable token vocabulary that callers
+                            // match on, so the analyzer's own message cannot live
+                            // in it: slugifying stripped the punctuation and cut it
+                            // mid-word, and a message happening to contain "stale"
+                            // steered rename candidates down the wrong branch.
+                            // The daemon installs no tracing subscriber, so this
+                            // goes to its event channel; through tracing the
+                            // analyzer's own message would be lost entirely.
+                            eprintln!(
+                                "[tracedecay] event=analyzer_start_failed error={error}"
+                            );
+                            LspSemanticOperationOutcome::Partial {
+                                value: serde_json::Value::Null,
+                                coverage: "analyzer-start-failed".to_owned(),
+                            }
+                        }
                     }
                 }
             };
@@ -377,14 +390,6 @@ fn semantic_operation_outcome(
             coverage: format!("analyzer-{}", error.class()),
         },
     }
-}
-
-fn bounded_failure(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        .take(64)
-        .collect()
 }
 
 pub struct PreparedRefresh {

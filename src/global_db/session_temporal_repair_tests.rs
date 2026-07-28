@@ -173,10 +173,7 @@ async fn offline_session_repair_rolls_back_trigger_suspension_on_failure() {
         .execute_batch("DROP TABLE session_refresh_progress;")
         .await
         .expect("corrupt the repair fixture");
-    transaction
-        .commit()
-        .await
-        .expect("commit rollback fixture");
+    transaction.commit().await.expect("commit rollback fixture");
 
     let transaction = harness
         .registered
