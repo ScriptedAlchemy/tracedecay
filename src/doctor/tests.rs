@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::time::SystemTime;
 
 use super::*;
+use crate::diagnostics::lsp::adapters::{DiagnosticMode, LspAdapterDefinition, LspInstallOption};
+use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -2143,4 +2145,168 @@ async fn daemon_startup_health_deadline_is_distinct_from_terminal_failure() {
     assert!(message.contains("deadline-exceeded"));
     assert!(message.contains("project_store_schema_unsupported"));
     assert!(!message.contains("terminal daemon startup health failure"));
+}
+
+#[cfg(unix)]
+fn write_executable_script(directory: &Path, name: &str, body: &str) -> std::io::Result<PathBuf> {
+    let path = directory.join(name);
+    std::fs::write(&path, body)?;
+    let mut permissions = std::fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn language_analyzer_probe_reports_present_executable()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write_executable_script(
+        temp.path(),
+        "typescript-language-server",
+        "#!/bin/sh\necho 'typescript-language-server 4.3.3'\n",
+    )?;
+
+    let result = probe_language_analyzer_with_path(
+        "typescript-language-server",
+        "typescript-language-server",
+        &["--version"],
+        false,
+        Some(temp.path().as_os_str()),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        LanguageAnalyzerProbe::Present { version }
+            if version == "typescript-language-server 4.3.3"
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn language_analyzer_probe_reports_missing_executable() {
+    let temp = tempfile::tempdir().expect("create empty PATH directory");
+
+    let result = probe_language_analyzer_with_path(
+        "pyright-langserver",
+        "pyright",
+        &["--version"],
+        false,
+        Some(temp.path().as_os_str()),
+    )
+    .await;
+
+    assert!(matches!(result, LanguageAnalyzerProbe::Missing));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn language_analyzer_probe_reports_resolvable_but_broken_server()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write_executable_script(
+        temp.path(),
+        "gopls",
+        "#!/bin/sh\necho 'gopls startup configuration is invalid' >&2\nexit 7\n",
+    )?;
+
+    let result = probe_language_analyzer_with_path(
+        "gopls",
+        "gopls",
+        &["version"],
+        false,
+        Some(temp.path().as_os_str()),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        LanguageAnalyzerProbe::Broken { detail }
+            if detail.contains("gopls startup configuration is invalid")
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn language_analyzer_probe_detects_rustup_shim_without_component()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write_executable_script(
+        temp.path(),
+        "rust-analyzer",
+        "#!/bin/sh\necho \"error: 'rust-analyzer' is not installed for the toolchain 'stable'\" >&2\necho 'To install, run `rustup component add rust-analyzer`' >&2\nexit 1\n",
+    )?;
+    write_executable_script(
+        temp.path(),
+        "rustup",
+        "#!/bin/sh\nif [ \"$1 $2 $3\" = \"component list --installed\" ]; then\n  echo 'rustfmt-x86_64-unknown-linux-gnu'\n  exit 0\nfi\nexit 2\n",
+    )?;
+
+    let result = probe_language_analyzer_with_path(
+        "rust-analyzer",
+        "rust-analyzer",
+        &["--version"],
+        true,
+        Some(temp.path().as_os_str()),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        LanguageAnalyzerProbe::RustupComponentMissing
+    ));
+    Ok(())
+}
+
+#[test]
+fn configured_language_analyzers_cover_builtins_and_custom_adapters() {
+    let mut settings = CodeDiagnosticsSettings::default();
+    settings.custom_adapters.push(LspAdapterDefinition {
+        language: "example".to_string(),
+        language_id: "example".to_string(),
+        command: "example-language-server".to_string(),
+        args: vec!["--stdio".to_string()],
+        extensions: vec!["example".to_string()],
+        root_markers: Vec::new(),
+        install_options: vec![LspInstallOption {
+            label: "example package manager".to_string(),
+            command: "example install example-language-server".to_string(),
+            notes: None,
+        }],
+        diagnostics: DiagnosticMode::Push,
+    });
+
+    let analyzers = configured_language_analyzers(&settings);
+    let commands = analyzers
+        .iter()
+        .map(|analyzer| analyzer.command.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        commands,
+        BTreeSet::from([
+            "clangd",
+            "example-language-server",
+            "gopls",
+            "intelephense",
+            "lua-language-server",
+            "pyright-langserver",
+            "rust-analyzer",
+            "typescript-language-server",
+            "zls",
+        ])
+    );
+    assert_eq!(analyzers[0].command, "rust-analyzer");
+    let custom = analyzers
+        .iter()
+        .find(|analyzer| analyzer.command == "example-language-server")
+        .expect("custom analyzer is included");
+    assert_eq!(
+        custom.remedy.as_deref(),
+        Some("example install example-language-server")
+    );
 }
