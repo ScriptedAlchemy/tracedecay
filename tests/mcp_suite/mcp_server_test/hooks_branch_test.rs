@@ -1,142 +1,492 @@
 //! `hooks_branch_test` domain tests, split mechanically from `mcp_server_test.rs`.
 
 use crate::mcp_server_test::support::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::{
+    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-#[tokio::test]
-async fn hook_event_workspace_context_routes_followup_graph_reads() {
+/// Two indexed projects inside one throwaway profile: the project the server
+/// serves by default ("active"), and the project a hook route must select
+/// instead ("target"). Each carries a source file named after it, so a routed
+/// read is only correct when it contains one marker and not the other.
+struct RoutedProjects {
+    _home: TempDir,
+    profile_root: PathBuf,
+    active_dir: TempDir,
+    target_dir: TempDir,
+    active: TraceDecay,
+    target: TraceDecay,
+    active_project_id: String,
+    target_project_id: String,
+}
+
+async fn routed_projects() -> RoutedProjects {
     let home = TempDir::new().unwrap();
     let profile_root = home
         .path()
         .canonicalize()
         .expect("temporary home canonicalizes")
         .join(".tracedecay");
-    let global_db_path = profile_root.join("global.db");
     let options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(global_db_path.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
     };
 
     let active_dir = TempDir::new().unwrap();
-    let active_project = active_dir.path();
-    fs::create_dir_all(active_project.join("src")).unwrap();
+    fs::create_dir_all(active_dir.path().join("src")).unwrap();
     fs::write(
-        active_project.join("src/active_only.rs"),
+        active_dir.path().join("src/active_only.rs"),
         "fn active_only() -> i32 { 1 }\n",
     )
     .unwrap();
-    let active_cg = TraceDecay::init_with_options(active_project, options.clone())
+    let active = TraceDecay::init_with_options(active_dir.path(), options.clone())
         .await
         .unwrap();
-    active_cg.index_all().await.unwrap();
+    active.index_all().await.unwrap();
 
     let target_dir = TempDir::new().unwrap();
-    let target_project = target_dir.path();
-    fs::create_dir_all(target_project.join("src")).unwrap();
+    fs::create_dir_all(target_dir.path().join("src")).unwrap();
     fs::write(
-        target_project.join("src/target_only.rs"),
+        target_dir.path().join("src/target_only.rs"),
         "fn target_only() -> i32 { 2 }\n",
     )
     .unwrap();
-    let target_cg = TraceDecay::init_with_options(target_project, options)
+    let target = TraceDecay::init_with_options(target_dir.path(), options)
         .await
         .unwrap();
-    target_cg.index_all().await.unwrap();
+    target.index_all().await.unwrap();
 
-    let active_project_id = active_cg
+    let active_project_id = active
         .store_layout()
         .identity
         .project_id
-        .as_deref()
-        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .clone()
         .expect("active project identity");
-    let registry_db =
-        tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
-            &profile_root,
-            active_project,
+    let target_project_id = target
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("target project identity");
+
+    RoutedProjects {
+        _home: home,
+        profile_root,
+        active_dir,
+        target_dir,
+        active,
+        target,
+        active_project_id,
+        target_project_id,
+    }
+}
+
+impl RoutedProjects {
+    fn active_root(&self) -> &Path {
+        self.active_dir.path()
+    }
+
+    fn target_root(&self) -> &Path {
+        self.target_dir.path()
+    }
+
+    /// Registers both projects under the identities their stores already
+    /// carry and returns the runtime the server uses as its registry.
+    ///
+    /// `TraceDecay::init` registered each store under its own identity id, so
+    /// re-registering under a synthetic id would leave the root's alias
+    /// pointing at a project row that owns no store — the ambiguity
+    /// [`hook_route_to_ambiguously_registered_project_fails_closed`] covers
+    /// deliberately.
+    async fn registered_runtime(&self) -> ProjectScopedTestRuntimeV1 {
+        let active_project_id = tracedecay_domain::ProjectId::new(self.active_project_id.clone())
+            .expect("typed active project identity");
+        let runtime = HostAdmissionTestRuntimeV1::project_scoped(
+            &self.profile_root,
+            self.active_root(),
             active_project_id,
         )
         .await
         .expect("registered project runtime opens");
-    registry_db
-        .upsert_code_project("proj_hook_active", active_project, None, None, Some("main"))
-        .await
-        .expect("active project registers");
-    registry_db
-        .upsert_code_project("proj_hook_target", target_project, None, None, Some("main"))
-        .await
-        .expect("target project registers");
-    let server =
-        McpServer::new_with_host_admission_test_runtime_for_test(active_cg, None, registry_db)
-            .await;
+        runtime
+            .upsert_code_project(
+                &self.active_project_id,
+                self.active_root(),
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("active project registers");
+        runtime
+            .upsert_code_project(
+                &self.target_project_id,
+                self.target_root(),
+                None,
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("target project registers");
+        runtime
+    }
+}
+
+/// A `workspaceOpen` notification naming the workspace `cwd` a host just
+/// opened, with no route identity — it can only steer follow-up calls on the
+/// same connection.
+fn workspace_open(cwd: &Path) -> String {
+    jsonrpc_notification_with_params(
+        "tracedecay/hookEvent",
+        json!({
+            "agent": "codex",
+            "event": "workspaceOpen",
+            "cwd": cwd.to_string_lossy()
+        }),
+    )
+}
+
+/// A `workspaceOpen` carrying route identity, the shape every real host sends.
+/// The session id is what lets the route survive to the agent's own socket.
+fn workspace_open_for_session(cwd: &Path, session_id: &str) -> String {
+    jsonrpc_notification_with_params(
+        "tracedecay/hookEvent",
+        json!({
+            "agent": "codex",
+            "event": "workspaceOpen",
+            "cwd": cwd.to_string_lossy(),
+            "route": {
+                "session_id": session_id,
+                "cwd": cwd.to_string_lossy(),
+                "worktree": cwd.to_string_lossy(),
+            }
+        }),
+    )
+}
+
+fn files_call(id: i64) -> String {
+    jsonrpc_request(
+        json!(id),
+        "tools/call",
+        json!({ "name": "tracedecay_files", "arguments": {} }),
+    )
+}
+
+fn files_call_for_session(id: i64, session_id: &str) -> String {
+    jsonrpc_request(
+        json!(id),
+        "tools/call",
+        json!({
+            "name": "tracedecay_files",
+            "arguments": { "session_id": session_id }
+        }),
+    )
+}
+
+/// Asserts a routed read refused rather than answering, and that it did not
+/// hand back the active project's files as if the route had resolved.
+fn assert_route_failed_closed(response: &Value, label: &str, expected_detail: &str) {
+    assert!(
+        response["result"].is_null(),
+        "{label} must not return a tool result: {response}"
+    );
+    let message = response["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} must return a JSON-RPC error: {response}"));
+    assert!(
+        message.contains(expected_detail),
+        "{label} must report `{expected_detail}`: {response}"
+    );
+}
+
+/// Asserts a routed read served exactly one project: `present` appears,
+/// `absent` does not, and the call itself succeeded with real text.
+fn assert_served_project(response: &Value, label: &str, present: &str, absent: &str) {
+    let text = successful_tool_text(response, label);
+    assert!(
+        text.contains(present),
+        "{label} must serve the routed project ({present} missing): {response}"
+    );
+    assert!(
+        !text.contains(absent),
+        "{label} must not serve the other project ({absent} present): {response}"
+    );
+}
+
+#[tokio::test]
+async fn hook_event_workspace_context_routes_followup_graph_reads() {
+    let projects = routed_projects().await;
+    let target_workspace = projects.target_root().to_path_buf();
+    let registry_db = projects.registered_runtime().await;
+    // Tools that name another project reach it only through the retained
+    // resolver, so the target project's graph must be handed to the server
+    // (the daemon equivalent: the target project is mounted).
+    let server = McpServer::new_with_retained_test_graphs_for_test(
+        projects.active,
+        None,
+        registry_db,
+        vec![Arc::new(projects.target)],
+    )
+    .await;
 
     let responses = run_server_with_messages(
         server.clone(),
+        vec![workspace_open(&target_workspace), files_call(1)],
+    )
+    .await;
+    assert_served_project(
+        &response_with_id(&responses, json!(1)),
+        "hook-routed files read",
+        "target_only.rs",
+        "active_only.rs",
+    );
+
+    let responses = run_server_with_messages(server, vec![files_call(2)]).await;
+    assert_served_project(
+        &response_with_id(&responses, json!(2)),
+        "unrouted files read on a fresh client",
+        "active_only.rs",
+        "target_only.rs",
+    );
+}
+
+/// A hook arriving from a linked worktree must reach the registered checkout
+/// through git-common-dir identity, and must carry that route to the agent's
+/// own socket.
+///
+/// This is the production shape the single-connection test above cannot
+/// reproduce: the host's hook client and the agent's tool client are separate
+/// sockets correlated only by session id, and a linked worktree lives at a
+/// sibling path, so the parent-directory alias walk from it never reaches the
+/// registered project. Fall back to alias-only resolution and this read
+/// silently serves the active project.
+#[tokio::test]
+async fn linked_worktree_hook_route_reaches_target_across_client_sockets() {
+    let projects = routed_projects().await;
+    let target_project = projects.target_root().to_path_buf();
+
+    // Turn the target into a real repository and attach a linked worktree at a
+    // sibling path outside every ancestor of the registered checkout.
+    fs::write(target_project.join(".gitignore"), ".tracedecay/\n").unwrap();
+    git(&target_project, &["init", "-b", "main"]);
+    git(&target_project, &["config", "user.email", "test@test.com"]);
+    git(&target_project, &["config", "user.name", "Test"]);
+    git(&target_project, &["add", "."]);
+    git(&target_project, &["commit", "-m", "initial"]);
+    let worktree_parent = TempDir::new().unwrap();
+    let linked_worktree = worktree_parent.path().join("linked-feature");
+    git(
+        &target_project,
+        &[
+            "worktree",
+            "add",
+            linked_worktree.to_string_lossy().as_ref(),
+            "-b",
+            "feature",
+        ],
+    );
+    let git_common_dir = tracedecay::worktree::git_common_dir(&target_project);
+    assert!(
+        git_common_dir.is_some(),
+        "the linked-worktree fixture needs a resolvable git common dir"
+    );
+
+    let registry_db = projects.registered_runtime().await;
+    // Re-register the target with its git common dir. The repository was
+    // created after the store, so there is no identity marker to fall back on:
+    // this alias is the only bridge from the linked worktree back to the
+    // registered checkout.
+    registry_db
+        .upsert_code_project(
+            &projects.target_project_id,
+            &target_project,
+            git_common_dir.as_deref(),
+            None,
+            Some("main"),
+        )
+        .await
+        .expect("target project registers with its git common dir");
+    let server = McpServer::new_with_retained_test_graphs_for_test(
+        projects.active,
+        None,
+        registry_db,
+        vec![Arc::new(projects.target)],
+    )
+    .await;
+
+    let session_id = "sess-linked-worktree";
+    // The host's hook socket: closes as soon as the notification is delivered.
+    run_client_connection_with_messages(
+        server.clone(),
+        vec![workspace_open_for_session(&linked_worktree, session_id)],
+    )
+    .await;
+
+    // The agent's socket: a different connection whose only tie to the hook
+    // above is the session id it reports.
+    let responses =
+        run_client_connection_with_messages(server, vec![files_call_for_session(1, session_id)])
+            .await;
+    assert_served_project(
+        &response_with_id(&responses, json!(1)),
+        "linked-worktree hook route on a separate tool socket",
+        "target_only.rs",
+        "active_only.rs",
+    );
+}
+
+/// A route that resolves to a registered project the daemon has not mounted
+/// must surface a typed failure. Serving the active project instead would
+/// present the wrong project's files as a successful answer.
+#[tokio::test]
+async fn hook_route_to_registered_but_unmounted_project_fails_closed() {
+    let projects = routed_projects().await;
+    let target_workspace = projects.target_root().to_path_buf();
+    let registry_db = projects.registered_runtime().await;
+    // No retained graph for the target: registered, but not mounted.
+    let server = McpServer::new_with_host_admission_test_runtime_for_test(
+        projects.active,
+        None,
+        registry_db,
+    )
+    .await;
+
+    let session_id = "sess-unmounted-target";
+    let responses = run_server_with_messages(
+        server,
         vec![
-            jsonrpc_notification_with_params(
-                "tracedecay/hookEvent",
-                json!({
-                    "agent": "codex",
-                    "event": "workspaceOpen",
-                    "cwd": target_project.join("src").to_string_lossy()
-                }),
-            ),
-            jsonrpc_request(
-                json!(1),
-                "tools/call",
-                json!({
-                    "name": "tracedecay_files",
-                    "arguments": {}
-                }),
-            ),
+            workspace_open_for_session(&target_workspace, session_id),
+            files_call_for_session(1, session_id),
         ],
     )
     .await;
 
-    let response = response_with_id(&responses, json!(1));
-    let text = extract_tool_text(&response["result"]);
-    assert!(
-        text.contains("target_only.rs"),
-        "hook workspace context should route graph reads to target project, got: {text}; response: {response}"
+    assert_route_failed_closed(
+        &response_with_id(&responses, json!(1)),
+        "read routed to a registered but unmounted project",
+        "not mounted",
     );
-    assert!(
-        !text.contains("active_only.rs"),
-        "ambient hook route should not fall back to active project when the hook cwd resolves"
-    );
+}
 
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(2),
-            "tools/call",
-            json!({
-                "name": "tracedecay_files",
-                "arguments": {}
-            }),
-        )],
+/// Registering one root under a second project id leaves that root's alias
+/// pointing at a project row that owns no store. Selector resolution must
+/// refuse rather than pick a registration, and must not quietly answer from
+/// the active project.
+#[tokio::test]
+async fn hook_route_to_ambiguously_registered_project_fails_closed() {
+    let projects = routed_projects().await;
+    let target_root = projects.target_root().to_path_buf();
+    let registry_db = projects.registered_runtime().await;
+    registry_db
+        .upsert_code_project(
+            "proj_duplicate_target",
+            &target_root,
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .expect("duplicate registration of the target root is accepted by the registry");
+    // The target graph *is* mounted, so a failure here can only come from the
+    // ambiguous registration.
+    let server = McpServer::new_with_retained_test_graphs_for_test(
+        projects.active,
+        None,
+        registry_db,
+        vec![Arc::new(projects.target)],
     )
     .await;
 
-    let response = response_with_id(&responses, json!(2));
-    let text = extract_tool_text(&response["result"]);
-    assert!(
-        text.contains("active_only.rs"),
-        "hook workspace context must not leak across socket clients, got: {text}"
+    let session_id = "sess-ambiguous-target";
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            workspace_open_for_session(&target_root, session_id),
+            files_call_for_session(1, session_id),
+        ],
+    )
+    .await;
+
+    assert_route_failed_closed(
+        &response_with_id(&responses, json!(1)),
+        "read routed to an ambiguously registered project",
+        "not found for selector",
     );
-    assert!(
-        !text.contains("target_only.rs"),
-        "new socket client without a hook should use the active project"
+}
+
+/// An identity-free hook whose workspace belongs to no registered project
+/// leaves follow-up reads on the active project. That is the contract, and it
+/// is only sound because the answer is the active project's own data — never
+/// another project's, and never the active project's presented as if the route
+/// had resolved somewhere else.
+#[tokio::test]
+async fn hook_route_from_unregistered_cwd_serves_the_active_project() {
+    let projects = routed_projects().await;
+    let unregistered = TempDir::new().unwrap();
+    let unregistered_workspace = unregistered.path().to_path_buf();
+    let registry_db = projects.registered_runtime().await;
+    let server = McpServer::new_with_retained_test_graphs_for_test(
+        projects.active,
+        None,
+        registry_db,
+        vec![Arc::new(projects.target)],
+    )
+    .await;
+
+    let responses = run_server_with_messages(
+        server,
+        vec![workspace_open(&unregistered_workspace), files_call(1)],
+    )
+    .await;
+    assert_served_project(
+        &response_with_id(&responses, json!(1)),
+        "unresolvable hook route",
+        "active_only.rs",
+        "target_only.rs",
+    );
+}
+
+/// Hosts report the workspace path the user opened, which is often a symlink
+/// to the checkout. Route resolution canonicalizes before matching aliases, so
+/// the symlinked spelling must reach the same registered project rather than
+/// missing and falling back to the active one.
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_route_through_symlinked_workspace_reaches_target() {
+    let projects = routed_projects().await;
+    let link_parent = TempDir::new().unwrap();
+    let link = link_parent.path().join("target-link");
+    std::os::unix::fs::symlink(projects.target_root(), &link)
+        .expect("symlink alias for the target checkout");
+    let registry_db = projects.registered_runtime().await;
+    let server = McpServer::new_with_retained_test_graphs_for_test(
+        projects.active,
+        None,
+        registry_db,
+        vec![Arc::new(projects.target)],
+    )
+    .await;
+
+    let responses =
+        run_server_with_messages(server, vec![workspace_open(&link), files_call(1)]).await;
+    assert_served_project(
+        &response_with_id(&responses, json!(1)),
+        "symlinked hook workspace",
+        "target_only.rs",
+        "active_only.rs",
     );
 }
 
 #[tokio::test]
 async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
-    let _branch_lock = BRANCH_DRIFT_TEST_LOCK.lock().await;
-    let (_dir, project, server) = setup_branch_drift_fixture().await;
+    let (_env, project, server) = setup_branch_drift_fixture().await;
 
     // While on main, the feature-only symbol must be invisible.
     let resp = search_via_transport(server.clone(), 1, "feature_only").await;
@@ -177,8 +527,7 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
 
 #[tokio::test]
 async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() {
-    let _branch_lock = BRANCH_DRIFT_TEST_LOCK.lock().await;
-    let (_dir, project, server) = setup_branch_drift_fixture().await;
+    let (_env, project, server) = setup_branch_drift_fixture().await;
 
     git(&project, &["checkout", "feature"]);
 
@@ -276,9 +625,12 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         )
         .await
         .unwrap();
+    // Register under the project's real identity-marker id: identity
+    // resolution for the linked-worktree route reads the marker first, so a
+    // synthetic id would shadow the row the marker points at.
     registry
         .upsert_code_project(
-            "proj_live",
+            project_id.as_str(),
             &project_root,
             git_common_dir.as_deref(),
             None,
@@ -289,9 +641,6 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
     let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, registry).await;
 
     let session_id = "sess-live";
-    let main_worktree = project_root.to_string_lossy().to_string();
-    let feature_worktree =
-        tracedecay::sessions::git_correlation::normalize_worktree(&worktree.to_string_lossy());
 
     // (1) Hook notification on `main` in the project worktree.
     run_server_with_messages(
@@ -356,10 +705,10 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         )
         .await
         .unwrap();
-    assert!(
-        on_main.iter().any(|hit| hit.session_id == session_id),
-        "main span should exist: {on_main:?}"
-    );
+    let main_span = on_main
+        .iter()
+        .find(|hit| hit.session_id == session_id)
+        .unwrap_or_else(|| panic!("main span should exist: {on_main:?}"));
 
     // A distinct span on feature exists (scenario 2: branch switch).
     let on_feature = db
@@ -374,13 +723,26 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         )
         .await
         .unwrap();
-    assert!(
-        on_feature.iter().any(|hit| hit.session_id == session_id),
-        "feature span should exist after branch switch: {on_feature:?}"
-    );
+    let feature_span = on_feature
+        .iter()
+        .find(|hit| hit.session_id == session_id)
+        .unwrap_or_else(|| panic!("feature span should exist after branch switch: {on_feature:?}"));
 
-    // Both branches recorded distinct worktrees for the same session.
-    assert_ne!(main_worktree, feature_worktree);
+    // The two spans must be two real observations of the same session in two
+    // checkouts. Comparing the recorded worktrees (rather than the paths the
+    // test itself sent) is what makes this fail if span recording is skipped
+    // and only one row is ever written.
+    assert_ne!(
+        main_span.worktree, feature_span.worktree,
+        "each checkout must record its own span worktree: {main_span:?} / {feature_span:?}"
+    );
+    assert!(
+        feature_span
+            .worktree
+            .as_deref()
+            .is_some_and(|recorded| recorded.ends_with("feature-worktree")),
+        "the feature span must record the linked worktree, not the main checkout: {feature_span:?}"
+    );
 
     // (3) Make a commit on `feature` inside the live span window, then run the
     // ingest sweep and confirm it is attributed to the session.

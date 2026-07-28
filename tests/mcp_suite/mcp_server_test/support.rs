@@ -12,7 +12,7 @@ use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
-use tracedecay::storage::{resolve_layout_for_current_profile, resolve_response_handle_root};
+use tracedecay::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 // ---------------------------------------------------------------------------
@@ -47,6 +47,26 @@ pub(crate) async fn run_server_with_messages(
     server: Arc<McpServer>,
     messages: Vec<String>,
 ) -> Vec<String> {
+    drive_messages(server, messages, true).await
+}
+
+/// As [`run_server_with_messages`], but leaves the server running when the
+/// client disconnects — [`McpServer::run_connection`] is the entry point the
+/// daemon uses per client socket. Scenarios where a hook arrives on the host's
+/// hook socket and the follow-up tool call arrives on the agent's own socket
+/// need this: two independent connections against one live server.
+pub(crate) async fn run_client_connection_with_messages(
+    server: Arc<McpServer>,
+    messages: Vec<String>,
+) -> Vec<String> {
+    drive_messages(server, messages, false).await
+}
+
+async fn drive_messages(
+    server: Arc<McpServer>,
+    messages: Vec<String>,
+    shutdown_on_exit: bool,
+) -> Vec<String> {
     let (mut transport, sender, mut receiver) = ChannelTransport::new();
 
     for msg in messages {
@@ -55,7 +75,11 @@ pub(crate) async fn run_server_with_messages(
     drop(sender);
 
     let handle = tokio::spawn(async move {
-        server.run(&mut transport).await.unwrap();
+        if shutdown_on_exit {
+            server.run(&mut transport).await.unwrap();
+        } else {
+            server.run_connection(&mut transport).await.unwrap();
+        }
     });
 
     let mut responses = Vec::new();
@@ -114,6 +138,24 @@ pub(crate) fn extract_tool_text(value: &Value) -> &str {
         .unwrap_or("<missing text>")
 }
 
+/// Returns a `tools/call` response's first text block, requiring the call to
+/// have succeeded and produced text.
+///
+/// [`extract_tool_text`] substitutes `<missing text>` when the response has no
+/// text content, which lets an errored or empty response satisfy a
+/// "must not contain the other project's marker" assertion. Routing tests
+/// assert on both presence and absence, so they need the failure to be loud
+/// and to carry the whole response.
+pub(crate) fn successful_tool_text<'a>(response: &'a Value, label: &str) -> &'a str {
+    assert!(
+        response["error"].is_null(),
+        "{label} must not return a JSON-RPC error: {response}"
+    );
+    response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} must return tool text content: {response}"))
+}
+
 pub(crate) fn response_with_id(responses: &[String], id: Value) -> Value {
     responses
         .iter()
@@ -145,9 +187,6 @@ impl McpTransport for ReadErrorTransport {
 /// env vars. `#[tokio::test]` defaults to a current-thread runtime, so holding
 /// the guard across `.await` is fine.
 pub(crate) static SAVINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub(crate) static BRANCH_DRIFT_TEST_LOCK: tokio::sync::Mutex<()> =
-    tokio::sync::Mutex::const_new(());
 
 /// Awaits the server's ledger-write settlement signal (the rows are written
 /// by spawned fire-and-forget tasks), then reads the ledger once and asserts
@@ -411,9 +450,17 @@ pub(crate) async fn search_via_transport(server: Arc<McpServer>, id: i64, query:
     tool_call_via_transport(server, id, "tracedecay_search", json!({ "query": query })).await
 }
 
-pub(crate) async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpServer>) {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().to_path_buf();
+/// Builds the mid-session branch-switch fixture inside an isolated home.
+///
+/// The fixture writes branch metadata and a seeded branch DB straight into the
+/// profile store, so it must own that profile: run against the developer's or
+/// runner's real `~/.tracedecay` it would both mutate live state and read back
+/// branch rows another project put there. [`crate::common::IsolatedEnv`] also
+/// serializes these tests within one binary, which is why no separate
+/// fixture-local lock is needed.
+pub(crate) async fn setup_branch_drift_fixture()
+-> (crate::common::IsolatedEnv, PathBuf, Arc<McpServer>) {
+    let (env, project) = crate::common::IsolatedEnv::acquire().await;
 
     // main: one committed source file, indexed into the default DB.
     fs::create_dir_all(project.join("src")).unwrap();
@@ -430,14 +477,19 @@ pub(crate) async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpSe
     git(&project, &["commit", "-m", "initial"]);
     git(&project, &["branch", "-M", "main"]);
 
-    {
+    // Take the layout from the graph that just created the store. Resolving
+    // the profile layout independently can name a different shard than the one
+    // this project was indexed into (identity resolution and the fallback
+    // directory derivation do not always agree), and the branch seeding below
+    // would then write metadata and a feature DB into a store no reader opens.
+    let layout = {
         let cg = TraceDecay::init(&project).await.unwrap();
         cg.index_all().await.unwrap();
         cg.checkpoint().await.unwrap();
-    }
+        cg.store_layout().clone()
+    };
 
     // Track main + feature, seeding feature's DB from main's.
-    let layout = resolve_layout_for_current_profile(&project).unwrap();
     let mut meta = BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
     save_branch_meta(&layout.data_root, &meta).unwrap();
@@ -475,7 +527,7 @@ pub(crate) async fn setup_branch_drift_fixture() -> (TempDir, PathBuf, Arc<McpSe
     assert_eq!(cg.serving_branch(), Some("main"));
     let server = McpServer::new(cg, None).await;
 
-    (dir, project, server)
+    (env, project, server)
 }
 
 // ---------------------------------------------------------------------------
