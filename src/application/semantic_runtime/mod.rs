@@ -24,10 +24,9 @@ pub(crate) use bundled_pr9::bundled_pr9_authority;
 pub use config_backend::ConfigurationLinkedSemanticRuntimeBackendV1;
 pub use config_store::ProductionSemanticRetrievalConfigurationStoreV1;
 pub(crate) use configuration_operation::{
-    ProductionSemanticConfigurationOperationV1,
-    SemanticEvaluationAuthorityPublicationV1, SemanticEvaluationPublicationSnapshotPortV1,
-    SemanticEvaluationPublicationSnapshotV1, SemanticProtectedActivationOperationV1,
-    SemanticProtectedRollbackOperationV1,
+    ProductionSemanticConfigurationOperationV1, SemanticEvaluationAuthorityPublicationV1,
+    SemanticEvaluationPublicationSnapshotPortV1, SemanticEvaluationPublicationSnapshotV1,
+    SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
 };
 pub use configuration_operation::{
     SemanticEvaluationDiversityCandidateV1, SemanticEvaluationFusionCandidateV1,

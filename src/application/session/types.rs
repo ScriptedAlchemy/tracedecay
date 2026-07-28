@@ -1,9 +1,8 @@
 use std::fmt;
 
 use tracedecay_domain::{
-    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1,
-    SessionId, SessionSourceCoverageAggregateStateV1, SessionSourceCoverageReceiptV1,
-    TemporalModeV1,
+    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1, SessionId,
+    SessionSourceCoverageAggregateStateV1, SessionSourceCoverageReceiptV1, TemporalModeV1,
 };
 
 use crate::application::context::{

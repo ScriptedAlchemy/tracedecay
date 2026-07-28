@@ -583,10 +583,8 @@ impl DoctorRemediationAuthorityV1 {
             }
             Err(
                 DoctorRemediationDispatchErrorV1::OwnerUnavailable
-                    | DoctorRemediationDispatchErrorV1::Unsupported,
-            ) => {
-                DoctorRemediationVerificationV1::Unavailable
-            }
+                | DoctorRemediationDispatchErrorV1::Unsupported,
+            ) => DoctorRemediationVerificationV1::Unavailable,
             Err(error) => return Err(error),
         };
         Ok(outcome)
