@@ -557,6 +557,8 @@ impl TraceDecay {
 
         let mut roots = Vec::new();
         for candidate in candidates {
+            let candidate = crate::worktree::repository_identity_root(&candidate)
+                .unwrap_or(candidate);
             let Ok(canonical) = candidate.canonicalize() else {
                 continue;
             };
@@ -573,13 +575,15 @@ impl TraceDecay {
             }
         }
         if roots.is_empty() {
+            let enrollment_root = crate::worktree::repository_identity_root(project_root)
+                .unwrap_or_else(|| project_root.to_path_buf());
             let canonical =
-                project_root
+                enrollment_root
                     .canonicalize()
                     .map_err(|error| TraceDecayError::Config {
                         message: format!(
                             "could not canonicalize project enrollment root '{}': {error}",
-                            project_root.display()
+                            enrollment_root.display()
                         ),
                     })?;
             storage::write_enrollment_marker(

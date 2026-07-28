@@ -3751,6 +3751,13 @@ async fn cached_project_node_count(
     let canonical_project_path = project_path
         .canonicalize()
         .unwrap_or_else(|_| project_path.clone());
+    ensure_registered_project_route(
+        store_administration,
+        &canonical_project_path,
+        handshake.allow_init,
+    )
+    .await
+    .ok()?;
     let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
     let server = {
         let servers = store_administration.project_servers().lock().await;
@@ -3876,7 +3883,9 @@ async fn ensure_registered_project_route(
         let is_project_root = crate::worktree::git_worktree_root(&project_path)
             .map(|git_root| git_root == project_path)
             .unwrap_or(true);
-        if allow_init && is_project_root {
+        let owns_repository_identity =
+            crate::worktree::repository_identity_root(&project_path).is_none();
+        if allow_init && is_project_root && owns_repository_identity {
             return Ok(());
         }
         return Err(unenrolled_project_route_error(&project_path));
@@ -4230,6 +4239,12 @@ async fn production_project_server(
     #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
 ) -> Result<ProductionProjectComposition> {
     project_open_cancellation_checkpoint(cancellation)?;
+    ensure_registered_project_route(
+        store_administration,
+        canonical_project_path,
+        handshake.allow_init,
+    )
+    .await?;
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
     if let Some(server) = {
         let mut servers = store_administration.project_servers().lock().await;
@@ -4246,12 +4261,6 @@ async fn production_project_server(
         });
     }
 
-    ensure_registered_project_route(
-        store_administration,
-        canonical_project_path,
-        handshake.allow_init,
-    )
-    .await?;
     let gate = project_open_gate(project_open_gates, &route).await;
     let _singleflight = tokio::select! {
         biased;
@@ -5812,8 +5821,10 @@ async fn open_project_for_handshake(
     // step, not a bypass: it only runs on the explicit allow_init first-touch
     // path, and a subsequent open resolves this same marker deterministically.
     if first_touch {
+        let enrollment_root = crate::worktree::repository_identity_root(project_path)
+            .unwrap_or_else(|| project_path.to_path_buf());
         crate::storage::write_enrollment_marker(
-            project_path,
+            &enrollment_root,
             &crate::storage::EnrollmentMarker {
                 project_id: project_id.to_owned(),
                 storage_mode: crate::storage::StorageMode::ProfileSharded,
