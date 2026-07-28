@@ -301,7 +301,7 @@ mod config_backend_tests {
         DiversityPolicyId, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
         EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
         EmbeddingTruncationSideV1, FusionProfile, FusionProfileId, PrivacyDomainId,
-        RetrievalAnchorId, RetrievalBudget, RetrieverKind, UtcMicros, canonical_sha256,
+        RetrievalBudget, RetrieverKind, UtcMicros, canonical_sha256,
     };
 
     use super::*;

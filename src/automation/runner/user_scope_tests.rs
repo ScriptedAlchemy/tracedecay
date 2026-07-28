@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{FactOwnerV1, SessionId, TemporalCoverageCountsV1};
-use tracedecay_store::FactCompatibilityStore;
 
 use super::*;
 use crate::application::memory::{MemoryApplication, MemoryOperationContext};

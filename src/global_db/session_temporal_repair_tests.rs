@@ -6,7 +6,7 @@
 //! authority tables, and a repair that fails partway leaves the triggers
 //! standing rather than a live user store with its integrity guards stripped.
 
-use crate::db::engine::{Executor, QueryExecutor};
+use crate::db::engine::QueryExecutor;
 use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 use crate::global_db::{connection_table_exists, repair_session_temporal_store};
 
