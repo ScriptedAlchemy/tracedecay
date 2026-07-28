@@ -1,8 +1,8 @@
 use super::{
     AnalyticsAction, CommandFamily, Commands, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS,
-    PostUpdateMode, SilentReinstallAction, async_worker_threads, is_extract_worker,
-    is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, silent_reinstall_action,
+    PostUpdateMode, SilentReinstallAction, StderrTracingDefault, async_worker_threads,
+    is_extract_worker, is_local_install_command, should_skip_agent_install_maintenance,
+    should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
 };
 use tracedecay::extraction::complexity::{RUST_COMPLEXITY, count_complexity};
 use tracedecay::user_config::UserConfig;
@@ -113,6 +113,30 @@ fn representative_commands_route_to_their_dispatch_family() {
     for (command, expected) in cases {
         assert_eq!(CommandFamily::for_command(&command), expected);
     }
+}
+
+#[test]
+fn hook_commands_default_to_a_silent_stderr_subscriber() {
+    for command in [
+        Commands::HookStop,
+        Commands::HookCursorPostToolUse,
+        Commands::HookCodexSessionStart,
+    ] {
+        assert_eq!(
+            stderr_tracing_default(Some(&command)),
+            StderrTracingDefault::Silent,
+            "hook stderr belongs to the host and must stay quiet by default"
+        );
+    }
+}
+
+#[test]
+fn non_hook_commands_keep_warnings_on_stderr() {
+    assert_eq!(
+        stderr_tracing_default(Some(&Commands::Monitor)),
+        StderrTracingDefault::Warn
+    );
+    assert_eq!(stderr_tracing_default(None), StderrTracingDefault::Warn);
 }
 
 #[test]

@@ -188,14 +188,37 @@ fn is_plain_target(target: &str) -> bool {
             .contains(|ch: char| ch.is_whitespace() || matches!(ch, '[' | ']' | '{' | '}' | '='))
 }
 
+/// What the stderr subscriber does when `RUST_LOG` says nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StderrTracingDefault {
+    /// Surface warnings, the crate default for ordinary commands.
+    Warn,
+    /// Emit nothing. Agent hosts read hook stderr as a contract surface and
+    /// several treat unexpected output as a hook failure, so a hook may only
+    /// speak there when an operator explicitly asks it to.
+    Silent,
+}
+
+impl StderrTracingDefault {
+    fn level(self) -> LevelFilter {
+        match self {
+            Self::Warn => LevelFilter::WARN,
+            Self::Silent => LevelFilter::OFF,
+        }
+    }
+}
+
 /// Installs the process-wide stderr `tracing` subscriber, honoring `RUST_LOG`
-/// (default `warn`). Additive to the bespoke `[tracedecay] event=` stderr
-/// lines above — both channels share stderr, and tools that parse `event=`
-/// lines are unaffected because tracing output never carries that prefix.
-pub fn install_stderr_tracing() {
+/// over `default`. Additive to the bespoke `[tracedecay] event=` stderr lines
+/// above — both channels share stderr, and tools that parse `event=` lines are
+/// unaffected because tracing output never carries that marker.
+///
+/// An explicit `RUST_LOG` is operator intent and outranks `default`, including
+/// for hooks: `Silent` only decides what happens in its absence.
+pub fn install_stderr_tracing(default: StderrTracingDefault) {
     install_stderr_tracing_filter(StderrTracingFilter::parse(
         std::env::var("RUST_LOG").ok().as_deref(),
-        LevelFilter::WARN,
+        default.level(),
     ));
 }
 
@@ -221,10 +244,14 @@ fn install_stderr_tracing_filter(filter: StderrTracingFilter) {
 mod stderr_tracing_tests {
     use tracing::level_filters::LevelFilter;
 
-    use super::{StderrTracingFilter, install_stderr_tracing};
+    use super::{StderrTracingDefault, StderrTracingFilter, install_stderr_tracing};
 
     fn parse(env_value: Option<&str>) -> StderrTracingFilter {
         StderrTracingFilter::parse(env_value, LevelFilter::WARN)
+    }
+
+    fn parse_for_hook(env_value: Option<&str>) -> StderrTracingFilter {
+        StderrTracingFilter::parse(env_value, StderrTracingDefault::Silent.level())
     }
 
     #[test]
@@ -311,9 +338,26 @@ mod stderr_tracing_tests {
     }
 
     #[test]
+    fn hooks_stay_silent_until_rust_log_asks_otherwise() {
+        let unset = parse_for_hook(None);
+        assert_eq!(unset.level_for_target("tracedecay"), LevelFilter::OFF);
+        assert_eq!(unset.max_level(), LevelFilter::OFF);
+
+        // An explicit value is operator intent and outranks the hook default.
+        let explicit = parse_for_hook(Some("info"));
+        assert_eq!(explicit.level_for_target("tracedecay"), LevelFilter::INFO);
+
+        // A target directive raises only that target; everything else on the
+        // hook's stderr stays off.
+        let scoped = parse_for_hook(Some("tracedecay=debug"));
+        assert_eq!(scoped.level_for_target("tracedecay"), LevelFilter::DEBUG);
+        assert_eq!(scoped.level_for_target("hyper"), LevelFilter::OFF);
+    }
+
+    #[test]
     fn installing_the_subscriber_twice_does_not_panic() {
-        install_stderr_tracing();
-        install_stderr_tracing();
+        install_stderr_tracing(StderrTracingDefault::Warn);
+        install_stderr_tracing(StderrTracingDefault::Warn);
     }
 }
 

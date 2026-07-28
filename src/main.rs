@@ -23,6 +23,7 @@ mod update_cmd;
 pub use tracedecay::serve;
 
 use cli::*;
+use tracedecay::daemon::StderrTracingDefault;
 
 /// Alias for the shared timestamp utility.
 pub(crate) fn current_unix_timestamp() -> i64 {
@@ -178,17 +179,21 @@ fn main() {
 }
 
 fn async_main() -> tracedecay::errors::Result<()> {
-    // Route tracing events (degradation causes, ingest warnings) to stderr —
-    // without a subscriber every `tracing::warn!` in the runtime is silently
-    // dropped, which hid the causes behind typed catch-up reason codes. The
-    // daemon runs through this same entrypoint, so this is also the daemon's
-    // subscriber; RUST_LOG raises verbosity (default `warn`).
-    tracedecay::daemon::install_stderr_tracing();
     let args: Vec<String> = std::env::args().collect();
     if render_dynamic_command_help(&args) {
         return Ok(());
     }
     let cli = Cli::parse_from(args);
+    // Route tracing events (degradation causes, ingest warnings) to stderr —
+    // without a subscriber every `tracing::warn!` in the runtime is silently
+    // dropped, which hid the causes behind typed catch-up reason codes. The
+    // daemon runs through this same entrypoint, so this is also the daemon's
+    // subscriber; RUST_LOG raises verbosity (default `warn`).
+    //
+    // Installed after parsing rather than first thing: hook stderr belongs to
+    // the host, so which command is running has to be known before anything
+    // is allowed to write there.
+    tracedecay::daemon::install_stderr_tracing(stderr_tracing_default(cli.command.as_ref()));
     // Extraction workers are synchronous subprocesses. Dispatch them before
     // constructing Tokio: a full sync can spawn many workers, and giving each
     // one its own async/blocking pools multiplies thread stacks and allocator
@@ -212,6 +217,18 @@ fn async_main() -> tracedecay::errors::Result<()> {
     // so bound teardown after the command's own graceful shutdown completes.
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
     result
+}
+
+/// Hooks are silent on stderr unless `RUST_LOG` says otherwise: their host
+/// owns that stream and reads unexpected output as a hook failure. Every other
+/// command keeps the crate default of `warn`.
+fn stderr_tracing_default(command: Option<&Commands>) -> StderrTracingDefault {
+    match command {
+        Some(command) if CommandFamily::for_command(command) == CommandFamily::Hook => {
+            StderrTracingDefault::Silent
+        }
+        _ => StderrTracingDefault::Warn,
+    }
 }
 
 fn render_dynamic_command_help(args: &[String]) -> bool {
