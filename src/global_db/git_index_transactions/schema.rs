@@ -173,7 +173,6 @@ pub(crate) async fn ensure_git_index_transaction_schema(
             END;",
         )
         .await
-        .map(|_| ())
         .map_err(|error| {
             global_db_operation_error("initialize git index transaction schema", error)
         })

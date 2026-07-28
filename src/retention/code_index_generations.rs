@@ -230,7 +230,7 @@ pub fn plan_code_generation_retention(
     let missing_sources = vector_readable_sources
         .iter()
         .filter(|source| !generations.contains_key(*source))
-        .map(|source| source.as_str())
+        .map(tracedecay_domain::CodeGenerationId::as_str)
         .collect::<Vec<_>>();
     if !missing_sources.is_empty() {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(

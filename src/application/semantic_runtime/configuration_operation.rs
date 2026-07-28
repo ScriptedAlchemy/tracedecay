@@ -93,10 +93,10 @@ pub(crate) struct SemanticEvaluationPublicationSnapshotV1 {
 }
 
 pub(crate) trait SemanticEvaluationPublicationSnapshotPortV1: Send + Sync {
-    fn current<'a>(
-        &'a self,
+    fn current(
+        &self,
     ) -> SemanticRuntimeFuture<
-        'a,
+        '_,
         Result<SemanticEvaluationPublicationSnapshotV1, SemanticActivationCoordinationErrorV1>,
     >;
 

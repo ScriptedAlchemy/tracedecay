@@ -232,9 +232,7 @@ impl HookProjectRouteCache {
                 }
                 Ok((arguments, Some(resolved.clone())))
             }
-            Some(WorkspaceProjectRoute::Failed(failure)) => {
-                Err(failure.clone().into_error())
-            }
+            Some(WorkspaceProjectRoute::Failed(failure)) => Err(failure.clone().into_error()),
             None => Ok((self.apply_to_tool_arguments(tool_name, arguments), None)),
         }
     }
@@ -282,11 +280,7 @@ impl HookProjectRouteCache {
         self.evict_old_session_routes();
     }
 
-    fn insert_session_workspace_route(
-        &mut self,
-        session_id: String,
-        route: WorkspaceProjectRoute,
-    ) {
+    fn insert_session_workspace_route(&mut self, session_id: String, route: WorkspaceProjectRoute) {
         if !self.routes_by_session.contains_key(&session_id) {
             self.session_order.push_back(session_id.clone());
         }
@@ -378,10 +372,7 @@ impl HookProjectRouteCache {
     }
 
     fn evict_old_thread_routes(&mut self) {
-        while self
-            .paths_by_thread
-            .len()
-            .max(self.routes_by_thread.len())
+        while self.paths_by_thread.len().max(self.routes_by_thread.len())
             > MAX_HOOK_ROUTE_CACHE_ENTRIES
         {
             let Some(thread_id) = self.thread_order.pop_front() else {

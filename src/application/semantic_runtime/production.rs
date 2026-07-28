@@ -472,9 +472,8 @@ impl ProductionSemanticRuntimeV1 {
             let prepared = std::rc::Rc::new(std::cell::RefCell::new(prepared));
             let replacement_for_stage = std::rc::Rc::clone(&replacement);
             let prepared_for_stage = std::rc::Rc::clone(&prepared);
-            let mut rebuilder = ProductionLegacyVectorCanonicalRebuilderV1::try_new(
-                retained.into_iter(),
-                move |chunks| {
+            let mut rebuilder =
+                ProductionLegacyVectorCanonicalRebuilderV1::try_new(retained, move |chunks| {
                     let prepared = prepared_for_stage
                         .borrow_mut()
                         .remove(chunks.source_generation())
@@ -510,9 +509,8 @@ impl ProductionSemanticRuntimeV1 {
                         rebuilt_generation: publication.generation_id,
                         canonical_chunk_set_digest: chunks.digest().clone(),
                     })
-                },
-            )
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+                })
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
             let transaction = prepare_legacy_vector_migration(
                 &inventory_for_prepare,
                 &mut rebuilder,

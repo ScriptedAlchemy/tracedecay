@@ -172,7 +172,10 @@ impl ProjectionChangeQueue {
             document_uri: change.document_uri.clone(),
             kind: change.kind.clone(),
         };
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state
             .latest
             .get(&key)
@@ -188,7 +191,10 @@ impl ProjectionChangeQueue {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
-        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut changes = state
             .latest
             .iter()
@@ -1000,7 +1006,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
             projection
                 .current_scopes
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(
                     current_scope_key(&current),
                     CachedTestRunScope {
@@ -1021,7 +1027,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                     projection
                         .observed_revisions
                         .lock()
-                        .unwrap_or_else(|error| error.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(
                             current_scope_key(&current),
                             test_run_source_revision(&snapshot),
@@ -1159,7 +1165,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
         let scopes = self
             .current_scopes
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter(|scope| scope.current.root_uri == root.uri())
             .cloned()
@@ -1177,7 +1183,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                 let mut observed = self
                     .observed_revisions
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match observed.insert(key, source_revision.clone()) {
                     Some(previous) => previous != source_revision,
                     None => false,

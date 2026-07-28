@@ -19,7 +19,7 @@ struct LocalProfileIdentityRecordV1 {
     profile_id: UserProfileId,
 }
 
-/// Durable random identity for one local TraceDecay profile root.
+/// Durable random identity for one local `TraceDecay` profile root.
 ///
 /// The profile root is retained with the decoded record so callers cannot
 /// accidentally pair its identities with another physical profile.

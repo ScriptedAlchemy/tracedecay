@@ -64,7 +64,7 @@ pub(super) async fn migration_recorded(
 }
 
 async fn migrate_observation_schema(
-    conn: &(impl Executor + QueryExecutor),
+    conn: &impl Executor,
     table_preexisted: bool,
 ) -> crate::errors::Result<()> {
     let columns = observation_columns(conn).await?;
@@ -154,9 +154,7 @@ async fn migrate_observation_schema(
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-async fn migrate_source_cursor_advances_schema(
-    conn: &(impl Executor + QueryExecutor),
-) -> crate::errors::Result<()> {
+async fn migrate_source_cursor_advances_schema(conn: &impl Executor) -> crate::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT name FROM pragma_table_xinfo('source_cursor_advances')",
@@ -233,12 +231,11 @@ async fn migrate_source_cursor_advances_schema(
          ALTER TABLE source_cursor_advances_v2 RENAME TO source_cursor_advances;",
     )
     .await
-    .map(|_| ())
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
 pub(in crate::global_db) async fn ensure_observation_schema(
-    conn: &(impl Executor + QueryExecutor + Sync),
+    conn: &(impl Executor + Sync),
 ) -> crate::errors::Result<()> {
     let table_preexisted = observation_table_exists(conn).await?;
     crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(

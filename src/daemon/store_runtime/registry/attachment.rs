@@ -40,7 +40,7 @@ impl PhysicalRuntimeSnapshot {
 pub(crate) trait PhysicalRuntimeAttachment: Send + Sync {
     fn snapshot(&self) -> PhysicalRuntimeSnapshot;
 
-    /// Physical identity captured from a descriptor held across SQLite worker
+    /// Physical identity captured from a descriptor held across `SQLite` worker
     /// startup. Implementations must not derive this from a later pathname
     /// stat.
     fn opened_file_identity(&self) -> Result<u64, String> {

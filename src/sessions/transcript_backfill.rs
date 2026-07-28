@@ -192,8 +192,7 @@ async fn advance_transcript_facts_backfill_with_limit(
 
     let next_cursor = candidates
         .last()
-        .map(|candidate| candidate.rowid)
-        .unwrap_or(cursor);
+        .map_or(cursor, |candidate| candidate.rowid);
     let updates = tokio::task::spawn_blocking(move || derive_candidate_updates(candidates))
         .await
         .map_err(|error| {

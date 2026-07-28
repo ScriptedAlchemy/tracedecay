@@ -455,7 +455,6 @@ async fn ensure_projection_table_columns(
 async fn ensure_v4_projection_binding_triggers(conn: &impl Executor) -> Result<(), Error> {
     conn.execute_batch(include_str!("projection_v4_binding_triggers.sql"))
         .await
-        .map(|_| ())
 }
 
 const LEGACY_REBUILD_COLUMNS: &[&str] = &[

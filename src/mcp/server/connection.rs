@@ -130,8 +130,7 @@ impl McpServer {
                             .params
                             .as_ref()
                             .and_then(|params| params.get("requestId"))
-                        {
-                            if !self.cancel_application_surface_request(id, &connection_scope)
+                            && !self.cancel_application_surface_request(id, &connection_scope)
                                 && pending_cancellations.len()
                                     < MAX_PENDING_CANCELLABLE_REQUEST_LINES
                                 && let Some(key) = queued_cancellable_request_key(
@@ -142,7 +141,6 @@ impl McpServer {
                             {
                                 pending_cancellations.insert(key);
                             }
-                        }
                         continue;
                     }
                     if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {

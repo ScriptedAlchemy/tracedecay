@@ -486,7 +486,7 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
 /// is expected (fresh profile, no daemon), so the registry tools report it
 /// as a stable `not_found` payload rather than a tool error. This never
 /// opens a default registry itself — the fallback removed in the
-/// RegisteredGlobalDb cutover stays removed.
+/// `RegisteredGlobalDb` cutover stays removed.
 fn open_project_registry_read_only(
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Option<(PathBuf, &RegisteredGlobalDb)> {

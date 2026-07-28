@@ -639,7 +639,7 @@ where
     tokio::pin!(cancellation);
     let run_result = tokio::select! {
         result = &mut run => result,
-        _ = &mut cancellation => {
+        () = &mut cancellation => {
             finish_test_run(
                 &emitter,
                 started_at,

@@ -267,7 +267,7 @@ pub(crate) struct DaemonSemanticQueryFactoryV1 {
 }
 
 /// Isolated evaluator projection. It reuses the verified production artifact
-/// and FastEmbed runtime, but has no durable vector pointer and cannot replace
+/// and `FastEmbed` runtime, but has no durable vector pointer and cannot replace
 /// a project's active generation.
 pub(crate) struct PreparedSemanticEvaluationProjectionV1 {
     pub(crate) query_factory: DaemonSemanticQueryFactoryV1,

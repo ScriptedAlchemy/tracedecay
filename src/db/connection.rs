@@ -154,7 +154,7 @@ impl StoreRuntimeResolver for ExactTestRuntimeResolver {
 ///
 /// This is deliberately independent of the physical runtime's writer
 /// presence: one writable runtime can issue both read-only and read-write
-/// database facades without opening the SQLite path again.
+/// database facades without opening the `SQLite` path again.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DatabaseAccessMode {
     ReadOnly,
@@ -199,7 +199,7 @@ static DATABASE_HEALTH_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 /// A writer connection that cannot outlive the canonical database's writer
 /// lane. It is another capability over the same physical attachment, never a
-/// second path-derived SQLite open.
+/// second path-derived `SQLite` open.
 pub(crate) struct DatabaseWriterConnection<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     conn: Connection,
@@ -689,7 +689,7 @@ impl Database {
         self.canonical_database_path()
     }
 
-    /// Physical SQLite identity captured when this retained handle was opened.
+    /// Physical `SQLite` identity captured when this retained handle was opened.
     pub(crate) fn opened_file_identity(&self) -> u64 {
         self.inner.opened_file_identity
     }
@@ -713,8 +713,7 @@ impl Database {
         }
         self.inner
             ._authority
-            .as_ref()
-            .cloned()
+            .clone()
             .ok_or_else(|| TraceDecayError::Database {
                 message: "writable database facade has no originating authority".to_owned(),
                 operation: "acquire database write authority".to_owned(),
@@ -1214,7 +1213,7 @@ impl Database {
         operation: &str,
     ) -> Result<Connection> {
         self.require_active_write_scope(operation)?;
-        self.inner.write_conn.as_ref().cloned().ok_or_else(|| {
+        self.inner.write_conn.clone().ok_or_else(|| {
             integrity::read_only_upgrade_error(self.canonical_database_path(), operation)
         })
     }
@@ -1377,7 +1376,7 @@ impl Database {
     ///
     /// This is narrower than the pressure-based runtime checkpoint policy:
     /// only an exclusive-maintenance authority may use it, and success means
-    /// SQLite reported no busy readers and no remaining log frames. Offline
+    /// `SQLite` reported no busy readers and no remaining log frames. Offline
     /// migration artifacts need that proof before they can be attached.
     pub(crate) async fn truncate_wal_for_offline_maintenance(&self) -> Result<()> {
         self.require_active_write_scope("truncate WAL for offline maintenance")?;
@@ -1490,7 +1489,7 @@ impl Database {
 
     /// Writes a transactionally consistent copy of this database.
     ///
-    /// The writer-owned online-backup command copies one consistent SQLite
+    /// The writer-owned online-backup command copies one consistent `SQLite`
     /// snapshot in bounded steps. The destination must not already exist.
     pub async fn snapshot_to(&self, destination: &Path) -> Result<()> {
         self.require_active_write_scope("snapshot_to")?;

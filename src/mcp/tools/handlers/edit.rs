@@ -99,8 +99,7 @@ async fn source_edit_tool_result(
         result
             .outcome
             .as_move()
-            .map(move_result_md)
-            .unwrap_or_else(|| render::generic_md(&value))
+            .map_or_else(|| render::generic_md(&value), move_result_md)
     });
     let tool_result = ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),

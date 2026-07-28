@@ -1279,8 +1279,8 @@ pub(super) async fn run_automation_scheduler_tick(
         );
         return Ok(());
     }
-    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    if !automation_scheduler_has_work(&cg, &config).await? {
+    let config = effective_automation_config_for_project(cg, &handshake.client_identity).await?;
+    if !automation_scheduler_has_work(cg, &config).await? {
         log_daemon_event(
             "scheduler_tick",
             &[
@@ -1326,7 +1326,7 @@ pub(super) async fn run_automation_scheduler_tick(
 
     log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
     match run_memory_curator_with_backend(
-        &cg,
+        cg,
         &config,
         &backend,
         MemoryCuratorAutomationOptions {
@@ -1354,7 +1354,7 @@ pub(super) async fn run_automation_scheduler_tick(
     if config.combine_due_tasks {
         log_scheduler_task_start(project_path, AgentTaskKind::CombinedReview);
         match run_combined_review_with_backend_and_retrieval(
-            &cg,
+            cg,
             &config,
             &backend,
             retrieval.as_ref(),
@@ -1401,7 +1401,7 @@ pub(super) async fn run_automation_scheduler_tick(
     if !combined_handled {
         log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
         match run_session_reflector_with_backend_and_retrieval(
-            &cg,
+            cg,
             &config,
             &backend,
             retrieval.as_ref(),
@@ -1424,7 +1424,7 @@ pub(super) async fn run_automation_scheduler_tick(
         }
         log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
         match run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            cg,
             &config,
             &backend,
             retrieval.as_ref(),
@@ -1447,12 +1447,12 @@ pub(super) async fn run_automation_scheduler_tick(
         }
     }
     if any_succeeded {
-        log_automation_staged_if_pending(project_path, &cg).await;
+        log_automation_staged_if_pending(project_path, cg).await;
     }
     run_user_jobs_scheduler_pass(
         project_path,
         &handshake.client_identity.profile_root,
-        &cg,
+        cg,
         &config,
         &backend,
         &mut first_error,
@@ -1489,7 +1489,7 @@ async fn run_host_receipt_review(
     {
         return Ok(());
     }
-    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
+    let config = effective_automation_config_for_project(cg, &handshake.client_identity).await?;
     let session_id = pending
         .route
         .as_ref()
@@ -1544,7 +1544,7 @@ async fn run_host_receipt_review(
             .await?;
     let backend = CodexAppServerBackend::from_automation_config(&config);
     let result = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        cg,
         &config,
         &backend,
         retrieval.as_ref(),

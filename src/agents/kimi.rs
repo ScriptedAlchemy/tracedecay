@@ -2,7 +2,7 @@
 //! Kimi Code CLI agent integration.
 //!
 //! Kimi Code currently exposes plugin lifecycle only through its interactive
-//! `/plugins` host API. TraceDecay's first-party bundle contains the complete
+//! `/plugins` host API. `TraceDecay`'s first-party bundle contains the complete
 //! managed plugin artifact set and may reap its own superseded managed trees,
 //! while registration in `plugins/installed.json` remains owned by Kimi's
 //! interactive host flow. Until Kimi ships a documented non-interactive

@@ -1167,10 +1167,10 @@ fn evaluate_resources(
                 if sample.peak_rss_bytes.is_some()
                     || sample.measured_queries != 0
                     || !sample.latency_samples_us.is_empty()
-                    || !sample
+                    || sample
                         .pending_reason
                         .as_deref()
-                        .is_some_and(|reason| !reason.trim().is_empty())
+                        .is_none_or(|reason| reason.trim().is_empty())
                 {
                     return DirectEvaluationStatusV1::Fail;
                 }

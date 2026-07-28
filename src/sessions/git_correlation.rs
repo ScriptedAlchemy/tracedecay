@@ -1117,7 +1117,7 @@ async fn coalesce_adjacent_spans(
 }
 
 /// Assigns every `session_git_spans` row to the minimal set of gap-separated
-/// clusters for its (provider, session_id, branch, worktree) key. `?1` is the
+/// clusters for its (provider, `session_id`, branch, worktree) key. `?1` is the
 /// merge gap in seconds.
 ///
 /// The boundary test is [`observation_extends_span`] lifted from an instant to

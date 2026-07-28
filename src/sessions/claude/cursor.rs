@@ -13,7 +13,7 @@ pub(super) fn claude_source_id(path: &Path) -> Option<String> {
 }
 
 pub(super) fn claude_observation_source_id(path: &Path) -> String {
-    let transcript_id = path.file_stem().unwrap_or_else(|| path.as_os_str());
+    let transcript_id = path.file_stem().unwrap_or(path.as_os_str());
     digest_claude_observation_source_id(claude_source_component(transcript_id).as_bytes())
 }
 

@@ -173,8 +173,10 @@ pub struct DoctorRemediationOperationV1 {
 /// only the separately admitted observation callback can.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DoctorRemediationVerificationV1 {
     /// A mutating owner effect has not yet been independently observed.
+    #[default]
     Pending,
     /// A preview or a cancellation before any effect requires no recovery check.
     NotRequired,
@@ -194,12 +196,6 @@ pub enum DoctorRemediationVerificationV1 {
     Denied,
     /// Current owner state could not be observed.
     Unavailable,
-}
-
-impl Default for DoctorRemediationVerificationV1 {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,7 +304,7 @@ impl DoctorRemediationAuthorityV1 {
     ) -> Vec<DoctorRemediationLegalActionV1> {
         let preview_available = DoctorRemediationRegistryV1::default_registry()
             .resolve(reference)
-            .is_ok_and(|descriptor| descriptor.preview_available());
+            .is_ok_and(tracedecay_application::DoctorRemediationDescriptorV1::preview_available);
         (self.legal_actions)(reference.clone())
             .await
             .into_iter()
@@ -674,7 +670,7 @@ fn shared_durable_dispatch_gate(root: &std::path::Path) -> Arc<tokio::sync::Mute
     let gates = GATES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut gates = gates
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     gates.retain(|_, gate| gate.strong_count() > 0);
     if let Some(gate) = gates.get(root).and_then(std::sync::Weak::upgrade) {
         return gate;

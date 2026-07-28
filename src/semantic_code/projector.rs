@@ -287,7 +287,7 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
         if reembed_reused {
             let chunk = chunks
                 .get(&change.chunk_id)
-                .ok_or_else(|| SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)?;
+                .ok_or(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)?;
             let values = encoder.encode(embedding_key, chunk).map_err(|reason| {
                 SemanticProjectionErrorV1::Encoder {
                     chunk_id: chunk.id.clone(),

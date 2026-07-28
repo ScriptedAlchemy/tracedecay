@@ -280,10 +280,10 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
 }
 
 impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthorityV1 {
-    fn current<'a>(
-        &'a self,
+    fn current(
+        &self,
     ) -> SemanticRuntimeFuture<
-        'a,
+        '_,
         Result<SemanticEvaluationPublicationSnapshotV1, SemanticActivationCoordinationErrorV1>,
     > {
         Box::pin(async move {

@@ -38,7 +38,7 @@ pub(super) fn opt_str(opt: Option<&str>) -> Value {
 ///
 /// Keep caller-provided prefixes out of SQL text. The `%` suffix is the only
 /// wildcard added by query helpers; quotes, comments, and semicolons inside the
-/// prefix stay plain data when bound through SQLite parameters.
+/// prefix stay plain data when bound through `SQLite` parameters.
 pub(super) fn path_prefix_like_value(prefix: &str) -> Value {
     Value::Text(format!("{prefix}%"))
 }

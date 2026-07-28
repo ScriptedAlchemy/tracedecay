@@ -106,7 +106,6 @@ impl<'a> DiagnosticsStore<'a> {
         self.conn
             .execute_batch(SCHEMA)
             .await
-            .map(|_| ())
             .map_err(|e| db_error("diagnostics ensure_schema", e))
     }
 

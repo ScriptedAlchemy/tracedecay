@@ -419,18 +419,18 @@ impl McpServer {
             // A `true` return means the paths really entered a mounted
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
-            if sink(root.clone(), event.rel_paths.clone()).await {
-                if let Some(activity_db) = self.session_db.as_deref() {
-                    crate::application::event_lane::publish(
-                        activity_db,
-                        crate::application::event_lane::ActivityFamilyV1::CodeIndex,
-                        &root,
-                        activity_project_id.as_deref(),
-                        event.rel_paths.len() as u64,
-                        Some(event.kind.as_key()),
-                    )
-                    .await;
-                }
+            if sink(root.clone(), event.rel_paths.clone()).await
+                && let Some(activity_db) = self.session_db.as_deref()
+            {
+                crate::application::event_lane::publish(
+                    activity_db,
+                    crate::application::event_lane::ActivityFamilyV1::CodeIndex,
+                    &root,
+                    activity_project_id.as_deref(),
+                    event.rel_paths.len() as u64,
+                    Some(event.kind.as_key()),
+                )
+                .await;
             }
         }
         let current_branch = crate::branch::current_branch(&root);
@@ -857,13 +857,15 @@ impl McpServer {
         }
         let selected_project = match routed_project {
             Some(project) => Some(project),
-            None => crate::mcp::tools::handlers::selected_registered_project_reader(
-                tool_name,
-                &handler_arguments,
-                self.registry_db.as_deref(),
-                self.retained_project_graph_resolver.as_ref(),
-            )
-            .await?,
+            None => {
+                crate::mcp::tools::handlers::selected_registered_project_reader(
+                    tool_name,
+                    &handler_arguments,
+                    self.registry_db.as_deref(),
+                    self.retained_project_graph_resolver.as_ref(),
+                )
+                .await?
+            }
         };
         Ok(RoutedToolCall {
             arguments: handler_arguments,
@@ -1028,10 +1030,10 @@ impl McpServer {
             .selected_project
             .as_ref()
             .map(|selected| selected.owner.clone());
-        let cg = routed
-            .selected_project
-            .as_ref()
-            .map_or_else(|| Arc::clone(&active_cg), |selected| Arc::clone(&selected.graph));
+        let cg = routed.selected_project.as_ref().map_or_else(
+            || Arc::clone(&active_cg),
+            |selected| Arc::clone(&selected.graph),
+        );
         let project_reader_preselected = routed.selected_project.is_some();
 
         // Notification-free freshness is useful before tools that edit source
@@ -1531,9 +1533,7 @@ impl McpServer {
         // appears FIRST in the response — the index serving the
         // wrong branch is the most serious of these warnings to
         // surface to the agent.
-        if include_connection_worktree_warning
-            && let Some(ref m) = self.worktree_mismatch
-        {
+        if include_connection_worktree_warning && let Some(ref m) = self.worktree_mismatch {
             let notice = crate::worktree::worktree_mismatch_notice(m);
             if let Some(content) = result
                 .value

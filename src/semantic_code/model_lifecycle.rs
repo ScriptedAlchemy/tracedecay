@@ -257,7 +257,7 @@ pub trait ModelMemberSourceV1: Send + Sync {
 
 /// Daemon-owned Hugging Face source scoped to the lifecycle root.
 ///
-/// The client never uses FastEmbed's ambient cache discovery: it resolves the
+/// The client never uses `FastEmbed`'s ambient cache discovery: it resolves the
 /// cataloged repository and immutable revision into this explicit cache, then
 /// the lifecycle independently checks every member's length and SHA-256 before
 /// atomically publishing an install.

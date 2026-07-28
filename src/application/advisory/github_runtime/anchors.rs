@@ -422,7 +422,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
             };
             let Some(body) = serde_json::from_str::<StoredGitHubReviewBodyV1>(&encoded)
                 .ok()
-                .filter(|body| valid_stored_body(body))
+                .filter(valid_stored_body)
                 .filter(|body| {
                     body.scope == request.scope
                         && body.pull_request_id == request.pull_request_id
@@ -603,7 +603,7 @@ fn safe_github_review_url(value: &str) -> bool {
     };
     let segments = url
         .path_segments()
-        .map(|segments| segments.collect::<Vec<_>>())
+        .map(std::iter::Iterator::collect::<Vec<_>>)
         .unwrap_or_default();
     url.scheme() == "https"
         && url.host_str() == Some("github.com")

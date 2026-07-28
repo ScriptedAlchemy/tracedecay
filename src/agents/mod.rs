@@ -413,7 +413,7 @@ pub trait AgentIntegration {
     }
 }
 
-/// User action required to finish a lifecycle operation that TraceDecay cannot
+/// User action required to finish a lifecycle operation that `TraceDecay` cannot
 /// safely perform through a non-interactive host API.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeferredUserAction {
@@ -1061,7 +1061,7 @@ pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
 /// Both the retired suffix and ownership manifest are allow-listed: a name
 /// prefix alone is never ownership evidence. A sibling is removed only when it
 /// is a real directory, its suffix is known to have been created by
-/// TraceDecay, and one host-specific manifest parses with `name = "tracedecay"`.
+/// `TraceDecay`, and one host-specific manifest parses with `name = "tracedecay"`.
 pub(crate) fn sweep_superseded_plugin_siblings(
     current_dir: &Path,
     ownership_manifests: &[&str],

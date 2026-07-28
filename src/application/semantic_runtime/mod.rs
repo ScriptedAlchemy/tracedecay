@@ -70,6 +70,8 @@ pub(crate) use production::{
     project_semantic_production_runtime, project_semantic_source_generation,
     register_project_semantic_runtime, unregister_project_semantic_runtime,
 };
+// The only in-crate consumers are the redundancy handler tests, so this
+// re-export is test-gated.
 pub(crate) use redundancy::{
     SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
     register_project_semantic_redundancy_authority,

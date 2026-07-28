@@ -807,7 +807,7 @@ fn resolve_edit_range_symbol<'a>(
             .cmp(&right.1.end_byte.saturating_sub(right.1.start_byte))
             .then_with(|| left.0.id.cmp(&right.0.id))
     });
-    let candidate = candidates.first()?.clone();
+    let candidate = *candidates.first()?;
     let candidate_size = candidate.1.end_byte.saturating_sub(candidate.1.start_byte);
     if candidates
         .get(1)

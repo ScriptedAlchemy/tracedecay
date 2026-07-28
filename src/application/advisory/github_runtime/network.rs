@@ -137,7 +137,7 @@ impl GitHubReadOnlyCredentialSecretV1 {
 }
 
 /// Result supplied by an authority that has already verified the provider's
-/// effective permissions. TraceDecay never treats local scope labels as proof.
+/// effective permissions. `TraceDecay` never treats local scope labels as proof.
 pub enum GitHubReadOnlyCredentialAuthorityOutcomeV1 {
     Verified {
         secret: GitHubReadOnlyCredentialSecretV1,

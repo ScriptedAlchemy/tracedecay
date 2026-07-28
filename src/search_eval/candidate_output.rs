@@ -2208,13 +2208,7 @@ impl CandidateCorpusHydrationSourceV1<'_> {
                 self.published
                     .occurrence_map
                     .get(candidate.candidate.anchor_id.as_str())
-                    .and_then(|entry| {
-                        candidate
-                            .candidate
-                            .occurrences
-                            .first()
-                            .map(|occurrence| (entry, occurrence))
-                    })
+                    .zip(candidate.candidate.occurrences.first())
             })
     }
 }
@@ -3429,8 +3423,8 @@ fn hardware_fingerprint() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::pr10_native::Pr10NativePendingReasonV1;
     use super::*;
+    use crate::search_eval::pr10_native::Pr10NativePendingReasonV1;
 
     struct TestRepositoryFixture {
         _temp: tempfile::TempDir,

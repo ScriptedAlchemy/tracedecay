@@ -301,7 +301,6 @@ pub(super) async fn install_v22_compatibility_schema(
         END;",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error(operation, error))
 }
 
@@ -414,7 +413,6 @@ async fn create_v23_fact_relation_table(
         );",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error(operation, error))
 }
 
@@ -481,7 +479,6 @@ async fn install_v23_fact_relation_support(
          END;",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error(operation, error))
 }
 
@@ -572,6 +569,5 @@ pub(super) async fn install_v23_compatibility_bank_schema(
         END;",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error(operation, error))
 }

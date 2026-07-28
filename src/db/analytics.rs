@@ -315,7 +315,7 @@ impl Database {
 
     /// Returns nodes ranked by total incoming and outgoing connectivity.
     ///
-    /// Aggregation stays inside SQLite so large graphs never materialize the
+    /// Aggregation stays inside `SQLite` so large graphs never materialize the
     /// complete edge table in the MCP process. The optional path filter is
     /// applied before `LIMIT`, unlike post-filtering an already truncated list.
     pub async fn get_hotspot_nodes(

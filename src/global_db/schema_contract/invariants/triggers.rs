@@ -1701,7 +1701,6 @@ pub(super) async fn replace_trigger(
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     conn.execute_batch(trigger.create_sql)
         .await
-        .map(|_| ())
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 

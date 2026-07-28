@@ -404,25 +404,23 @@ impl AcceptedRetrievalProfileV1 {
         {
             return Err(RetrievalProfileActivationErrorV1::IncompatibleProfile);
         }
-        if let Some(pins) = self.compatibility.semantic.as_ref() {
-            if !pins.resources.valid()
+        if let Some(pins) = self.compatibility.semantic.as_ref()
+            && (!pins.resources.valid()
                 || !pins.valid()
                 || self.profile.calibrations.get(&RetrieverKind::Semantic)
-                    != Some(&pins.calibration.calibration_profile_id)
-            {
-                return Err(RetrievalProfileActivationErrorV1::IncompatibleProfile);
-            }
+                    != Some(&pins.calibration.calibration_profile_id))
+        {
+            return Err(RetrievalProfileActivationErrorV1::IncompatibleProfile);
         }
-        if let Some(policy) = &self.rerank {
-            if policy.evaluation_result_anchor != self.profile.evaluation_result_anchor
+        if let Some(policy) = &self.rerank
+            && (policy.evaluation_result_anchor != self.profile.evaluation_result_anchor
                 || policy.max_candidates == 0
                 || policy.max_input_bytes == 0
                 || policy.max_input_tokens == 0
                 || policy.max_work_units == 0
-                || policy.max_model_invocations == 0
-            {
-                return Err(RetrievalProfileActivationErrorV1::IncompatibleProfile);
-            }
+                || policy.max_model_invocations == 0)
+        {
+            return Err(RetrievalProfileActivationErrorV1::IncompatibleProfile);
         }
         Ok(())
     }

@@ -1,4 +1,4 @@
-//! Admitted local FastEmbed reranking over generation-bound code views.
+//! Admitted local `FastEmbed` reranking over generation-bound code views.
 //!
 //! Artifact bytes are opened only through the digest-addressed artifact-store
 //! capability. Query and chunk bytes remain request-local and are dropped

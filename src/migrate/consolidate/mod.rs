@@ -1883,8 +1883,8 @@ fn frozen_input_records(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArti
         authorities.insert(relative, authority);
     }
     authorities
-        .into_iter()
-        .map(|(_, authority)| ConsolidationArtifactRecordV1::capture(&profile_root, authority))
+        .into_values()
+        .map(|authority| ConsolidationArtifactRecordV1::capture(&profile_root, authority))
         .collect()
 }
 
@@ -2011,7 +2011,7 @@ async fn merge_databases(
                 sqlite::advance_graph_maxima(maxima, source_maxima)?;
                 graph_tokens.push(token);
             } else {
-                let (_, token) = mounted.finish_operation(Ok(())).await?;
+                let ((), token) = mounted.finish_operation(Ok(())).await?;
                 graph_tokens.push(token);
             }
         }
@@ -2037,7 +2037,7 @@ async fn merge_databases(
             .collect::<Vec<_>>();
         let merged =
             sqlite::merge_registered_graph_facts(target_mount.database(), graph_sources).await;
-        let (_, token) = target_mount.finish_operation(merged).await?;
+        let ((), token) = target_mount.finish_operation(merged).await?;
         drop(token);
 
         let destination_sessions = authority_for_role(
@@ -2082,11 +2082,11 @@ async fn merge_databases(
             sqlite::validate_registered_session_source(mounted.database()).await
         }
         .await;
-        let (_, source_token) = mounted.finish_operation(prepared).await?;
+        let ((), source_token) = mounted.finish_operation(prepared).await?;
 
         let target_input_record = artifact_record(&ledger.artifact_records, target_input)?;
         let mounted = owner.mount(target_input, target_input_record).await?;
-        let (_, target_input_token) = mounted.finish_operation(Ok(())).await?;
+        let ((), target_input_token) = mounted.finish_operation(Ok(())).await?;
 
         let offsets = ledger
             .session_offsets
@@ -2107,7 +2107,7 @@ async fn merge_databases(
             .await
         }
         .await;
-        let (_, token) = mounted.finish_operation(merged).await?;
+        let ((), token) = mounted.finish_operation(merged).await?;
         drop(token);
         Ok(())
     }
