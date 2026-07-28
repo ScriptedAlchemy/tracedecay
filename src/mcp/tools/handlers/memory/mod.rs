@@ -27,7 +27,10 @@ mod actions;
 mod args;
 mod fact_store;
 mod feedback;
+mod registered_target;
 mod status;
+
+use registered_target::open_registered_project_memory_read_only;
 
 pub(super) use fact_store::handle_fact_store;
 pub(super) use feedback::handle_fact_feedback;
@@ -116,23 +119,26 @@ pub(super) async fn open_target_memory_db<'a>(
             owner: active_project_memory_owner(cg)?,
         });
     };
-    let project_root = PathBuf::from(&context.project.display_root);
-    let canonical_project_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.clone());
-    if canonical_project_root != cg.project_root()
-        || cg.store_layout().identity.project_id.as_deref()
-            != Some(context.project.project_id.as_str())
-    {
-        return Err(config_error(
-            "registered project graph is not mounted by the daemon",
-        ));
+    let selected_project_id = context.project.project_id.as_str();
+    // The selector may name the project this instance already serves — by id,
+    // by an alias, or through a branch shard. That is the active project's own
+    // memory, so resolve it through the active resolver, which routes a
+    // branch-serving instance back to the shared project store.
+    if cg.store_layout().identity.project_id.as_deref() == Some(selected_project_id) {
+        return Ok(TargetMemoryDb {
+            db: cg.project_memory_db().await?,
+            project_root: cg.project_root().to_path_buf(),
+            user_scope: false,
+            owner: project_memory_owner(selected_project_id)?,
+        });
     }
+    let owner = project_memory_owner(selected_project_id)?;
+    let db = open_registered_project_memory_read_only(cg, &context).await?;
     Ok(TargetMemoryDb {
-        db: cg.project_memory_db().await?,
-        project_root,
+        db: ProjectMemoryDbHandle::Owned(Box::new(db)),
+        project_root: PathBuf::from(&context.project.display_root),
         user_scope: false,
-        owner: project_memory_owner(&context.project.project_id)?,
+        owner,
     })
 }
 
@@ -253,6 +259,97 @@ mod tests {
         (tmp, cg)
     }
 
+    fn open_options(profile_root: &Path) -> crate::tracedecay::TraceDecayOpenOptions {
+        crate::tracedecay::TraceDecayOpenOptions {
+            global_db_path: Some(profile_root.join("global.db")),
+            profile_root: Some(profile_root.to_path_buf()),
+        }
+    }
+
+    async fn register_project(cg: &TraceDecay, project_id: &str, project_root: &Path) {
+        cg.profile_database()
+            .upsert_code_project(project_id, project_root, None, None, Some("main"))
+            .await
+            .expect("registry must admit the fixture project root");
+    }
+
+    fn project_id_of(cg: &TraceDecay) -> String {
+        cg.store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("fixture graph must carry an authoritative project identity")
+    }
+
+    /// Two graphs enrolled in one profile, both registered in the profile
+    /// registry the active graph reads selectors against.
+    async fn cross_project_memory_pair() -> (tempfile::TempDir, TraceDecay, TraceDecay) {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let mut graphs = Vec::new();
+        for name in ["active", "target"] {
+            let project_root = tmp.path().join(name);
+            std::fs::create_dir_all(&project_root).unwrap();
+            graphs.push(
+                TraceDecay::init_with_options(&project_root, open_options(&profile_root))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let target = graphs.pop().unwrap();
+        let active = graphs.pop().unwrap();
+        for graph in [&active, &target] {
+            register_project(&active, &project_id_of(graph), graph.project_root()).await;
+        }
+        (tmp, active, target)
+    }
+
+    async fn denied_selector(cg: &TraceDecay, args: Value) -> TraceDecayError {
+        let Err(error) = open_target_memory_db(cg, &args, Some(cg.profile_database())).await else {
+            panic!("selector {args} must be denied instead of resolving a memory store");
+        };
+        error
+    }
+
+    async fn fact_count(target: &TargetMemoryDb<'_>) -> usize {
+        memory_application(target)
+            .unwrap()
+            .memory_status_with_repair_v1()
+            .await
+            .unwrap()
+            .status
+            .fact_count
+    }
+
+    async fn add_project_fact(cg: &TraceDecay, content: &str) {
+        let owner = active_project_memory_owner(cg).unwrap();
+        assert!(
+            memory_application_for_project(cg)
+                .await
+                .add_fact_v1(
+                    cursor_fact(content),
+                    MemoryOperationContext::generated(&owner, content, None).unwrap(),
+                )
+                .await
+                .unwrap()
+                .fact
+                .is_some(),
+            "fixture fact '{content}' must persist"
+        );
+    }
+
+    /// A memory application over the graph's *project-wide* store, so a
+    /// branch-serving fixture seeds the same store a selector must resolve.
+    async fn memory_application_for_project(
+        cg: &TraceDecay,
+    ) -> MemoryApplication<crate::store::memory::ProjectFactStore<'_>> {
+        MemoryApplication::new(
+            active_project_memory_owner(cg).unwrap(),
+            cg.project_memory_db().await.unwrap().into_fact_store(),
+        )
+        .unwrap()
+    }
+
     async fn seeded_memory() -> (tempfile::TempDir, TraceDecay, i64) {
         let (tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
@@ -302,6 +399,197 @@ mod tests {
             &project_memory_owner(cg.store_layout().identity.project_id.as_deref().unwrap(),)
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn project_selector_reads_the_selected_registered_projects_memory() {
+        let (_tmp, active, target) = cross_project_memory_pair().await;
+        add_project_fact(&active, "active project selector fixture fact").await;
+        for content in ["target selector fixture one", "target selector fixture two"] {
+            add_project_fact(&target, content).await;
+        }
+        let target_project_id = project_id_of(&target);
+
+        let selected = open_target_memory_db(
+            &active,
+            &json!({ "project_id": target_project_id }),
+            Some(active.profile_database()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            selected.owner(),
+            &project_memory_owner(&target_project_id).unwrap()
+        );
+        assert_eq!(
+            selected.project_root.canonicalize().unwrap(),
+            target.project_root().canonicalize().unwrap()
+        );
+        assert_eq!(fact_count(&selected).await, 2);
+    }
+
+    #[tokio::test]
+    async fn active_and_selected_project_memory_stay_isolated() {
+        let (_tmp, active, target) = cross_project_memory_pair().await;
+        add_project_fact(&active, "active project selector fixture fact").await;
+        add_project_fact(&target, "target selector fixture fact").await;
+
+        let default_scope = open_target_memory_db(&active, &json!({}), Some(active.profile_database()))
+            .await
+            .unwrap();
+        assert_eq!(fact_count(&default_scope).await, 1);
+        assert_eq!(
+            default_scope.owner(),
+            &project_memory_owner(&project_id_of(&active)).unwrap()
+        );
+        drop(default_scope);
+
+        let selected = open_target_memory_db(
+            &active,
+            &json!({ "project_id": project_id_of(&target) }),
+            Some(active.profile_database()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !std::ptr::eq(selected.db(), active.db()),
+            "a foreign project selector must not resolve the active project's database"
+        );
+        assert_eq!(fact_count(&selected).await, 1);
+
+        // Reading the selected project must leave the active project's own
+        // memory untouched, not merge the two owners' facts.
+        assert_eq!(
+            memory_application_for_project(&active)
+                .await
+                .list_facts_untracked_v1(None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_project_selector_is_denied_without_falling_back() {
+        let (_tmp, active, _target) = cross_project_memory_pair().await;
+
+        let error = denied_selector(&active, json!({ "project_id": "proj_does_not_exist" })).await;
+
+        assert!(
+            matches!(&error, TraceDecayError::Config { message }
+                if message.contains("registered project not found for selector")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_project_without_profile_enrollment_is_denied() {
+        let (tmp, active, _target) = cross_project_memory_pair().await;
+        // Registered in the profile registry, but never opened here, so no
+        // enrollment marker names it and this profile holds no memory store.
+        let unenrolled_root = tmp.path().join("unenrolled");
+        std::fs::create_dir_all(&unenrolled_root).unwrap();
+        register_project(&active, "proj_unenrolled", &unenrolled_root).await;
+
+        let error = denied_selector(&active, json!({ "project_id": "proj_unenrolled" })).await;
+
+        assert!(
+            matches!(&error, TraceDecayError::Config { message }
+                if message.contains("is not enrolled in this TraceDecay profile")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_project_name_selector_is_denied_as_ambiguous() {
+        let (tmp, active, _target) = cross_project_memory_pair().await;
+        for (index, parent) in ["first", "second"].into_iter().enumerate() {
+            let root = tmp.path().join(parent).join("shared");
+            std::fs::create_dir_all(&root).unwrap();
+            register_project(&active, &format!("proj_shared_{index}"), &root).await;
+        }
+
+        let error = denied_selector(&active, json!({ "project_path": "shared" })).await;
+
+        assert!(
+            matches!(&error, TraceDecayError::Config { message }
+                if message.contains("is ambiguous across 2 registered projects")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_serving_selector_resolves_the_project_wide_memory_store() {
+        fn git(project: &Path, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(project)
+                .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} must succeed");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        std::fs::write(project_root.join("src/lib.rs"), "pub fn served() {}\n").unwrap();
+        git(&project_root, &["init", "-b", "main"]);
+        git(&project_root, &["add", "."]);
+        git(&project_root, &["commit", "-m", "initial"]);
+
+        let main = TraceDecay::init_with_options(&project_root, open_options(&profile_root))
+            .await
+            .unwrap();
+        main.index_all().await.unwrap();
+        let project_id = project_id_of(&main);
+        let project_db_path = main.store_layout().graph_db_path.clone();
+        main.checkpoint().await.unwrap();
+        main.close();
+
+        git(&project_root, &["checkout", "-b", "feature"]);
+        TraceDecay::add_branch_tracking_with_options(
+            &project_root,
+            "feature",
+            open_options(&profile_root),
+        )
+        .await
+        .unwrap();
+
+        let branch = TraceDecay::open_with_options(&project_root, open_options(&profile_root))
+            .await
+            .unwrap();
+        assert_eq!(branch.serving_branch(), Some("feature"));
+        assert_ne!(
+            branch.db_path(),
+            project_db_path,
+            "fixture must serve a branch shard distinct from the project store"
+        );
+        register_project(&branch, &project_id, &project_root).await;
+        add_project_fact(&branch, "durable facts stay project-wide across branches").await;
+
+        let selected = open_target_memory_db(
+            &branch,
+            &json!({ "project_id": project_id }),
+            Some(branch.profile_database()),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !std::ptr::eq(selected.db(), branch.db()),
+            "a branch-serving graph must resolve memory to the project store, not its shard"
+        );
+        assert_eq!(fact_count(&selected).await, 1);
+        drop(selected);
+        branch.checkpoint().await.unwrap();
+        branch.close();
     }
 
     #[tokio::test]

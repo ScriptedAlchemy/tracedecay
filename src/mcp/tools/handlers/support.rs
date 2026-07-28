@@ -203,52 +203,81 @@ pub(super) async fn project_registry_context(
             });
         }
     };
-    let context = resolve_project_registry_context(db, project_id, project_path).await?;
+    match resolve_project_registry_context(db, project_id, project_path).await? {
+        ProjectSelectorResolution::Resolved(context) => Ok(Some(context)),
+        ProjectSelectorResolution::Unresolved => {
+            Err(unresolved_project_selector_error(project_id, project_path))
+        }
+        ProjectSelectorResolution::Ambiguous { candidates } => Err(
+            ambiguous_project_selector_error(project_id, project_path, &candidates),
+        ),
+    }
+}
 
-    context
-        .ok_or_else(|| unresolved_project_selector_error(project_id, project_path))
-        .map(Some)
+/// The three outcomes a project selector can have. "No single registered
+/// project" is not one state: a selector that matches several registered
+/// projects is ambiguous and must say so, because reporting it as unresolved
+/// sends the caller looking for a registration that already exists.
+enum ProjectSelectorResolution {
+    Resolved(ProjectRegistryContext),
+    Unresolved,
+    Ambiguous { candidates: Vec<String> },
+}
+
+impl From<Option<ProjectRegistryContext>> for ProjectSelectorResolution {
+    fn from(context: Option<ProjectRegistryContext>) -> Self {
+        context.map_or(Self::Unresolved, Self::Resolved)
+    }
 }
 
 async fn resolve_project_registry_context(
     db: &RegisteredGlobalDb,
     project_id: Option<&str>,
     project_path: Option<&str>,
-) -> Result<Option<ProjectRegistryContext>> {
+) -> Result<ProjectSelectorResolution> {
     if let Some(project_id) = project_id {
-        return db.project_registry_context_by_id(project_id).await;
+        return Ok(db.project_registry_context_by_id(project_id).await?.into());
     }
     let Some(project_path) = project_path else {
-        return Ok(None);
+        return Ok(ProjectSelectorResolution::Unresolved);
     };
     let selector_path = Path::new(project_path);
     if let Some(store) = db
         .try_resolve_project_store_record_by_alias(selector_path)
         .await?
     {
-        return db.project_registry_context_by_id(&store.project_id).await;
+        return Ok(db
+            .project_registry_context_by_id(&store.project_id)
+            .await?
+            .into());
     }
     if is_explicit_project_path_selector(project_path) {
+        // A registered project needs no registered *store instance* row to be
+        // selectable: its registry identity is what names the project. Resolve
+        // the project itself so a project registered before its store instance
+        // was recorded still selects, instead of reporting an unregistered
+        // project.
+        if let Some(context) = db.project_registry_context_by_alias(selector_path).await? {
+            return Ok(ProjectSelectorResolution::Resolved(context));
+        }
         let git_common_dir = crate::worktree::git_common_dir(selector_path);
-        if let Some(resolution) = db
-            .resolve_project_store_by_identity(selector_path, git_common_dir.as_deref())
+        if let Some(context) = db
+            .project_registry_context_by_identity(selector_path, git_common_dir.as_deref())
             .await?
         {
-            return db
-                .project_registry_context_by_id(&resolution.project.project_id)
-                .await;
+            return Ok(ProjectSelectorResolution::Resolved(context));
         }
         let canonical_path = selector_path
             .canonicalize()
             .unwrap_or_else(|_| selector_path.to_path_buf());
         for parent in canonical_path.ancestors().skip(1) {
-            if let Some(store) = db.try_resolve_project_store_record_by_alias(parent).await? {
-                return db.project_registry_context_by_id(&store.project_id).await;
+            if let Some(context) = db.project_registry_context_by_alias(parent).await? {
+                return Ok(ProjectSelectorResolution::Resolved(context));
             }
         }
     }
     let Some(basename) = bare_project_name(project_path) else {
-        return Ok(None);
+        return Ok(ProjectSelectorResolution::Unresolved);
     };
     unique_project_basename_context(db, basename).await
 }
@@ -256,7 +285,7 @@ async fn resolve_project_registry_context(
 async fn unique_project_basename_context(
     db: &RegisteredGlobalDb,
     basename: &str,
-) -> Result<Option<ProjectRegistryContext>> {
+) -> Result<ProjectSelectorResolution> {
     let mut matching_ids = Vec::new();
     for project in db.try_search_code_projects(basename, usize::MAX).await? {
         if !project_basename_matches(&project, basename)
@@ -265,14 +294,17 @@ async fn unique_project_basename_context(
             continue;
         }
         matching_ids.push(project.project_id);
-        if matching_ids.len() > 1 {
-            return Ok(None);
-        }
+    }
+    if matching_ids.len() > 1 {
+        matching_ids.sort();
+        return Ok(ProjectSelectorResolution::Ambiguous {
+            candidates: matching_ids,
+        });
     }
     let Some(project_id) = matching_ids.into_iter().next() else {
-        return Ok(None);
+        return Ok(ProjectSelectorResolution::Unresolved);
     };
-    db.project_registry_context_by_id(&project_id).await
+    Ok(db.project_registry_context_by_id(&project_id).await?.into())
 }
 
 fn is_explicit_project_path_selector(selector: &str) -> bool {
@@ -307,17 +339,36 @@ fn project_basename_matches(project: &CodeProjectRecord, basename: &str) -> bool
     .any(|name| name == basename)
 }
 
+fn selector_label(project_id: Option<&str>, project_path: Option<&str>) -> String {
+    project_id
+        .map(|value| format!("project_id={value}"))
+        .or_else(|| project_path.map(|value| format!("project_path={value}")))
+        .unwrap_or_else(|| "empty selector".to_string())
+}
+
 fn unresolved_project_selector_error(
     project_id: Option<&str>,
     project_path: Option<&str>,
 ) -> TraceDecayError {
-    let selector = project_id
-        .map(|value| format!("project_id={value}"))
-        .or_else(|| project_path.map(|value| format!("project_path={value}")))
-        .unwrap_or_else(|| "empty selector".to_string());
+    let selector = selector_label(project_id, project_path);
     TraceDecayError::Config {
         message: format!(
             "registered project not found for selector ({selector}); run tracedecay_project_search to find the registered project_id or full project_path"
+        ),
+    }
+}
+
+fn ambiguous_project_selector_error(
+    project_id: Option<&str>,
+    project_path: Option<&str>,
+    candidates: &[String],
+) -> TraceDecayError {
+    let selector = selector_label(project_id, project_path);
+    TraceDecayError::Config {
+        message: format!(
+            "registered project selector ({selector}) is ambiguous across {} registered projects ({}); pass project_id or the full project_path",
+            candidates.len(),
+            candidates.join(", ")
         ),
     }
 }

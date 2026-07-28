@@ -818,13 +818,21 @@ pub(crate) async fn setup_cross_project_memory_projects()
     fs::write(active_project.join("src/lib.rs"), "pub fn active() {}\n").unwrap();
     fs::write(target_project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
 
+    // Both graphs must be enrolled in *one* profile. A default-option open
+    // gives each test project its own standalone test profile, and a project
+    // store is keyed by (profile, project), so a selector resolved against the
+    // active profile could never reach a store enrolled in another one.
+    let shared_profile = tracedecay::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(storage_guard.profile_root().to_path_buf()),
+        global_db_path: Some(storage_guard.global_db_path().to_path_buf()),
+    };
     let active = TestTraceDecay::new(
-        fixture::init_project_from_template(&active_project)
+        fixture::init_project_from_template_with_options(&active_project, shared_profile.clone())
             .await
             .unwrap(),
     );
     let target = TestTraceDecay::new(
-        fixture::init_project_from_template(&target_project)
+        fixture::init_project_from_template_with_options(&target_project, shared_profile)
             .await
             .unwrap(),
     );
