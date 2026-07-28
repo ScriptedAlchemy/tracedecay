@@ -17,7 +17,7 @@
     {
       "state": "unavailable", "admission_provider": "cursor",
       "request": {"hook_event_name": "sessionStart", "conversation_id": "<SESSION_ID>", "workspace_roots": ["<PROJECT_ROOT>"]},
-      "admission": {"status": "unavailable", "retryable": true, "reason_code": "authority_unavailable"},
+      "admission": {"status": "unavailable", "retryable": false, "reason_code": "project_authority_unbound"},
       "response": {"exit_code": 0, "stdout": "{\"additional_context\":\"<REDACTED_CONTEXT>\",\"env\":{\"TRACEDECAY_PROJECT_ROOT\":\"<PROJECT_ROOT>\"}}", "stderr": ""}
     },
     {

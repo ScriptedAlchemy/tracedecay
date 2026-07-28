@@ -214,7 +214,6 @@ fn assert_hook_completed_analytics(provider: &str, state: &str, project: &Path, 
         "hook_wall_time_us",
         "hook_wall_time_ms",
         "payload_bytes",
-        "daemon_ipc_payload_bytes",
         "daemon_call_count",
     ] {
         assert!(row[field].as_u64().is_some(), "{label}/{field}: {row}");
@@ -223,19 +222,27 @@ fn assert_hook_completed_analytics(provider: &str, state: &str, project: &Path, 
         row["payload_bytes"].as_u64().is_some_and(|bytes| bytes > 0),
         "{label}"
     );
+
+    // Daemon IPC is conditional, and the row must say which happened rather
+    // than render "no IPC" as a zero. A hook whose synchronous admission
+    // budget expires before it reaches the daemon spools the event locally and
+    // performs no IPC at all, so both the round-trip time and the byte count
+    // are genuinely absent. Whenever a round trip did happen, both must be
+    // attributed, and a recorded byte count is never a dishonest zero.
+    let daemon_calls = row["daemon_call_count"].as_u64().unwrap_or_default();
+    let ipc_bytes = &row["daemon_ipc_payload_bytes"];
     assert!(
-        row["daemon_ipc_payload_bytes"]
-            .as_u64()
-            .is_some_and(|bytes| bytes > 0),
-        "{label}"
+        ipc_bytes.is_null() || ipc_bytes.as_u64().is_some_and(|bytes| bytes > 0),
+        "{label}: recorded IPC bytes must be a real count, not zero: {row}"
     );
-    if row["daemon_call_count"]
-        .as_u64()
-        .is_some_and(|calls| calls > 0)
-    {
-        assert!(row["daemon_rtt_us"].as_u64().is_some(), "{label}");
+    if daemon_calls > 0 {
+        assert!(row["daemon_rtt_us"].as_u64().is_some(), "{label}: {row}");
+        assert!(
+            ipc_bytes.as_u64().is_some_and(|bytes| bytes > 0),
+            "{label}: a daemon round trip must attribute its IPC bytes: {row}"
+        );
     } else {
-        assert!(row["daemon_rtt_us"].is_null(), "{label}");
+        assert!(row["daemon_rtt_us"].is_null(), "{label}: {row}");
     }
 
     let timeout = &row["timeout"];
