@@ -440,6 +440,8 @@ pub struct LcmExpandQueryPagination {
     pub kind: String,
     pub node_id: Option<String>,
     pub source_ref: Option<LcmSourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<tracedecay_domain::HydrationStateV1>,
     pub next_content_offset: Option<u64>,
     pub has_more: bool,
 }
@@ -952,12 +954,18 @@ pub struct LcmCompressionResponse {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmExpandedSummarySource {
     pub source_ref: LcmSourceRef,
+    #[serde(default = "default_summary_source_hydration_state")]
+    pub state: tracedecay_domain::HydrationStateV1,
     pub content: String,
     pub content_range: Option<LcmContentRange>,
     #[serde(default)]
     pub content_truncated: bool,
     pub raw_message: Option<LcmRawMessage>,
     pub summary_node: Option<Box<LcmSummaryNode>>,
+}
+
+const fn default_summary_source_hydration_state() -> tracedecay_domain::HydrationStateV1 {
+    tracedecay_domain::HydrationStateV1::RetainedButUnavailable
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

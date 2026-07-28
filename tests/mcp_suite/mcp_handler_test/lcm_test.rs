@@ -2813,6 +2813,15 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
         .await
         .expect("summary should insert");
     let summary_id = summary.node_id.clone();
+    for (index, store_id) in store_ids.iter().copied().enumerate() {
+        db.poison_lcm_raw_projection_for_test(
+            HostAdmissionScope::Project,
+            store_id,
+            &format!("projection poison {}", index + 1),
+        )
+        .await
+        .expect("legacy LCM source projection should be poisonable");
+    }
     let server = real_mcp_server(cg).await;
 
     let result = handle_real_server_tool_call(
@@ -2834,6 +2843,14 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     assert_eq!(sources.len(), 2);
     assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[1]));
     assert_eq!(sources[1]["raw_message"]["store_id"], json!(store_ids[2]));
+    for (source, expected_body) in sources
+        .iter()
+        .zip(["paged source body 2", "paged source body 3"])
+    {
+        assert_eq!(source["state"], "available", "{source}");
+        assert_eq!(source["content"], expected_body, "{source}");
+        assert_eq!(source["raw_message"]["content"], expected_body, "{source}");
+    }
     let pagination = &payload["expansion"]["source_pagination"];
     assert_eq!(pagination["source_offset"], 1);
     assert_eq!(pagination["source_limit"], 2);
@@ -2916,6 +2933,18 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     assert_eq!(
         continued["expansion"]["summary_sources"][0]["raw_message"]["store_id"],
         json!(store_ids[3])
+    );
+    assert_eq!(
+        continued["expansion"]["summary_sources"][0]["state"],
+        "available"
+    );
+    assert_eq!(
+        continued["expansion"]["summary_sources"][0]["content"],
+        "paged source body 4"
+    );
+    assert_eq!(
+        continued["expansion"]["summary_sources"][0]["raw_message"]["content"],
+        "paged source body 4"
     );
     assert_eq!(
         continued["expansion"]["source_pagination"]["source_offset"],
