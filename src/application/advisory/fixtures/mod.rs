@@ -11,20 +11,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::feedback::{
-    CiFailureBranchEvidenceV1, CiFailureCallerEvidenceV1, CiFailureCoverageV1,
-    CiFailureGenerationEvidenceV1, CiFailureKindV1, CiFailureLocalizationResultV1,
+    CiFailureCallerEvidenceV1, CiFailureCoverageV1, CiFailureGenerationEvidenceV1, CiFailureKindV1,
     CiFailureLocalizationStateV1, CiFailureParserIdentityV1, CiFailureRunIdentityV1,
-    CiFailureSymbolEvidenceV1, CiFailureTestEvidenceV1, CiInertRerunHintV1, FeedbackScopeV1,
-    GitHubPullRequestIdV1, GitHubReviewAuthorClassV1, GitHubReviewCommentIdV1,
-    GitHubReviewCoverageV1, GitHubReviewCurrentBranchRemapV1, GitHubReviewIdV1,
-    GitHubReviewImmutableAnchorV1, GitHubReviewIngressProviderOutcomeV1,
-    GitHubReviewIngressResultV1, GitHubReviewItemV1, GitHubReviewLifecycleV1,
-    GitHubReviewReadOperationV1, GitHubReviewStateV1, GitHubReviewThreadIdV1, ProximityAddressV1,
-    ProximityCoverageV1, ProximityRelationPathV1, ProximityRiskInputsV1, ProximityWarningClassV1,
+    CiFailureSymbolEvidenceV1, CiFailureTestEvidenceV1, CiInertRerunHintV1, GitHubPullRequestIdV1,
+    GitHubReviewAuthorClassV1, GitHubReviewCommentIdV1, GitHubReviewIdV1,
+    GitHubReviewImmutableAnchorV1, GitHubReviewLifecycleV1, GitHubReviewStateV1,
+    GitHubReviewThreadIdV1, ProximityAddressV1, ProximityCoverageV1, ProximityRelationPathV1,
+    ProximityRiskInputsV1, ProximityWarningClassV1,
 };
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, CommitId, ManifestDigest, ProviderId, RetrievalAnchorId,
-    SessionId, UtcMicros, canonical_sha256,
+    CanonicalObservationEnvelopeV1, CommitId, ManifestDigest, RetrievalAnchorId, SessionId,
+    UtcMicros, canonical_sha256,
 };
 
 use super::ci_runtime::{GitHubCiOfficialResponseDecoderV1, GitHubCiProviderRecordV1};
@@ -167,105 +164,6 @@ pub struct Pr13ProximityFixtureEvidenceV1 {
 }
 
 impl Pr13SourceBackedCompositeFixtureV1 {
-    /// Builds the source-owned GitHub ingress value after the acceptance
-    /// harness supplies its durable Plan 13 anchors.
-    pub fn github_ingress(
-        &self,
-        provider: ProviderId,
-        scope: FeedbackScopeV1,
-        anchors: Pr13GitHubFixtureAnchorsV1,
-    ) -> Option<GitHubReviewIngressResultV1> {
-        if scope.head_commit_id != self.head_commit_id
-            || anchors.original.repository_id != scope.repository_id
-            || anchors.original.commit_id != self.github.original_commit_id
-            || anchors.original.validate().is_err()
-            || anchors.author_anchor.validate().is_err()
-            || anchors.body_anchor.validate().is_err()
-            || anchors
-                .safe_url_anchor
-                .as_ref()
-                .is_some_and(|anchor| anchor.validate().is_err())
-        {
-            return None;
-        }
-        let remap =
-            GitHubReviewCurrentBranchRemapV1::unmapped(anchors.original, scope.clone()).ok()?;
-        let item = GitHubReviewItemV1 {
-            provider: provider.clone(),
-            repository_id: scope.repository_id.clone(),
-            pull_request_id: self.github.pull_request_id.clone(),
-            review_id: Some(self.github.review_id.clone()),
-            thread_id: Some(self.github.thread_id.clone()),
-            comment_id: self.github.comment_id.clone(),
-            reply_to_comment_id: None,
-            version_digest: self.github.version_digest.clone(),
-            author_anchor: anchors.author_anchor,
-            author_class: self.github.author_class,
-            review_state: self.github.review_state,
-            body_digest: self.github.body_digest.clone(),
-            body_anchor: anchors.body_anchor,
-            safe_url_anchor: anchors.safe_url_anchor,
-            safe_url: (!self.github.safe_url.is_empty()).then_some(self.github.safe_url.clone()),
-            lifecycle: self.github.lifecycle,
-            provider_outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
-            remap,
-            observed_at: anchors.observed_at,
-        };
-        let ingress = GitHubReviewIngressResultV1 {
-            provider,
-            scope,
-            pull_request_id: self.github.pull_request_id.clone(),
-            provider_base_commit_id: self.base_commit_id.clone(),
-            provider_head_commit_id: self.head_commit_id.clone(),
-            merge_base_commit_id: self.merge_base_commit_id.clone(),
-            operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-            outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
-            coverage: GitHubReviewCoverageV1::Complete,
-            items: vec![item],
-            fetched_at: anchors.fetched_at,
-        };
-        ingress.validate().ok()?;
-        Some(ingress)
-    }
-
-    /// Builds bounded retained CI evidence. No log text or executable rerun
-    /// handle is introduced; the captured failed job remains partial.
-    pub fn ci_evidence(
-        &self,
-        provider: ProviderId,
-        scope: FeedbackScopeV1,
-        evidence: Pr13CiFixtureEvidenceV1,
-    ) -> Option<CiFailureLocalizationResultV1> {
-        if scope.head_commit_id != self.head_commit_id
-            || evidence.parser.validate().is_err()
-            || evidence.failure_anchor.validate().is_err()
-        {
-            return None;
-        }
-        let retained = CiFailureLocalizationResultV1 {
-            provider,
-            run: self.ci.run.clone(),
-            parser: evidence.parser,
-            state: self.ci.state,
-            coverage: self.ci.coverage,
-            source_degradation: None,
-            failure_kind: self.ci.failure_kind,
-            failure_anchor: evidence.failure_anchor,
-            branch: CiFailureBranchEvidenceV1 {
-                scope,
-                provider_head_commit_id: self.ci.provider_head_commit_id.clone(),
-            },
-            generation: evidence.generation,
-            symbol: evidence.symbol,
-            callers: evidence.callers,
-            tests: evidence.tests,
-            rerun_hints: evidence.rerun_hints,
-            observed_at: evidence.observed_at,
-        };
-        retained.validate().ok()?;
-        Some(retained)
-    }
-
     /// Verifies that canonical observations belong to at least two of the
     /// captured concurrent sessions before producing proximity-provider input.
     pub fn proximity_evidence(

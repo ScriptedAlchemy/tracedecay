@@ -12,6 +12,11 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 pub mod ci;
 pub mod ci_runtime;
+/// Checked-in provider source captures for the PR13 composite acceptance
+/// scenario. Integration tests are a separate crate and can only reach `pub`
+/// items, so the opt-in `test-transport` feature keeps these captures out of
+/// the default production surface without weakening them.
+#[cfg(any(test, feature = "test-transport"))]
 pub mod fixtures;
 pub mod github;
 pub mod github_runtime;
@@ -37,6 +42,7 @@ pub use ci_runtime::{
     discover_production_ci_failure_request_v1, open_production_ci_provider_authorities_v1,
     unavailable_production_ci_provider_authorities_v1,
 };
+#[cfg(any(test, feature = "test-transport"))]
 pub use fixtures::{
     PR13_CHECK_ANNOTATIONS_FIXTURE_V1, PR13_CHECK_RUN_FIXTURE_V1, PR13_FIXTURE_ROOT_V1,
     PR13_PROXIMITY_SESSIONS_FIXTURE_V1, PR13_PULL_REQUEST_FIXTURE_V1,
