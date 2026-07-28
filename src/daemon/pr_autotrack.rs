@@ -822,7 +822,10 @@ async fn remove_pr_store(
     label: &str,
     administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<(), String> {
-    if let Some(graph) = administration.graph {
+    let branch_store_exists = crate::branch_meta::load_branch_meta(data_root)
+        .and_then(|meta| crate::branch::resolve_branch_db_path(data_root, label, &meta))
+        .is_some_and(|path| path.is_file());
+    if branch_store_exists && let Some(graph) = administration.graph {
         administration
             .daemon
             .with_writer(|| async {

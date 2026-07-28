@@ -19,7 +19,7 @@ use crate::common::IsolatedEnv;
 use fs2::FileExt;
 use tracedecay::branch_meta::{load_branch_meta, save_branch_meta};
 use tracedecay::daemon::pr_autotrack;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 fn git_out(cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new("git")
@@ -58,6 +58,14 @@ fn project_data_dir(graph: &TraceDecay) -> PathBuf {
     graph.store_layout().data_root.clone()
 }
 
+fn profile_open_options(env: &IsolatedEnv) -> TraceDecayOpenOptions {
+    let profile_root = env.home().join(".tracedecay");
+    TraceDecayOpenOptions {
+        global_db_path: Some(profile_root.join("global.db")),
+        profile_root: Some(profile_root),
+    }
+}
+
 fn seed_branch_only_fact(database_path: &Path, content: &str) -> i64 {
     let connection = rusqlite::Connection::open(database_path).unwrap();
     connection
@@ -78,12 +86,17 @@ fn seed_branch_only_fact(database_path: &Path, content: &str) -> i64 {
 /// pushed to. Returns `(env, project, origin_bare, retained_graph)`.
 async fn indexed_repo_with_origin() -> (IsolatedEnv, PathBuf, PathBuf, Arc<TraceDecay>) {
     let (env, project) = IsolatedEnv::acquire().await;
+    let open_options = profile_open_options(&env);
     git(&project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
     commit_all(&project, "initial commit");
 
-    let main = Arc::new(TraceDecay::init(&project).await.unwrap());
+    let main = Arc::new(
+        TraceDecay::init_with_options(&project, open_options)
+            .await
+            .unwrap(),
+    );
     main.index_all().await.unwrap();
 
     // A sibling bare repo acts as `origin`. Keep it next to the project so it
@@ -903,7 +916,7 @@ async fn failed_discovery_returns_error_and_never_mass_untracks() {
 /// now be idempotent: adopt/reset the orphan branch to the new head and recover.
 #[tokio::test]
 async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
-    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
+    let (env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 12, "pr_twelve_v1");
     let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/12";
@@ -962,7 +975,9 @@ async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
         "an interrupted track with an advanced head must recover, not wedge"
     );
     assert!(worktree.exists(), "recovery re-creates the worktree");
-    let cg = TraceDecay::open_branch(&project, label).await.unwrap();
+    let cg = TraceDecay::open_branch_with_options(&project, label, profile_open_options(&env))
+        .await
+        .unwrap();
     assert!(
         !cg.search("pr_twelve_v2", 10).await.unwrap().is_empty(),
         "recovered branch graph serves the advanced head's content"
@@ -975,7 +990,7 @@ async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
 /// sorts lexically after new PRs 10/11/12.)
 #[tokio::test]
 async fn cap_does_not_starve_head_updates_for_managed_prs() {
-    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
+    let (env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 9, "pr_nine_v1");
     let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/9";
@@ -1001,7 +1016,9 @@ async fn cap_does_not_starve_head_updates_for_managed_prs() {
     let new_tracked = r1.tracked.iter().filter(|l| l.as_str() != label).count();
     assert_eq!(new_tracked, 2, "cap still bounds NEW tracks to 2");
 
-    let cg = TraceDecay::open_branch(&project, label).await.unwrap();
+    let cg = TraceDecay::open_branch_with_options(&project, label, profile_open_options(&env))
+        .await
+        .unwrap();
     assert!(
         !cg.search("pr_nine_v2", 10).await.unwrap().is_empty(),
         "the refreshed managed branch serves the advanced head, not the stale one"
