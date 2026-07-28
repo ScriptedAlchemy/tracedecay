@@ -857,11 +857,20 @@ pub(crate) async fn router(cg: &TraceDecay, mut state: DashboardState) -> Result
     // through the read-only gateway and never pass through this function.
     match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
         Ok(application) => {
-            if let Err(error) = application
+            match application
                 .converge_derived_memory("dashboard-startup-repair")
                 .await
             {
-                tracing::warn!("Derived memory startup repair skipped: {error}");
+                Ok(report) if report.is_pending() => {
+                    tracing::warn!(
+                        "Derived memory startup convergence is pending; dashboard startup is \
+                         proceeding while remaining repair is deferred to the daemon scheduler"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!("Derived memory startup repair skipped: {error}");
+                }
             }
         }
         Err(error) => {
