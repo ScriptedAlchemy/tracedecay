@@ -1179,15 +1179,12 @@ async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
         db.close();
         write_store_manifest(&layout).unwrap();
     }
+    // Only the repository identity marker, deliberately: an enrollment marker
+    // is a current-generation authority that resolves this checkout outright,
+    // short-circuiting the legacy-candidate scan that detects the split. A
+    // cutover conflict can only exist on a pre-enrollment checkout, so writing
+    // one here would model a state in which the conflict cannot arise.
     write_repository_identity_marker(&project_root, "proj_status_selected").unwrap();
-    write_enrollment_marker(
-        &project_root,
-        &EnrollmentMarker {
-            project_id: "proj_status_selected".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
@@ -1573,10 +1570,28 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // The shard exists on disk with a reconstructable manifest but was never
+    // registered, so `list --all` must say exactly that. Reporting it as a
+    // plain `profile-sharded` row would promote an unregistered store to a
+    // registered-looking one — the ambient registry fallback this fixture
+    // exists to forbid. `list_all_uses_registry_profile_shard_when_enrollment_marker_missing`
+    // covers the registered spelling.
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("profile-sharded") && !stdout.contains("stale"),
-        "manifest reconstruction should yield a live profile shard\nstdout:\n{stdout}"
+        stdout.contains("[orphan manifest-reconstructable]"),
+        "unregistered reconstructable shard must be reported as an orphan\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&canonical_temp_path(project.path()).display().to_string()),
+        "orphan row must name the project root\nstdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("stale"),
+        "a reconstructable shard is not stale\nstdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("[profile-sharded]"),
+        "unregistered shard must not be labelled as a registered profile shard\nstdout:\n{stdout}"
     );
 }
 
