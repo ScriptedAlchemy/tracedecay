@@ -1,6 +1,6 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
-import { Meter, ReadoutBar } from '../../ui/instrument.tsx';
+import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   SavingsOverviewPayloadSchema,
@@ -332,21 +332,15 @@ function TokenMixPlate({
           {mix.dominant ? 'everything else · log scale' : 'token classes'}
         </figcaption>
         {rest.map((entry) => (
-          <div key={entry.label} className="flex items-center gap-2 text-xs">
-            <span className="min-w-0 flex-1 truncate text-text-primary">{entry.label}</span>
-            <Meter
-              fraction={
-                mix.dominant ? logFraction(entry.tokens, ceiling) : entry.tokens / ceiling
-              }
-              className="h-[3px] w-20 shrink-0 max-sm:hidden"
-            />
-            <span
-              className="td-value w-14 shrink-0 text-right text-2xs text-text-secondary"
-              data-cell="numeric"
-            >
-              {formatTokens(entry.tokens)}
-            </span>
-          </div>
+          <MeterRow
+            key={entry.label}
+            label={entry.label}
+            fraction={
+              mix.dominant ? logFraction(entry.tokens, ceiling) : entry.tokens / ceiling
+            }
+            value={formatTokens(entry.tokens)}
+            figureWidth="wide"
+          />
         ))}
         {/* The denominator is only worth stating when the ledger served it. A
           * "0 messages in 0 sessions" caption under real token figures reads as

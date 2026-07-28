@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
-import { Meter, ReadoutBar } from '../../ui/instrument.tsx';
+import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { AnalyticsUsageSummarySchema } from '../../contracts/wire.ts';
@@ -353,20 +353,15 @@ function CategoryComposition({
             everything else · log scale
           </figcaption>
           {rest.map((row) => (
-            <div key={`${row.kind}:${row.category}`} className="flex items-center gap-2 text-xs">
-              <span className="td-legend w-12 shrink-0 truncate max-sm:hidden">{row.kind}</span>
-              <span className="min-w-0 flex-1 truncate text-text-primary">{row.category}</span>
-              <Meter
-                fraction={logFraction(row.events, restCeiling)}
-                className="h-[3px] w-20 shrink-0 max-sm:hidden"
-              />
-              <span
-                className="td-value w-12 shrink-0 text-right text-2xs text-text-secondary"
-                data-cell="numeric"
-              >
-                {row.events.toLocaleString()}
-              </span>
-            </div>
+            <MeterRow
+              key={`${row.kind}:${row.category}`}
+              leading={
+                <span className="td-legend w-12 shrink-0 truncate max-sm:hidden">{row.kind}</span>
+              }
+              label={row.category}
+              fraction={logFraction(row.events, restCeiling)}
+              value={row.events.toLocaleString()}
+            />
           ))}
           <figcaption className="text-3xs leading-relaxed text-text-muted">
             The leader is stated above rather than drawn: on one shared linear axis
@@ -403,21 +398,13 @@ function ToolRanking({ rows }: { rows: ReadonlyArray<Record<string, unknown>> })
         top {shown.length} of {ranked.length} tools · log scale
       </figcaption>
       {shown.map((row) => (
-        <div key={row.name} className="flex items-center gap-2 text-xs">
-          <span className="min-w-0 flex-1 truncate text-text-primary" title={row.name}>
-            {row.name}
-          </span>
-          <Meter
-            fraction={logFraction(row.count, ceiling)}
-            className="h-[3px] w-20 shrink-0 max-sm:hidden"
-          />
-          <span
-            className="td-value w-12 shrink-0 text-right text-2xs text-text-secondary"
-            data-cell="numeric"
-          >
-            {row.count.toLocaleString()}
-          </span>
-        </div>
+        <MeterRow
+          key={row.name}
+          label={row.name}
+          title={row.name}
+          fraction={logFraction(row.count, ceiling)}
+          value={row.count.toLocaleString()}
+        />
       ))}
       {tail > 0 ? (
         <figcaption className="text-3xs leading-relaxed text-text-muted">
@@ -576,19 +563,12 @@ function ShareRows({
         {total != null ? ` · share of ${total.toLocaleString()}` : ' · window total unreported'}
       </figcaption>
       {rows.map((row) => (
-        <div key={row.label} className="flex items-center gap-2 text-xs">
-          <span className="min-w-0 flex-1 truncate text-text-primary">{row.label}</span>
-          <Meter
-            fraction={total != null && total > 0 ? row.count / total : null}
-            className="h-[3px] w-20 shrink-0 max-sm:hidden"
-          />
-          <span
-            className="td-value w-12 shrink-0 text-right text-2xs text-text-secondary"
-            data-cell="numeric"
-          >
-            {row.count.toLocaleString()}
-          </span>
-        </div>
+        <MeterRow
+          key={row.label}
+          label={row.label}
+          fraction={total != null && total > 0 ? row.count / total : null}
+          value={row.count.toLocaleString()}
+        />
       ))}
     </figure>
   );
