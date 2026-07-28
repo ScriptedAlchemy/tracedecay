@@ -156,11 +156,11 @@ export function AutomationsPage() {
       </div>
       <LegacyBoundary title="Scheduler" pending={scheduler.isPending} result={scheduler.data}>
         {(data) => {
-          const proposals = reviewQueue(data, 'fact_proposals');
+          const proposalQueue = reviewQueue(data, 'fact_proposals');
           const drafts = reviewQueue(data, 'skills');
           const unread = (
             [
-              ['fact proposals', proposals],
+              ['fact proposals', proposalQueue],
               ['skill drafts', drafts],
             ] as const
           ).flatMap(([label, reading]) =>
@@ -176,7 +176,7 @@ export function AutomationsPage() {
                   * has already rejected — the same unreachable fallback the
                   * review queues used to carry. */}
                 <StatTile label="tick interval" value={`${data.scheduler_tick_secs}s`} />
-                <ReviewQueueTile label="pending proposals" reading={proposals} />
+                <ReviewQueueTile label="pending proposals" reading={proposalQueue} />
                 <ReviewQueueTile label="pending skills" reading={drafts} />
               </div>
               {/* The tile can only carry the evidence class; the reason belongs
@@ -263,10 +263,14 @@ export function AutomationsPage() {
         <OverviewCard title="Fact proposals">
           <LegacyBoundary title="Proposals" pending={proposals.isPending} result={proposals.data}>
             {(data) => {
-              const rows = (data['proposals'] ?? data['items'] ?? []) as Array<
-                Record<string, unknown>
-              >;
-              if (!Array.isArray(rows) || rows.length === 0)
+              const candidate = data['proposals'] ?? data['items'] ?? [];
+              if (!Array.isArray(candidate) || candidate.length === 0)
+                return <p className="text-2xs text-text-muted">no pending fact proposals</p>;
+              const rows = candidate.filter(
+                (row): row is Record<string, unknown> =>
+                  typeof row === 'object' && row !== null && !Array.isArray(row),
+              );
+              if (rows.length === 0)
                 return <p className="text-2xs text-text-muted">no pending fact proposals</p>;
               return (
                 <div className="flex flex-col">
