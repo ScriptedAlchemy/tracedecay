@@ -691,22 +691,6 @@ where
     })
 }
 
-impl<GR, GA, CS, CE, PE, PC> Pr13AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC> {
-    /// Mounts host delivery from this registration's exact PR12 owner/store.
-    /// The mount observes only the post-store publication returned by
-    /// `run_once`; it cannot poll or publish another event.
-    pub fn mount_host_delivery(
-        &self,
-        scope: ResolvedScope,
-        lsp_session_factory: Arc<Pr12LspSessionFactory>,
-        hook_delivery_port: Arc<
-            dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
-        >,
-    ) -> Pr13AdvisoryHostDeliveryRegistrationV1 {
-        mount_pr13_advisory_host_delivery(scope, self, lsp_session_factory, hook_delivery_port)
-    }
-}
-
 fn capability_for_registration(route: HostRegistrationRouteV1) -> HostCapabilityV1 {
     match route {
         HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp

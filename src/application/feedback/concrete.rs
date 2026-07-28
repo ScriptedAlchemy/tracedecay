@@ -399,10 +399,6 @@ impl Pr12FeedbackRuntime {
         Arc::clone(&self.owner)
     }
 
-    pub fn into_owner(self) -> Arc<ConcretePr12FeedbackOwner> {
-        self.owner
-    }
-
     pub fn publication_store(&self) -> ProjectFeedbackStore {
         self.publications.clone()
     }

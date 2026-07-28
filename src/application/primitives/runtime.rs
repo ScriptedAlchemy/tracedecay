@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -62,6 +62,12 @@ const MAX_OPERATION_PARAMETERS_BYTES: usize = 1_048_576;
 const MAX_OPERATION_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_ADMITTED_ROOT_URI_BYTES: usize = 4_096;
 const MAX_CONCURRENT_PR12_PRIMITIVES: usize = 32;
+
+/// Validated once per process rather than on every paged primitive result.
+static PR12_PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
+    SortContractId::new("sort.application.pr12-primitive.v1")
+        .unwrap_or_else(|_| panic!("static primitive sort contract is valid"))
+});
 
 pub type Pr12PrimitiveDispatchFuture<'a> =
     Pin<Box<dyn Future<Output = ApplicationResult<Value>> + Send + 'a>>;
@@ -1720,8 +1726,7 @@ fn evidence_result(
         .validate()
         .map_err(|_| contract_problem(context, operation))?;
     let mut page = PageState::first_page(
-        SortContractId::new("sort.application.pr12-primitive.v1")
-            .unwrap_or_else(|_| panic!("static primitive sort contract is valid")),
+        PR12_PRIMITIVE_SORT_CONTRACT.clone(),
         1,
         eligible,
         coverage.returned,

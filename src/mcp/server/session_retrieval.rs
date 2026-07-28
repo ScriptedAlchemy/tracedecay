@@ -3,7 +3,7 @@
 //! describe/expand execution, and result filtering for the
 //! `SessionRetrievalServicePort` implementation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -606,6 +606,7 @@ impl DaemonSessionRetrievalService {
         let mut cursor = None;
         let mut skipped = 0u64;
         let mut rendering_omitted = 0u64;
+        let mut sessions = PageSessionCache::default();
         for item in items {
             let item_watermarks = item.snapshot.watermarks();
             watermarks.generation = watermarks.generation.max(item_watermarks.generation);
@@ -632,7 +633,9 @@ impl DaemonSessionRetrievalService {
                         continue;
                     }
                 };
-                let Some(result) = self.hydrate_result(&item.snapshot, ranked, hydrated).await
+                let Some(result) = self
+                    .hydrate_result(&item.snapshot, ranked, hydrated, &mut sessions)
+                    .await
                 else {
                     skipped = skipped.saturating_add(1);
                     rendering_omitted = rendering_omitted.saturating_add(1);
@@ -681,6 +684,7 @@ impl DaemonSessionRetrievalService {
         snapshot: &TemporalExecutionSnapshot,
         ranked: &crate::query::temporal::ranking::RankedCandidate,
         hydrated: &TemporalHydratedResult,
+        sessions: &mut PageSessionCache,
     ) -> Option<SessionMessageSearchResult> {
         let content = hydrated.content()?;
         let authorized_project_key = snapshot.request().authorized_root()?.project_key();
@@ -697,13 +701,14 @@ impl DaemonSessionRetrievalService {
                 .retriever_record_id
                 .clone();
             let text = std::str::from_utf8(content).ok()?.to_string();
-            let session = registered_session(
-                self.database.as_ref(),
-                authorized_project_key,
-                provider,
-                session_id,
-            )
-            .await?;
+            let session = sessions
+                .resolve(
+                    self.database.as_ref(),
+                    authorized_project_key,
+                    provider,
+                    session_id,
+                )
+                .await?;
             return Some(SessionMessageSearchResult {
                 session,
                 message: crate::sessions::SessionMessageRecord {
@@ -744,13 +749,14 @@ impl DaemonSessionRetrievalService {
             )
             .await
             .ok()?;
-        let session = registered_session(
-            self.database.as_ref(),
-            authorized_project_key,
-            provider,
-            session_id,
-        )
-        .await?;
+        let session = sessions
+            .resolve(
+                self.database.as_ref(),
+                authorized_project_key,
+                provider,
+                session_id,
+            )
+            .await?;
         if message.provider != provider
             || message.session_id != session_id
             || session.project_key != authorized_project_key
@@ -1373,6 +1379,41 @@ fn page_hydration_slot<'a>(
         });
     }
     Ok(hydrated)
+}
+
+/// Session records already read while rendering the current page.
+///
+/// One page routinely ranks many results out of the same session, and every
+/// unique lookup costs its own read snapshot, so the record is read once per
+/// distinct authorized identity instead of once per rendered result. A lookup
+/// that finds nothing is remembered too: repeating it cannot turn an absent
+/// session into a present one, and re-reading would only let one page render
+/// the same session inconsistently.
+#[derive(Default)]
+struct PageSessionCache {
+    sessions: HashMap<(String, String, String), Option<SessionRecord>>,
+}
+
+impl PageSessionCache {
+    async fn resolve(
+        &mut self,
+        database: &RegisteredGlobalDb,
+        project_key: &str,
+        provider: &str,
+        session_id: &str,
+    ) -> Option<SessionRecord> {
+        let key = (
+            project_key.to_string(),
+            provider.to_string(),
+            session_id.to_string(),
+        );
+        if let Some(cached) = self.sessions.get(&key) {
+            return cached.clone();
+        }
+        let session = registered_session(database, project_key, provider, session_id).await;
+        self.sessions.insert(key, session.clone());
+        session
+    }
 }
 
 async fn registered_session(

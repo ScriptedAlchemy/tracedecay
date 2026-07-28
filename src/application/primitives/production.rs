@@ -1,7 +1,7 @@
 //! Production PR12 primitive owners over `TraceDecay` graph/query authorities.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use ignore::overrides::OverrideBuilder;
 use sha2::{Digest, Sha256};
@@ -82,6 +82,12 @@ use crate::types::{Node, Visibility};
 
 const PRIMITIVE_SORT: &str = "sort.application.primitive.v1";
 
+/// Validated once per process; every page in this module shares the same
+/// static sort contract, so the identifier check does not belong on the
+/// per-call path.
+static PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> =
+    LazyLock::new(|| SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")));
+
 fn completed<T>(
     payload: T,
     domain: EvidenceDomain,
@@ -90,12 +96,7 @@ fn completed<T>(
     let Ok(coverage) = EvidenceCoverage::complete(vec![domain], 1, 1, 1) else {
         return failed(domain, finished_at);
     };
-    let Ok(page) = PageState::first_page(
-        SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
-        1,
-        Some(1),
-        1,
-    ) else {
+    let Ok(page) = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(1), 1) else {
         return failed(domain, finished_at);
     };
     RetrievalPortOutcome::Completed(RetrievalEvidence {
@@ -129,13 +130,8 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
         omissions: Vec::new(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(
-            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
-            1,
-            Some(0),
-            0,
-        )
-        .unwrap_or_else(|_| panic!("empty page")),
+        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(0), 0)
+            .unwrap_or_else(|_| panic!("empty page")),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -186,13 +182,8 @@ fn diagnostics_unavailable(
         }],
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(
-            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
-            1,
-            None,
-            0,
-        )
-        .unwrap_or_else(|_| panic!("diagnostic unavailable page")),
+        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, None, 0)
+            .unwrap_or_else(|_| panic!("diagnostic unavailable page")),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
@@ -211,13 +202,8 @@ fn diagnostics_result(
     let next_cursor_text = next_cursor
         .as_ref()
         .map(|cursor| cursor.as_str().to_owned());
-    let mut page = PageState::first_page(
-        SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
-        1,
-        Some(total),
-        returned,
-    )
-    .unwrap_or_else(|_| panic!("diagnostic result page"));
+    let mut page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(total), returned)
+        .unwrap_or_else(|_| panic!("diagnostic result page"));
     page.cursor = next_cursor;
     page.expires_at = page.cursor.as_ref().and_then(|_| {
         finished_at
@@ -1579,13 +1565,8 @@ impl Pr12OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                     completeness: CoverageCompleteness::Complete,
                 }],
             };
-            let page = PageState::first_page(
-                SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
-                1,
-                Some(1),
-                1,
-            )
-            .unwrap_or_else(|_| panic!("page"));
+            let page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(1), 1)
+                .unwrap_or_else(|_| panic!("page"));
             let execution = OperationReceipt {
                 started_at: observed_at,
                 ended_at: observed_at,
@@ -2113,13 +2094,8 @@ fn affected_tests_evidence(
             .collect(),
         scores: Vec::new(),
         contributions: Vec::new(),
-        page: PageState::first_page(
-            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
-            1,
-            eligible,
-            returned,
-        )
-        .unwrap_or_else(|_| panic!("affected-tests page")),
+        page: PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, eligible, returned)
+            .unwrap_or_else(|_| panic!("affected-tests page")),
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,

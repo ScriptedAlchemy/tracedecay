@@ -1,32 +1,15 @@
 //! Canonical derived-memory convergence policy.
 //!
-//! [`MemoryApplication::dashboard_repair_v1`] runs exactly one bounded,
-//! store-owned repair batch and reports whether the store is still
-//! `saturated()` — i.e. whether more repair work is known to remain behind
-//! that batch's cap. Any caller that needs derived state (missing vectors,
-//! HRR banks) to be *fully converged* before it proceeds has to decide how
-//! many of those passes to run and when to give up.
+//! [`MemoryApplication::dashboard_repair_v1`] runs one store-bounded repair
+//! batch and reports whether more work remains behind the batch cap. This
+//! module preserves that bound: [`MemoryApplication::converge_derived_memory`]
+//! performs exactly one pass and returns a typed pending state when the store
+//! remains saturated.
 //!
-//! That decision used to diverge into three separate copies: a hardcoded
-//! eight-pass any-progress loop next to the standalone dashboard's startup
-//! path, a single uncoverged pass in `memory curate --apply`, and the daemon
-//! scheduler's own saturation-driven backoff loop across ticks. This module
-//! is the one place that policy lives now: [`Self::converge_derived_memory`]
-//! runs repair passes until the store reports it is no longer saturated, or
-//! until a wall-clock bound is exhausted, in which case it logs a warning and
-//! returns the last-observed (still-saturated) stats instead of looping
-//! forever. The dashboard startup path and `memory curate --apply` are both
-//! one-shot callers of this single entry point.
-//!
-//! The daemon repair scheduler's cadence and backoff *between ticks*
-//! (`src/daemon/memory_repair_scheduler.rs`) is a distinct, intentionally
-//! separate policy for spreading retries across real time when nothing is
-//! actively waiting on convergence, and is untouched here: it still calls
-//! [`MemoryApplication::dashboard_repair_v1`] directly, once per tick, and
-//! decides whether to tick again from its own saturation-aware
-//! `MemoryRepairPassDecision`.
-
-use std::time::{Duration, Instant};
+//! Saturated backlog stays durable for the daemon-owned memory-repair
+//! scheduler, whose cadence and backoff live in
+//! `src/daemon/memory_repair_scheduler.rs`. Admission and ordinary retrieval
+//! never spin waiting for that background convergence.
 
 use tracedecay_store::{CompatibilityMemoryRepairStatsV1, FactCompatibilityStore};
 
@@ -34,102 +17,89 @@ use super::MemoryApplication;
 use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
 
-/// Upper bound on how long [`MemoryApplication::converge_derived_memory`]
-/// keeps issuing repair passes before giving up and returning the
-/// last-observed stats.
-const CONVERGE_WALL_CLOCK_BOUND: Duration = Duration::from_secs(10);
-
-/// What a repair pass's outcome means for the convergence loop. A pure,
-/// unit-testable decision kept separate from the store-calling loop, in the
-/// same spirit as the daemon scheduler's `MemoryRepairPassDecision`.
+/// Truthful state returned after one bounded derived-memory repair pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConvergeStep {
-    /// The store reports no remaining saturation: derived state is converged.
+pub enum DerivedMemoryConvergenceStateV1 {
     Converged,
-    /// Still saturated, and time remains within the bound: run another pass.
-    Continue,
-    /// Still saturated, but the wall-clock bound is exhausted: stop and warn.
-    BoundExhausted,
+    /// More durable repair work remains for the daemon scheduler.
+    Pending,
 }
 
-fn converge_step(saturated: bool, now: Instant, deadline: Instant) -> ConvergeStep {
-    if !saturated {
-        ConvergeStep::Converged
-    } else if now >= deadline {
-        ConvergeStep::BoundExhausted
+fn convergence_state(saturated: bool) -> DerivedMemoryConvergenceStateV1 {
+    if saturated {
+        DerivedMemoryConvergenceStateV1::Pending
     } else {
-        ConvergeStep::Continue
+        DerivedMemoryConvergenceStateV1::Converged
+    }
+}
+
+/// Receipt for one bounded pass plus its truthful convergence state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DerivedMemoryConvergenceReportV1 {
+    state: DerivedMemoryConvergenceStateV1,
+    stats: CompatibilityMemoryRepairStatsV1,
+}
+
+impl DerivedMemoryConvergenceReportV1 {
+    pub fn state(&self) -> DerivedMemoryConvergenceStateV1 {
+        self.state
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.state == DerivedMemoryConvergenceStateV1::Pending
+    }
+
+    pub fn stats(&self) -> &CompatibilityMemoryRepairStatsV1 {
+        &self.stats
+    }
+
+    pub fn missing_vectors_repaired(&self) -> u64 {
+        self.stats.missing_vectors_repaired()
+    }
+
+    pub fn banks_rebuilt(&self) -> u64 {
+        self.stats.banks_rebuilt()
     }
 }
 
 impl<A: FactCompatibilityStore> MemoryApplication<A> {
-    /// Runs bounded compatibility-memory repair passes until the store
-    /// reports it is no longer saturated, or until
-    /// [`CONVERGE_WALL_CLOCK_BOUND`] elapses.
+    /// Runs exactly one bounded compatibility-memory repair pass.
     ///
     /// `action` names the trigger (e.g. `"dashboard-startup-repair"`) used
-    /// for each pass's generated operation identity; every pass gets a fresh
-    /// generated operation id so repeated batches never collide with an
-    /// earlier one.
-    ///
-    /// Returns the last-observed repair stats. When the bound is exhausted
-    /// while the store is still saturated, this logs `tracing::warn!` and
-    /// returns those (still-saturated) stats rather than erroring — the
-    /// caller serves possibly-stale derived state instead of blocking
-    /// indefinitely.
+    /// for the pass's generated operation identity. Saturation is reported as
+    /// [`DerivedMemoryConvergenceStateV1::Pending`]; the caller proceeds while
+    /// the existing daemon scheduler owns the remaining durable backlog.
     pub async fn converge_derived_memory(
         &self,
         action: &str,
-    ) -> Result<CompatibilityMemoryRepairStatsV1, MemoryApplicationError> {
-        let deadline = Instant::now() + CONVERGE_WALL_CLOCK_BOUND;
-        loop {
-            let context = MemoryOperationContext::generated(&self.owner, action, None)?;
-            let stats = self.dashboard_repair_v1(context).await?;
-            match converge_step(stats.saturated(), Instant::now(), deadline) {
-                ConvergeStep::Converged => return Ok(stats),
-                ConvergeStep::BoundExhausted => {
-                    let bound_secs = CONVERGE_WALL_CLOCK_BOUND.as_secs();
-                    tracing::warn!(
-                        "Derived-memory convergence for {action} exhausted its {bound_secs}s \
-                         wall-clock bound while the store still reports saturation; serving \
-                         possibly-stale derived state"
-                    );
-                    return Ok(stats);
-                }
-                ConvergeStep::Continue => {}
-            }
+    ) -> Result<DerivedMemoryConvergenceReportV1, MemoryApplicationError> {
+        let context = MemoryOperationContext::generated(&self.owner, action, None)?;
+        let stats = self.dashboard_repair_v1(context).await?;
+        let state = convergence_state(stats.saturated());
+        if state == DerivedMemoryConvergenceStateV1::Pending {
+            tracing::warn!(
+                "Derived-memory convergence for {action} remains pending after one bounded pass; \
+                 serving possibly-stale derived state while the daemon repair scheduler owns \
+                 remaining work"
+            );
         }
+        Ok(DerivedMemoryConvergenceReportV1 { state, stats })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ConvergeStep, Duration, Instant, converge_step};
+    use super::{DerivedMemoryConvergenceStateV1, convergence_state};
 
     #[test]
-    fn unsaturated_pass_converges_regardless_of_remaining_time() {
-        let now = Instant::now();
-        assert_eq!(converge_step(false, now, now), ConvergeStep::Converged);
+    fn saturated_bounded_pass_reports_pending_for_scheduler() {
         assert_eq!(
-            converge_step(false, now, now + Duration::from_secs(10)),
-            ConvergeStep::Converged
+            convergence_state(true),
+            DerivedMemoryConvergenceStateV1::Pending
         );
-    }
-
-    #[test]
-    fn saturated_pass_continues_while_time_remains() {
-        let now = Instant::now();
-        let deadline = now + Duration::from_secs(1);
-        assert_eq!(converge_step(true, now, deadline), ConvergeStep::Continue);
-    }
-
-    #[test]
-    fn saturated_pass_stops_once_the_bound_is_exhausted() {
-        let now = Instant::now();
-        assert_eq!(converge_step(true, now, now), ConvergeStep::BoundExhausted);
         assert_eq!(
-            converge_step(true, now + Duration::from_secs(1), now),
-            ConvergeStep::BoundExhausted
+            convergence_state(false),
+            DerivedMemoryConvergenceStateV1::Converged
         );
     }
 }

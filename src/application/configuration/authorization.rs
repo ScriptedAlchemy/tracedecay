@@ -72,15 +72,6 @@ impl<Authority>
     }
 }
 
-impl<Authority, Evaluator> PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator> {
-    pub fn with_evaluator(authority: Authority, evaluator: Evaluator) -> Self {
-        Self {
-            authority,
-            evaluator,
-        }
-    }
-}
-
 impl<Authority, Evaluator> ConfigurationMutationAuthorizationPort
     for PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator>
 where

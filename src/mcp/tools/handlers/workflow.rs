@@ -843,7 +843,7 @@ async fn managed_test_document_content_digests(
 
     let mut outcomes: Vec<(
         usize,
-        Result<Option<(String, tracedecay_domain::ContentDigest)>, TraceDecayError>,
+        Result<Option<(String, tracedecay_domain::ContentDigest)>>,
     )> = stream::iter(validated.into_iter().enumerate())
         .map(|(index, (changed_path, absolute))| async move {
             let outcome = match tokio::fs::read(&absolute).await {

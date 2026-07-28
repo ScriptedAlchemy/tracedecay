@@ -379,21 +379,6 @@ impl RegisteredProjectLspAuthority {
         Ok((document.absolute, relative_path))
     }
 
-    fn authorize_projection_root(
-        &self,
-        root: AdmittedRoot,
-        document_uri: Option<String>,
-    ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
-        let authority = self.clone();
-        Box::pin(async move {
-            authority.validate_root(&root)?;
-            if let Some(document_uri) = document_uri {
-                authority.document_path(&document_uri)?;
-            }
-            Ok(())
-        })
-    }
-
     async fn read_disk_document(&self, relative: &Path) -> Result<String, LspRuntimeFailure> {
         let (_canonical, file) = open_project_file(&self.project_dir, relative)?;
         let mut file = tokio::fs::File::from_std(file.into_std());
@@ -549,8 +534,7 @@ pub trait LspFeedbackDocumentSnapshotPort: Send + Sync {
 /// Why one feedback finding did not become a published LSP diagnostic.
 ///
 /// Projection refusals used to be anonymous `continue`s, so an empty Problems
-/// list was indistinguishable from "the store never had the record". Each
-/// refusal is now typed, logged, and directly testable.
+/// list was indistinguishable from "the store never had the record".
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FeedbackDiagnosticProjectionSkipV1 {
     /// The finding is not in the active lifecycle state.
@@ -606,8 +590,7 @@ fn skipped(finding_id: &str, skip: FeedbackDiagnosticProjectionSkipV1) {
 
 /// Decides whether a resolved durable record may be projected for this cycle.
 ///
-/// Pure and total: every refusal is named, so the previously silent
-/// file-mismatch case is now explicit.
+/// Pure and total: every refusal is named.
 pub fn classify_feedback_diagnostic_admission(
     record: &tracedecay_domain::GenerationDiagnosticV1,
     impact_target_file: Option<&tracedecay_domain::FileOccurrenceId>,
