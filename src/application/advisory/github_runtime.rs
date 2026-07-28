@@ -51,6 +51,7 @@ pub use dto::{
     GitHubActionsWorkflowJobV1, GitHubActionsWorkflowRunV1, GitHubActionsWorkflowStepV1,
     GitHubCheckAnnotationLevelV1, GitHubCheckAnnotationV1, GitHubRetainedResponseV1,
 };
+#[cfg(any(test, feature = "test-transport"))]
 pub(crate) use dto::{GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1, RestReviewV1};
 pub use network::{
     GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
