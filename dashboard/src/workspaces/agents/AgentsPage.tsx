@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary, ReadFailure } from '../../ui/LegacyStates.tsx';
 import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -205,9 +205,9 @@ export function AgentsPage() {
             <OverviewGrid>
               <OverviewCard title="Where the events go">
                 {!data.available ? (
-                  <UnavailableRead label="Usage analytics unavailable" />
+                  <ReadFailure label="Usage analytics unavailable" />
                 ) : window.events == null && rows.length === 0 ? (
-                  <UnavailableRead label="Categorized usage events unavailable" />
+                  <ReadFailure label="Categorized usage events unavailable" />
                 ) : (
                   // The window's own count, or null. Substituting the
                   // categorized total made the two agree by construction, which
@@ -224,7 +224,7 @@ export function AgentsPage() {
                 >
                   {(payload) =>
                     payload.available === false ? (
-                      <UnavailableRead label="Analytics diagnostics unavailable" />
+                      <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
                       <ToolRanking rows={payload.by_mcp_tool ?? []} />
                     )
@@ -240,7 +240,7 @@ export function AgentsPage() {
                 >
                   {(payload) =>
                     payload.available === false ? (
-                      <UnavailableRead label="Analytics diagnostics unavailable" />
+                      <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
                       <RecentTape rows={payload.recent_events ?? []} />
                     )
@@ -256,7 +256,7 @@ export function AgentsPage() {
                 >
                   {(payload) =>
                     payload.available === false ? (
-                      <UnavailableRead label="Analytics diagnostics unavailable" />
+                      <ReadFailure label="Analytics diagnostics unavailable" />
                     ) : (
                       <WindowComposition
                         kinds={payload.by_event_kind ?? []}
@@ -272,7 +272,7 @@ export function AgentsPage() {
                 <LegacyBoundary title="Hints" pending={hints.isPending} result={hints.data}>
                   {(hintData) =>
                     hintData.available === false ? (
-                      <UnavailableRead label="Hint diagnostics unavailable" />
+                      <ReadFailure label="Hint diagnostics unavailable" />
                     ) : (
                       <FamilyList rows={hintData.families ?? []} />
                     )
@@ -284,14 +284,6 @@ export function AgentsPage() {
         );
       }}
     </LegacyBoundary>
-  );
-}
-
-function UnavailableRead({ label }: { label: string }) {
-  return (
-    <p role="status" className="text-2xs leading-relaxed text-state-error">
-      {label}
-    </p>
   );
 }
 
