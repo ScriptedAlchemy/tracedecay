@@ -478,7 +478,7 @@ pub(super) async fn handle_hotspots(
 }
 
 /// Default and ceiling for the unused imports reported in one page.
-const UNUSED_IMPORTS_DEFAULT_LIMIT: usize = 100;
+const UNUSED_IMPORTS_DEFAULT_LIMIT: usize = 50;
 const UNUSED_IMPORTS_MAX_LIMIT: usize = 500;
 
 /// Files inspected in one call before the answer becomes a typed partial.

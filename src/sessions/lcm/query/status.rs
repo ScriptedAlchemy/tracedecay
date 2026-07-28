@@ -3,7 +3,7 @@ use std::path::Path;
 use super::*;
 
 const STORE_STATUS_PAGE_SIZE: i64 = 512;
-const STORE_STATUS_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
+const STORE_STATUS_TOKEN_SCAN_MAX_BYTES: i64 = 32 * 1024 * 1024;
 
 /// Message bodies summed for the replay token estimate in one status call.
 ///
@@ -508,10 +508,13 @@ async fn store_status_within(
     let messages = store_message_count(conn, provider, session_id).await?;
     let mut estimated_tokens = 0_i64;
     let mut scanned_messages = 0_i64;
+    let mut scanned_bytes = 0_i64;
     let mut after_store_id = 0_i64;
     let mut complete = true;
-    while scanned_messages < token_scan_budget {
+    while scanned_messages < token_scan_budget && scanned_bytes < STORE_STATUS_TOKEN_SCAN_MAX_BYTES
+    {
         let page_limit = STORE_STATUS_PAGE_SIZE.min(token_scan_budget - scanned_messages);
+        let remaining_bytes = STORE_STATUS_TOKEN_SCAN_MAX_BYTES.saturating_sub(scanned_bytes);
         let mut rows = conn
             .query(
                 "WITH page AS (
@@ -539,7 +542,7 @@ async fn store_status_within(
                     session_id,
                     after_store_id,
                     page_limit,
-                    STORE_STATUS_PAGE_MAX_BYTES
+                    remaining_bytes
                 ],
             )
             .await?;
@@ -555,6 +558,8 @@ async fn store_status_within(
             // engine replays into active context.
             let text: String = row.get(1)?;
             estimated_tokens += estimate_tokens(&text);
+            scanned_bytes =
+                scanned_bytes.saturating_add(i64::try_from(text.len()).unwrap_or(i64::MAX));
             after_store_id = store_id;
             page_count += 1;
         }
@@ -563,8 +568,12 @@ async fn store_status_within(
             break;
         }
         scanned_messages += page_count;
-        if scanned_messages >= token_scan_budget && scanned_messages < messages {
+        if (scanned_messages >= token_scan_budget
+            || scanned_bytes >= STORE_STATUS_TOKEN_SCAN_MAX_BYTES)
+            && scanned_messages < messages
+        {
             complete = false;
+            break;
         }
     }
     let token_estimate = if complete {
@@ -990,6 +999,54 @@ mod tests {
             status.token_estimate,
             LcmStoreTokenCoverage::complete(10001)
         );
+    }
+
+    #[tokio::test]
+    async fn store_status_bounds_the_total_message_bytes_scanned() {
+        const ROWS: i64 = 40;
+        let (_database_dir, conn) = test_lcm_connection().await;
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'session-byte-budget', '/project', '/project')",
+            (),
+        )
+        .await
+        .unwrap();
+        let content = "x".repeat(1024 * 1024);
+        for ordinal in 1..=ROWS {
+            conn.execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, timestamp,
+                    content, content_hash, storage_kind, payload_ref, snippet_text,
+                    index_text, legacy_source, legacy_truncated, metadata_json
+                 ) VALUES (
+                    'cursor', ?1, 'session-byte-budget', 'assistant', ?2, ?2,
+                    ?3, ?4, 'inline', NULL, ?3, ?3, 0, 0, NULL
+                 )",
+                params![
+                    format!("byte-budget-message-{ordinal}"),
+                    ordinal,
+                    &content,
+                    format!("byte-budget-hash-{ordinal}")
+                ],
+            )
+            .await
+            .unwrap();
+        }
+
+        let status = store_status(&*conn, "cursor", None).await.unwrap();
+
+        assert_eq!(status.messages, ROWS);
+        assert!(
+            !status.token_estimate.complete,
+            "a status call must not read every body after crossing its byte budget: {:?}",
+            status.token_estimate
+        );
+        assert!(
+            status.token_estimate.scanned_messages < ROWS,
+            "the byte bound must stop before the complete store is materialized"
+        );
+        assert!(status.token_estimate.next_after_store_id.is_some());
     }
 
     async fn seed_raw_messages(conn: &Connection, session_id: &str, rows: i64) {
