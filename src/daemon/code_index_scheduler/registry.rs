@@ -206,19 +206,6 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             opened.replace_semantic_schedule_hook(Some(hook));
         }
-        // Project-open completion is the readiness boundary for the canonical
-        // PR9 fallback. Reconcile before publishing the mounted scheduler so
-        // the authority mounted immediately afterwards can bind one complete,
-        // current generation instead of losing a race with the background
-        // worker and remaining unavailable until a later edit.
-        let initial_reconcile = opened.reconcile_now()?;
-        if let CodeIndexReconcileOutcomeV1::Published(evidence) = &initial_reconcile {
-            Self::publish_generation(
-                &self.generation_publications,
-                project_root.clone(),
-                evidence,
-            );
-        }
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
@@ -245,6 +232,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::clone(&self.background_reconcile_admission);
         let worker_generation_publications = self.generation_publications.clone();
         let worker_project_root = project_root.clone();
+        let initial_wake = Arc::clone(&wake);
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -316,6 +304,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
+        initial_wake.notify_one();
         Ok(true)
     }
 
