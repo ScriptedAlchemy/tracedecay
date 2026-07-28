@@ -42,6 +42,7 @@ use super::{
     LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, dag, gc, maintenance, payload,
     raw, schema, util,
 };
+use super::types::LcmStoreTokenCoverage;
 
 const MAX_PAGE_LIMIT: usize = 100;
 const PLACEHOLDER_PREFIXES: [&str; 5] = [

@@ -5,6 +5,14 @@ use super::*;
 const STORE_STATUS_PAGE_SIZE: i64 = 512;
 const STORE_STATUS_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
 
+/// Message bodies summed for the replay token estimate in one status call.
+///
+/// The estimate needs each message's text, so an unbounded scan reads the whole
+/// raw store — gigabytes on a long-lived profile — and the request is
+/// interrupted before it can answer. Past this many rows the status reports a
+/// typed partial estimate with a resume cursor instead.
+const STORE_STATUS_TOKEN_SCAN_BUDGET: i64 = 20_000;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct StatusQueryWork {
     status_query_calls: usize,
@@ -278,6 +286,13 @@ fn merge_lcm_status(target: &mut LcmStatus, source: LcmStatus) {
     target.maintenance_debt_count += source.maintenance_debt_count;
     target.store.messages += source.store.messages;
     target.store.estimated_tokens += source.store.estimated_tokens;
+    // A merged estimate is only complete when every merged scope was.
+    target.store.token_estimate.complete &= source.store.token_estimate.complete;
+    target.store.token_estimate.scanned_messages += source.store.token_estimate.scanned_messages;
+    target.store.token_estimate.next_after_store_id = min_option_i64(
+        target.store.token_estimate.next_after_store_id,
+        source.store.token_estimate.next_after_store_id,
+    );
     target.dag.total_nodes += source.dag.total_nodes;
     target.dag.total_tokens += source.dag.total_tokens;
     target.dag.total_source_tokens += source.dag.total_source_tokens;
@@ -408,6 +423,7 @@ pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmS
         store: LcmStoreStatus {
             messages: 0,
             estimated_tokens: 0,
+            token_estimate: LcmStoreTokenCoverage::complete(0),
         },
         dag: LcmDagStatus {
             total_nodes: 0,
@@ -473,10 +489,29 @@ async fn store_status(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmStoreStatus, LcmError> {
-    let mut messages = 0_i64;
+    store_status_within(conn, provider, session_id, STORE_STATUS_TOKEN_SCAN_BUDGET).await
+}
+
+/// Exact message count plus a token estimate over at most `token_scan_budget`
+/// message bodies.
+///
+/// The count is a cheap indexed aggregate, so the reported store size is always
+/// the true one. The token estimate has to read text, so it stops at the budget
+/// and reports the resume cursor instead of streaming a multi-gigabyte store
+/// past the caller's deadline.
+async fn store_status_within(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: Option<&str>,
+    token_scan_budget: i64,
+) -> Result<LcmStoreStatus, LcmError> {
+    let messages = store_message_count(conn, provider, session_id).await?;
     let mut estimated_tokens = 0_i64;
+    let mut scanned_messages = 0_i64;
     let mut after_store_id = 0_i64;
-    loop {
+    let mut complete = true;
+    while scanned_messages < token_scan_budget {
+        let page_limit = STORE_STATUS_PAGE_SIZE.min(token_scan_budget - scanned_messages);
         let mut rows = conn
             .query(
                 "WITH page AS (
@@ -503,12 +538,12 @@ async fn store_status(
                     provider,
                     session_id,
                     after_store_id,
-                    STORE_STATUS_PAGE_SIZE,
+                    page_limit,
                     STORE_STATUS_PAGE_MAX_BYTES
                 ],
             )
             .await?;
-        let mut page_count = 0usize;
+        let mut page_count = 0i64;
         while let Some(row) = rows.next().await? {
             let store_id: i64 = row.get(0)?;
             if store_id <= after_store_id {
@@ -516,7 +551,6 @@ async fn store_status(
                     "LCM store status page did not advance".to_string(),
                 ));
             }
-            messages += 1;
             // Externalized rows count their inline placeholder, matching what the
             // engine replays into active context.
             let text: String = row.get(1)?;
@@ -528,11 +562,48 @@ async fn store_status(
         if page_count == 0 {
             break;
         }
+        scanned_messages += page_count;
+        if scanned_messages >= token_scan_budget && scanned_messages < messages {
+            complete = false;
+        }
     }
+    let token_estimate = if complete {
+        LcmStoreTokenCoverage::complete(scanned_messages)
+    } else {
+        LcmStoreTokenCoverage {
+            complete: false,
+            scanned_messages,
+            next_after_store_id: Some(after_store_id),
+        }
+    };
     Ok(LcmStoreStatus {
         messages,
         estimated_tokens,
+        token_estimate,
     })
+}
+
+/// Exact raw-message count for the scope. The `(provider, session_id,
+/// store_id)` index serves this without touching message text.
+async fn store_message_count(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: Option<&str>,
+) -> Result<i64, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
+             FROM lcm_raw_messages
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)",
+            params![provider, session_id],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("LCM store count query returned no rows".to_string()))?;
+    Ok(row.get(0)?)
 }
 
 async fn dag_status(
@@ -915,6 +986,112 @@ mod tests {
 
         assert_eq!(status.messages, 10001);
         assert_eq!(status.estimated_tokens, 20002);
+        assert_eq!(
+            status.token_estimate,
+            LcmStoreTokenCoverage::complete(10001)
+        );
+    }
+
+    async fn seed_raw_messages(conn: &Connection, session_id: &str, rows: i64) {
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', ?1, '/project', '/project')",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            &format!(
+                "WITH RECURSIVE fixture(value) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT value + 1 FROM fixture WHERE value < {rows}
+                 )
+                 INSERT INTO lcm_raw_messages (
+                     provider, message_id, session_id, role, ordinal, timestamp,
+                     content, content_hash, storage_kind, payload_ref, snippet_text,
+                     index_text, legacy_source, legacy_truncated, metadata_json
+                 )
+                 SELECT 'cursor', printf('message-%05d', value), ?1,
+                        'assistant', value, value, 'one token',
+                        printf('hash-%05d', value), 'inline', NULL, 'one token',
+                        'one token', 0, 0, NULL
+                 FROM fixture"
+            ),
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The token estimate must not stream the whole raw store. Past the scan
+    /// budget the status reports the exact message count with a typed partial
+    /// estimate and a resume cursor — never a truncated total presented as the
+    /// whole store.
+    #[tokio::test]
+    async fn store_status_reports_a_partial_token_estimate_beyond_the_scan_budget() {
+        const ROWS: i64 = 900;
+        const BUDGET: i64 = 512;
+        let (_database_dir, conn) = test_lcm_connection().await;
+        seed_raw_messages(&conn, "session-budgeted-status", ROWS).await;
+
+        let status = store_status_within(&*conn, "cursor", None, BUDGET)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            status.messages, ROWS,
+            "the reported store size must stay exact"
+        );
+        assert!(
+            !status.token_estimate.complete,
+            "an estimate that skipped rows must not be reported as complete: {:?}",
+            status.token_estimate
+        );
+        assert_eq!(status.token_estimate.scanned_messages, BUDGET);
+        assert_eq!(
+            status.estimated_tokens,
+            BUDGET * 2,
+            "the estimate must cover exactly the scanned prefix"
+        );
+        let cursor = status
+            .token_estimate
+            .next_after_store_id
+            .expect("a partial estimate must carry a resume cursor");
+        assert!(cursor > 0, "resume cursor must address a real store id");
+    }
+
+    /// A store inside the budget is fully covered, and the coverage says so.
+    #[tokio::test]
+    async fn store_status_reports_a_complete_token_estimate_within_the_scan_budget() {
+        const ROWS: i64 = 300;
+        let (_database_dir, conn) = test_lcm_connection().await;
+        seed_raw_messages(&conn, "session-complete-status", ROWS).await;
+
+        let status = store_status_within(&*conn, "cursor", None, 512)
+            .await
+            .unwrap();
+
+        assert_eq!(status.messages, ROWS);
+        assert_eq!(status.estimated_tokens, ROWS * 2);
+        assert_eq!(status.token_estimate, LcmStoreTokenCoverage::complete(ROWS));
+    }
+
+    /// The bound has to hold on the production entry point too, not only on the
+    /// test-visible inner function.
+    #[tokio::test]
+    async fn store_status_applies_the_production_scan_budget() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        seed_raw_messages(&conn, "session-production-budget", 600).await;
+
+        let status = store_status(&*conn, "cursor", None).await.unwrap();
+
+        assert!(
+            status.token_estimate.scanned_messages <= STORE_STATUS_TOKEN_SCAN_BUDGET,
+            "the production entry point must respect its own budget: {:?}",
+            status.token_estimate
+        );
+        assert_eq!(status.messages, 600);
     }
 
     #[tokio::test]
