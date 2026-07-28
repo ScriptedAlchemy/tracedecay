@@ -1011,6 +1011,9 @@ impl DaemonSessionRetrievalService {
             .await;
         let direct = match direct_result {
             Ok(direct) => direct,
+            Err(SessionTemporalExecutionError::Deleted) if command.cursor().is_some() => {
+                return LcmExpandServiceOutcome::Denied;
+            }
             Err(error) => return expand_execution_error(error),
         };
         let binding = self.lcm_binding(

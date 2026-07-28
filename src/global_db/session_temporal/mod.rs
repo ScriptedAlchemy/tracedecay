@@ -658,11 +658,11 @@ fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
         | CursorError::GrainMismatch => SessionTemporalExecutionError::WrongScope,
         CursorError::Malformed
         | CursorError::Tampered
+        | CursorError::WrongRequest
         | CursorError::FilterMismatch
         | CursorError::SortKeyMismatch => SessionTemporalExecutionError::Denied,
         CursorError::Expired
         | CursorError::UnknownOrExpiredKey
-        | CursorError::WrongRequest
         | CursorError::SchemaMismatch
         | CursorError::RankingMismatch
         | CursorError::ConfigurationMismatch
@@ -778,5 +778,22 @@ mod participant_access_tests {
             None
         );
         assert_eq!(participant_source_access(Some("{"), 100), None);
+    }
+}
+
+#[cfg(test)]
+mod cursor_access_tests {
+    use super::*;
+
+    #[test]
+    fn request_rebinding_is_denied_while_missing_key_authority_is_unavailable() {
+        assert!(matches!(
+            map_lcm_cursor_error(CursorError::WrongRequest),
+            SessionTemporalExecutionError::Denied
+        ));
+        assert!(matches!(
+            map_lcm_cursor_error(CursorError::KeyUnavailable),
+            SessionTemporalExecutionError::Unavailable
+        ));
     }
 }
