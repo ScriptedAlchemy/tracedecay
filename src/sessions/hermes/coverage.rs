@@ -147,33 +147,6 @@ pub(crate) async fn drain_hermes_projections_with_admission_and_cancellation(
     }
 }
 
-pub(crate) async fn admit_rows(
-    rows: &[HermesRow],
-    scope: ObservationScopeV1,
-    generation: ObservationSourceGenerationV1,
-    file_identity: u64,
-    resume_fingerprint: u64,
-    route: impl Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
-) -> Result<TranscriptIngestStats, String> {
-    let authorities = match &scope {
-        ObservationScopeV1::Project { project_id } => {
-            HostAdmissionAuthorities::unregistered_for_project(project_id.clone())
-        }
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::unregistered_for_profile(),
-    };
-    let facade = HostAdmissionFacade::new(authorities);
-    admit_rows_with_admission(
-        &facade,
-        rows,
-        scope,
-        generation,
-        file_identity,
-        resume_fingerprint,
-        route,
-    )
-    .await
-}
-
 pub(crate) async fn admit_rows_with_admission(
     facade: &HostAdmissionFacade<'_>,
     rows: &[HermesRow],

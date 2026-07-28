@@ -288,8 +288,8 @@ fn run_cwd(run: &DiscoveredRun) -> Option<PathBuf> {
     // Parent transcript sits at <slug>/<session_id>.jsonl. agents_dir is
     // <slug>/<session_id>/subagents/workflows/<run_id>; `ancestors()` yields
     // nth(0)=<run_id> dir, nth(1)=workflows, nth(2)=subagents,
-    // nth(3)=<slug>/<session_id>. The parent transcript is that session dir's
-    // sibling with a `.jsonl` suffix appended (not `with_extension`, which would
+    // The parent transcript is that session dir's sibling with a `.jsonl` suffix
+    // appended (not `with_extension`, which would
     // mangle a session id that happens to contain a dot).
     let parent_transcript = run.agents_dir.ancestors().nth(3).and_then(|session_dir| {
         let name = session_dir.file_name()?.to_str()?;

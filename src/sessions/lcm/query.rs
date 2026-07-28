@@ -279,60 +279,6 @@ pub(crate) async fn describe(
     })
 }
 
-pub(crate) async fn describe_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    request: LcmDescribeRequest,
-) -> Result<LcmDescribeResponse, LcmError> {
-    let provider = request.provider.as_str();
-    let session_id = request.session_id.as_str();
-    let raw_message_count = count_raw_messages(conn, provider, Some(session_id)).await?;
-    let summary_node_count = count_summary_nodes(conn, provider, Some(session_id)).await?;
-    let external_payload_count = count_external_payloads(conn, provider, Some(session_id)).await?;
-    let (first_store_id, last_store_id) = raw_store_bounds(conn, provider, session_id).await?;
-    let (target, raw_messages, summary_nodes, summary_node, external_payload) = match request.target
-    {
-        LcmDescribeTarget::Session => (
-            "session".to_string(),
-            raw_message_overviews_metadata(conn, provider, session_id).await?,
-            summary_overviews_metadata(conn, provider, session_id).await?,
-            None,
-            None,
-        ),
-        LcmDescribeTarget::SummaryNode { node_id } => (
-            "summary_node".to_string(),
-            Vec::new(),
-            Vec::new(),
-            Some(describe_summary_node(conn, provider, session_id, &node_id).await?),
-            None,
-        ),
-        LcmDescribeTarget::ExternalPayload { payload_ref } => (
-            "external_payload".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(
-                describe_external_payload_metadata(conn, provider, session_id, &payload_ref)
-                    .await?,
-            ),
-        ),
-    };
-
-    Ok(LcmDescribeResponse {
-        target,
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        raw_message_count,
-        summary_node_count,
-        external_payload_count,
-        first_store_id,
-        last_store_id,
-        raw_messages,
-        summary_nodes,
-        summary_node,
-        external_payload,
-    })
-}
-
 pub(crate) async fn status(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
