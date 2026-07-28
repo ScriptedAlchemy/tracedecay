@@ -39,7 +39,6 @@
 //! enrolled and [`RegisteredProject::into_legacy_split`] for a registered store
 //! whose marker is deliberately absent.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -804,11 +803,4 @@ fn copy_tree_contents(src: &Path, dest: &Path) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Whether `program` names a resolvable git, for fixtures that must skip when
-/// the host has none.
-pub fn git_is_available() -> bool {
-    let program: &OsStr = tracedecay::git::git_program();
-    Path::new(program).is_absolute() || Path::new(program).is_file()
 }
