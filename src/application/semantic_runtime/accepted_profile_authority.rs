@@ -8,7 +8,7 @@ use super::SemanticRuntimeFuture;
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalRuntimeCompatibilityV1,
 };
-use crate::db::engine::{QueryExecutor, params};
+use crate::db::engine::params;
 use crate::global_db::RegisteredGlobalDb;
 use crate::search_eval::DirectEvaluationReportV1;
 

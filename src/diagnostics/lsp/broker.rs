@@ -394,7 +394,7 @@ fn semantic_operation_outcome(
         }) => LspSemanticOperationOutcome::Unavailable,
         Err(error) => LspSemanticOperationOutcome::Partial {
             value: serde_json::Value::Null,
-            coverage: format!("analyzer-{}", error.class()),
+            coverage: error.coverage_token().to_owned(),
             detail: LspSemanticOperationOutcome::bounded_detail(&error.to_string()),
         },
     }
@@ -1081,6 +1081,17 @@ fn command_candidates(command: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::diagnostics::lsp::adapters::DiagnosticMode;
+
+    #[test]
+    fn semantic_remote_method_missing_remains_unavailable() {
+        assert_eq!(
+            semantic_operation_outcome(Err(LspSemanticRequestError::Remote {
+                code: Some(-32601),
+                message: "method not found: stale Bearer secret /private/path?!".to_owned(),
+            })),
+            LspSemanticOperationOutcome::Unavailable
+        );
+    }
 
     fn adapter(
         language: &str,

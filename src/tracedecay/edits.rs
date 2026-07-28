@@ -125,7 +125,7 @@ impl SourceEditFileAuthority {
         }
         let mut options = CapOpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
-        let mut input = self
+        let input = self
             .parent
             .open_with(&self.name, &options)
             .map_err(|error| {
@@ -1760,10 +1760,12 @@ fn is_callable_edit_kind(kind: &NodeKind) -> bool {
 mod tests {
     use std::path::Path;
 
+    #[cfg(unix)]
+    use super::read_source_edit_candidate;
     use super::{
         SourceEditFileAuthority, capture_planned_source_edit, capture_source_edit_plan,
         leading_doc_or_attr, narrow_symbol_for_edit, publish_planned_source_edit,
-        read_source_edit_candidate, reconstruct_ast_grep_rewrite, rollback_api_migration_files,
+        reconstruct_ast_grep_rewrite, rollback_api_migration_files,
     };
     use crate::types::{Node, NodeKind, Visibility};
     use tempfile::tempdir;

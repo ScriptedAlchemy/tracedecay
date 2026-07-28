@@ -3,8 +3,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-#[cfg(test)]
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::{
     AgentInstanceId, CanonicalObservationEnvelopeV1, DurableObservationV1, MessageId,
     ObservationScopeV1, ProjectId, SessionId, ThreadId, TurnId, UserProfileId, WorktreeId,
