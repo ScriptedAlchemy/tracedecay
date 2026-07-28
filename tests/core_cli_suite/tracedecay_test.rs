@@ -7,13 +7,14 @@ use tracedecay::application::edit::{
     SourceEditApplicationResult, execute_source_edit, preview_source_edit_expected_state,
 };
 use tracedecay::errors::TraceDecayError;
-use tracedecay::tracedecay::{TraceDecay, is_test_file};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, is_test_file};
 use tracedecay::types::{EdgeKind, NodeKind};
 use tracedecay_application::{
     ApplicationOperation, AuthorityReceipt, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
     SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
-    SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
+    SourceEditEffectRequestV1, SourceEditRequest, SourceEditVerificationStateV1,
+    source_edit_operation,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
@@ -1003,7 +1004,7 @@ async fn rename_preview_lists_declaration_and_call_sites() {
 #[tokio::test]
 async fn edit_verify_flag_surfaces_planted_compiler_error() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
+    let project = tmp.path().join("project");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("Cargo.toml"),
@@ -1012,8 +1013,16 @@ async fn edit_verify_flag_surfaces_planted_compiler_error() {
     .unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn answer() -> u32 { 1 }\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.sync().await.unwrap();
+    let profile_root = tmp.path().join("profile");
+    let cg = crate::fixture::init_project_from_template_with_options(
+        &project,
+        TraceDecayOpenOptions {
+            global_db_path: Some(profile_root.join("global.db")),
+            profile_root: Some(profile_root),
+        },
+    )
+    .await
+    .unwrap();
 
     // Default path (no `verify`): `run_authorized_source_edit` previews the
     // exact state before applying it through the idempotency/CAS boundary.
@@ -1051,10 +1060,16 @@ async fn edit_verify_flag_surfaces_planted_compiler_error() {
     let verification = broken
         .verification
         .expect("verify=true should attach a verification verdict");
-    let verification_text = serde_json::to_string(&verification).unwrap().to_lowercase();
+    assert_eq!(
+        verification.state,
+        SourceEditVerificationStateV1::Errors,
+        "the real compiler verdict should report errors: {verification:?}"
+    );
     assert!(
-        verification_text.contains("mismatched types") || verification_text.contains("error"),
-        "verification should surface the planted compiler error: {verification_text}"
+        verification.first_errors.iter().any(|diagnostic| {
+            diagnostic.code == "E0308" && diagnostic.message.contains("mismatched types")
+        }),
+        "verification should surface the planted E0308 diagnostic: {verification:?}"
     );
 }
 
