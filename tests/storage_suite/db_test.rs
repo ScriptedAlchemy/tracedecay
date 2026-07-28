@@ -542,7 +542,7 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
 #[tokio::test]
 async fn test_migrate_is_idempotent_at_latest() {
     // After Database::initialize creates the latest schema, calling migrate
-    // again must be a no-op (returns false) — guards against accidental
+    // again must be a no-op (returns None) — guards against accidental
     // re-runs of v7's ALTER TABLE on an already-migrated DB.
     let dir = TempDir::new().expect("tempdir");
     let db_path = dir.path().join("idem.db");
@@ -552,5 +552,5 @@ async fn test_migrate_is_idempotent_at_latest() {
     let migrated = tracedecay::db::migrations::migrate(&db)
         .await
         .expect("migrate");
-    assert!(!migrated, "second migrate should be a no-op");
+    assert!(migrated.is_none(), "second migrate should be a no-op");
 }
