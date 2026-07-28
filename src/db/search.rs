@@ -1,14 +1,11 @@
 // Rust guideline compliant 2025-10-17
 use crate::db::engine::{Value, params, params_from_iter};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::connection::{Database, DatabaseEngineReadSnapshot};
 use super::rows::row_to_node;
 use super::sql::{build_qmark_placeholders, collect_rows};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
-
-static FTS_REPAIR_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyImportUse {
@@ -21,9 +18,9 @@ pub struct DependencyImportUse {
 impl Database {
     /// Searches nodes by name, qualified name, docstring, or signature.
     ///
-    /// Attempts an FTS5 prefix match first. If only the FTS index is corrupted,
-    /// falls back to a read-only `LIKE` query. Whole-database corruption is
-    /// returned to the caller for recovery.
+    /// Attempts an FTS5 prefix match first. FTS corruption is returned to the
+    /// caller for offline recovery; an empty healthy index falls back to a
+    /// read-only `LIKE` query.
     pub async fn search_nodes(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         debug_assert!(!query.is_empty(), "search_nodes called with empty query");
         debug_assert!(limit > 0, "search_nodes limit must be positive");
@@ -69,16 +66,7 @@ impl Database {
                         .to_ascii_lowercase()
                         .contains("fts5: corruption") =>
             {
-                match self.non_fts_schema_intact(conn).await {
-                    Ok(true) => {
-                        if !FTS_REPAIR_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
-                            eprintln!(
-                                "[tracedecay] FTS index corruption detected; using LIKE fallback. Offline repair required."
-                            );
-                        }
-                    }
-                    Ok(false) | Err(_) => return Err(e),
-                }
+                return Err(e);
             }
             Err(e) => return Err(e),
         }
@@ -113,71 +101,6 @@ impl Database {
             results.push(SearchResult { node, score: 1.0 });
         }
         Ok(results)
-    }
-
-    /// Validates every non-FTS table and its indexes without asking `SQLite`
-    /// to inspect the known-corrupt FTS virtual table or shadow tables.
-    async fn non_fts_schema_intact(&self, conn: &DatabaseEngineReadSnapshot) -> Result<bool> {
-        let mut rows = conn
-            .query(
-                "SELECT name FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name NOT IN (
-                       'nodes_fts', 'nodes_fts_data', 'nodes_fts_idx',
-                       'nodes_fts_content', 'nodes_fts_docsize', 'nodes_fts_config'
-                   )
-                   AND name NOT LIKE '%_fts%'
-                   AND COALESCE(sql, '') NOT LIKE 'CREATE VIRTUAL TABLE%'
-                 ORDER BY name",
-                (),
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to enumerate non-FTS tables: {e}"),
-                operation: "search_nodes".to_string(),
-            })?;
-        let mut tables = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read non-FTS table name: {e}"),
-            operation: "search_nodes".to_string(),
-        })? {
-            tables.push(
-                row.get::<String>(0)
-                    .map_err(|e| TraceDecayError::Database {
-                        message: format!("invalid non-FTS table name: {e}"),
-                        operation: "search_nodes".to_string(),
-                    })?,
-            );
-        }
-        drop(rows);
-        if !tables.iter().any(|table| table == "nodes") {
-            return Ok(false);
-        }
-
-        for table in tables {
-            let sql = format!("PRAGMA quick_check({})", quote_sqlite_identifier(&table));
-            let mut rows = conn
-                .query(&sql, ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to check non-FTS table '{table}': {e}"),
-                    operation: "search_nodes".to_string(),
-                })?;
-            let mut saw_result = false;
-            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read non-FTS table check for '{table}': {e}"),
-                operation: "search_nodes".to_string(),
-            })? {
-                saw_result = true;
-                if row.get::<String>(0).unwrap_or_default() != "ok" {
-                    return Ok(false);
-                }
-            }
-            if !saw_result {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 
     /// Executes the FTS5 query and returns ranked results.
@@ -404,8 +327,4 @@ impl Database {
             _ => false,
         }
     }
-}
-
-fn quote_sqlite_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
