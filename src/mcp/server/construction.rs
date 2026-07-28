@@ -381,6 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_context_installs_only_the_explicit_search_executor() {
+        let _pin = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let git_init = Command::new("git")
             .args(["init", "--quiet"])

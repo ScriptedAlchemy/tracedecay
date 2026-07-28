@@ -21,7 +21,8 @@ pub use definitions::{
     ALWAYS_REGISTERED_TOOL_COUNT, ToolRegistryMode, ast_grep_available, ast_grep_diagnostics_json,
     ast_grep_outline_available, context_description, default_catalog_discovery_authority,
     explore_call_budget, format_capable_tool_names,
-    get_catalog_filtered_tool_definitions_with_budget, get_tool_definitions,
+    get_catalog_filtered_tool_definitions_with_budget,
+    get_catalog_filtered_tool_definitions_with_warming_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };

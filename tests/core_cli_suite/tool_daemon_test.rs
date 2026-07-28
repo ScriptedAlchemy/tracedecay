@@ -1283,7 +1283,7 @@ fn daemon_project_handshake_uses_client_profile_identity() {
 }
 
 #[test]
-fn daemon_first_touch_init_does_not_mask_existing_profile_config_errors() {
+fn daemon_first_touch_uses_registered_runtime_without_rewriting_legacy_config() {
     let daemon_home = TempDir::new().unwrap();
     let client_home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -1318,15 +1318,16 @@ fn daemon_first_touch_init_does_not_mask_existing_profile_config_errors() {
         .expect("tracedecay tool should run");
 
     assert!(
-        !output.status.success(),
-        "first-touch daemon dispatch must not reinitialize over an existing bad config\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "daemon dispatch must use the registered configuration revision instead of re-entering \
+         legacy first-touch migration\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("failed to parse config file"),
-        "expected malformed config error, got:\n{stderr}"
+        String::from_utf8_lossy(&output.stdout).contains("Fact Store"),
+        "registered runtime should execute the requested tool\nstdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
     assert_eq!(
         std::fs::read_to_string(config_path).unwrap(),
