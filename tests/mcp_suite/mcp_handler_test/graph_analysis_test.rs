@@ -2283,12 +2283,18 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
         cycle_count, 1,
         "three-file SCC must report exactly one cycle entry, got {cycle_count}"
     );
-    let cycle = output["cycles"][0].as_array().unwrap();
+    let cycle = &output["cycles"][0];
     assert_eq!(
-        cycle.len(),
-        3,
-        "the cycle should list all three files in the SCC; got {cycle:?}"
+        cycle["member_count"].as_u64(),
+        Some(3),
+        "the cycle should account for all three files in the SCC; got {cycle:?}"
     );
+    assert_eq!(
+        cycle["members"].as_array().map(Vec::len),
+        Some(3),
+        "three members fit the default member bound; got {cycle:?}"
+    );
+    assert_eq!(cycle["omitted_member_count"].as_u64(), Some(0));
 }
 
 /// Regression for bug #12: `tracedecay_port_order`'s `cycles` output must
@@ -2556,9 +2562,17 @@ async fn circular_emits_disjoint_sccs_under_load() {
     }
     let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
-    let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
-        .await
-        .unwrap();
+    // Disjointness is only observable when every member is listed, so raise the
+    // member bound above this fixture's 15-file component.
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_circular",
+        json!({"member_limit": 200}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).unwrap();
     let cycles = output["cycles"].as_array().unwrap();
@@ -2567,7 +2581,12 @@ async fn circular_emits_disjoint_sccs_under_load() {
     use std::collections::HashSet;
     let mut seen: HashSet<String> = HashSet::new();
     for cycle in cycles {
-        let files = cycle.as_array().unwrap();
+        assert_eq!(
+            cycle["omitted_member_count"].as_u64(),
+            Some(0),
+            "the raised member bound must list every member; got {cycle:?}"
+        );
+        let files = cycle["members"].as_array().unwrap();
         for f in files {
             let s = f.as_str().unwrap().to_string();
             assert!(

@@ -450,6 +450,43 @@ impl Database {
         collect_rows(&mut rows, row_to_node, "get_children_of").await
     }
 
+    /// Returns the distinct file paths that hold at least one node of `kind`,
+    /// in path order, starting after `after_path`.
+    ///
+    /// Whole-repository walks over one node kind (unused imports, for example)
+    /// must not read the entire `nodes` table to find their candidate files.
+    /// Path-ordered keyset paging also gives those walks a stable continuation
+    /// cursor across calls.
+    pub async fn file_paths_with_nodes_of_kind(
+        &self,
+        kind: NodeKind,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut rows = self
+            .engine_conn()
+            .query(
+                "SELECT DISTINCT file_path
+                 FROM nodes
+                 WHERE kind = ?1 AND (?2 IS NULL OR file_path > ?2)
+                 ORDER BY file_path
+                 LIMIT ?3",
+                params![kind.as_str(), opt_str(after_path), limit],
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query files by node kind: {e}"),
+                operation: "file_paths_with_nodes_of_kind".to_string(),
+            })?;
+        collect_rows(
+            &mut rows,
+            |row| row.get::<String>(0),
+            "file_paths_with_nodes_of_kind",
+        )
+        .await
+    }
+
     /// Returns all nodes of a given kind.
     pub async fn get_nodes_by_kind(&self, kind: NodeKind) -> Result<Vec<Node>> {
         let mut rows = self

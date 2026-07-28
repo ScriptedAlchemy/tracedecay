@@ -3,6 +3,7 @@
 //! `unused_imports`, `god_class`, `doc_coverage`, `inheritance_depth`, `module_api`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -14,31 +15,6 @@ use crate::types::{NodeKind, Visibility};
 use super::super::ToolResult;
 use super::super::render;
 use super::support::{effective_path, filter_by_scope, unique_file_paths};
-
-/// True if `line` contains `identifier` as a whole token (boundaries are
-/// any non-`[A-Za-z0-9_]` char or string ends). Avoids false positives
-/// from substring matches like `Map` inside `HashMap`.
-fn has_identifier_match(line: &str, identifier: &str) -> bool {
-    debug_assert!(!identifier.is_empty(), "identifier must be non-empty");
-    let bytes = line.as_bytes();
-    let id_bytes = identifier.as_bytes();
-    let id_len = id_bytes.len();
-    if bytes.len() < id_len {
-        return false;
-    }
-    let mut i = 0;
-    while i + id_len <= bytes.len() {
-        if &bytes[i..i + id_len] == id_bytes {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_ok = i + id_len == bytes.len() || !is_ident_byte(bytes[i + id_len]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -298,6 +274,25 @@ pub(super) async fn handle_module_api(
 const CIRCULAR_DEFAULT_LIMIT: usize = 25;
 const CIRCULAR_MAX_LIMIT: usize = 200;
 
+/// Default and ceiling for member files listed per reported cycle.
+///
+/// Bounding the cycle count alone does not bound the answer: a single
+/// strongly connected component in a real workspace can contain hundreds of
+/// files, so `limit: 3` still rendered tens of kilobytes and landed in the
+/// truncation envelope. Each entry therefore reports a bounded member list
+/// plus its true member count, so a declared bound always fits the budget.
+const CIRCULAR_DEFAULT_MEMBER_LIMIT: usize = 12;
+const CIRCULAR_MAX_MEMBER_LIMIT: usize = 200;
+
+/// One reported cycle: the members that fit the declared member bound, plus
+/// the component's true size so the omission is stated rather than hidden.
+#[derive(Debug, PartialEq, Eq)]
+struct BoundedCycle {
+    members: Vec<String>,
+    member_count: usize,
+    omitted_member_count: usize,
+}
+
 /// Handles `tracedecay_circular` tool calls.
 pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let limit = args
@@ -306,20 +301,18 @@ pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
         .map_or(CIRCULAR_DEFAULT_LIMIT, |limit| {
             (limit as usize).clamp(1, CIRCULAR_MAX_LIMIT)
         });
+    let member_limit = args
+        .get("member_limit")
+        .and_then(Value::as_u64)
+        .map_or(CIRCULAR_DEFAULT_MEMBER_LIMIT, |limit| {
+            (limit as usize).clamp(1, CIRCULAR_MAX_MEMBER_LIMIT)
+        });
 
     let all_cycles = cg.find_circular_dependencies().await?;
     let cycle_count = all_cycles.len();
-    let (cycles, omitted) = bound_cycles(all_cycles, limit);
+    let (cycles, omitted) = bound_cycles(all_cycles, limit, member_limit);
 
-    let items: Vec<Value> = cycles.iter().map(|cycle| json!(cycle)).collect();
-
-    let output = json!({
-        "cycle_count": cycle_count,
-        "reported_cycle_count": cycles.len(),
-        "omitted_cycle_count": omitted,
-        "limit": limit,
-        "cycles": items,
-    });
+    let output = circular_output(&cycles, cycle_count, omitted, limit, member_limit);
 
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         render_circular_md(&cycles, cycle_count, omitted, limit)
@@ -332,27 +325,72 @@ pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
     ))
 }
 
+fn circular_output(
+    cycles: &[BoundedCycle],
+    cycle_count: usize,
+    omitted: usize,
+    limit: usize,
+    member_limit: usize,
+) -> Value {
+    let items: Vec<Value> = cycles
+        .iter()
+        .map(|cycle| {
+            json!({
+                "members": cycle.members,
+                "member_count": cycle.member_count,
+                "omitted_member_count": cycle.omitted_member_count,
+            })
+        })
+        .collect();
+    json!({
+        "cycle_count": cycle_count,
+        "reported_cycle_count": cycles.len(),
+        "omitted_cycle_count": omitted,
+        "limit": limit,
+        "member_limit": member_limit,
+        "cycles": items,
+    })
+}
+
 /// Renders file-level dependency cycles as arrow chains that preserve cycle
 /// order (`a.rs -> b.rs -> a.rs`) instead of collapsing the members into a
 /// directory tree, which destroys the cyclic relationship. Each SCC's member
 /// files are joined with ` -> ` and the first is repeated at the end to close
 /// the loop.
-/// Orders cycles largest-first and bounds them to `limit`, returning the
-/// bounded page and the number of cycles it leaves out.
+/// Orders cycles largest-first and bounds them to `limit` cycles of
+/// `member_limit` members each, returning the bounded page and the number of
+/// cycles it leaves out.
 ///
 /// The largest strongly connected components are the ones worth breaking, so a
 /// bounded page reports the worst offenders rather than an arbitrary prefix.
-/// Ties fall back to path order so repeated calls agree. The omitted count is
-/// returned rather than dropped: the caller always states what it left out.
-fn bound_cycles(mut cycles: Vec<Vec<String>>, limit: usize) -> (Vec<Vec<String>>, usize) {
+/// Ties fall back to path order so repeated calls agree. Both the omitted cycle
+/// count and each component's true member count are returned rather than
+/// dropped: the caller always states what it left out.
+fn bound_cycles(
+    mut cycles: Vec<Vec<String>>,
+    limit: usize,
+    member_limit: usize,
+) -> (Vec<BoundedCycle>, usize) {
     let omitted = cycles.len().saturating_sub(limit);
     cycles.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
     cycles.truncate(limit);
-    (cycles, omitted)
+    let bounded = cycles
+        .into_iter()
+        .map(|mut members| {
+            let member_count = members.len();
+            members.truncate(member_limit);
+            BoundedCycle {
+                omitted_member_count: member_count.saturating_sub(members.len()),
+                members,
+                member_count,
+            }
+        })
+        .collect();
+    (bounded, omitted)
 }
 
 fn render_circular_md(
-    cycles: &[Vec<String>],
+    cycles: &[BoundedCycle],
     cycle_count: usize,
     omitted: usize,
     limit: usize,
@@ -365,12 +403,22 @@ fn render_circular_md(
     let mut out = String::new();
     let _ = writeln!(out, "# Circular Dependencies ({cycle_count})\n");
     for (i, cycle) in cycles.iter().enumerate() {
-        if cycle.is_empty() {
+        let Some(entry) = cycle.members.first() else {
             continue;
+        };
+        let mut chain = cycle.members.join(" -> ");
+        if cycle.omitted_member_count > 0 {
+            // An elided component is not a closed loop; say so instead of
+            // rendering a chain that reads as the whole cycle.
+            let _ = write!(
+                chain,
+                " -> … ({} further member(s) not shown of {} at member_limit)",
+                cycle.omitted_member_count, cycle.member_count
+            );
+        } else {
+            // Close the loop by repeating the entry file.
+            let _ = write!(chain, " -> {entry}");
         }
-        let mut chain = cycle.join(" -> ");
-        // Close the loop by repeating the entry file.
-        let _ = write!(chain, " -> {}", cycle[0]);
         let _ = writeln!(out, "{}. {chain}", i + 1);
     }
     if omitted > 0 {
@@ -429,97 +477,143 @@ pub(super) async fn handle_hotspots(
     ))
 }
 
+/// Default and ceiling for the unused imports reported in one page.
+const UNUSED_IMPORTS_DEFAULT_LIMIT: usize = 100;
+const UNUSED_IMPORTS_MAX_LIMIT: usize = 500;
+
+/// Files inspected in one call before the answer becomes a typed partial.
+///
+/// The scan reads and masks each candidate file's source, so an unbounded walk
+/// over a large workspace never returns inside the caller's deadline. A file
+/// budget keeps the call bounded and the response states the continuation
+/// cursor rather than reporting a short list as the whole truth.
+const UNUSED_IMPORTS_FILE_BUDGET: usize = 400;
+
+/// Files fetched from the graph per keyset page while walking candidates.
+const UNUSED_IMPORTS_FILE_PAGE: usize = 64;
+
+/// The line span in which an identifier occurs within one masked file.
+///
+/// An identifier is referenced outside a `use` statement's own line range
+/// exactly when its first occurrence precedes that range or its last
+/// occurrence follows it, so two line numbers answer the question without
+/// rescanning the file per identifier.
+#[derive(Clone, Copy)]
+struct IdentifierSpan {
+    first_line: u32,
+    last_line: u32,
+}
+
+/// Indexes every identifier in a masked source once, so each import's
+/// reference check is a map lookup instead of a full-file scan.
+fn identifier_spans(source: &str) -> HashMap<String, IdentifierSpan> {
+    let mut spans: HashMap<String, IdentifierSpan> = HashMap::new();
+    for (line_index, line) in source.lines().enumerate() {
+        let line_index = line_index as u32;
+        for identifier in identifiers_in_line(line) {
+            spans
+                .entry(identifier)
+                .and_modify(|span| span.last_line = line_index)
+                .or_insert(IdentifierSpan {
+                    first_line: line_index,
+                    last_line: line_index,
+                });
+        }
+    }
+    spans
+}
+
+/// Splits a masked source line into whole identifier tokens (boundaries are
+/// any non-`[A-Za-z0-9_]` char or the line ends), so `Map` never matches
+/// inside `HashMap`.
+fn identifiers_in_line(line: &str) -> Vec<String> {
+    let mut identifiers = Vec::new();
+    let mut current = String::new();
+    for character in line.chars() {
+        if character.is_alphanumeric() || character == '_' {
+            current.push(character);
+        } else if !current.is_empty() {
+            identifiers.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        identifiers.push(current);
+    }
+    identifiers
+}
+
 /// Handles `tracedecay_unused_imports` tool calls.
+///
+/// Walks candidate files in path order, so `cursor` resumes the walk exactly
+/// where the previous page stopped and `complete` reports whether the answer
+/// covers the whole scope.
 pub(super) async fn handle_unused_imports(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let _ = args; // currently unused beyond scope filtering
-    let all_nodes = cg.get_all_nodes().await?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(UNUSED_IMPORTS_DEFAULT_LIMIT, |limit| {
+            (limit as usize).clamp(1, UNUSED_IMPORTS_MAX_LIMIT)
+        });
+    let mut after_path = args
+        .get("cursor")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
-    // Find all Use nodes
-    let use_nodes: Vec<&crate::types::Node> = all_nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .filter(|n| path_matches_optional_scope(&n.file_path, scope_prefix))
-        .collect();
-
+    let project_root = cg.project_root();
     let mut unused: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
+    let mut scanned_files = 0usize;
+    // The cursor is exclusive, so it must name the last file this call
+    // finished. Advancing it past a file the call never inspected would drop
+    // that file from every continuation.
+    let mut last_scanned: Option<String> = None;
+    let mut partial_reason: Option<&str> = None;
 
-    // Source-text fallback (cheap + cached per file): every Use node is
-    // potentially unused if the imported identifier appears nowhere else in
-    // the file body. The previous graph-only check was unreliable because
-    // the Rust resolver doesn't create `Uses` edges for std/foreign-crate
-    // imports — every `use std::collections::HashSet` had no outgoing edge
-    // regardless of whether it was actually referenced.
-    //
-    // `pub use` re-exports are intentional public aliases; we never report
-    // them as unused.
-    let project_root = cg.project_root();
-    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
-    for use_node in &use_nodes {
-        if use_node.visibility == crate::types::Visibility::Pub {
-            continue;
+    'walk: loop {
+        let files = cg
+            .file_paths_with_nodes_of_kind(
+                NodeKind::Use,
+                after_path.as_deref(),
+                UNUSED_IMPORTS_FILE_PAGE,
+            )
+            .await?;
+        if files.is_empty() {
+            break;
         }
-        // The Use node's `name` is the full import path as written. Three
-        // shapes show up in real Rust code:
-        //   - `foo::bar`           → single identifier `bar`
-        //   - `foo::bar as baz`    → single identifier `baz`
-        //   - `foo::{a, b as c}`   → grouped: identifiers `a`, `c`
-        // The previous version only handled the first two: it took the last
-        // `::` segment and treated the literal string `{a, b as c}` as one
-        // identifier, which never matched anything and therefore either
-        // flagged every grouped import (false positive) or missed unused
-        // members inside a partially-used group (false negative). Real
-        // codebases lean heavily on grouped imports.
-        let identifiers = identifiers_from_use_path(&use_node.name);
-        if identifiers.is_empty() {
-            continue;
-        }
-
-        // Cache the *masked* source (comments and string/char literals blanked)
-        // so an import merely named in a comment isn't read as a real use.
-        let source = file_cache
-            .entry(use_node.file_path.clone())
-            .or_insert_with(|| {
-                let abs = project_root.join(&use_node.file_path);
-                std::fs::read_to_string(&abs)
-                    .ok()
-                    .map(|src| crate::extraction::source_mask::masked_rust_source(&src))
-            })
-            .clone();
-        let Some(source) = source else {
-            continue;
-        };
-
-        for identifier in &identifiers {
-            // Count word-boundary occurrences of the identifier outside the
-            // use statement's own line range. If zero non-use references
-            // appear, this particular identifier is unused.
-            let mut found = false;
-            for (line_idx, line) in source.lines().enumerate() {
-                let line_idx = line_idx as u32;
-                if line_idx >= use_node.start_line && line_idx <= use_node.end_line {
-                    continue;
-                }
-                if has_identifier_match(line, identifier) {
-                    found = true;
-                    break;
-                }
+        for file_path in files {
+            if !path_matches_optional_scope(&file_path, scope_prefix) {
+                after_path = Some(file_path);
+                continue;
             }
-            if !found {
-                touched.push(use_node.file_path.clone());
-                unused.push(json!({
-                    "id": use_node.id,
-                    "name": use_node.name,
-                    "unused": identifier,
-                    "file": use_node.file_path,
-                    "line": use_node.start_line,
-                }));
+            if scanned_files >= UNUSED_IMPORTS_FILE_BUDGET {
+                partial_reason = Some("file_budget_exhausted");
+                break 'walk;
+            }
+            scanned_files += 1;
+            let file_unused = unused_imports_in_file(cg, project_root, &file_path).await?;
+            if !file_unused.is_empty() {
+                touched.push(file_path.clone());
+            }
+            unused.extend(file_unused);
+            after_path = Some(file_path.clone());
+            last_scanned = Some(file_path);
+            if unused.len() >= limit {
+                unused.truncate(limit);
+                partial_reason = Some("limit_reached");
+                break 'walk;
             }
         }
+    }
+    // A partial answer without a resumable cursor would be a dead end, so a
+    // stop that produced no inspected file is reported as complete coverage of
+    // what the scope contains rather than a fabricated continuation.
+    let next_cursor = partial_reason.and(last_scanned);
+    if next_cursor.is_none() {
+        partial_reason = None;
     }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
@@ -527,6 +621,11 @@ pub(super) async fn handle_unused_imports(
     let output = json!({
         "unused_import_count": unused.len(),
         "imports": unused,
+        "limit": limit,
+        "scanned_files": scanned_files,
+        "complete": partial_reason.is_none(),
+        "partial_reason": partial_reason,
+        "next_cursor": next_cursor,
     });
 
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
@@ -538,6 +637,63 @@ pub(super) async fn handle_unused_imports(
         }),
         touched_files,
     ))
+}
+
+/// Reports the unused imports of one file.
+///
+/// Source-text scan (comments and string/char literals masked, so an import
+/// merely named in a comment is not read as a real use): a `use` identifier is
+/// unused when it appears nowhere outside its own statement. A graph-only check
+/// is unreliable because the Rust resolver creates no `Uses` edge for
+/// std/foreign-crate imports.
+///
+/// `pub use` re-exports are intentional public aliases and are never reported.
+async fn unused_imports_in_file(
+    cg: &TraceDecay,
+    project_root: &Path,
+    file_path: &str,
+) -> Result<Vec<Value>> {
+    let use_nodes: Vec<crate::types::Node> = cg
+        .get_nodes_by_file(file_path)
+        .await?
+        .into_iter()
+        .filter(|node| node.kind == NodeKind::Use)
+        .filter(|node| node.visibility != crate::types::Visibility::Pub)
+        .collect();
+    if use_nodes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Ok(source) = std::fs::read_to_string(project_root.join(file_path)) else {
+        return Ok(Vec::new());
+    };
+    let spans = identifier_spans(&crate::extraction::source_mask::masked_rust_source(&source));
+
+    let mut unused = Vec::new();
+    for use_node in use_nodes {
+        // The Use node's `name` is the full import path as written. Three
+        // shapes show up in real Rust code:
+        //   - `foo::bar`           → single identifier `bar`
+        //   - `foo::bar as baz`    → single identifier `baz`
+        //   - `foo::{a, b as c}`   → grouped: identifiers `a`, `c`
+        // Grouped imports must expand, otherwise an unused member inside a
+        // partially-used group is missed and the literal `{a, b as c}` is
+        // treated as one identifier that matches nothing.
+        for identifier in identifiers_from_use_path(&use_node.name) {
+            let referenced = spans.get(&identifier).is_some_and(|span| {
+                span.first_line < use_node.start_line || span.last_line > use_node.end_line
+            });
+            if !referenced {
+                unused.push(json!({
+                    "id": use_node.id,
+                    "name": use_node.name,
+                    "unused": identifier,
+                    "file": file_path,
+                    "line": use_node.start_line,
+                }));
+            }
+        }
+    }
+    Ok(unused)
 }
 
 /// Handles `tracedecay_rank` tool calls.
@@ -2506,15 +2662,26 @@ fn line_is_comment(source: &str, byte: usize) -> bool {
 
 #[cfg(test)]
 mod circular_render_tests {
-    use super::{CIRCULAR_MAX_LIMIT, bound_cycles, render_circular_md};
+    use super::{
+        CIRCULAR_DEFAULT_MEMBER_LIMIT, CIRCULAR_MAX_LIMIT, bound_cycles, circular_output,
+        render_circular_md,
+    };
+
+    /// Mirrors [`crate::mcp::tools::MAX_RESPONSE_CHARS`], the point at which a
+    /// response is replaced by a preview envelope plus a retrieval handle.
+    const RESPONSE_BUDGET: usize = 15_000;
 
     fn cycle(files: &[&str]) -> Vec<String> {
         files.iter().map(|file| (*file).to_string()).collect()
     }
 
+    fn bounded(files: &[&str], member_limit: usize) -> Vec<super::BoundedCycle> {
+        bound_cycles(vec![cycle(files)], 1, member_limit).0
+    }
+
     #[test]
     fn renders_arrow_chain_closing_the_loop() {
-        let cycles = vec![cycle(&["a.rs", "b.rs"])];
+        let cycles = bounded(&["a.rs", "b.rs"], CIRCULAR_DEFAULT_MEMBER_LIMIT);
         let out = render_circular_md(&cycles, 1, 0, 25);
         assert!(out.contains("a.rs -> b.rs -> a.rs"), "got: {out}");
         assert!(out.contains("Circular Dependencies (1)"), "got: {out}");
@@ -2528,13 +2695,17 @@ mod circular_render_tests {
 
     #[test]
     fn numbers_multiple_cycles() {
-        let cycles = vec![cycle(&["a.rs", "b.rs"]), cycle(&["c.rs", "d.rs", "e.rs"])];
+        let (cycles, _) = bound_cycles(
+            vec![cycle(&["c.rs", "d.rs", "e.rs"]), cycle(&["a.rs", "b.rs"])],
+            2,
+            CIRCULAR_DEFAULT_MEMBER_LIMIT,
+        );
         let out = render_circular_md(&cycles, 2, 0, 25);
-        assert!(out.contains("1. a.rs -> b.rs -> a.rs"), "got: {out}");
         assert!(
-            out.contains("2. c.rs -> d.rs -> e.rs -> c.rs"),
+            out.contains("1. c.rs -> d.rs -> e.rs -> c.rs"),
             "got: {out}"
         );
+        assert!(out.contains("2. a.rs -> b.rs -> a.rs"), "got: {out}");
     }
 
     #[test]
@@ -2545,26 +2716,31 @@ mod circular_render_tests {
             cycle(&["small-a.rs", "small-a2.rs"]),
         ];
 
-        let (page, omitted) = bound_cycles(cycles, 2);
+        let (page, omitted) = bound_cycles(cycles, 2, CIRCULAR_DEFAULT_MEMBER_LIMIT);
 
         assert_eq!(omitted, 1, "the omitted cycle must be counted, not dropped");
         assert_eq!(page.len(), 2);
-        assert_eq!(page[0], cycle(&["big.rs", "big2.rs", "big3.rs", "big4.rs"]));
+        assert_eq!(
+            page[0].members,
+            cycle(&["big.rs", "big2.rs", "big3.rs", "big4.rs"])
+        );
+        assert_eq!(page[0].member_count, 4);
+        assert_eq!(page[0].omitted_member_count, 0);
         // Ties resolve by path order so repeated calls agree.
-        assert_eq!(page[1], cycle(&["small-a.rs", "small-a2.rs"]));
+        assert_eq!(page[1].members, cycle(&["small-a.rs", "small-a2.rs"]));
     }
 
     #[test]
     fn unbounded_page_reports_no_omission() {
         let cycles = vec![cycle(&["a.rs", "b.rs"])];
-        let (page, omitted) = bound_cycles(cycles, 25);
+        let (page, omitted) = bound_cycles(cycles, 25, CIRCULAR_DEFAULT_MEMBER_LIMIT);
         assert_eq!(omitted, 0);
         assert_eq!(page.len(), 1);
     }
 
     #[test]
     fn omission_notice_states_the_remainder_and_the_ceiling() {
-        let cycles = vec![cycle(&["a.rs", "b.rs"])];
+        let cycles = bounded(&["a.rs", "b.rs"], CIRCULAR_DEFAULT_MEMBER_LIMIT);
         let out = render_circular_md(&cycles, 9, 8, 1);
         assert!(out.contains("Circular Dependencies (9)"), "got: {out}");
         assert!(
@@ -2572,6 +2748,49 @@ mod circular_render_tests {
             "got: {out}"
         );
         assert!(out.contains(&CIRCULAR_MAX_LIMIT.to_string()), "got: {out}");
+    }
+
+    /// A single strongly connected component can hold hundreds of files. The
+    /// declared bound must shape the answer before rendering, so both the JSON
+    /// payload and the markdown stay inside the response budget and state the
+    /// component's true size.
+    #[test]
+    fn wide_component_is_bounded_within_the_response_budget() {
+        let members: Vec<String> = (0..400)
+            .map(|index| {
+                format!("crates/tracedecay-application/src/deeply/nested/module_{index:04}.rs")
+            })
+            .collect();
+        let member_count = members.len();
+
+        let (page, omitted) = bound_cycles(vec![members], 3, CIRCULAR_DEFAULT_MEMBER_LIMIT);
+
+        assert_eq!(omitted, 0);
+        assert_eq!(page[0].member_count, member_count);
+        assert_eq!(page[0].members.len(), CIRCULAR_DEFAULT_MEMBER_LIMIT);
+        assert_eq!(
+            page[0].omitted_member_count,
+            member_count - CIRCULAR_DEFAULT_MEMBER_LIMIT
+        );
+
+        let payload = circular_output(&page, 1, omitted, 3, CIRCULAR_DEFAULT_MEMBER_LIMIT);
+        let serialized = serde_json::to_string_pretty(&payload).expect("payload serializes");
+        assert!(
+            serialized.len() <= RESPONSE_BUDGET,
+            "bounded payload is {} chars, over the {RESPONSE_BUDGET} budget",
+            serialized.len()
+        );
+
+        let markdown = render_circular_md(&page, 1, omitted, 3);
+        assert!(
+            markdown.len() <= RESPONSE_BUDGET,
+            "bounded markdown is {} chars, over the {RESPONSE_BUDGET} budget",
+            markdown.len()
+        );
+        assert!(
+            markdown.contains("further member(s) not shown"),
+            "the bounded member list must state its omission: {markdown}"
+        );
     }
 }
 

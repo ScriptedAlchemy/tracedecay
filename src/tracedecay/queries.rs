@@ -184,6 +184,20 @@ impl TraceDecay {
         self.db.get_all_nodes().await
     }
 
+    /// Returns the distinct file paths holding at least one node of `kind`, in
+    /// path order after `after_path`, so a whole-repository walk over one kind
+    /// can page instead of loading the graph.
+    pub async fn file_paths_with_nodes_of_kind(
+        &self,
+        kind: NodeKind,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        self.db
+            .file_paths_with_nodes_of_kind(kind, after_path, limit)
+            .await
+    }
+
     /// Returns incoming edges to a target node.
     pub async fn get_incoming_edges(&self, node_id: &str) -> Result<Vec<Edge>> {
         self.db.get_incoming_edges(node_id, &[]).await

@@ -320,8 +320,8 @@ mod tests {
     use super::{MaskOptions, masked_rust_source, masked_rust_source_with};
 
     /// Whole-token match used by the scanners: does `identifier` appear as a
-    /// real token (non-identifier boundaries) anywhere on `line`? Mirrors
-    /// `has_identifier_match` in the analysis handlers.
+    /// real token (non-identifier boundaries) anywhere on `line`? Mirrors the
+    /// identifier tokenizer in the analysis handlers.
     fn contains_token(line: &str, identifier: &str) -> bool {
         let bytes = line.as_bytes();
         let id = identifier.as_bytes();
