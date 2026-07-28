@@ -103,21 +103,21 @@ fn retained_project_graph_resolver(
         let administration = administration.clone();
         Box::pin(async move {
             let graphs = administration.mounted_project_graphs().await;
-            let requested_root =
-                authority::canonical_identity_path(&request.requested_worktree_root).map_err(
-                    |error| {
-                        TraceDecayError::project_route(
-                            "project_route_unavailable",
-                            true,
-                            format!(
-                                "workspace identity is unavailable for {}: {error}",
-                                request.requested_worktree_root.display()
-                            ),
-                        )
-                    },
-                )?;
-            let registered_root =
-                authority::canonical_identity_path(&request.registered_root).map_err(|error| {
+            let requested_root = authority::canonical_identity_path(
+                &request.requested_worktree_root,
+            )
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "project_route_unavailable",
+                    true,
+                    format!(
+                        "workspace identity is unavailable for {}: {error}",
+                        request.requested_worktree_root.display()
+                    ),
+                )
+            })?;
+            let registered_root = authority::canonical_identity_path(&request.registered_root)
+                .map_err(|error| {
                     TraceDecayError::project_route(
                         "project_route_unavailable",
                         true,
@@ -148,12 +148,17 @@ fn retained_project_graph_resolver(
                 .into_iter()
                 .filter(|graph| {
                     graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                        && request.requested_git_common_dir.as_ref().is_none_or(|requested| {
-                            let requested = authority::canonical_identity_path(requested).ok();
-                            let mounted = crate::worktree::git_common_dir(graph.project_root())
-                                .and_then(|path| authority::canonical_identity_path(&path).ok());
-                            mounted.is_none() || mounted == requested
-                        })
+                        && request
+                            .requested_git_common_dir
+                            .as_ref()
+                            .is_none_or(|requested| {
+                                let requested = authority::canonical_identity_path(requested).ok();
+                                let mounted = crate::worktree::git_common_dir(graph.project_root())
+                                    .and_then(|path| {
+                                        authority::canonical_identity_path(&path).ok()
+                                    });
+                                mounted.is_none() || mounted == requested
+                            })
                 })
                 .collect::<Vec<_>>();
             let branch_matches = |graph: &crate::tracedecay::TraceDecay| {
@@ -254,9 +259,7 @@ fn code_index_search_hydration_budget(
     accepted_semantic_budget: Option<&tracedecay_domain::RetrievalBudget>,
     pr9_budget: &tracedecay_domain::RetrievalBudget,
 ) -> tracedecay_domain::RetrievalBudget {
-    accepted_semantic_budget
-        .copied()
-        .unwrap_or(*pr9_budget)
+    accepted_semantic_budget.copied().unwrap_or(*pr9_budget)
 }
 
 struct CodeIndexSearchHydrationSourceV1<A, P, H> {

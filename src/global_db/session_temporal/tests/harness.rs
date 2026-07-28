@@ -170,14 +170,7 @@ impl RegisteredTemporalHarness {
             ),
         ] {
             let observation = fixture_observation(
-                1,
-                session_id,
-                provider,
-                message_id,
-                record_id,
-                receipt_id,
-                payload,
-                false,
+                1, session_id, provider, message_id, record_id, receipt_id, payload, false,
             );
             let anchor = self.persist_observation(&observation).await;
             let actual = policy_digest_bytes(&anchor);
@@ -188,14 +181,8 @@ impl RegisteredTemporalHarness {
             }
             self.seed_session(session_id, provider, "application-root-key", 1)
                 .await;
-            self.seed_occurrence(
-                &observation,
-                &anchor,
-                message_id,
-                payload,
-                1,
-            )
-            .await;
+            self.seed_occurrence(&observation, &anchor, message_id, payload, 1)
+                .await;
         }
         let foreign = fixture_observation(
             1,

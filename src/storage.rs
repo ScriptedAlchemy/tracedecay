@@ -68,7 +68,7 @@ pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
 /// Checks the fixed 16-byte `SQLite` header without opening the database.
 ///
-/// This is deliberately file-only: opening SQLite may create or rewrite WAL/SHM
+/// This is deliberately file-only: opening `SQLite` may create or rewrite WAL/SHM
 /// sidecars before reporting that the main file is not a database. Recovery
 /// paths use this preflight to preserve the complete on-disk recovery set.
 pub(crate) fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
@@ -1514,8 +1514,8 @@ impl PrivateStoreIo {
         Ok(())
     }
 
-    /// Synchronizes the durable members of one SQLite WAL family. The SHM
-    /// coordination file is intentionally excluded because SQLite rebuilds it.
+    /// Synchronizes the durable members of one `SQLite` WAL family. The SHM
+    /// coordination file is intentionally excluded because `SQLite` rebuilds it.
     pub fn sync_sqlite_family(path: &Path) -> io::Result<()> {
         reject_symlink_components(path, "private SQLite store")?;
         for member in [
