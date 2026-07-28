@@ -9,7 +9,7 @@
 //! constructs are preserved as evidence; extraction never invents successful
 //! structure.
 
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use serde::Serialize;
 use tracedecay_domain::{
@@ -18,7 +18,7 @@ use tracedecay_domain::{
 };
 
 use super::{intake::ReceiptBoundCodeFileV1, languages::canonical_language_id};
-use crate::types::ExtractionResult;
+use crate::types::{Edge, ExtractionResult, Node, UnresolvedRef, Visibility};
 
 /// Cancellation checkpoint for extraction (the code-index-local spelling of
 /// the Plan 25 `CancellationToken`). Application adapts its cancellation
@@ -142,52 +142,180 @@ impl Default for TreeSitterExtractor {
     }
 }
 
-fn sort_canonical_json(values: &mut Vec<serde_json::Value>) {
-    let mut keyed = values
-        .drain(..)
-        .map(|value| {
-            let key = serde_json::to_string(&value).expect("canonical value serializes");
-            (key, value)
+#[derive(Serialize)]
+struct CanonicalNodeRow<'a> {
+    id: &'a str,
+    kind: &'a crate::types::NodeKind,
+    name: &'a str,
+    qualified_name: &'a str,
+    file_path: &'a str,
+    start_line: u32,
+    attrs_start_line: u32,
+    end_line: u32,
+    start_column: u32,
+    end_column: u32,
+    signature: Option<&'a str>,
+    docstring: Option<&'a str>,
+    visibility: &'a Visibility,
+    is_async: bool,
+    branches: u32,
+    loops: u32,
+    returns: u32,
+    max_nesting: u32,
+    unsafe_blocks: u32,
+    unchecked_calls: u32,
+    assertions: u32,
+    parent_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a Node> for CanonicalNodeRow<'a> {
+    fn from(node: &'a Node) -> Self {
+        Self {
+            id: &node.id,
+            kind: &node.kind,
+            name: &node.name,
+            qualified_name: &node.qualified_name,
+            file_path: &node.file_path,
+            start_line: node.start_line,
+            attrs_start_line: node.attrs_start_line,
+            end_line: node.end_line,
+            start_column: node.start_column,
+            end_column: node.end_column,
+            signature: node.signature.as_deref(),
+            docstring: node.docstring.as_deref(),
+            visibility: &node.visibility,
+            is_async: node.is_async,
+            branches: node.branches,
+            loops: node.loops,
+            returns: node.returns,
+            max_nesting: node.max_nesting,
+            unsafe_blocks: node.unsafe_blocks,
+            unchecked_calls: node.unchecked_calls,
+            assertions: node.assertions,
+            parent_id: node.parent_id.as_deref(),
+        }
+    }
+}
+
+fn compare_canonical_nodes(left: &CanonicalNodeRow<'_>, right: &CanonicalNodeRow<'_>) -> Ordering {
+    left.id
+        .cmp(right.id)
+        .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+        .then_with(|| left.name.cmp(right.name))
+        .then_with(|| left.qualified_name.cmp(right.qualified_name))
+        .then_with(|| left.file_path.cmp(right.file_path))
+        .then_with(|| left.start_line.cmp(&right.start_line))
+        .then_with(|| left.attrs_start_line.cmp(&right.attrs_start_line))
+        .then_with(|| left.end_line.cmp(&right.end_line))
+        .then_with(|| left.start_column.cmp(&right.start_column))
+        .then_with(|| left.end_column.cmp(&right.end_column))
+        .then_with(|| left.signature.cmp(&right.signature))
+        .then_with(|| left.docstring.cmp(&right.docstring))
+        .then_with(|| left.visibility.as_str().cmp(right.visibility.as_str()))
+        .then_with(|| left.is_async.cmp(&right.is_async))
+        .then_with(|| left.branches.cmp(&right.branches))
+        .then_with(|| left.loops.cmp(&right.loops))
+        .then_with(|| left.returns.cmp(&right.returns))
+        .then_with(|| left.max_nesting.cmp(&right.max_nesting))
+        .then_with(|| left.unsafe_blocks.cmp(&right.unsafe_blocks))
+        .then_with(|| left.unchecked_calls.cmp(&right.unchecked_calls))
+        .then_with(|| left.assertions.cmp(&right.assertions))
+        .then_with(|| left.parent_id.cmp(&right.parent_id))
+}
+
+#[derive(Serialize)]
+struct CanonicalEdgeRow<'a> {
+    source: &'a str,
+    target: &'a str,
+    kind: crate::types::EdgeKind,
+    line: Option<u32>,
+}
+
+impl<'a> From<&'a Edge> for CanonicalEdgeRow<'a> {
+    fn from(edge: &'a Edge) -> Self {
+        Self {
+            source: &edge.source,
+            target: &edge.target,
+            kind: edge.kind,
+            line: edge.line,
+        }
+    }
+}
+
+fn compare_canonical_edges(left: &CanonicalEdgeRow<'_>, right: &CanonicalEdgeRow<'_>) -> Ordering {
+    left.source
+        .cmp(right.source)
+        .then_with(|| left.target.cmp(right.target))
+        .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+        .then_with(|| left.line.cmp(&right.line))
+}
+
+#[derive(Serialize)]
+struct CanonicalUnresolvedRefRow<'a> {
+    from_node_id: &'a str,
+    reference_name: &'a str,
+    reference_kind: crate::types::EdgeKind,
+    line: u32,
+    column: u32,
+    file_path: &'a str,
+}
+
+impl<'a> From<&'a UnresolvedRef> for CanonicalUnresolvedRefRow<'a> {
+    fn from(reference: &'a UnresolvedRef) -> Self {
+        Self {
+            from_node_id: &reference.from_node_id,
+            reference_name: &reference.reference_name,
+            reference_kind: reference.reference_kind,
+            line: reference.line,
+            column: reference.column,
+            file_path: &reference.file_path,
+        }
+    }
+}
+
+fn compare_canonical_unresolved_refs(
+    left: &CanonicalUnresolvedRefRow<'_>,
+    right: &CanonicalUnresolvedRefRow<'_>,
+) -> Ordering {
+    left.from_node_id
+        .cmp(right.from_node_id)
+        .then_with(|| left.reference_name.cmp(right.reference_name))
+        .then_with(|| {
+            left.reference_kind
+                .as_str()
+                .cmp(right.reference_kind.as_str())
         })
-        .collect::<Vec<_>>();
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    values.extend(keyed.into_iter().map(|(_, value)| value));
+        .then_with(|| left.line.cmp(&right.line))
+        .then_with(|| left.column.cmp(&right.column))
+        .then_with(|| left.file_path.cmp(right.file_path))
 }
 
 /// Canonical digest of the extraction rows. Operational timestamps are
-/// stripped and rows are canonically ordered before hashing.
+/// omitted through borrowed DTOs and rows are canonically ordered by stable
+/// typed fields before one payload serialization.
 fn rows_digest(
     file: &ValidatedCodeFileV1,
     descriptor: &LanguageDescriptorV1,
-    result: &crate::types::ExtractionResult,
+    result: &ExtractionResult,
 ) -> Result<ManifestDigest, ExtractionFailureV1> {
-    let mut nodes: Vec<serde_json::Value> = result
+    let mut nodes = result
         .nodes
         .iter()
-        .map(|node| {
-            let mut value =
-                serde_json::to_value(node).expect("extraction nodes serialize canonically");
-            if let Some(object) = value.as_object_mut() {
-                object.remove("updated_at");
-            }
-            value
-        })
-        .collect();
-    let mut edges: Vec<serde_json::Value> = result
+        .map(CanonicalNodeRow::from)
+        .collect::<Vec<_>>();
+    let mut edges = result
         .edges
         .iter()
-        .map(|edge| serde_json::to_value(edge).expect("extraction edges serialize canonically"))
-        .collect();
-    let mut unresolved: Vec<serde_json::Value> = result
+        .map(CanonicalEdgeRow::from)
+        .collect::<Vec<_>>();
+    let mut unresolved = result
         .unresolved_refs
         .iter()
-        .map(|reference| {
-            serde_json::to_value(reference).expect("unresolved refs serialize canonically")
-        })
-        .collect();
-    sort_canonical_json(&mut nodes);
-    sort_canonical_json(&mut edges);
-    sort_canonical_json(&mut unresolved);
+        .map(CanonicalUnresolvedRefRow::from)
+        .collect::<Vec<_>>();
+    nodes.sort_by(compare_canonical_nodes);
+    edges.sort_by(compare_canonical_edges);
+    unresolved.sort_by(compare_canonical_unresolved_refs);
 
     #[derive(Serialize)]
     struct RowsPayload<'a> {
@@ -197,9 +325,9 @@ fn rows_digest(
         descriptor_revision: &'a str,
         grammar_revision: &'a str,
         extractor_revision: &'a str,
-        nodes: Vec<serde_json::Value>,
-        edges: Vec<serde_json::Value>,
-        unresolved_refs: Vec<serde_json::Value>,
+        nodes: Vec<CanonicalNodeRow<'a>>,
+        edges: Vec<CanonicalEdgeRow<'a>>,
+        unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
     }
 
     canonical_sha256(&RowsPayload {
