@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::Path;
 
 use serde_json::Value;
@@ -383,11 +384,11 @@ pub(crate) async fn admit_jsonl_observations<State>(
     let retained_frame_bytes = raw.frames.iter().fold(0_u64, |total, frame| {
         total.saturating_add(u64::try_from(frame.bytes.len()).unwrap_or(u64::MAX))
     });
-    tracing::warn!(
+    tracing::debug!(
         event = "transcript_admission_batch",
         phase = "capturing",
         provider,
-        path = %path.display(),
+        transcript = %transcript_log_identity(path),
         total_frames,
         retained_frame_bytes,
         bytes_consumed = progress.bytes_consumed,
@@ -423,11 +424,11 @@ pub(crate) async fn admit_jsonl_observations<State>(
             break;
         }
         if frame_index % 256 == 0 {
-            tracing::warn!(
+            tracing::trace!(
                 event = "transcript_admission_batch",
                 phase = "capturing",
                 provider,
-                path = %path.display(),
+                transcript = %transcript_log_identity(path),
                 completed_frames = frame_index,
                 total_frames,
                 source_offset = frame.offset,
@@ -511,11 +512,11 @@ pub(crate) async fn admit_jsonl_observations<State>(
                 .await?;
         }
     }
-    tracing::warn!(
+    tracing::debug!(
         event = "transcript_admission_batch",
         phase = "complete",
         provider,
-        path = %path.display(),
+        transcript = %transcript_log_identity(path),
         total_frames,
         retained_frame_bytes,
         bytes_consumed = progress.bytes_consumed,
@@ -523,6 +524,14 @@ pub(crate) async fn admit_jsonl_observations<State>(
         "transcript admission batch finished"
     );
     Ok(progress)
+}
+
+/// Log identity for a transcript file. Transcript paths sit under the
+/// operator's home directory and name real sessions, so ingest logs carry the
+/// basename only rather than persisting an absolute path into the daemon log.
+fn transcript_log_identity(path: &Path) -> Cow<'_, str> {
+    path.file_name()
+        .map_or(Cow::Borrowed("<unnamed>"), |name| name.to_string_lossy())
 }
 
 fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
