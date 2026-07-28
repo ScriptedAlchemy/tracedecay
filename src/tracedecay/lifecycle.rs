@@ -885,10 +885,13 @@ impl TraceDecay {
         allow_corrupt_branch_repair: bool,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
+        let graph_scope = active_branch
+            .clone()
+            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
         Self::auto_track_active_branch_with_registered_configuration(
             project_root,
             &store_layout.data_root,
-            active_branch.as_deref(),
+            graph_scope.as_deref(),
             open_options.clone(),
             &store_layout,
             &configuration_database,
@@ -897,11 +900,12 @@ impl TraceDecay {
         )
         .await?;
 
-        let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
+        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
             &store_layout.data_root,
-            active_branch.as_deref(),
+            graph_scope.as_deref(),
         );
+        let serving_branch = active_branch.as_ref().and(mounted_graph_scope.clone());
 
         // Sync state belongs to the concrete graph DB, not the repository-wide
         // store root. Different tracked branches have independent databases
@@ -984,7 +988,7 @@ impl TraceDecay {
                 project_root,
                 &store_layout,
                 &db_path,
-                serving_branch.as_deref(),
+                mounted_graph_scope.as_deref(),
                 "crash verification",
                 DatabaseAccessMode::ReadOnly,
             )
@@ -1061,7 +1065,7 @@ impl TraceDecay {
             project_root,
             &store_layout,
             &db_path,
-            serving_branch.as_deref(),
+            mounted_graph_scope.as_deref(),
             "open project store",
             DatabaseAccessMode::ReadWrite,
         )
@@ -1080,7 +1084,7 @@ impl TraceDecay {
                 project_root,
                 &store_layout,
                 &db_path,
-                serving_branch.as_deref(),
+                mounted_graph_scope.as_deref(),
                 "remount project store for FTS repair",
                 DatabaseAccessMode::ReadWrite,
             )
@@ -1475,12 +1479,16 @@ impl TraceDecay {
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
+        let graph_scope = active_branch
+            .clone()
+            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
 
-        let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
+        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
             &store_layout.data_root,
-            active_branch.as_deref(),
+            graph_scope.as_deref(),
         );
+        let serving_branch = active_branch.as_ref().and(mounted_graph_scope.clone());
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
@@ -1497,7 +1505,7 @@ impl TraceDecay {
             project_root,
             &store_layout,
             &db_path,
-            serving_branch.as_deref(),
+            mounted_graph_scope.as_deref(),
             "open project store read-only",
             DatabaseAccessMode::ReadOnly,
         )
