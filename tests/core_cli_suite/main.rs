@@ -8,6 +8,8 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+#[path = "../mcp_suite/fixture.rs"]
+mod fixture;
 
 mod cli_help_test;
 mod cli_non_interactive_test;
