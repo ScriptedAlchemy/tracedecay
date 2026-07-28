@@ -169,7 +169,7 @@ async fn migrated_project_serves_old_generation_until_atomic_background_swap() {
 
     let resumed = tokio::time::timeout(
         Duration::from_secs(2),
-        runtime.open_project_graph_for_test(&project, options),
+        runtime.open_project_graph_for_test(&project, options.clone()),
     )
     .await
     .expect("restart admission must not wait for resumed work")
@@ -206,4 +206,53 @@ async fn migrated_project_serves_old_generation_until_atomic_background_swap() {
         1
     );
     resumed.close();
+
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn after_malformed_checkpoint() {}\n",
+    )
+    .expect("malformed-state source");
+    let malformed = runtime
+        .open_project_graph_for_test(&project, options.clone())
+        .await
+        .expect("open before malformed state");
+    malformed
+        .db()
+        .set_metadata("migration_reindex_state_v1", "{not-json")
+        .await
+        .expect("persist malformed state");
+    malformed.close();
+
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(2),
+        runtime.open_project_graph_for_test(&project, options),
+    )
+    .await
+    .expect("malformed durable state must not block admission")
+    .expect("reopen malformed migration state");
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if matches!(
+                recovered
+                    .migration_reindex_status()
+                    .await
+                    .expect("read recovered migration status"),
+                MigrationReindexStatusV1::Current { .. }
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("malformed migration state recovers");
+    assert_eq!(
+        recovered
+            .get_nodes_by_name("after_malformed_checkpoint")
+            .await
+            .expect("recovered generation published")
+            .len(),
+        1
+    );
+    recovered.close();
 }
