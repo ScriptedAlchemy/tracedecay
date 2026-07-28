@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::branch::BranchAddOutcome;
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::{
     MigrationReindexAvailabilityV1, MigrationReindexStatusV1, TraceDecay, TraceDecayOpenOptions,
@@ -98,12 +97,14 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
         .expect("initialize fixture");
     let full_index = initialized.index_all().await.expect("seed old generation");
     assert_eq!(full_index.file_count, FILE_COUNT);
-    assert_eq!(
-        TraceDecay::add_branch_tracking_with_options(&project, "feature", options.clone())
-            .await
-            .expect("track peer branch"),
-        BranchAddOutcome::Added
-    );
+    git(&project, &["checkout", "-q", "feature"]);
+    let feature_seed = runtime
+        .open_project_graph_for_test(&project, options.clone())
+        .await
+        .expect("auto-track peer branch through retained runtime");
+    assert_eq!(feature_seed.serving_branch(), Some("feature"));
+    feature_seed.close();
+    git(&project, &["checkout", "-q", "main"]);
 
     initialized
         .db()
@@ -220,9 +221,15 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
         TraceDecay::migration_reindex_extractions_for_test(),
         CHECKPOINT_BATCH_SIZE
     );
+    let mut active_sync_lock_name = opened
+        .db_path()
+        .file_name()
+        .expect("active graph database filename")
+        .to_os_string();
+    active_sync_lock_name.push(".sync.lock");
     let checkpoint_root = opened
-        .store_layout()
-        .sync_lock_path
+        .db_path()
+        .with_file_name(active_sync_lock_name)
         .with_extension("migration-reindex-checkpoint-v1");
     assert!(
         std::fs::read_dir(&checkpoint_root)
