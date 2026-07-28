@@ -31,6 +31,149 @@ const SOURCE_EDIT_EFFECT_REQUEST_DIGEST_DOMAIN_V1: &str =
 const SOURCE_EDIT_RECONCILIATION_ATTEMPT_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.source-edit-reconciliation-attempt.v1";
 
+/// `serde` `skip_serializing_if` predicate for default-off flags.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Result of a single string replacement edit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EditResult {
+    pub success: bool,
+    pub file_path: String,
+    pub matched_str: String,
+    pub new_str: String,
+    /// For `replace_symbol`: the exact source span that was replaced, including
+    /// any leading doc-comment / attribute block that belongs to the item. Lets
+    /// callers see precisely what was swapped out (and recover its docs/attrs if
+    /// the replacement dropped them). `None` for plain string replacements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_span: Option<String>,
+    /// True when this was a dry run: validation, spans, and the resulting
+    /// content were all computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview diff of the would-be change. Populated only on a
+    /// successful dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    pub message: String,
+}
+
+/// Result of a multi-string replacement edit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultiEditResult {
+    pub success: bool,
+    pub file_path: String,
+    pub applied_count: usize,
+    /// True when this was a dry run: replacements were validated and the
+    /// resulting content computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview diff of the would-be change. Populated only on a
+    /// successful dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    pub message: String,
+}
+
+/// Result of an insert-at operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InsertResult {
+    pub success: bool,
+    pub file_path: String,
+    pub anchor_line: u32,
+    pub content: String,
+    pub before: bool,
+    /// True when this was a dry run: the insertion point was resolved and the
+    /// resulting content computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview diff of the would-be change. Populated only on a
+    /// successful dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    pub message: String,
+}
+
+/// Result of an ast-grep rewrite operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AstGrepResult {
+    pub success: bool,
+    pub file_path: String,
+    pub pattern: String,
+    pub rewrite: String,
+    /// True when this was a dry run: the rewrite was resolved (via the built-in
+    /// literal fallback or an ast-grep preview run) but nothing was written.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview of the would-be change. Populated only on a successful
+    /// dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    pub message: String,
+}
+
+/// One evidence-based, actionable finding produced by the `move_symbol` impact
+/// engine. Each hint points at a concrete file/line and carries a suggestion
+/// the caller (or a follow-up refactor) can act on. Hints are derived from graph
+/// edges (callers/callees) and parse-level facts (identifiers, `use` lines,
+/// module declarations) — never speculative noise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveHint {
+    /// Taxonomy tag: `caller_reference`, `dependency_broken`, `import_needed`,
+    /// `visibility_required`, `collision`, `module_missing`, `cycle_risk`,
+    /// `orphaned_import`, or `cfg_context`.
+    pub kind: String,
+    /// File the finding concerns (the caller's file, the destination, or the
+    /// source), project-relative.
+    pub file: String,
+    /// 1-based line the finding concerns, when a specific site is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// Human-readable description of what the move breaks or affects.
+    pub detail: String,
+    /// The exact change to make (e.g. a `use` line to add, a path to rewrite, a
+    /// visibility to escalate). `None` when no single mechanical fix applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
+/// Result of a `move_symbol` operation: the moved span, a dry-run diff of the
+/// source + destination files, and — the centerpiece — the impact report of
+/// everything the move breaks or that needs attention.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MoveResult {
+    pub success: bool,
+    /// The resolved symbol that was (or would be) moved, `name (kind)`.
+    pub symbol: String,
+    pub source_file: String,
+    pub dest_file: String,
+    /// The exact source span that was moved, including its leading
+    /// doc-comment / attribute block. `None` on failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_span: Option<String>,
+    /// True when this was a dry run: spans, the destination shape, and the
+    /// impact report were all computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Combined preview diff of the source (removal) and destination (insertion)
+    /// files. Populated on a successful dry run; `None` for real moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// `use` lines auto-inserted at the destination because the moved body's
+    /// dependency on them was unambiguous. Reported so the caller sees exactly
+    /// what the move added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied_imports: Vec<String>,
+    /// The impact report — every actionable finding. Empty on a truly clean
+    /// move.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub impact: Vec<MoveHint>,
+    pub message: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceEditKind {
