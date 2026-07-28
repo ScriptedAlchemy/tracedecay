@@ -180,13 +180,10 @@ fn main() {
 fn async_main() -> tracedecay::errors::Result<()> {
     // Route tracing events (degradation causes, ingest warnings) to stderr —
     // without a subscriber every `tracing::warn!` in the runtime is silently
-    // dropped, which hid the causes behind typed catch-up reason codes.
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_writer(std::io::stderr)
-        .with_target(true)
-        .compact()
-        .try_init();
+    // dropped, which hid the causes behind typed catch-up reason codes. The
+    // daemon runs through this same entrypoint, so this is also the daemon's
+    // subscriber; RUST_LOG raises verbosity (default `warn`).
+    tracedecay::daemon::install_stderr_tracing();
     let args: Vec<String> = std::env::args().collect();
     if render_dynamic_command_help(&args) {
         return Ok(());

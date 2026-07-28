@@ -61,6 +61,85 @@ pub(crate) fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
     eprintln!("{}", format_daemon_log_line(event, fields));
 }
 
+/// Installs the process-wide stderr `tracing` subscriber, honoring `RUST_LOG`
+/// (default `warn`). Additive to the bespoke `[tracedecay] event=` stderr
+/// lines above — both channels share stderr, and tools that parse `event=`
+/// lines are unaffected because tracing output never carries that prefix.
+///
+/// `tracing-subscriber` is deliberately built without the `env-filter`
+/// feature (it pulls `matchers`/regex machinery into every build), so the
+/// `RUST_LOG` value is reduced to a plain global level with
+/// [`stderr_tracing_level`] instead of full per-target directives.
+pub fn install_stderr_tracing() {
+    let level = stderr_tracing_level(std::env::var("RUST_LOG").ok().as_deref());
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .compact()
+        .try_init();
+}
+
+/// Reduces a `RUST_LOG`-style directive list to one global level: the most
+/// verbose level named anywhere in it (so `foo=debug` keeps debug events
+/// flowing even though per-target filtering is unavailable). Unset, empty, or
+/// unparseable input yields the crate's default of `warn`.
+pub(crate) fn stderr_tracing_level(env_value: Option<&str>) -> tracing::level_filters::LevelFilter {
+    use tracing::level_filters::LevelFilter;
+    let default = LevelFilter::WARN;
+    let Some(env_value) = env_value else {
+        return default;
+    };
+    env_value
+        .split(',')
+        .filter_map(|directive| {
+            let level = directive
+                .rsplit_once('=')
+                .map_or(directive, |(_, level)| level);
+            level.trim().parse::<LevelFilter>().ok()
+        })
+        .max()
+        .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod stderr_tracing_tests {
+    use tracing::level_filters::LevelFilter;
+
+    use super::stderr_tracing_level;
+
+    #[test]
+    fn defaults_to_warn_without_rust_log() {
+        assert_eq!(stderr_tracing_level(None), LevelFilter::WARN);
+        assert_eq!(stderr_tracing_level(Some("")), LevelFilter::WARN);
+        assert_eq!(stderr_tracing_level(Some("not-a-level")), LevelFilter::WARN);
+    }
+
+    #[test]
+    fn honors_plain_levels_case_insensitively() {
+        assert_eq!(stderr_tracing_level(Some("debug")), LevelFilter::DEBUG);
+        assert_eq!(stderr_tracing_level(Some("TRACE")), LevelFilter::TRACE);
+        assert_eq!(stderr_tracing_level(Some("error")), LevelFilter::ERROR);
+        assert_eq!(stderr_tracing_level(Some("off")), LevelFilter::OFF);
+    }
+
+    #[test]
+    fn takes_the_most_verbose_level_from_directive_lists() {
+        assert_eq!(
+            stderr_tracing_level(Some("tracedecay=debug,hyper=warn")),
+            LevelFilter::DEBUG
+        );
+        assert_eq!(
+            stderr_tracing_level(Some("warn,tokio::task=trace")),
+            LevelFilter::TRACE
+        );
+        assert_eq!(
+            stderr_tracing_level(Some("garbage,info")),
+            LevelFilter::INFO
+        );
+    }
+}
+
 /// Parses one daemon log line into a [`WatcherEvent`] when it is a `git_watch_*`
 /// event. Mirrors [`format_daemon_log_line`] (space-separated `key=value`, values
 /// optionally double-quoted). Returns `None` for non-watcher lines.
