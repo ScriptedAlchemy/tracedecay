@@ -1140,6 +1140,11 @@ async fn dispatch_application_surface_tools(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    if operation == ApplicationSurfaceOperation::DiagnosticsRead
+        && options.application_invocation_executor.is_none()
+    {
+        return None;
+    }
     let normalized_args = match crate::application_surface::normalize_application_tool_args(
         tool_name,
         args.clone(),
