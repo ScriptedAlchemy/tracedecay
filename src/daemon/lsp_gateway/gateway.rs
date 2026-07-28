@@ -289,7 +289,13 @@ impl MethodUnavailable {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GatewayResponse<T> {
     Value(T),
-    Partial { value: T, coverage: String },
+    Partial {
+        value: T,
+        coverage: String,
+        /// Bounded human-readable failure message for the coverage token,
+        /// surfaced to LSP callers in the JSON-RPC error `data`.
+        detail: Option<String>,
+    },
     Pending,
     Unavailable(MethodUnavailable),
     RequestFailed(LspRequestFailure),
@@ -409,7 +415,13 @@ pub enum RenameCandidateResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticProviderOutcome<T> {
     Complete(T),
-    Partial { value: T, coverage: String },
+    Partial {
+        value: T,
+        coverage: String,
+        /// Bounded human-readable failure message for the coverage token,
+        /// carried through to the JSON-RPC error `data` for LSP callers.
+        detail: Option<String>,
+    },
     Pending,
     Unavailable,
 }
@@ -418,9 +430,14 @@ impl<T> SemanticProviderOutcome<T> {
     fn map<U>(self, project: impl FnOnce(T) -> U) -> SemanticProviderOutcome<U> {
         match self {
             Self::Complete(value) => SemanticProviderOutcome::Complete(project(value)),
-            Self::Partial { value, coverage } => SemanticProviderOutcome::Partial {
+            Self::Partial {
+                value,
+                coverage,
+                detail,
+            } => SemanticProviderOutcome::Partial {
                 value: project(value),
                 coverage,
+                detail,
             },
             Self::Pending => SemanticProviderOutcome::Pending,
             Self::Unavailable => SemanticProviderOutcome::Unavailable,
@@ -1327,14 +1344,23 @@ where
             GatewayResponse::Partial {
                 value: SemanticResponse::RenameCandidate(value),
                 coverage,
-            } => GatewayResponse::Partial { value, coverage },
+                detail,
+            } => GatewayResponse::Partial {
+                value,
+                coverage,
+                detail,
+            },
             GatewayResponse::Value(_) => GatewayResponse::Partial {
                 value: unavailable,
                 coverage: "rename-candidate-response-mismatch".to_owned(),
+                detail: None,
             },
-            GatewayResponse::Partial { coverage, .. } => GatewayResponse::Partial {
+            GatewayResponse::Partial {
+                coverage, detail, ..
+            } => GatewayResponse::Partial {
                 value: unavailable,
                 coverage,
+                detail,
             },
             GatewayResponse::Pending => GatewayResponse::Pending,
             GatewayResponse::Unavailable(unavailable) => GatewayResponse::Unavailable(unavailable),
@@ -1421,9 +1447,15 @@ where
         }
         match route(&self.semantic_provider) {
             SemanticProviderOutcome::Complete(value) => GatewayResponse::Value(value),
-            SemanticProviderOutcome::Partial { value, coverage } => {
-                GatewayResponse::Partial { value, coverage }
-            }
+            SemanticProviderOutcome::Partial {
+                value,
+                coverage,
+                detail,
+            } => GatewayResponse::Partial {
+                value,
+                coverage,
+                detail,
+            },
             SemanticProviderOutcome::Pending => GatewayResponse::Pending,
             SemanticProviderOutcome::Unavailable => {
                 GatewayResponse::unavailable(method, MethodUnavailableReason::ProviderUnavailable)

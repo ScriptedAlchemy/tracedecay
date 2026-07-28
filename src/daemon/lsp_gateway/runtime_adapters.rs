@@ -463,9 +463,45 @@ impl FeedbackCyclePort for Pr12FeedbackCycleAdapter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LspSemanticOperationOutcome {
     Complete(Value),
-    Partial { value: Value, coverage: String },
+    Partial {
+        value: Value,
+        /// Short stable identifier callers match on (e.g.
+        /// `analyzer-start-failed`); never carries free-form text.
+        coverage: String,
+        /// Bounded human-readable failure message for the coverage token,
+        /// surfaced verbatim to LSP callers in the JSON-RPC error `data`.
+        detail: Option<String>,
+    },
     RenameCandidate(RenameCandidateResult),
     Unavailable,
+}
+
+impl LspSemanticOperationOutcome {
+    /// Maximum bytes of human-readable failure text carried in
+    /// [`LspSemanticOperationOutcome::Partial::detail`].
+    const MAX_PARTIAL_DETAIL_BYTES: usize = 256;
+
+    /// Bounds a human-readable failure message for the `Partial.detail`
+    /// channel: one line, capped at a UTF-8 boundary; empty input yields
+    /// `None`.
+    pub fn bounded_detail(message: &str) -> Option<String> {
+        let message = message.trim();
+        if message.is_empty() {
+            return None;
+        }
+        let mut detail: String = message
+            .chars()
+            .map(|character| if character.is_control() { ' ' } else { character })
+            .collect();
+        if detail.len() > Self::MAX_PARTIAL_DETAIL_BYTES {
+            let mut end = Self::MAX_PARTIAL_DETAIL_BYTES;
+            while !detail.is_char_boundary(end) {
+                end -= 1;
+            }
+            detail.truncate(end);
+        }
+        Some(detail)
+    }
 }
 
 /// Canonical asynchronous owner for one retained standard analyzer request.
@@ -551,6 +587,7 @@ impl Pr12SemanticProviderAdapter {
                 return SemanticProviderOutcome::Partial {
                     value: empty_semantic_response(request),
                     coverage,
+                    detail: None,
                 };
             }
         };
@@ -560,6 +597,7 @@ impl Pr12SemanticProviderAdapter {
             return SemanticProviderOutcome::Partial {
                 value: empty_semantic_response(request),
                 coverage: "semantic-runtime-busy".to_owned(),
+                detail: None,
             };
         };
         if let Some(pending) = in_flight.get_mut(&key) {
@@ -567,6 +605,7 @@ impl Pr12SemanticProviderAdapter {
                 return SemanticProviderOutcome::Partial {
                     value: empty_semantic_response(request),
                     coverage: "semantic-request-correlation-mismatch".to_owned(),
+                    detail: None,
                 };
             }
             return match pending.receiver.try_recv() {
@@ -580,6 +619,7 @@ impl Pr12SemanticProviderAdapter {
                     SemanticProviderOutcome::Partial {
                         value: empty_semantic_response(request),
                         coverage: "semantic-operation-dropped".to_owned(),
+                        detail: None,
                     }
                 }
             };
@@ -588,6 +628,7 @@ impl Pr12SemanticProviderAdapter {
             return SemanticProviderOutcome::Partial {
                 value: empty_semantic_response(request),
                 coverage: "semantic-operation-capacity".to_owned(),
+                detail: None,
             };
         }
 
@@ -744,21 +785,34 @@ fn project_semantic_outcome(
                     match coverage.or_else(|| {
                         outside_root.then(|| "semantic-result-outside-admitted-root".to_owned())
                     }) {
-                        Some(coverage) => SemanticProviderOutcome::Partial { value, coverage },
+                        Some(coverage) => SemanticProviderOutcome::Partial {
+                            value,
+                            coverage,
+                            detail: None,
+                        },
                         None => SemanticProviderOutcome::Complete(value),
                     }
                 }
                 Err(coverage) => SemanticProviderOutcome::Partial {
                     value: empty_semantic_response(request),
                     coverage,
+                    detail: None,
                 },
             }
         }
-        LspSemanticOperationOutcome::Partial { value, coverage } => {
+        LspSemanticOperationOutcome::Partial {
+            value,
+            coverage,
+            detail,
+        } => {
             let value = parse_semantic_response(request, value)
                 .map_or_else(|_| empty_semantic_response(request), |(value, _)| value);
             let (value, _) = confine_semantic_response(root, value);
-            SemanticProviderOutcome::Partial { value, coverage }
+            SemanticProviderOutcome::Partial {
+                value,
+                coverage,
+                detail,
+            }
         }
         LspSemanticOperationOutcome::RenameCandidate(value) => {
             SemanticProviderOutcome::Complete(SemanticResponse::RenameCandidate(value))
@@ -1888,6 +1942,7 @@ mod tests {
             if let SemanticProviderOutcome::Partial {
                 value: SemanticResponse::Locations(locations),
                 coverage,
+                ..
             } = SemanticProviderPort::request(&adapter, &root, &completion_id, &request)
             {
                 assert_eq!(locations.len(), 1);
