@@ -1,4 +1,5 @@
 import { assertNever } from '../../contracts/generated.ts';
+import { splitSignedBytes } from '../../ui/format.ts';
 import type {
   DoctorStorageFindingKind,
   StorageFindingKindStatus,
@@ -274,14 +275,12 @@ export function storeRolesLabel(roles: string[], role: string): string {
   return ordered.length > 1 ? `${ordered.join(' · ')} (shared store file)` : ordered.join(' · ');
 }
 
+/** The shared byte magnitudes, joined for a sentence rather than split for a
+ * readout: these figures are read inside prose ("32.0 KiB of 64.0 KiB soft
+ * limit"), where a separately-styled unit has nothing to align with. */
 export function formatBytes(bytes: number | null): string {
-  if (bytes == null) return '—';
-  const sign = bytes < 0 ? '-' : '';
-  const size = Math.abs(bytes);
-  if (size >= 1024 * 1024 * 1024) return `${sign}${(size / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
-  if (size >= 1024 * 1024) return `${sign}${(size / (1024 * 1024)).toFixed(1)} MiB`;
-  if (size >= 1024) return `${sign}${(size / 1024).toFixed(1)} KiB`;
-  return `${sign}${size} B`;
+  const { value, unit } = splitSignedBytes(bytes);
+  return unit ? `${value} ${unit}` : value;
 }
 
 /** Growth is signed on the wire; a shrinking store must read as a shrink and an
