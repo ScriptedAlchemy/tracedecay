@@ -210,7 +210,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        let serving_generation = Arc::new(RwLock::new(opened.latest_complete()));
+        let retained_generation = opened.latest_complete();
+        let needs_initial_reconcile = retained_generation.is_none();
+        let serving_generation = Arc::new(RwLock::new(retained_generation));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let (wake, shutting_down) = {
@@ -304,7 +306,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
-        initial_wake.notify_one();
+        if needs_initial_reconcile {
+            initial_wake.notify_one();
+        }
         Ok(true)
     }
 
