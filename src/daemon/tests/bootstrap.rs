@@ -921,7 +921,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         })
         .and_then(|tool| tool["description"].as_str())
         .expect("portable context tool description");
-    assert!(portable_context_description.contains("10 calls maximum"));
+    assert!(portable_context_description.contains("3 calls maximum"));
     assert!(portable_context_description.contains("project graph is warming"));
 
     lifecycle.begin_draining();
@@ -950,14 +950,6 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "warmup drain enrolled route");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    engine
-        .store_administration
-        .registered_profile_database()
-        .await
-        .expect("open registered profile database")
-        .upsert_code_project("warmup-drain-project", &project, None, None, None)
-        .await
-        .expect("enroll warmup drain project");
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity,
@@ -1057,6 +1049,7 @@ async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
     std::fs::create_dir_all(&project).expect("project dir");
     prepare_test_profile_root(&profile_root);
     let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity,
@@ -1191,16 +1184,6 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
             .expect("daemon database scope");
-    let registry = engine
-        .store_administration
-        .registered_profile_database()
-        .await
-        .expect("open registered profile database");
-    registry
-        .upsert_code_project("mcp-bootstrap-route-project", &project, None, None, None)
-        .await
-        .expect("register initialize root");
-    drop(registry);
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)
@@ -1308,7 +1291,7 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         .find(|tool| tool["name"] == json!("tracedecay_context"))
         .and_then(|tool| tool["description"].as_str())
         .expect("context tool description");
-    assert!(context_description.contains("10 calls maximum"));
+    assert!(context_description.contains("3 calls maximum"));
     assert!(context_description.contains("project graph is warming"));
 
     tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
@@ -1342,14 +1325,6 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         crate::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
             .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    engine
-        .store_administration
-        .registered_profile_database()
-        .await
-        .expect("open registered profile database")
-        .upsert_code_project("direct-warmup-project", &project, None, None, None)
-        .await
-        .expect("enroll direct warmup project");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,

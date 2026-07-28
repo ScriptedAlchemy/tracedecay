@@ -166,7 +166,10 @@ impl std::fmt::Display for LspSemanticRequestError {
                 code: Some(code),
                 message,
             } => write!(formatter, "analyzer reported error {code}: {message}"),
-            Self::Remote { code: None, message } => {
+            Self::Remote {
+                code: None,
+                message,
+            } => {
                 write!(formatter, "analyzer reported an error: {message}")
             }
             Self::Transport { class } => {
