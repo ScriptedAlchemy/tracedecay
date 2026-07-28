@@ -282,6 +282,21 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-features --profile ci --locked
 
+      # Raw retention, unconditional and positioned before every gate that can
+      # abort the job. The OS-tagged packet upload further down only runs after
+      # the strict validators, so a failing test step took the durations and
+      # failure detail down with it and left nothing to analyse. This step
+      # cannot rescue the job - a missing file is a warning, not a pass - it
+      # only preserves whatever nextest managed to write.
+      - name: Upload raw nextest junit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Validate PR12/PR13 packets (lint)
         run: |
           set -euo pipefail
