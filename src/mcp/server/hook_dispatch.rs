@@ -37,7 +37,9 @@ impl McpServer {
                         },
                     ),
                     Err(error) => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
-                        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error),
+                        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(
+                            &error,
+                        ),
                     ),
                 }
             }

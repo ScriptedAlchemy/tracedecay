@@ -365,14 +365,13 @@ impl McpServer {
                 "path": cwd.to_string_lossy(),
             }
         });
-        let Ok(Some(selected)) =
-            crate::mcp::tools::handlers::selected_registered_project_reader(
-                "tracedecay_files",
-                &arguments,
-                self.registry_db.as_deref(),
-                self.retained_project_graph_resolver.as_ref(),
-            )
-            .await
+        let Ok(Some(selected)) = crate::mcp::tools::handlers::selected_registered_project_reader(
+            "tracedecay_files",
+            &arguments,
+            self.registry_db.as_deref(),
+            self.retained_project_graph_resolver.as_ref(),
+        )
+        .await
         else {
             return;
         };
