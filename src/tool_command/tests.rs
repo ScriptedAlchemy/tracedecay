@@ -830,3 +830,101 @@ fn application_problem_makes_the_tool_command_fail() {
         "{error}"
     );
 }
+
+/// Documented read-only invocations from `tracedecay tool <name> --help`, each
+/// paired with the `format: "json"` presentation key the help text advertises.
+fn documented_json_invocations() -> Vec<(&'static str, Value)> {
+    vec![
+        ("tracedecay_storage_status", json!({})),
+        ("tracedecay_git_status", json!({})),
+        ("tracedecay_git_diff", json!({})),
+        ("tracedecay_git_history", json!({"count": 3})),
+        (
+            "tracedecay_source_outline",
+            json!({"file": "src/update_cmd.rs"}),
+        ),
+        (
+            "tracedecay_file_metadata",
+            json!({"files": ["src/update_cmd.rs"]}),
+        ),
+    ]
+}
+
+fn with_format(mut args: Value, format: &str) -> Value {
+    args.as_object_mut()
+        .expect("documented invocations are objects")
+        .insert("format".to_owned(), json!(format));
+    args
+}
+
+#[test]
+fn documented_format_argument_never_reaches_the_reviewed_request() {
+    for (tool_name, args) in documented_json_invocations() {
+        let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
+
+        let (request, format) =
+            cli_surface_invocation(tool_name, with_format(args.clone(), "json"), false)
+                .unwrap_or_else(|error| {
+                    panic!("{tool_name} rejected a documented argument: {error}")
+                });
+        assert_eq!(format, RequestedOutputFormat::Json, "{tool_name}");
+        assert_eq!(request, args, "{tool_name}");
+
+        parse_application_surface_request(operation, request).unwrap_or_else(|error| {
+            panic!("{tool_name} did not match its reviewed schema: {error}")
+        });
+    }
+}
+
+#[test]
+fn cli_and_mcp_normalize_documented_arguments_identically() {
+    for (tool_name, args) in documented_json_invocations() {
+        let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
+        let arguments = with_format(args, "json");
+
+        let (cli_request, cli_format) = cli_surface_invocation(tool_name, arguments.clone(), false)
+            .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
+        // The MCP transport reaches the reviewed schema through the same
+        // adapter; an argument accepted there must be accepted here.
+        let mcp = normalize_application_tool_args(tool_name, arguments)
+            .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
+
+        assert_eq!(cli_request, mcp.request, "{tool_name}");
+        assert_eq!(cli_format, mcp.requested_format, "{tool_name}");
+
+        let cli_parsed = serde_json::to_value(
+            parse_application_surface_request(operation, cli_request).expect("cli request"),
+        )
+        .expect("cli request is serializable");
+        let mcp_parsed = serde_json::to_value(
+            parse_application_surface_request(operation, mcp.request).expect("mcp request"),
+        )
+        .expect("mcp request is serializable");
+        assert_eq!(cli_parsed, mcp_parsed, "{tool_name}");
+    }
+}
+
+#[test]
+fn json_flag_and_json_format_select_the_same_output() {
+    let (flag_request, flag_format) =
+        cli_surface_invocation("tracedecay_storage_status", json!({}), true).expect("flag");
+    let (format_request, format_format) = cli_surface_invocation(
+        "tracedecay_storage_status",
+        json!({"format": "json"}),
+        false,
+    )
+    .expect("format");
+
+    assert_eq!(flag_format, RequestedOutputFormat::Json);
+    assert_eq!(format_format, RequestedOutputFormat::Json);
+    assert_eq!(flag_request, format_request);
+}
+
+#[test]
+fn markdown_remains_the_default_presentation() {
+    let (_request, format) =
+        cli_surface_invocation("tracedecay_storage_status", json!({}), false).expect("default");
+    assert_eq!(format, RequestedOutputFormat::Markdown);
+}

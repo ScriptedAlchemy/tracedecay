@@ -3,9 +3,13 @@ use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_edge;
-use super::sql::collect_rows;
+use super::sql::{collect_rowid_pages, collect_rows};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+/// Columns `row_to_edge` reads, and therefore the index of the trailing
+/// `rowid` cursor column in a paged edge scan.
+const EDGE_COLUMNS: i32 = 4;
 
 impl Database {
     /// Inserts a single edge, skipping silently if either endpoint is missing.
@@ -304,17 +308,18 @@ impl Database {
     }
 
     /// Returns every edge in the database.
+    /// Read through `rowid` keyset pages: whole-table reads on a real project
+    /// exceed what the SQLite runtime will materialize for one query.
     pub async fn get_all_edges(&self) -> Result<Vec<Edge>> {
-        let mut rows = self
-            .engine_conn()
-            .query("SELECT source, target, kind, line FROM edges", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query all edges: {e}"),
-                operation: "get_all_edges".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_edge, "get_all_edges").await
+        collect_rowid_pages(
+            &self.engine_conn(),
+            "SELECT source, target, kind, line, rowid FROM edges
+             WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+            EDGE_COLUMNS,
+            row_to_edge,
+            "get_all_edges",
+        )
+        .await
     }
 
     /// Deletes all edges originating from a given source node.

@@ -5,9 +5,13 @@ use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_file;
-use super::sql::collect_rows;
+use super::sql::collect_rowid_pages;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+/// Columns `row_to_file` reads, and therefore the index of the trailing
+/// `rowid` cursor column in a paged file scan.
+const FILE_COLUMNS: i32 = 6;
 
 /// Keyset page size for file token-map construction.
 ///
@@ -135,20 +139,18 @@ impl Database {
     }
 
     /// Returns all file records.
+    /// Read through `rowid` keyset pages: whole-table reads on a real project
+    /// exceed what the SQLite runtime will materialize for one query.
     pub async fn get_all_files(&self) -> Result<Vec<FileRecord>> {
-        let mut rows = self
-            .engine_conn()
-            .query(
-                "SELECT path, content_hash, size, modified_at, indexed_at, node_count FROM files",
-                (),
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query all files: {e}"),
-                operation: "get_all_files".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_file, "get_all_files").await
+        collect_rowid_pages(
+            &self.engine_conn(),
+            "SELECT path, content_hash, size, modified_at, indexed_at, node_count, rowid
+             FROM files WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+            FILE_COLUMNS,
+            row_to_file,
+            "get_all_files",
+        )
+        .await
     }
 
     /// Returns only indexed logical paths.

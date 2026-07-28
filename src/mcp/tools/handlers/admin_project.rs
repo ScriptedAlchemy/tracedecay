@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
     CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalStateV1,
+    CompatibilityFactProposalStateV1, FactCompatibilityStoreError, FactStoreError,
 };
 
 use crate::application::memory::{MemoryApplication, MemoryApplicationError};
@@ -27,6 +27,7 @@ enum AdminProjectAction {
     RuntimeStatus {
         json: bool,
     },
+    GitignoreStatus,
     MemoryCurate {
         apply: bool,
         llm: bool,
@@ -113,6 +114,31 @@ fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("project memory application failed: {error}"),
     }
+}
+
+fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value> {
+    let MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Store(
+        FactStoreError::Storage { source, .. },
+    )) = error
+    else {
+        return None;
+    };
+    let message = source.to_string();
+    let proposal_bank_absent = message.contains("no such table")
+        && ["memory_v2_proposal_current", "memory_v2_proposals"]
+            .iter()
+            .any(|table| message.contains(table));
+    proposal_bank_absent.then(|| {
+        json!({
+            "availability": {
+                "state": "unavailable",
+                "reason": "compatibility_proposal_bank_absent",
+            },
+            "count": 0,
+            "proposals": [],
+            "next_after_proposal_id": null,
+        })
+    })
 }
 
 fn parse_proposal_id(value: String) -> Result<ProvenanceId> {
@@ -274,6 +300,20 @@ pub(super) async fn handle_admin_project(
             };
             json!({ "output": output })
         }
+        AdminProjectAction::GitignoreStatus => {
+            let configuration = cg
+                .configuration_runtime()
+                .client()
+                .current()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("configuration authority unavailable: {error}"),
+                })?;
+            json!({
+                "git_ignore": configuration.config.git_ignore,
+                "revision_id": configuration.revision_id.as_str(),
+            })
+        }
         AdminProjectAction::MemoryCurate {
             apply,
             llm,
@@ -320,22 +360,28 @@ pub(super) async fn handle_admin_project(
                 .as_deref()
                 .map(parse_fact_proposal_state)
                 .transpose()?;
-            let page = memory
+            match memory
                 .list_compatibility_fact_proposals(state, None, limit)
                 .await
-                .map_err(memory_application_error)?;
-            let proposals = page
-                .proposals()
-                .iter()
-                .map(fact_proposal_json)
-                .collect::<Vec<_>>();
-            json!({
-                "count": proposals.len(),
-                "proposals": proposals,
-                "next_after_proposal_id": page
-                    .next_after_proposal_id()
-                    .map(ProvenanceId::as_str),
-            })
+            {
+                Ok(page) => {
+                    let proposals = page
+                        .proposals()
+                        .iter()
+                        .map(fact_proposal_json)
+                        .collect::<Vec<_>>();
+                    json!({
+                        "availability": { "state": "available" },
+                        "count": proposals.len(),
+                        "proposals": proposals,
+                        "next_after_proposal_id": page
+                            .next_after_proposal_id()
+                            .map(ProvenanceId::as_str),
+                    })
+                }
+                Err(error) => fact_list_unavailable_payload(&error)
+                    .ok_or_else(|| memory_application_error(error))?,
+            }
         }
         AdminProjectAction::FactView { id } => {
             let proposal_id = parse_proposal_id(id)?;
@@ -580,6 +626,33 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn missing_compatibility_proposal_bank_is_a_typed_unavailable_list() {
+        let error = MemoryApplicationError::Compatibility(
+            tracedecay_store::FactCompatibilityStoreError::Store(
+                tracedecay_store::FactStoreError::Storage {
+                    operation: "read compatibility fact projection",
+                    source: Box::new(std::io::Error::other(
+                        "no such table: memory_v2_proposal_current",
+                    )),
+                },
+            ),
+        );
+
+        assert_eq!(
+            fact_list_unavailable_payload(&error),
+            Some(json!({
+                "availability": {
+                    "state": "unavailable",
+                    "reason": "compatibility_proposal_bank_absent",
+                },
+                "count": 0,
+                "proposals": [],
+                "next_after_proposal_id": null,
+            }))
+        );
+    }
+
     #[tokio::test]
     async fn admin_project_handler_executes_typed_fact_and_automation_round_trips_on_one_authority()
     {
@@ -631,6 +704,7 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(pending["count"], 2);
+        assert_eq!(pending["availability"]["state"], "available");
         assert!(
             pending["proposals"]
                 .as_array()
@@ -759,6 +833,12 @@ mod tests {
     #[test]
     fn admin_project_wire_contract_round_trips_typed_results_without_local_fallback() {
         use crate::automation::runner::MemoryCuratorAutomationRun;
+
+        assert!(matches!(
+            serde_json::from_value::<AdminProjectAction>(json!({ "action": "gitignore_status" }))
+                .unwrap(),
+            AdminProjectAction::GitignoreStatus
+        ));
 
         let fact_request = json!({ "action": "fact_apply", "id": "fact_1" });
         let fact = serde_json::from_value::<AdminProjectAction>(fact_request).unwrap();

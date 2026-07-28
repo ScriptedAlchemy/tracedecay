@@ -59,6 +59,10 @@ enum AdminCliAction {
         #[serde(default)]
         verify_integrity: bool,
     },
+    StorageReport {
+        project_id: Option<String>,
+        project_root: Option<PathBuf>,
+    },
     GainQuery {
         project_arg: Option<PathBuf>,
         since: i64,
@@ -315,6 +319,36 @@ async fn dispatch_admin_cli(
             )
             .await?,
         )?,
+        AdminCliAction::StorageReport {
+            project_id,
+            project_root,
+        } => {
+            let profile_root = context.require_profile_root()?;
+            let report = match (project_id, project_root) {
+                (Some(project_id), Some(project_root)) => {
+                    crate::retention::storage_report::build_project_storage_report_from_daemon(
+                        profile_root,
+                        &project_id,
+                        &project_root,
+                    )
+                    .await?
+                }
+                (None, None) => {
+                    crate::retention::storage_report::build_storage_report_from_registered_global_db(
+                        profile_root, global_db,
+                    )
+                    .await?
+                }
+                _ => {
+                    return Err(TraceDecayError::Config {
+                        message:
+                            "storage_report requires project_id and project_root together"
+                                .to_string(),
+                    });
+                }
+            };
+            serde_json::to_value(report)?
+        }
         AdminCliAction::GainQuery {
             project_arg,
             since,
@@ -635,6 +669,17 @@ mod tests {
 
     #[test]
     fn parses_projectless_and_project_scoped_actions() {
+        assert!(matches!(
+            serde_json::from_value::<AdminCliAction>(json!({
+                "action": "storage_report",
+                "project_id": null,
+                "project_root": null,
+            })),
+            Ok(AdminCliAction::StorageReport {
+                project_id: None,
+                project_root: None,
+            })
+        ));
         assert!(matches!(
             serde_json::from_value::<AdminCliAction>(json!({
                 "action": "registry_context",

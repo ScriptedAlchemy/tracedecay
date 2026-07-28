@@ -42,9 +42,10 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
-    normalize_application_tool_args, observe_surface_argument_rejection,
-    parse_application_surface_request, resolve_catalog_tool_binding,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
+    ApplicationSurfaceOperation, normalize_application_tool_args,
+    observe_surface_argument_rejection, parse_application_surface_request,
+    resolve_catalog_tool_binding,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
@@ -215,16 +216,15 @@ pub(crate) async fn run(
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
-        let tool_args = normalize_application_tool_args(&def.name, tool_args).map_err(|error| {
-            TraceDecayError::Config {
+        let (request, requested_format) = cli_surface_invocation(&def.name, tool_args, raw_json)
+            .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         return dispatch_cli_application_surface(
             operation,
-            tool_args,
+            request,
             explicit_project.map(PathBuf::from),
-            raw_json,
+            requested_format,
             deadline,
         )
         .await;
@@ -259,11 +259,28 @@ pub(crate) async fn run(
     .await
 }
 
+/// Splits a CLI `--args` object into the reviewed application request body and
+/// the requested output format, through the same adapter every other transport
+/// uses. `--json` and `format: "json"` are the same request for JSON output.
+fn cli_surface_invocation(
+    tool_name: &str,
+    tool_args: Value,
+    raw_json: bool,
+) -> std::result::Result<(Value, RequestedOutputFormat), ApplicationSurfaceAdapterError> {
+    let normalized = normalize_application_tool_args(tool_name, tool_args)?;
+    let requested_format = if raw_json {
+        RequestedOutputFormat::Json
+    } else {
+        normalized.requested_format
+    };
+    Ok((normalized.request, requested_format))
+}
+
 async fn dispatch_cli_application_surface(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
     project: Option<PathBuf>,
-    raw_json: bool,
+    requested_format: RequestedOutputFormat,
     deadline: Instant,
 ) -> Result<()> {
     let request_id =
@@ -314,11 +331,7 @@ async fn dispatch_cli_application_surface(
         operation,
         request_id,
         request,
-        if raw_json {
-            RequestedOutputFormat::Json
-        } else {
-            RequestedOutputFormat::Markdown
-        },
+        requested_format,
         deadline,
         cancellation,
         Some(&client),
@@ -327,7 +340,7 @@ async fn dispatch_cli_application_surface(
     .map_err(|error| TraceDecayError::Config {
         message: error.to_string(),
     })?;
-    print_cli_application_surface(result, raw_json)
+    print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
 }
 
 fn print_cli_application_surface(

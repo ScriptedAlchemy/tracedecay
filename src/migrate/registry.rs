@@ -642,10 +642,15 @@ where
             )
             .await
             {
-                Ok(Some(existing)) if existing != scope_identity => issues.push(format!(
-                    "graph scope '{}' already has conflicting ownership or location",
-                    scope.graph_scope_id
-                )),
+                Ok(Some(existing))
+                    if existing != scope_identity
+                        && !graph_scope_location_drift_is_repairable(&existing, scope) =>
+                {
+                    issues.push(format!(
+                        "graph scope '{}' already has conflicting ownership",
+                        scope.graph_scope_id
+                    ));
+                }
                 Err(error) => issues.push(error),
                 _ => {}
             }
@@ -694,6 +699,15 @@ fn record_batch_owner(
             "{label} '{key}' has conflicting batch owners '{existing}' and '{owner}'"
         ));
     }
+}
+
+fn graph_scope_location_drift_is_repairable(existing: &str, expected: &GraphScopeUpsert) -> bool {
+    serde_json::from_str::<(String, String, String, String, Option<String>)>(existing)
+        .is_ok_and(|(project_id, store_id, branch_name, _, _)| {
+            project_id == expected.project_id
+                && store_id == expected.store_id
+                && branch_name == expected.branch_name
+        })
 }
 
 async fn query_optional_text<Q, P>(
@@ -821,10 +835,18 @@ where
         for scope in &plan.graph_scopes {
             applied.graph_scopes += usize::try_from(
                 conn.execute(
-                    "INSERT OR IGNORE INTO graph_scopes(
+                    "INSERT INTO graph_scopes(
                          graph_scope_id, project_id, store_id, branch_name, db_relpath,
                          parent_scope_id, last_synced_at, writable
-                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(graph_scope_id) DO UPDATE SET
+                         project_id = excluded.project_id,
+                         store_id = excluded.store_id,
+                         branch_name = excluded.branch_name,
+                         db_relpath = excluded.db_relpath,
+                         parent_scope_id = excluded.parent_scope_id,
+                         last_synced_at = excluded.last_synced_at,
+                         writable = excluded.writable",
                     params![
                         scope.graph_scope_id.as_str(),
                         scope.project_id.as_str(),
