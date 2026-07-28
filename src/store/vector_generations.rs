@@ -2376,6 +2376,7 @@ fn validate_batch_identity(
     if prepared.request.target_projection_key != plan.target_projection_key
         || prepared.receipt.target_projection_key != plan.target_projection_key
         || prepared.request.changes.to_generation != plan.source_generation
+        || prepared.request.changes.manifest_digest != plan.source_manifest_digest
         || prepared.receipt.source_generation != plan.source_generation
     {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);

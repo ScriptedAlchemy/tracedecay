@@ -600,7 +600,12 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     let cg = selected_cg.as_deref().unwrap_or(cg);
     let active_project_session_db = selected_cg
         .is_none()
-        .then_some(options.session_authorities.project)
+        .then(|| {
+            options
+                .registered_project_session_db
+                .as_ref()
+                .or(options.session_authorities.project)
+        })
         .flatten();
     let active_lcm_context = session::LcmHandlerContext::active(
         cg,
