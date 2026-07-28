@@ -734,38 +734,6 @@ where
     invoke_route(operation, state, request_id, cancellation, page, body).await
 }
 
-fn parse_feedback_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    match operation {
-        "diagnostics" => Some(HttpApplicationOperation::FeedbackDiagnostics),
-        "get" => Some(HttpApplicationOperation::FeedbackGet),
-        "expand" => Some(HttpApplicationOperation::FeedbackExpand),
-        "list" => Some(HttpApplicationOperation::FeedbackList),
-        "impact" => Some(HttpApplicationOperation::FeedbackImpact),
-        "advisory_cycle" => Some(HttpApplicationOperation::FeedbackAdvisoryCycle),
-        _ => None,
-    }
-}
-
-async fn feedback_operation<O>(
-    Path(operation): Path<String>,
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    let Some(operation) = parse_feedback_operation(&operation) else {
-        return application_problem_response(adapter_problem(
-            request_id.0,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
-    };
-    invoke_route(operation, state, request_id, cancellation, page, body).await
-}
-
 async fn affected_tests<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
@@ -1000,8 +968,7 @@ mod tests {
     use super::{
         DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
         parse_callable_code_operation, parse_configuration_operation,
-        parse_context_scout_operation, parse_feedback_operation, parse_feedback_read_operation,
-        parse_git_read_operation,
+        parse_context_scout_operation, parse_feedback_read_operation, parse_git_read_operation,
     };
 
     #[test]
@@ -1027,27 +994,6 @@ mod tests {
         }
         for rejected in ["", "preview", "apply", "git_status", "status/"] {
             assert_eq!(parse_git_read_operation(rejected), None);
-        }
-    }
-
-    #[test]
-    fn feedback_operation_parser_is_exact() {
-        for (route, operation) in [
-            ("diagnostics", HttpApplicationOperation::FeedbackDiagnostics),
-            ("get", HttpApplicationOperation::FeedbackGet),
-            ("expand", HttpApplicationOperation::FeedbackExpand),
-            ("list", HttpApplicationOperation::FeedbackList),
-            ("impact", HttpApplicationOperation::FeedbackImpact),
-            (
-                "advisory_cycle",
-                HttpApplicationOperation::FeedbackAdvisoryCycle,
-            ),
-        ] {
-            assert_eq!(parse_feedback_operation(route), Some(operation));
-            assert_eq!(operation.owner_kind(), HttpApplicationOwnerKind::Feedback);
-        }
-        for rejected in ["", "feedback_diagnostics", "preview", "apply"] {
-            assert_eq!(parse_feedback_operation(rejected), None);
         }
     }
 
