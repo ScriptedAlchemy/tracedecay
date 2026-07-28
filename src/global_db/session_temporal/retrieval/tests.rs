@@ -1283,6 +1283,14 @@ fn authorized_root_candidate_queries_bind_durable_anchor_owner_before_materializ
     }
 }
 
+#[test]
+fn singleton_derived_candidates_share_their_member_logical_message() {
+    for sql in [DERIVED_CANDIDATE_QUERY, ROOT_DERIVED_CANDIDATE_QUERY] {
+        assert!(sql.contains("CASE WHEN evidence.member_count = 1"));
+        assert!(sql.contains("THEN first_occurrence.message_id ELSE NULL END"));
+    }
+}
+
 #[tokio::test]
 async fn root_record_authority_binds_the_candidate_source_provider() {
     let dir = tempdir().unwrap();
@@ -1344,6 +1352,72 @@ async fn root_record_authority_binds_the_candidate_source_provider() {
         )
         .await
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn profile_root_authorizes_legacy_claude_anchor_without_project_scope() {
+    let dir = tempdir().unwrap();
+    let conn = TestConnection::open(&dir.path().join("profile-root-authority.db"));
+    conn.execute_batch(
+        "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+             );
+             CREATE TABLE retrieval_anchors (
+                anchor_id TEXT PRIMARY KEY,
+                owner_json TEXT NOT NULL
+             );
+             CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                PRIMARY KEY(session_id, generation)
+             );
+             CREATE TABLE observations (
+                observation_id TEXT PRIMARY KEY,
+                observation_json TEXT NOT NULL
+             );
+             CREATE TABLE session_occurrences (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                occurrence_id TEXT NOT NULL,
+                source_observation_id TEXT NOT NULL,
+                retrieval_anchor_id TEXT NOT NULL
+             );
+             INSERT INTO sessions VALUES
+                ('claude', 'profile-session', 'user');
+             INSERT INTO retrieval_anchors VALUES
+                ('profile-anchor', '{\"kind\":\"profile\"}');
+             INSERT INTO session_temporal_generations VALUES
+                ('profile-session', 1, 'active');
+             INSERT INTO observations VALUES (
+                'profile-observation',
+                '{\"identity\":{\"source\":{}}}'
+             );
+             INSERT INTO session_occurrences VALUES (
+                'profile-session', 1, 'profile-occurrence',
+                'profile-observation', 'profile-anchor'
+             );",
+    )
+    .await
+    .unwrap();
+    let mut candidate = candidate_for_anchor("profile-anchor");
+    candidate.session = Some("profile-session".to_string());
+    candidate.source = Some("profile-occurrence".to_string());
+    candidate.retriever_record_id = "profile-occurrence".to_string();
+    let read = super::super::sql::TemporalSqlRead::engine_connection(&conn);
+
+    require_candidate_root_authority(&read, &candidate, "user", Some("claude"))
+        .await
+        .expect("profile root must authorize the legacy Claude provider fallback");
+    assert!(
+        require_candidate_root_authority(&read, &candidate, "associated-project", Some("claude"),)
+            .await
+            .is_err(),
+        "a profile anchor must not become project-owned through session metadata"
     );
 }
 

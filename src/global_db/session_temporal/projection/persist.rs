@@ -4,7 +4,7 @@ use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1,
     MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalAnchorRecord,
     SessionAuthorityClassV1, SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1,
-    TemporalValidityV1, derive_exact_observation_anchor_id,
+    TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_store::{
     SessionStoreError, SessionStoreResult, SessionTemporalProjectionBatchReceiptV1,
@@ -511,9 +511,13 @@ pub(super) async fn canonical_occurrence(
             "canonical observation retrieval anchor has invalid retained provenance",
         ));
     }
-    let valid_time = anchor.occurred_at().map_or_else(
+    let valid_at = anchor
+        .occurred_at()
+        .map(|interval| interval.start)
+        .or_else(|| envelope.evidence().native_timestamp().map(UtcMicros));
+    let valid_time = valid_at.map_or_else(
         || json!({"kind": "unknown"}),
-        |interval| json!({"kind": "known", "valid_at": interval.start}),
+        |valid_at| json!({"kind": "known", "valid_at": valid_at}),
     );
     let grouping = || json!({"kind": "provider_native"});
     let relations = envelope.relations();

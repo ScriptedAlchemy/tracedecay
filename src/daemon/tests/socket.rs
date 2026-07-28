@@ -444,6 +444,80 @@ async fn socket_client_requires_user_storage_scope_without_project() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn user_session_read_bypasses_unregistered_project_route() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "user-session-read-test");
+    let unregistered_project = home.join("unregistered-project");
+    std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+
+    let (reader, mut writer) = client.into_split();
+    let handshake = DaemonHandshake {
+        project_path: Some(unregistered_project),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("newline");
+    writer
+        .write_all(
+            serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_message_search",
+                    "arguments": {
+                        "storage_scope": "user",
+                        "query": "profile-only evidence",
+                        "format": "json"
+                    }
+                }
+            }))
+            .expect("tools/call json")
+            .as_bytes(),
+        )
+        .await
+        .expect("write tools/call");
+    writer.write_all(b"\n").await.expect("newline");
+    writer.shutdown().await.expect("shutdown writer");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("user session read should not time out")
+        .expect("read response")
+        .expect("user session response");
+    let response: Value = serde_json::from_str(&line).expect("response json");
+    assert_eq!(response["id"], json!(8));
+    assert!(response["error"].is_null(), "{response}");
+    let payload: Value = serde_json::from_str(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("message search JSON text"),
+    )
+    .expect("message search payload");
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_eq!(payload["outcome"], "complete_zero", "{payload}");
+    assert_eq!(payload["store_scope"], "profile");
+
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("user session client shutdown should be clean");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn socket_client_routes_multiple_closed_invocations_without_falling_back_to_mcp() {
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");

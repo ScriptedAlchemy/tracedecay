@@ -9,7 +9,8 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
     RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, TemporalAssertionKindV1, UtcMicros, derive_exact_observation_anchor_id,
+    SessionId, TemporalAssertionKindV1, TemporalValidityV1, UtcMicros,
+    derive_exact_observation_anchor_id,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
@@ -251,6 +252,12 @@ async fn checked_in_codex_goal_materializes_one_generation_bound_occurrence() {
             .as_ref()
             .map(|message_id| message_id.as_str()),
         Some("record.goal.fixture")
+    );
+    assert_eq!(
+        occurrence.valid_time,
+        TemporalValidityV1::Known {
+            valid_at: UtcMicros(1_783_500_569)
+        }
     );
 }
 

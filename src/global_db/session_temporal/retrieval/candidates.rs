@@ -238,10 +238,10 @@ pub(super) async fn require_candidate_root_authority(
                       occurrence.source_observation_id
                  JOIN sessions AS authority_session
                    ON authority_session.session_id = occurrence.session_id
-                  AND authority_session.provider = json_extract(
+                  AND authority_session.provider = COALESCE(json_extract(
                       source_observation.observation_json,
                       '$.identity.source.provider'
-                  )
+                  ), 'claude')
                   AND authority_session.project_key = ?3
                  WHERE authority_anchor.anchor_id = ?1
                    AND (?5 IS NULL OR authority_session.provider = ?5)
