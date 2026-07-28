@@ -9,6 +9,7 @@ use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use futures_util::stream::{self, StreamExt};
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -52,6 +53,10 @@ const NEAR_DUP_THRESHOLD: f64 = 0.6;
 
 /// Maximum near-duplicate matches attached per diagnostic.
 const NEAR_DUP_MAX: usize = 3;
+
+/// Bound concurrent reads while hashing changed files for a managed test run.
+/// Large edit sets must not serialize hundreds of awaited `fs::read` calls.
+const MANAGED_TEST_DIGEST_READ_CONCURRENCY: usize = 32;
 
 #[derive(Debug, Clone)]
 struct TestTarget {
@@ -816,7 +821,7 @@ async fn managed_test_document_content_digests(
     root: &Path,
     changed_paths: &[String],
 ) -> Result<BTreeMap<String, tracedecay_domain::ContentDigest>> {
-    let mut digests = BTreeMap::new();
+    let mut validated = Vec::with_capacity(changed_paths.len());
     for changed_path in changed_paths {
         let relative = Path::new(changed_path);
         if relative.as_os_str().is_empty()
@@ -828,25 +833,49 @@ async fn managed_test_document_content_digests(
                 message: format!("managed test-run path is invalid: {changed_path}"),
             });
         }
-        let absolute = root.join(relative);
-        let bytes = match tokio::fs::read(&absolute).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(TraceDecayError::Config {
+        validated.push((changed_path.as_str(), root.join(relative)));
+    }
+
+    let mut outcomes: Vec<(
+        usize,
+        Result<Option<(String, tracedecay_domain::ContentDigest)>, TraceDecayError>,
+    )> = stream::iter(validated.into_iter().enumerate())
+        .map(|(index, (changed_path, absolute))| async move {
+            let outcome = match tokio::fs::read(&absolute).await {
+                Ok(bytes) => match Url::from_file_path(&absolute) {
+                    Ok(uri) => Ok(Some((
+                        uri.to_string(),
+                        crate::code_index::intake::content_digest(&bytes),
+                    ))),
+                    Err(()) => Err(TraceDecayError::Config {
+                        message: format!(
+                            "managed test-run source URI is invalid: {changed_path}"
+                        ),
+                    }),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(TraceDecayError::Config {
                     message: format!(
                         "managed test-run source is unavailable for {changed_path}: {error}"
                     ),
-                });
+                }),
+            };
+            (index, outcome)
+        })
+        .buffer_unordered(MANAGED_TEST_DIGEST_READ_CONCURRENCY)
+        .collect()
+        .await;
+
+    // Restore input order so the first hard error matches the serial path.
+    outcomes.sort_by_key(|(index, _)| *index);
+    let mut digests = BTreeMap::new();
+    for (_, outcome) in outcomes {
+        match outcome? {
+            Some((uri, digest)) => {
+                digests.insert(uri, digest);
             }
-        };
-        let uri = Url::from_file_path(&absolute).map_err(|()| TraceDecayError::Config {
-            message: format!("managed test-run source URI is invalid: {changed_path}"),
-        })?;
-        digests.insert(
-            uri.to_string(),
-            crate::code_index::intake::content_digest(&bytes),
-        );
+            None => {}
+        }
     }
     Ok(digests)
 }
