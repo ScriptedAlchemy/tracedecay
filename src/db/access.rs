@@ -274,6 +274,40 @@ impl DatabaseAuthority {
         Self::acquire(db_path, DatabaseAuthorityRole::Maintenance, intent)
     }
 
+    /// Acquires only authority already owned by the active daemon or an
+    /// exclusive maintenance scope. Unlike [`Self::for_runtime`], this never
+    /// falls back to fixture-only `Test` authority.
+    pub(crate) fn for_owned_runtime(db_path: &Path, intent: &str) -> Result<Self> {
+        let identity = DatabaseIdentity::for_path(db_path)?;
+        if let Some(role) = exact_scoped_runtime_role(&identity.profile_root, intent)? {
+            return Self::acquire_identity(identity, role, intent);
+        }
+        let maintenance_active = PROCESS_LEASES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&identity.database_key)
+            .is_some_and(|lease| {
+                matches!(
+                    lease,
+                    ProcessLease::Authority {
+                        held: HeldLocks::Maintenance { .. },
+                        ..
+                    }
+                )
+            });
+        if maintenance_active {
+            return Self::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent);
+        }
+        if let Some(role) = scoped_runtime_role(&identity, intent)? {
+            return Self::acquire_identity(identity, role, intent);
+        }
+        Err(access_error(
+            intent,
+            &identity.database_path,
+            "database access requires managed-daemon or exclusive-maintenance authority",
+        ))
+    }
+
     #[doc(hidden)]
     pub fn for_runtime(db_path: &Path, intent: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;

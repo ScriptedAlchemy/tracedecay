@@ -130,9 +130,20 @@ impl TraceDecay {
         operation: &'static str,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
-        let authority = DatabaseAuthority::for_runtime(db_path, operation)?;
         let project_id = Self::registered_project_id(store_layout)?;
         if let Some(branch_name) = branch_name {
+            if matches!(access, DatabaseAccessMode::ReadOnly) {
+                return runtime_registry
+                    .code_graph_branch_registered(
+                        project_root,
+                        project_id,
+                        branch_name,
+                        db_path.to_path_buf(),
+                        access,
+                    )
+                    .await;
+            }
+            let authority = DatabaseAuthority::for_runtime(db_path, operation)?;
             runtime_registry
                 .code_graph_branch(
                     project_root,
@@ -144,6 +155,7 @@ impl TraceDecay {
                 )
                 .await
         } else {
+            let authority = DatabaseAuthority::for_runtime(db_path, operation)?;
             runtime_registry
                 .code_graph_worktree(
                     project_root,
