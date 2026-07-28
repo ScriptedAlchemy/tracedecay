@@ -316,7 +316,9 @@ per the authority section above.
 
 Commit `9e3ca9fd2` (2026-07-24, 617 files changed) deleted 124 first-party
 tests. 75 of those covered behavior that still ships. Three of them intersect
-claims this ledger or its numbered plans record as **delivered**.
+claims this ledger or its numbered plans record as **delivered** — though the
+third turned out on re-examination to be narrower than first reported, and that
+entry is corrected in place below. All three are restored as of 2026-07-28.
 
 These are **verification-coverage corrections, not retractions**. Nothing here
 withdraws a delivered claim, and no audit may cite this section as evidence that
@@ -340,32 +342,44 @@ capability as unbuilt.
   The adjacent recovery logic in
   `src/global_db/schema_contract/invariants/repair.rs` — 391 lines that run on
   every reopen and can rewind cursors and requeue projection suffixes — lost all
-  nine of its tests in the same commit and currently has zero. The retention
-  transaction's own coverage is a separate question from this one; what is
-  unasserted is the repair path that can move the same cursors outside it.
-- **Plans 18 and 23 — end-to-end sanitization.** Plan 18 lists structural
-  sanitization as delivered and Plan 23 requires every imported row to carry a
-  verified sanitization receipt. `tests/session_suite/temporal_privacy.rs` (1,081
-  lines) was deleted outright, taking the three end-to-end tests that a redacted
-  value cannot resurface through temporal summary, context, reopen, or rebuild
-  replay. Unit sanitization coverage in `src/privacy/tests.rs` survives, so the
-  detector and sanitizer are still asserted; the end-to-end non-resurfacing
-  property is not. The fixtures those tests consumed are still on disk, so
-  restoration does not require regenerating inputs.
+  nine of its tests in the same commit. The retention transaction's own coverage
+  is a separate question from this one; what was unasserted is the repair path
+  that can move the same cursors outside it. Closed 2026-07-28 by `be09be406`,
+  which gives that file a 346-line in-crate test module.
+- **Plans 18 and 23 — end-to-end sanitization. This entry was wrong and is
+  corrected here rather than rewritten.** It read that
+  `tests/session_suite/temporal_privacy.rs` (1,081 lines) "was deleted outright,
+  taking the three end-to-end tests that a redacted value cannot resurface".
+  The file was deleted, but the coverage was not lost: it had been migrated
+  in-crate to `src/global_db/session_temporal/tests/privacy.rs` by `ee949f726`,
+  where sanitized context, denied retrieval, quarantine, and replay are all
+  asserted. Only two properties were genuinely dropped in that migration — the
+  exhaustive full-text-sink sweep and the reopen-survival leg — and `d01d48f25`
+  has since restored both. Treating a migrated test as a lost one is the exact
+  error this ledger exists to prevent; see the restoration section below and
+  retraction 22.
 
 ### Structural residue of the same deletion
 
-Three files carrying schema-enforcement and registry authority were left with no
-direct test coverage at all, and two of them still are:
+Three files carrying schema-enforcement and registry authority were recorded
+here on 2026-07-27 as having no direct test coverage. That reading needs two
+corrections, and the residue has since largely closed:
 
 - `src/global_db/schema_contract/invariants/triggers.rs` — 67 `RAISE(ABORT)`
-  guards across roughly 1,800 lines of trigger definitions, of which three are
-  asserted by the module `b8ef48ec5` restored and 64 are not;
-- `src/global_db/schema_contract/invariants/repair.rs` — 391 lines, zero tests;
-- `src/global_db/project_registry.rs` — 1,691 lines, zero tests.
+  guards across roughly 1,800 lines of trigger definitions. `b8ef48ec5` asserts
+  three, and `be09be406` adds authority-row cross-checks in the adjacent
+  `rows.rs`. Most guards are still unasserted individually.
+- `src/global_db/schema_contract/invariants/repair.rs` — was 391 lines with zero
+  tests; `be09be406` restored a 346-line in-crate test module.
+- `src/global_db/project_registry.rs` — **the "zero tests" reading was wrong.**
+  The file has no in-file `#[cfg(test)]` module, which is what was actually
+  observed, but it is a private module reached through `GlobalDb` methods, and
+  `tests/storage_suite/global_registry_test.rs`,
+  `project_identity_collapse_test.rs`, and `worktree_canonical_root_guard_test.rs`
+  exercise it through exactly those. Absence of an in-file test module is not
+  absence of coverage; see retraction 23.
 
-Those counts describe the tree at the time of writing. Restoration lanes were
-in flight, so confirm the current state before quoting a zero.
+Counts describe the tree when written. Confirm current state before quoting one.
 
 The cause was mechanical rather than a judgement that the coverage was
 worthless: a `GlobalDb` → `RegisteredGlobalDb` refactor whose compile breaks were
@@ -373,6 +387,40 @@ cleared by deleting callers. The evidence is that 20 tests in the same file were
 successfully re-pointed at the new type while 63 were deleted. A later audit
 should treat this as a restoration backlog against known-good prior assertions,
 not as new test design.
+
+### Restoration complete (2026-07-28)
+
+That backlog is worked off. All five priority groups landed:
+
+- groups 1–3, 18 tests covering cursor/projection repair, five authority-row
+  cross-checks, and session-temporal repair guards — `be09be406`, `51cfedaf1`,
+  and `aec84a3ba`;
+- group 4, three registry GC two-generation atomicity tests, in-crate at
+  `src/migrate/registry/tests.rs` — `a221b4c1e`;
+- group 5, the two properties the temporal-privacy migration dropped —
+  `d01d48f25`.
+
+Every group's key test was proven falsifiable before being accepted: a
+production-side mutation probe made it fail, and the probe was then reverted and
+the pass re-verified. Group 5's probe is the one worth remembering, because it
+justifies the whole exercise — switching the raw-message FTS trigger to index
+raw `NEW.content` was caught by the new exhaustive sink sweep while the
+pre-existing migrated test passed blind. A test that survives the mutation it
+exists to catch is the same vacuous-gate family recorded below, arrived at from
+the other direction.
+
+**Placement finding.** Suite-level restoration under `tests/session_suite` is
+not achievable without either widening `RegisteredGlobalDb` and store-constructor
+visibility or substituting test doubles for the stores under test. Both are
+worse than the alternative: the first enlarges a production API to serve tests,
+and the second would leave the seam proven only against itself. In-crate is the
+correct home for this coverage, and a later audit must not file its absence from
+`tests/` as a gap.
+
+**Residual open gap.** The old reopen test's generation-rebuild leg — a
+`SessionGenerationRebuildRequestV1` rebuild after reopen — is not restored. It
+is recorded here as real residual debt rather than folded into the completion
+claim above.
 
 ## Gates that attest to what they never checked
 
@@ -490,6 +538,16 @@ above.
 21. No workspace crate is dead; all ten members are declared and imported,
     with the rusqlite parity crate deliberately outside the default binary
     graph.
+22. The temporal-privacy end-to-end coverage was not lost with
+    `tests/session_suite/temporal_privacy.rs`. It was migrated in-crate to
+    `src/global_db/session_temporal/tests/privacy.rs`, and only the sink sweep
+    and reopen-survival legs were dropped — both restored by `d01d48f25`. A
+    deleted test path is not a deleted assertion; look for the migration before
+    filing the loss.
+23. A file with no in-file `#[cfg(test)]` module is not therefore untested.
+    `src/global_db/project_registry.rs` was reported that way and is exercised
+    by storage-suite tests through the `GlobalDb` methods it backs. Search for
+    callers, not just for a test module.
 
 ## Out-of-scope correction requests
 

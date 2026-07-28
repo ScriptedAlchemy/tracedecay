@@ -77,20 +77,24 @@ the usability study. See
   request, so roughly 60 commits — including the whole 2026-07-27 night batch —
   carry scoped local verification only. Restoring a mergeable PR #421 is a
   precondition for any aggregate claim about this slice.
-- Six independent lanes found the same failure family on 2026-07-27: a gate
+- Seven independent lanes found the same failure family on 2026-07-27: a gate
   reporting success without exercising what it names, including a Windows job
-  whose nextest filter matched zero tests and a reachability test asserting that
-  a symbol name appears in source text. Because libtest exits 0 on an empty name
-  filter, a dangling `cargo test --exact` is silently vacuous forever. Gate
-  review for this slice must prove a filter selects a nonempty set before
-  counting the gate as evidence. The ledger records all six.
-- Commit `9e3ca9fd2` deleted 124 first-party tests, 75 of them covering shipping
-  behavior, and three of those intersect claims recorded as delivered — Plan 16
-  worktree/store identity, Plan 38 cursor-repair recovery, and the Plans 18/23
-  end-to-end sanitization property. These are verification-coverage gaps, not
-  retractions: restoring the assertions is the work, and no delivered capability
-  is reopened by them. The ledger names each one and the residual zero-coverage
-  files.
+  whose nextest filter matched zero tests, a reachability test asserting that a
+  symbol name appears in source text, and an accessibility gate reporting zero
+  violations across five workspaces it never visited. Because libtest exits 0 on
+  an empty name filter, a dangling `cargo test --exact` is silently vacuous
+  forever. Gate review for this slice must prove a filter selects a nonempty set,
+  and must read a green gate's scope against the surface it claims to cover. The
+  ledger records all seven.
+- The deleted-test restoration from `9e3ca9fd2` is complete as of 2026-07-28.
+  All five priority groups landed (`be09be406`, `51cfedaf1`, `aec84a3ba`,
+  `a221b4c1e`, `d01d48f25`), each with its key test proven falsifiable by a
+  reverted production-side mutation probe. One correction travels with that:
+  the Plans 18/23 temporal-privacy coverage was never lost — it had been
+  migrated in-crate, and only two legs were dropped, both now restored. One
+  residual gap stays open: the reopen test's generation-rebuild leg. The ledger
+  carries the detail, the correction, and the placement finding that this
+  coverage belongs in-crate rather than in `tests/session_suite`.
 
 ## Worktree-aware incremental indexing contract
 
