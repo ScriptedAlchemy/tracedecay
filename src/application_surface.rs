@@ -38,10 +38,9 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
     IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination, PageRequest,
-    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken,
-    RetrievalOrder,
-    RetrievalRequestMeta, RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
-    StreamEvent, StreamEventKind,
+    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
+    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
+    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
 };
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,

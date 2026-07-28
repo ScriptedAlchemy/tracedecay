@@ -298,12 +298,8 @@ async fn selected_registered_project_reader(
     if !tool_dispatches_registered_project_reader(tool_name) {
         return Ok(None);
     }
-    let Some(context) = project_registry_context(
-        args,
-        &["project_path", "project_root"],
-        global_db,
-    )
-    .await?
+    let Some(context) =
+        project_registry_context(args, &["project_path", "project_root"], global_db).await?
     else {
         return Ok(None);
     };
@@ -536,9 +532,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             "user" => {
                 let profile_root = match options.profile_root {
                     Some(profile_root) => profile_root.to_path_buf(),
-                    None => support::profile_root_for_global_db(
-                        options.global_db,
-                    )?,
+                    None => support::profile_root_for_global_db(options.global_db)?,
                 };
                 if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
                     return dispatch_profile_retained_application_tool(
@@ -1012,28 +1006,13 @@ async fn dispatch_info_tools(
             scope_prefix,
         )),
         "tracedecay_project_list" => {
-            info::handle_project_list(
-                cg,
-                args.clone(),
-                options.global_db,
-            )
-            .await
+            info::handle_project_list(cg, args.clone(), options.global_db).await
         }
         "tracedecay_project_search" => {
-            info::handle_project_search(
-                cg,
-                args.clone(),
-                options.global_db,
-            )
-            .await
+            info::handle_project_search(cg, args.clone(), options.global_db).await
         }
         "tracedecay_project_context" => {
-            info::handle_project_context(
-                cg,
-                args.clone(),
-                options.global_db,
-            )
-            .await
+            info::handle_project_context(cg, args.clone(), options.global_db).await
         }
         "tracedecay_files" => info::handle_files(cg, args.clone(), selected_scope_prefix).await,
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args.clone()).await,
@@ -1335,28 +1314,13 @@ async fn execute_project_retained_application_tool(
 ) -> Result<ToolResult> {
     match request.operation {
         RetainedSurfaceOperation::FactStore => {
-            memory::handle_fact_store(
-                cg,
-                request.arguments,
-                options.global_db,
-            )
-            .await
+            memory::handle_fact_store(cg, request.arguments, options.global_db).await
         }
         RetainedSurfaceOperation::FactFeedback => {
-            memory::handle_fact_feedback(
-                cg,
-                request.arguments,
-                options.global_db,
-            )
-            .await
+            memory::handle_fact_feedback(cg, request.arguments, options.global_db).await
         }
         RetainedSurfaceOperation::MemoryStatus => {
-            memory::handle_memory_status(
-                cg,
-                request.arguments,
-                options.global_db,
-            )
-            .await
+            memory::handle_memory_status(cg, request.arguments, options.global_db).await
         }
         RetainedSurfaceOperation::SessionRefresh => {
             session::handle_session_refresh(
@@ -1430,13 +1394,8 @@ async fn dispatch_memory_tools(
             skills::handle_automation_run_artifact_view(cg, args.clone()).await
         }
         "tracedecay_analytics" => {
-            analytics::handle_analytics(
-                cg,
-                args.clone(),
-                options.global_db,
-                options.accounting_db,
-            )
-            .await
+            analytics::handle_analytics(cg, args.clone(), options.global_db, options.accounting_db)
+                .await
         }
         "tracedecay_skill_list" => {
             skills::handle_skill_list(cg, args.clone(), options.accounting_db).await
