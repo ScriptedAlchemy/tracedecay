@@ -19,6 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 /// A mismatch between the caller's git working tree and the resolved
 /// tracedecay index root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,22 +106,45 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
-    let Ok(repo) = gix::discover(dir) else {
-        return false;
-    };
-    let git_dir = repo
-        .git_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.git_dir().to_path_buf());
-    let common_dir = repo
-        .common_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.common_dir().to_path_buf());
-    git_dir != common_dir
+    git_worktree_root(dir).is_some_and(|root| root.join(".git").is_file())
 }
 
 pub fn is_detached_linked_worktree(dir: &Path) -> bool {
     is_linked_worktree(dir) && crate::branch::current_branch(dir).is_none()
+}
+
+/// Stable internal graph scope for a detached linked worktree.
+///
+/// Detached worktrees share repository identity and storage with the primary
+/// checkout, but need a distinct graph database so indexing branchless files
+/// cannot replace the primary checkout's graph.
+pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
+    if !is_detached_linked_worktree(dir) {
+        return None;
+    }
+    let resolve = |raw: String| {
+        let path = PathBuf::from(raw);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            dir.join(path)
+        };
+        path.canonicalize().unwrap_or(path)
+    };
+    // Use Git here deliberately: gix can collapse a linked worktree's git
+    // directory onto its common directory, which loses the per-worktree key.
+    let git_dir = resolve(crate::git::git_capture(dir, &["rev-parse", "--git-dir"])?);
+    let common_dir = resolve(crate::git::git_capture(
+        dir,
+        &["rev-parse", "--git-common-dir"],
+    )?);
+    let identity = git_dir.strip_prefix(&common_dir).unwrap_or(&git_dir);
+    let mut hasher = Sha256::new();
+    hasher.update(crate::os_str_bytes::native_os_str_bytes(
+        identity.as_os_str(),
+    ));
+    let digest = hex::encode(hasher.finalize());
+    Some(format!("detached-worktree/{}", &digest[..16]))
 }
 
 /// Cheap pre-flight for the `git` subprocess fallbacks in this crate: `git`
