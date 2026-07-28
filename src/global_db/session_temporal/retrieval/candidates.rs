@@ -79,203 +79,333 @@ pub(super) fn authorized_root_project_key<'a>(
         .ok_or(TemporalPortError::UnauthorizedSnapshot)
 }
 
+/// Root-authority shape a candidate channel is authorized through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootAuthorityChannel {
+    Summary,
+    Derived,
+    Occurrence,
+}
+
+impl RootAuthorityChannel {
+    const fn from_candidate(channel: CandidateChannel) -> Self {
+        match channel {
+            CandidateChannel::Summary => Self::Summary,
+            CandidateChannel::Span | CandidateChannel::Burst => Self::Derived,
+            CandidateChannel::Anchor
+            | CandidateChannel::Scope
+            | CandidateChannel::ExactMessage
+            | CandidateChannel::Phrase
+            | CandidateChannel::Entity
+            | CandidateChannel::Time
+            | CandidateChannel::Lexical => Self::Occurrence,
+        }
+    }
+
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Derived => "derived",
+            Self::Occurrence => "occurrence",
+        }
+    }
+
+    fn authorized_predicate(self, project_param: usize, provider_param: usize) -> String {
+        match self {
+            Self::Summary => format!(
+                "EXISTS (
+                     SELECT 1
+                     FROM retrieval_anchors AS authority_anchor
+                     JOIN session_summary_nodes AS summary
+                       ON summary.summary_anchor_id = authority_anchor.anchor_id
+                      AND summary.session_id = input.session_id
+                      AND summary.summary_id = input.source_id
+                     JOIN session_temporal_generations AS generation
+                       ON generation.session_id = summary.session_id
+                      AND generation.state = 'active'
+                     JOIN sessions AS authority_session
+                       ON authority_session.session_id = summary.session_id
+                      AND authority_session.provider =
+                          json_extract(summary.publication_json, '$.provider')
+                      AND authority_session.project_key = ?{project_param}
+                     WHERE authority_anchor.anchor_id = input.anchor_id
+                       AND (
+                           (authority_session.project_key = 'user'
+                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+                           OR
+                           (authority_session.project_key <> 'user'
+                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+                            AND json_extract(authority_anchor.owner_json, '$.project_id')
+                                = authority_session.project_key)
+                       )
+                       AND (?{provider_param} IS NULL OR EXISTS (
+                           WITH RECURSIVE retained_sources(
+                               source_anchor_id, source_summary_id, depth
+                           ) AS (
+                               SELECT source_anchor_id, source_summary_id, 0
+                               FROM session_summary_sources
+                               WHERE summary_id = summary.summary_id
+                               UNION ALL
+                               SELECT nested.source_anchor_id, nested.source_summary_id,
+                                      retained.depth + 1
+                               FROM retained_sources AS retained
+                               JOIN session_summary_nodes AS retained_summary
+                                 ON retained_summary.summary_id = retained.source_summary_id
+                                AND retained_summary.session_id = summary.session_id
+                               JOIN session_summary_sources AS nested
+                                 ON nested.summary_id = retained_summary.summary_id
+                               WHERE retained.depth < 63
+                               LIMIT 257
+                           )
+                           SELECT 1
+                           FROM retained_sources AS retained
+                           JOIN session_occurrences AS source_occurrence
+                             ON source_occurrence.retrieval_anchor_id =
+                                retained.source_anchor_id
+                            AND source_occurrence.session_id = summary.session_id
+                            AND source_occurrence.generation = generation.generation
+                           JOIN observations AS source_observation
+                             ON source_observation.observation_id =
+                                source_occurrence.source_observation_id
+                           WHERE json_extract(
+                               source_observation.observation_json,
+                               '$.identity.source.provider'
+                           ) = ?{provider_param}
+                           LIMIT 1
+                       ))
+                     LIMIT 1
+                 )"
+            ),
+            Self::Derived => format!(
+                "EXISTS (
+                     SELECT 1
+                     FROM retrieval_anchors AS authority_anchor
+                     JOIN session_derived_evidence AS evidence
+                       ON evidence.retrieval_anchor_id = authority_anchor.anchor_id
+                      AND evidence.session_id = input.session_id
+                      AND evidence.evidence_id = input.source_id
+                     JOIN session_temporal_generations AS generation
+                       ON generation.session_id = evidence.session_id
+                      AND generation.generation = evidence.generation
+                      AND generation.state = 'active'
+                     JOIN session_occurrences AS first_occurrence
+                       ON first_occurrence.session_id = evidence.session_id
+                      AND first_occurrence.generation = evidence.generation
+                      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
+                     JOIN observations AS source_observation
+                       ON source_observation.observation_id =
+                          first_occurrence.source_observation_id
+                     JOIN sessions AS authority_session
+                       ON authority_session.session_id = evidence.session_id
+                      AND authority_session.provider = COALESCE(json_extract(
+                          source_observation.observation_json,
+                          '$.identity.source.provider'
+                      ), 'claude')
+                      AND authority_session.project_key = ?{project_param}
+                     WHERE authority_anchor.anchor_id = input.anchor_id
+                       AND (?{provider_param} IS NULL
+                            OR authority_session.provider = ?{provider_param})
+                       AND (
+                           (authority_session.project_key = 'user'
+                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+                           OR
+                           (authority_session.project_key <> 'user'
+                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+                            AND json_extract(authority_anchor.owner_json, '$.project_id')
+                                = authority_session.project_key)
+                       )
+                     LIMIT 1
+                 )"
+            ),
+            Self::Occurrence => format!(
+                "EXISTS (
+                     SELECT 1
+                     FROM retrieval_anchors AS authority_anchor
+                     JOIN session_occurrences AS occurrence
+                       ON occurrence.retrieval_anchor_id = authority_anchor.anchor_id
+                      AND occurrence.session_id = input.session_id
+                      AND occurrence.occurrence_id = input.source_id
+                     JOIN session_temporal_generations AS generation
+                       ON generation.session_id = occurrence.session_id
+                      AND generation.generation = occurrence.generation
+                      AND generation.state = 'active'
+                     JOIN observations AS source_observation
+                       ON source_observation.observation_id =
+                          occurrence.source_observation_id
+                     JOIN sessions AS authority_session
+                       ON authority_session.session_id = occurrence.session_id
+                      AND authority_session.provider = COALESCE(json_extract(
+                          source_observation.observation_json,
+                          '$.identity.source.provider'
+                      ), 'claude')
+                      AND authority_session.project_key = ?{project_param}
+                     WHERE authority_anchor.anchor_id = input.anchor_id
+                       AND (?{provider_param} IS NULL
+                            OR authority_session.provider = ?{provider_param})
+                       AND (
+                           (authority_session.project_key = 'user'
+                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+                           OR
+                           (authority_session.project_key <> 'user'
+                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+                            AND json_extract(authority_anchor.owner_json, '$.project_id')
+                                = authority_session.project_key)
+                       )
+                     LIMIT 1
+                 )"
+            ),
+        }
+    }
+}
+
+/// Authorization verdict for one root-wide candidate.
+#[derive(Clone, Copy)]
+enum RootAuthorityDecision {
+    Authorized,
+    OutsideRoot,
+    MissingSession,
+    MissingRecordIdentity,
+}
+
+/// Per-candidate root authorization for one record window, resolved together.
+pub(super) struct RootAuthorityDecisions {
+    decisions: Vec<RootAuthorityDecision>,
+}
+
+impl RootAuthorityDecisions {
+    pub(super) fn require(&self, candidate: usize) -> Result<(), TemporalPortError> {
+        match self.decisions.get(candidate) {
+            Some(RootAuthorityDecision::Authorized) => Ok(()),
+            Some(RootAuthorityDecision::MissingSession) => Err(read_message(
+                RECORD_OPERATION,
+                "root-wide candidate is missing session identity",
+            )),
+            Some(RootAuthorityDecision::MissingRecordIdentity) => Err(read_message(
+                RECORD_OPERATION,
+                "root-wide candidate is missing retriever record identity",
+            )),
+            Some(RootAuthorityDecision::OutsideRoot) => Err(read_message(
+                RECORD_OPERATION,
+                "candidate is outside the authorized root",
+            )),
+            None => Err(read_message(
+                RECORD_OPERATION,
+                "root authority did not decide the candidate",
+            )),
+        }
+    }
+}
+
+/// Authorizes an entire root-wide candidate window in one read.
+///
+/// Candidates are denied unless the window query names their ordinal, so a
+/// query that cannot see a candidate never widens the authorized root.
+pub(super) async fn resolve_root_authority(
+    conn: &TemporalSqlRead<'_>,
+    candidates: &[RankingCandidate],
+    project_key: &str,
+    provider: Option<&str>,
+) -> Result<RootAuthorityDecisions, TemporalPortError> {
+    let mut decisions = vec![RootAuthorityDecision::OutsideRoot; candidates.len()];
+    let mut channels: Vec<RootAuthorityChannel> = Vec::new();
+    let mut values = String::new();
+    let mut params = Vec::with_capacity(candidates.len().saturating_mul(5).saturating_add(2));
+    for (ordinal, candidate) in candidates.iter().enumerate() {
+        let Some(session_id) = candidate
+            .session
+            .as_deref()
+            .filter(|session| !session.is_empty())
+        else {
+            decisions[ordinal] = RootAuthorityDecision::MissingSession;
+            continue;
+        };
+        let source_id = candidate.retriever_record_id.as_str();
+        if source_id.is_empty() {
+            decisions[ordinal] = RootAuthorityDecision::MissingRecordIdentity;
+            continue;
+        }
+        let channel = RootAuthorityChannel::from_candidate(candidate.channel);
+        if !channels.contains(&channel) {
+            channels.push(channel);
+        }
+        if !values.is_empty() {
+            values.push(',');
+        }
+        values.push_str("(?, ?, ?, ?, ?)");
+        params.push(SqlValue::Integer(
+            i64::try_from(ordinal).map_err(|error| read_error(RECORD_OPERATION, error))?,
+        ));
+        params.push(SqlValue::Text(candidate.anchor_id.to_string()));
+        params.push(SqlValue::Text(session_id.to_string()));
+        params.push(SqlValue::Text(source_id.to_string()));
+        params.push(SqlValue::Text(channel.tag().to_string()));
+    }
+    if values.is_empty() {
+        return Ok(RootAuthorityDecisions { decisions });
+    }
+    let project_param = params.len() + 1;
+    params.push(SqlValue::Text(project_key.to_string()));
+    let provider_param = params.len() + 1;
+    params.push(provider.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string())));
+    let authorized = channels
+        .iter()
+        .map(|channel| {
+            format!(
+                "(input.channel_kind = '{tag}' AND {predicate})",
+                tag = channel.tag(),
+                predicate = channel.authorized_predicate(project_param, provider_param)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n              OR ");
+    let sql = format!(
+        "WITH candidate_input(
+             ordinal, anchor_id, session_id, source_id, channel_kind
+         ) AS (VALUES {values})
+         SELECT input.ordinal
+         FROM candidate_input AS input
+         WHERE {authorized}"
+    );
+    let mut rows = conn
+        .query(&sql, params)
+        .await
+        .map_err(|error| read_error(RECORD_OPERATION, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| read_error(RECORD_OPERATION, error))?
+    {
+        let ordinal: i64 = row
+            .get(0)
+            .map_err(|error| read_error(RECORD_OPERATION, error))?;
+        let ordinal =
+            usize::try_from(ordinal).map_err(|error| read_error(RECORD_OPERATION, error))?;
+        let Some(decision) = decisions.get_mut(ordinal) else {
+            return Err(read_message(
+                RECORD_OPERATION,
+                "root authority returned an unknown candidate ordinal",
+            ));
+        };
+        *decision = RootAuthorityDecision::Authorized;
+    }
+    Ok(RootAuthorityDecisions { decisions })
+}
+
+#[cfg(test)]
 pub(super) async fn require_candidate_root_authority(
     conn: &TemporalSqlRead<'_>,
     candidate: &RankingCandidate,
     project_key: &str,
     provider: Option<&str>,
 ) -> Result<(), TemporalPortError> {
-    let session_id = candidate
-        .session
-        .as_deref()
-        .filter(|session| !session.is_empty())
-        .ok_or_else(|| {
-            read_message(
-                RECORD_OPERATION,
-                "root-wide candidate is missing session identity",
-            )
-        })?;
-    let source_id = candidate.retriever_record_id.as_str();
-    if source_id.is_empty() {
-        return Err(read_message(
-            RECORD_OPERATION,
-            "root-wide candidate is missing retriever record identity",
-        ));
-    }
-    let provider = provider.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string()));
-    let params = vec![
-        SqlValue::Text(candidate.anchor_id.to_string()),
-        SqlValue::Text(session_id.to_string()),
-        SqlValue::Text(project_key.to_string()),
-        SqlValue::Text(source_id.to_string()),
+    resolve_root_authority(
+        conn,
+        std::slice::from_ref(candidate),
+        project_key,
         provider,
-    ];
-    let sql = match candidate.channel {
-        CandidateChannel::Summary => {
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM retrieval_anchors AS authority_anchor
-                 JOIN session_summary_nodes AS summary
-                   ON summary.summary_anchor_id = authority_anchor.anchor_id
-                  AND summary.session_id = ?2
-                  AND summary.summary_id = ?4
-                 JOIN session_temporal_generations AS generation
-                   ON generation.session_id = summary.session_id
-                  AND generation.state = 'active'
-                 JOIN sessions AS authority_session
-                   ON authority_session.session_id = summary.session_id
-                  AND authority_session.provider =
-                      json_extract(summary.publication_json, '$.provider')
-                  AND authority_session.project_key = ?3
-                 WHERE authority_anchor.anchor_id = ?1
-                   AND (
-                       (authority_session.project_key = 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                       OR
-                       (authority_session.project_key <> 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                        AND json_extract(authority_anchor.owner_json, '$.project_id')
-                            = authority_session.project_key)
-                   )
-                   AND (?5 IS NULL OR EXISTS (
-                       WITH RECURSIVE retained_sources(
-                           source_anchor_id, source_summary_id, depth
-                       ) AS (
-                           SELECT source_anchor_id, source_summary_id, 0
-                           FROM session_summary_sources
-                           WHERE summary_id = summary.summary_id
-                           UNION ALL
-                           SELECT nested.source_anchor_id, nested.source_summary_id,
-                                  retained.depth + 1
-                           FROM retained_sources AS retained
-                           JOIN session_summary_nodes AS retained_summary
-                             ON retained_summary.summary_id = retained.source_summary_id
-                            AND retained_summary.session_id = summary.session_id
-                           JOIN session_summary_sources AS nested
-                             ON nested.summary_id = retained_summary.summary_id
-                           WHERE retained.depth < 63
-                           LIMIT 257
-                       )
-                       SELECT 1
-                       FROM retained_sources AS retained
-                       JOIN session_occurrences AS source_occurrence
-                         ON source_occurrence.retrieval_anchor_id =
-                            retained.source_anchor_id
-                        AND source_occurrence.session_id = summary.session_id
-                        AND source_occurrence.generation = generation.generation
-                       JOIN observations AS source_observation
-                         ON source_observation.observation_id =
-                            source_occurrence.source_observation_id
-                       WHERE json_extract(
-                           source_observation.observation_json,
-                           '$.identity.source.provider'
-                       ) = ?5
-                       LIMIT 1
-                   ))
-                 LIMIT 1
-             )"
-        }
-        CandidateChannel::Span | CandidateChannel::Burst => {
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM retrieval_anchors AS authority_anchor
-                 JOIN session_derived_evidence AS evidence
-                   ON evidence.retrieval_anchor_id = authority_anchor.anchor_id
-                  AND evidence.session_id = ?2
-                  AND evidence.evidence_id = ?4
-                 JOIN session_temporal_generations AS generation
-                   ON generation.session_id = evidence.session_id
-                  AND generation.generation = evidence.generation
-                  AND generation.state = 'active'
-                 JOIN session_occurrences AS first_occurrence
-                   ON first_occurrence.session_id = evidence.session_id
-                  AND first_occurrence.generation = evidence.generation
-                  AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-                 JOIN observations AS source_observation
-                   ON source_observation.observation_id =
-                      first_occurrence.source_observation_id
-                 JOIN sessions AS authority_session
-                   ON authority_session.session_id = evidence.session_id
-                  AND authority_session.provider = COALESCE(json_extract(
-                      source_observation.observation_json,
-                      '$.identity.source.provider'
-                  ), 'claude')
-                  AND authority_session.project_key = ?3
-                 WHERE authority_anchor.anchor_id = ?1
-                   AND (?5 IS NULL OR authority_session.provider = ?5)
-                   AND (
-                       (authority_session.project_key = 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                       OR
-                       (authority_session.project_key <> 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                        AND json_extract(authority_anchor.owner_json, '$.project_id')
-                            = authority_session.project_key)
-                   )
-                 LIMIT 1
-             )"
-        }
-        CandidateChannel::Anchor
-        | CandidateChannel::Scope
-        | CandidateChannel::ExactMessage
-        | CandidateChannel::Phrase
-        | CandidateChannel::Entity
-        | CandidateChannel::Time
-        | CandidateChannel::Lexical => {
-            "SELECT EXISTS (
-                 SELECT 1
-                 FROM retrieval_anchors AS authority_anchor
-                 JOIN session_occurrences AS occurrence
-                   ON occurrence.retrieval_anchor_id = authority_anchor.anchor_id
-                  AND occurrence.session_id = ?2
-                  AND occurrence.occurrence_id = ?4
-                 JOIN session_temporal_generations AS generation
-                   ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
-                  AND generation.state = 'active'
-                 JOIN observations AS source_observation
-                   ON source_observation.observation_id =
-                      occurrence.source_observation_id
-                 JOIN sessions AS authority_session
-                   ON authority_session.session_id = occurrence.session_id
-                  AND authority_session.provider = COALESCE(json_extract(
-                      source_observation.observation_json,
-                      '$.identity.source.provider'
-                  ), 'claude')
-                  AND authority_session.project_key = ?3
-                 WHERE authority_anchor.anchor_id = ?1
-                   AND (?5 IS NULL OR authority_session.provider = ?5)
-                   AND (
-                       (authority_session.project_key = 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                       OR
-                       (authority_session.project_key <> 'user'
-                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                        AND json_extract(authority_anchor.owner_json, '$.project_id')
-                            = authority_session.project_key)
-                   )
-                 LIMIT 1
-             )"
-        }
-    };
-    let mut rows = conn
-        .query(sql, params)
-        .await
-        .map_err(|error| read_error(RECORD_OPERATION, error))?;
-    let authorized: i64 = rows
-        .next()
-        .await
-        .map_err(|error| read_error(RECORD_OPERATION, error))?
-        .ok_or_else(|| read_message(RECORD_OPERATION, "root authority query returned no row"))?
-        .get(0)
-        .map_err(|error| read_error(RECORD_OPERATION, error))?;
-    if authorized != 1 {
-        return Err(read_message(
-            RECORD_OPERATION,
-            "candidate is outside the authorized root",
-        ));
-    }
-    Ok(())
+    )
+    .await?
+    .require(0)
 }
 
 #[allow(clippy::too_many_arguments)]

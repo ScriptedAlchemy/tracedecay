@@ -832,16 +832,27 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             }
             let window_end = bounded_window_end(candidates.len(), cursor.candidate, window_size);
             let window = &candidates[cursor.candidate..window_end];
-            for candidate in window {
-                require_candidate_scope(scope, candidate)?;
-                if let Some(project_key) = root_project_key {
-                    require_candidate_root_authority(
-                        &self.read,
-                        candidate,
-                        project_key,
-                        snapshot.provider_scope(),
+            // The leading candidate's scope still gates the authority read, so a
+            // scope violation fails before any window authorization runs.
+            let root_authority = match (root_project_key, window.first()) {
+                (Some(project_key), Some(first)) => {
+                    require_candidate_scope(scope, first)?;
+                    Some(
+                        resolve_root_authority(
+                            &self.read,
+                            window,
+                            project_key,
+                            snapshot.provider_scope(),
+                        )
+                        .await?,
                     )
-                    .await?;
+                }
+                _ => None,
+            };
+            for (local, candidate) in window.iter().enumerate() {
+                require_candidate_scope(scope, candidate)?;
+                if let Some(authority) = root_authority.as_ref() {
+                    authority.require(local)?;
                 }
                 if candidate.anchor_id.to_string().len() > request.max_key_bytes() {
                     return Err(TemporalPortError::BudgetExceeded {
