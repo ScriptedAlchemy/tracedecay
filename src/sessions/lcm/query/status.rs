@@ -77,16 +77,20 @@ async fn status_for_provider_with_work(
     work.record_query();
     let counts = status_counts(conn, provider, session_id).await?;
     work.record_payload_health();
-    let payload_health = payload_health_detail(
-        conn,
-        storage_root,
-        provider,
-        session_id,
-        deep,
-        20,
-        gc_config,
-    )
-    .await?;
+    let payload_health = if deep {
+        payload_health_detail(
+            conn,
+            storage_root,
+            provider,
+            session_id,
+            true,
+            20,
+            gc_config,
+        )
+        .await?
+    } else {
+        payload_health_summary(conn, storage_root, provider, session_id, gc_config).await?
+    };
     work.record_query();
     let lifecycle_metadata = load_lifecycle_metadata(conn, provider, session_id).await?;
     work.record_query();
@@ -137,8 +141,11 @@ async fn aggregate_provider_status_with_work(
     }
 
     work.record_payload_health();
-    let payload_health =
-        payload_health_detail(conn, storage_root, "all", session_id, deep, 20, gc_config).await?;
+    let payload_health = if deep {
+        payload_health_detail(conn, storage_root, "all", session_id, true, 20, gc_config).await?
+    } else {
+        payload_health_summary(conn, storage_root, "all", session_id, gc_config).await?
+    };
     work.record_query();
     let store = store_status(conn, "all", session_id).await?;
     work.record_query();
@@ -447,6 +454,12 @@ pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmS
             compression_boundary_cooldown_seconds: LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS,
         },
         payload: LcmPayloadStatus {
+            coverage: LcmPayloadCoverage {
+                state: LcmPayloadCoverageState::Complete,
+                scanned_metadata_refs: 0,
+                scanned_files: 0,
+                reason: None,
+            },
             externalized_count: 0,
             missing_count: 0,
             unreferenced_count: 0,
@@ -889,10 +902,15 @@ mod tests {
                 .expect("load provider status");
             merge_lcm_status(&mut aggregate, status);
         }
-        let payload_health =
-            payload_health_detail(conn, storage_root, "all", None, deep, 20, &gc_config)
+        let payload_health = if deep {
+            payload_health_detail(conn, storage_root, "all", None, true, 20, &gc_config)
                 .await
-                .expect("load aggregate payload health");
+                .expect("load aggregate payload health")
+        } else {
+            payload_health_summary(conn, storage_root, "all", None, &gc_config)
+                .await
+                .expect("load aggregate payload summary")
+        };
         aggregate.external_payload_count = payload_health.payload.externalized_count;
         aggregate.missing_payload_count = payload_health.payload.missing_count;
         aggregate.unreferenced_payload_count = payload_health.payload.unreferenced_count;
@@ -967,6 +985,25 @@ mod tests {
             assert_eq!(status.raw_message_count, 12);
             assert_eq!(work, baseline);
         }
+    }
+
+    #[tokio::test]
+    async fn shallow_status_marks_the_skipped_payload_census_partial() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        seed_provider(&conn, 0).await;
+
+        let status =
+            aggregate_provider_status(&*conn, storage.path(), None, false, &LcmGcConfig::default())
+                .await
+                .expect("load shallow aggregate status");
+        let payload = serde_json::to_value(status).expect("status json");
+
+        assert_eq!(payload["payload"]["coverage"]["state"], "partial");
+        assert_eq!(
+            payload["payload"]["coverage"]["reason"],
+            "payload_file_census_requires_deep_status"
+        );
     }
 
     #[tokio::test]

@@ -5,6 +5,76 @@ use super::*;
 
 use crate::sessions::lcm::{LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS};
 
+pub(crate) async fn payload_health_summary(
+    conn: &(impl QueryExecutor + ?Sized),
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    gc_config: &LcmGcConfig,
+) -> Result<PayloadHealthDetail, LcmError> {
+    let gc_config = gc_config.clone().normalized();
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN byte_count > 0 THEN byte_count ELSE 0 END), 0)
+             FROM lcm_external_payloads
+             WHERE (?1 = 'all' OR provider = ?1)
+               AND (?2 IS NULL OR session_id = ?2)",
+            params![provider, session_id],
+        )
+        .await?;
+    let row = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("payload summary query returned no rows".to_owned()))?;
+    let externalized_count: i64 = row.get(0)?;
+    let total_bytes = row.get::<i64>(1)?.max(0) as u64;
+    Ok(PayloadHealthDetail {
+        payload: LcmPayloadStatus {
+            coverage: LcmPayloadCoverage {
+                state: LcmPayloadCoverageState::Partial,
+                scanned_metadata_refs: 0,
+                scanned_files: 0,
+                reason: Some("payload_file_census_requires_deep_status".to_owned()),
+            },
+            externalized_count,
+            missing_count: 0,
+            unreferenced_count: 0,
+            placeholder_ref_count: 0,
+            missing_placeholder_metadata_count: 0,
+            missing_placeholder_file_count: 0,
+            gc_candidate_count: 0,
+            root_contained: payload_root_contained(storage_root),
+            orphan_file_count: 0,
+            tombstoned_count: 0,
+            referenced_count: 0,
+            total_bytes,
+            referenced_bytes: 0,
+            orphan_file_bytes: 0,
+            reclaimable_bytes: 0,
+            reclaimable_bytes_after_grace: 0,
+            integrity_mismatch_count: None,
+        },
+        payload_gc: LcmPayloadGcStatus {
+            last_gc_at: None,
+            last_gc_duration_ms: None,
+            last_gc_status: None,
+            last_gc_error: None,
+            last_reaped_refs: None,
+            last_reaped_bytes: None,
+            grace_seconds: i64::try_from(gc_config.grace_seconds).unwrap_or(i64::MAX),
+            reap_missing_metadata_after_seconds: i64::try_from(gc_config.reap_missing_after)
+                .unwrap_or(i64::MAX),
+            next_run_eligible_at: None,
+        },
+        missing_payload_refs: Vec::new(),
+        orphan_files: Vec::new(),
+        unreferenced_refs: Vec::new(),
+        missing_placeholder_refs: Vec::new(),
+        integrity_mismatch_refs: Vec::new(),
+    })
+}
+
 pub(crate) async fn payload_health_detail(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -131,9 +201,11 @@ pub(crate) async fn payload_health_detail(
     let mut orphan_file_bytes = 0_u64;
     let mut reclaimable_orphan_bytes = 0_u64;
     let mut orphan_files = Vec::new();
+    let mut scanned_files = 0_i64;
     if let Ok(entries) = fs::read_dir(&payload_dir) {
         for entry in entries {
             let entry = entry.map_err(|err| LcmError::Io(err.to_string()))?;
+            scanned_files = scanned_files.saturating_add(1);
             let name = entry.file_name().to_string_lossy().to_string();
             if payload::validate_payload_ref(&name).is_err() {
                 continue;
@@ -191,6 +263,12 @@ pub(crate) async fn payload_health_detail(
 
     Ok(PayloadHealthDetail {
         payload: LcmPayloadStatus {
+            coverage: LcmPayloadCoverage {
+                state: LcmPayloadCoverageState::Complete,
+                scanned_metadata_refs: metadata_refs.len() as i64,
+                scanned_files,
+                reason: None,
+            },
             externalized_count,
             missing_count,
             unreferenced_count,
@@ -239,7 +317,8 @@ pub(crate) fn payload_health_state(
         || !payload.root_contained
     {
         "error"
-    } else if payload.orphan_file_count > 0
+    } else if payload.coverage.state == LcmPayloadCoverageState::Partial
+        || payload.orphan_file_count > 0
         || payload.unreferenced_count > 0
         || payload_gc.last_gc_at.is_none()
     {

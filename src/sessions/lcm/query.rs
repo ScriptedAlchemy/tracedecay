@@ -23,8 +23,10 @@ pub(crate) use payload_health::*;
 pub(crate) use session::*;
 use status::*;
 
+use super::types::LcmStoreTokenCoverage;
 use super::types::{
-    LcmGrepOutcome, LcmLifecycleStatus, LcmPayloadGcStatus, LcmPayloadStatus, LcmRedactionStatus,
+    LcmGrepOutcome, LcmLifecycleStatus, LcmPayloadCoverage, LcmPayloadCoverageState,
+    LcmPayloadGcStatus, LcmPayloadStatus, LcmRedactionStatus,
 };
 use super::{
     LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_FRESH_TAIL_COUNT,
@@ -42,7 +44,6 @@ use super::{
     LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeOverview, dag, gc, maintenance, payload,
     raw, schema, util,
 };
-use super::types::LcmStoreTokenCoverage;
 
 const MAX_PAGE_LIMIT: usize = 100;
 const PLACEHOLDER_PREFIXES: [&str; 5] = [

@@ -773,7 +773,24 @@ pub struct LcmPayloadGcStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LcmPayloadCoverageState {
+    Complete,
+    Partial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmPayloadCoverage {
+    pub state: LcmPayloadCoverageState,
+    pub scanned_metadata_refs: i64,
+    pub scanned_files: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmPayloadStatus {
+    pub coverage: LcmPayloadCoverage,
     pub externalized_count: i64,
     pub missing_count: i64,
     pub unreferenced_count: i64,
