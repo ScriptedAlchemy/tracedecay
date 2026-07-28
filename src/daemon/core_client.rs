@@ -12,7 +12,7 @@ use super::unavailable_error;
 use super::{
     BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonEndpoint, DaemonHandshake,
     JsonRpcRequest, JsonRpcResponse, PROJECT_WARMING_RETRY_HINT, Result, TraceDecayError,
-    authority, cold_doctor_runtime_value, default_socket_path, doctor_runtime_tool_result,
+    authority, default_socket_path,
 };
 
 pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -530,21 +530,6 @@ pub async fn call_default_tool_awaiting_project_open(
     let socket_path = default_available_socket_path()?;
     call_tool_with_project_warming_retry(&socket_path, handshake, tool_name, arguments, deadline)
         .await
-}
-
-pub async fn call_default_doctor_runtime(
-    handshake: &DaemonHandshake,
-    arguments: serde_json::Value,
-) -> Result<serde_json::Value> {
-    if let Ok(socket_path) = default_available_socket_path()
-        && let Ok(result) =
-            call_tool(&socket_path, handshake, "tracedecay_runtime", arguments).await
-    {
-        return Ok(result);
-    }
-    Ok(doctor_runtime_tool_result(
-        cold_doctor_runtime_value(handshake).await,
-    ))
 }
 
 /// Extracts the single JSON payload from an MCP tool result while ignoring

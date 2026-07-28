@@ -47,11 +47,10 @@ use super::provider::{
 };
 use super::rpc::{
     DiagnosticSerializationCapabilities, RpcFailure, diagnostic_result_id, diagnostic_value,
-    document_diagnostic_report_value, document_position, document_uri, error_response,
-    incoming_calls_value, initialized_root_uri, outgoing_calls_value, overlay_failure,
-    parse_call_item, parse_overlay_change, parse_type_item, partial_failure_data, request_id,
-    request_id_value, required_i64, required_nonempty_string, required_string, response_value,
-    semantic_response_value, success_response, text_document, type_items_value,
+    document_diagnostic_report_value, error_response, initialized_root_uri, overlay_failure,
+    parse_overlay_change, partial_failure_data, request_id, request_id_value, required_i64,
+    required_nonempty_string, required_string, response_value, semantic_response_value,
+    success_response, text_document,
 };
 use super::session::{
     CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
@@ -1173,109 +1172,6 @@ where
             }
         }
         Ok(())
-    }
-
-    pub(super) fn handle_position_request(
-        &mut self,
-        id: Value,
-        params: &Value,
-        now_ms: u64,
-        route: impl FnOnce(&DaemonLspGateway<P, S>, &str, LspPosition) -> Result<Value, RpcFailure>,
-    ) {
-        let parsed = document_position(params);
-        match parsed {
-            Ok((uri, position)) => {
-                let version = self.overlays.version(&uri).unwrap_or_default();
-                self.with_request(id, Some((uri.clone(), version)), now_ms, move |session| {
-                    route(&session.gateway, &uri, position)
-                });
-            }
-            Err(error) => {
-                let _ = self.enqueue_value(error_response(id, error));
-            }
-        }
-    }
-
-    pub(super) fn handle_document_request(
-        &mut self,
-        id: Value,
-        params: &Value,
-        now_ms: u64,
-        route: impl FnOnce(&DaemonLspGateway<P, S>, &str) -> Result<Value, RpcFailure>,
-    ) {
-        match document_uri(params) {
-            Ok(uri) => {
-                let version = self.overlays.version(&uri).unwrap_or_default();
-                self.with_request(id, Some((uri.clone(), version)), now_ms, move |session| {
-                    route(&session.gateway, &uri)
-                });
-            }
-            Err(error) => {
-                let _ = self.enqueue_value(error_response(id, error));
-            }
-        }
-    }
-
-    pub(super) fn handle_call_request(
-        &mut self,
-        id: Value,
-        params: &Value,
-        now_ms: u64,
-        incoming: bool,
-    ) {
-        let item = params
-            .get("item")
-            .ok_or_else(|| RpcFailure::invalid_params("item is required"));
-        match item.and_then(parse_call_item) {
-            Ok(item) => {
-                let uri = item.uri.clone();
-                let version = self.overlays.version(&uri).unwrap_or_default();
-                self.with_request(id, Some((uri, version)), now_ms, move |session| {
-                    if incoming {
-                        response_value(session.gateway.incoming_calls(&item), incoming_calls_value)
-                    } else {
-                        response_value(session.gateway.outgoing_calls(&item), outgoing_calls_value)
-                    }
-                });
-            }
-            Err(error) => {
-                let _ = self.enqueue_value(error_response(id, error));
-            }
-        }
-    }
-
-    pub(super) fn handle_type_request(
-        &mut self,
-        id: Value,
-        params: &Value,
-        now_ms: u64,
-        supertypes: bool,
-    ) {
-        let item = params
-            .get("item")
-            .ok_or_else(|| RpcFailure::invalid_params("item is required"));
-        match item.and_then(parse_type_item) {
-            Ok(item) => {
-                let uri = item.uri.clone();
-                let version = self.overlays.version(&uri).unwrap_or_default();
-                self.with_request(id, Some((uri, version)), now_ms, move |session| {
-                    if supertypes {
-                        response_value(
-                            session.gateway.type_hierarchy_supertypes(&item),
-                            type_items_value,
-                        )
-                    } else {
-                        response_value(
-                            session.gateway.type_hierarchy_subtypes(&item),
-                            type_items_value,
-                        )
-                    }
-                });
-            }
-            Err(error) => {
-                let _ = self.enqueue_value(error_response(id, error));
-            }
-        }
     }
 
     pub(super) fn handle_context_request(&mut self, id: Value, params: &Value, now_ms: u64) {
