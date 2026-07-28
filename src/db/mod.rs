@@ -27,6 +27,8 @@ mod unresolved;
 pub(crate) use access::OwnedMaintenanceDatabaseScope;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
+#[cfg(not(any(test, feature = "test-transport")))]
+pub(crate) use access::enter_owned_maintenance_database_scope;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) use access::is_isolated_test_path;
 #[cfg(windows)]
@@ -37,8 +39,6 @@ pub(crate) use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
     enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
-#[cfg(not(any(test, feature = "test-transport")))]
-pub(crate) use access::enter_owned_maintenance_database_scope;
 #[cfg(any(test, feature = "test-transport"))]
 pub use connection::TestDatabaseRuntimeMode;
 pub use connection::{Database, SQLITE_UNSAFE_FAST_ENV};
