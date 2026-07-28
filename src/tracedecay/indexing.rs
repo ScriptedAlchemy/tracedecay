@@ -90,7 +90,14 @@ pub enum MigrationReindexStatusV1 {
 }
 
 fn should_schedule_migration_reindex(status: &MigrationReindexStatusV1) -> bool {
-    !matches!(status, MigrationReindexStatusV1::Current { .. })
+    matches!(
+        status,
+        MigrationReindexStatusV1::Indexing { .. }
+            | MigrationReindexStatusV1::Failed {
+                retryable: true,
+                ..
+            }
+    )
 }
 
 struct MigrationReindexWorkerRegistration {
@@ -343,26 +350,19 @@ impl TraceDecay {
                 completed_at,
             });
         };
-        serde_json::from_str(&encoded).map_err(|error| TraceDecayError::Database {
-            operation: "read migration re-index state".to_owned(),
-            message: format!("invalid migration re-index state: {error}"),
-        })
+        match serde_json::from_str(&encoded) {
+            Ok(status) => Ok(status),
+            Err(_) => Ok(MigrationReindexStatusV1::Failed {
+                schema_version: crate::db::migrations::LATEST_VERSION,
+                availability: self.migration_reindex_availability().await?,
+                retryable: true,
+                reason: "stored migration re-index state is unreadable".to_owned(),
+            }),
+        }
     }
 
     pub(super) async fn mark_migration_reindex_pending(&self) -> Result<()> {
-        let availability = if self
-            .db
-            .query_scalar_i64(
-                "inspect pre-migration graph availability",
-                "SELECT EXISTS(SELECT 1 FROM files LIMIT 1)",
-            )
-            .await?
-            != 0
-        {
-            MigrationReindexAvailabilityV1::Stale
-        } else {
-            MigrationReindexAvailabilityV1::Unavailable
-        };
+        let availability = self.migration_reindex_availability().await?;
         self.write_migration_reindex_status(&MigrationReindexStatusV1::Indexing {
             schema_version: crate::db::migrations::LATEST_VERSION,
             completed_files: 0,
@@ -372,12 +372,44 @@ impl TraceDecay {
         .await
     }
 
+    async fn migration_reindex_availability(&self) -> Result<MigrationReindexAvailabilityV1> {
+        Ok(
+            if self
+                .db
+                .query_scalar_i64(
+                    "inspect pre-migration graph availability",
+                    "SELECT EXISTS(SELECT 1 FROM files LIMIT 1)",
+                )
+                .await?
+                != 0
+            {
+                MigrationReindexAvailabilityV1::Stale
+            } else {
+                MigrationReindexAvailabilityV1::Unavailable
+            },
+        )
+    }
+
     pub(super) async fn schedule_migration_reindex_if_needed(&self) -> Result<()> {
         let status = self.migration_reindex_status().await?;
         if !should_schedule_migration_reindex(&status) {
             return Ok(());
         }
-        self.ensure_branch_writable("schedule migration re-index")?;
+        if let Err(error) = self.ensure_branch_writable("schedule migration re-index") {
+            let availability = match status {
+                MigrationReindexStatusV1::Indexing { availability, .. }
+                | MigrationReindexStatusV1::Failed { availability, .. } => availability,
+                MigrationReindexStatusV1::Current { .. } => return Ok(()),
+            };
+            self.write_migration_reindex_status(&MigrationReindexStatusV1::Failed {
+                schema_version: crate::db::migrations::LATEST_VERSION,
+                availability,
+                retryable: true,
+                reason: error.to_string(),
+            })
+            .await?;
+            return Ok(());
+        }
         let key = self.active_graph_layout.sync_lock_path.clone();
         if !MIGRATION_REINDEX_WORKERS
             .lock()
@@ -1969,8 +2001,15 @@ mod migration_reindex_tests {
             schema_version: 25,
             completed_at: 42,
         };
+        let terminal = MigrationReindexStatusV1::Failed {
+            schema_version: 25,
+            availability: MigrationReindexAvailabilityV1::Unavailable,
+            retryable: false,
+            reason: "manual intervention required".to_owned(),
+        };
 
         assert!(!should_schedule_migration_reindex(&current));
+        assert!(!should_schedule_migration_reindex(&terminal));
     }
 
     #[test]
