@@ -637,20 +637,18 @@ async fn validate_message_projection_row(
     ProjectionOutputOwnership::load(conn, &message.provider, &message.message_id)
         .await?
         .validate()?;
-    let verification = if provenance.message_created == 1 {
-        // This observation is the canonical creator and its provenance was
-        // compared above, so looking the owner up and re-deriving this same
-        // projection only adds several SQL-channel round trips. Duplicate
-        // observations still take the full canonical-owner path below.
-        crate::global_db::observation_projection::verify_projection_rows(conn, projection).await
-    } else {
-        crate::global_db::observation_projection::verify_output_authority(conn, projection).await
-    };
-    verification.map_err(|error| {
-        authority_violation(format!(
-            "projection output rows disagree with deterministic output: {error}"
-        ))
-    })?;
+    // Creating an output does not make this observation its current owner: a
+    // later generation from the same source supersedes the row while the
+    // historical creator keeps `message_created = 1`. Resolve the canonical
+    // owner for every observation so a superseded creator is audited against
+    // the projection that actually owns the row.
+    crate::global_db::observation_projection::verify_output_authority(conn, projection)
+        .await
+        .map_err(|error| {
+            authority_violation(format!(
+                "projection output rows disagree with deterministic output: {error}"
+            ))
+        })?;
     Ok(true)
 }
 

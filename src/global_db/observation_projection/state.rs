@@ -657,13 +657,6 @@ async fn verify_rows(
     Ok(())
 }
 
-pub(in crate::global_db) async fn verify_projection_rows(
-    conn: &impl QueryExecutor,
-    projection: &SessionMessageProjection,
-) -> ProjectionStoreResult<()> {
-    verify_rows(conn, projection).await
-}
-
 pub(super) fn same_projection_lineage(
     candidate: &DurableObservationV1,
     owner: &DurableObservationV1,

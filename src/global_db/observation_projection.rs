@@ -17,6 +17,4 @@ pub(super) use schema::{
     converge_v4_projection_anchor_bindings, ensure_observation_projection_performance_indexes,
     ensure_observation_projection_schema,
 };
-pub(super) use state::{
-    converge_session_project_paths, verify_output_authority, verify_projection_rows,
-};
+pub(super) use state::{converge_session_project_paths, verify_output_authority};
