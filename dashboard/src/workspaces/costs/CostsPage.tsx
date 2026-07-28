@@ -1,7 +1,6 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, ReadoutBar } from '../../ui/instrument.tsx';
-import { formatCount, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   SavingsOverviewPayloadSchema,
@@ -520,19 +519,30 @@ function ReadFailure({
   );
 }
 
-/** Tokens abbreviate from a thousand rather than the shared default of ten,
- * because four-figure token counts are the exception on this surface and a
- * column of them at full width buys nothing. The magnitude language itself —
- * and the em dash for an absent value — is the dashboard's, not this page's. */
-const TOKEN_THOUSANDS_AT = 1_000;
+/** Tokens abbreviate from a thousand rather than the ten thousand the shared
+ * `formatCount` uses, because four-figure token counts are the exception on
+ * this surface. `null` in, em dash out: an absent figure is never a zero. */
+function formatTokens(tokens: number | null | undefined): string {
+  if (tokens == null || !Number.isFinite(tokens)) return '—';
+  if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(1)}B`;
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
+  return tokens.toLocaleString();
+}
 
-const formatTokens = (tokens: number | null | undefined): string =>
-  formatCount(tokens, TOKEN_THOUSANDS_AT);
-
-/** The same language with the unit split off, so the display tier can set the
- * figure large and its unit small on the shared baseline. */
-const splitTokens = (tokens: number | null | undefined): { value: string; unit?: string } =>
-  splitCount(tokens, TOKEN_THOUSANDS_AT);
+/** The same magnitude language with the unit split off, so the display tier can
+ * set the figure large and its unit small on the shared baseline. */
+function splitTokens(tokens: number | null | undefined): {
+  value: string;
+  unit?: string;
+} {
+  if (tokens == null || !Number.isFinite(tokens)) return { value: '—' };
+  if (tokens >= 1_000_000_000)
+    return { value: (tokens / 1_000_000_000).toFixed(1), unit: 'B' };
+  if (tokens >= 1_000_000) return { value: (tokens / 1_000_000).toFixed(1), unit: 'M' };
+  if (tokens >= 1_000) return { value: (tokens / 1_000).toFixed(1), unit: 'K' };
+  return { value: tokens.toLocaleString() };
+}
 
 /** A window's share of the lifetime figure it is nested inside. Null whenever
  * either end is missing — an absent denominator must never render as a full
