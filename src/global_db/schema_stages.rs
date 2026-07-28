@@ -181,6 +181,11 @@ const TRANSCRIPT_SCHEMA: &str = "
         ON session_messages(timestamp);
     CREATE INDEX IF NOT EXISTS idx_session_messages_source
         ON session_messages(source_path);
+    CREATE TABLE IF NOT EXISTS session_backfill_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
     CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
         text, role, kind, model, tool_names,
         content='session_messages', content_rowid='rowid'
@@ -292,17 +297,6 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
             .map_err(|error| {
                 global_db_operation_error("initialize workflow index schema", error)
             })?;
-        if let Err(error) =
-            crate::sessions::transcript_backfill::backfill_transcript_facts(&transaction).await
-        {
-            if !error.atomicity_preserved() {
-                return Err(global_db_operation_error(
-                    "roll back transcript facts backfill",
-                    error,
-                ));
-            }
-            tracing::warn!(error = %error, "transcript facts backfill deferred until a later open");
-        }
         crate::errors::Result::Ok(())
     }
     .await;

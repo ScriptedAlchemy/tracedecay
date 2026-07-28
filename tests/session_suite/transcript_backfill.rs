@@ -1,11 +1,15 @@
-//! Coverage for the one-off transcript-facts backfill: legacy rows ingested
-//! with `timestamp = NULL` (or without `metadata_json.usage` counters) are
-//! re-derived from their source transcript files on store open, missing
-//! files are tolerated, already-dated rows (e.g. Hermes-migrated messages)
-//! are left untouched, and the marker makes the pass run once per store.
+//! Coverage for the checkpointed transcript-facts backfill: legacy rows
+//! ingested with `timestamp = NULL` (or without `metadata_json.usage`
+//! counters) are re-derived from their source transcript files by background
+//! maintenance, missing files are tolerated, already-dated rows (e.g.
+//! Hermes-migrated messages) are left untouched, and the marker makes the
+//! pass run once per store.
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::host_admission::HostAdmissionScope;
+use tracedecay::sessions::transcript_backfill::{
+    TranscriptFactsBackfillOutcome, TranscriptFactsBackfillTestRuntimeV1,
+};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay_domain::ProjectId;
 
@@ -23,8 +27,11 @@ fn init_project(tmp: &TempDir) -> std::path::PathBuf {
     project
 }
 
-async fn project_runtime(tmp: &TempDir, project: &std::path::Path) -> HostAdmissionTestRuntimeV1 {
-    HostAdmissionTestRuntimeV1::project(
+async fn project_runtime(
+    tmp: &TempDir,
+    project: &std::path::Path,
+) -> TranscriptFactsBackfillTestRuntimeV1 {
+    TranscriptFactsBackfillTestRuntimeV1::project(
         tmp.path().join("profile"),
         project,
         ProjectId::new(TEST_PROJECT_ID).unwrap(),
@@ -100,11 +107,10 @@ fn legacy_message(
     }
 }
 
-/// Seeds legacy rows and clears the backfill marker so the next open re-runs
-/// the pass against them (a fresh store marks itself done immediately because
-/// it has nothing to backfill).
+/// Seeds legacy rows and clears the backfill marker so background maintenance
+/// sees the fixture as pending.
 async fn seed_legacy_rows(
-    runtime: &HostAdmissionTestRuntimeV1,
+    runtime: &TranscriptFactsBackfillTestRuntimeV1,
     provider: &str,
     messages: &[SessionMessageRecord],
 ) {
@@ -118,11 +124,26 @@ async fn seed_legacy_rows(
         .unwrap();
 }
 
-async fn marker_version(runtime: &HostAdmissionTestRuntimeV1) -> Option<i64> {
+async fn marker_version(runtime: &TranscriptFactsBackfillTestRuntimeV1) -> Option<i64> {
     runtime
         .transcript_backfill_marker_version_for_test(HostAdmissionScope::Project)
         .await
         .unwrap()
+}
+
+async fn drain_backfill(runtime: &TranscriptFactsBackfillTestRuntimeV1) {
+    for _ in 0..16 {
+        match runtime
+            .advance_transcript_facts_backfill_for_test(2)
+            .await
+            .unwrap()
+        {
+            TranscriptFactsBackfillOutcome::Pending { .. } => {}
+            TranscriptFactsBackfillOutcome::Complete
+            | TranscriptFactsBackfillOutcome::NotRequired => return,
+        }
+    }
+    panic!("transcript facts backfill did not drain");
 }
 
 fn metadata_usage(metadata_json: Option<&str>) -> Option<serde_json::Value> {
@@ -133,7 +154,7 @@ fn metadata_usage(metadata_json: Option<&str>) -> Option<serde_json::Value> {
 }
 
 #[tokio::test]
-async fn backfill_dates_legacy_rows_from_source_transcripts() {
+async fn dogfood_recovery_admission_publishes_schema_with_transcript_backfill_pending() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (transcript, offsets) = write_tagged_transcript(&tmp);
@@ -172,8 +193,26 @@ async fn backfill_dates_legacy_rows_from_source_transcripts() {
     .await;
     drop(runtime);
 
-    // Re-opening the store runs the marker-guarded backfill.
+    // Re-opening publishes the schema without running the marker-guarded
+    // backfill on the admission path.
     let db = project_runtime(&tmp, &project).await;
+    assert_eq!(
+        db.transcript_facts_backfill_status_for_test()
+            .await
+            .unwrap(),
+        TranscriptFactsBackfillOutcome::Pending { cursor: 0 }
+    );
+    assert_eq!(
+        db.session_message_for_test(HostAdmissionScope::Project, "cursor", "m-0")
+            .await
+            .unwrap()
+            .unwrap()
+            .timestamp,
+        None
+    );
+    assert_eq!(marker_version(&db).await, None);
+
+    drain_backfill(&db).await;
     for (message_id, expected) in [("m-0", DAY_ONE), ("m-1", DAY_ONE), ("m-2", DAY_TWO)] {
         let projected = db
             .session_message_for_test(HostAdmissionScope::Project, "cursor", message_id)
@@ -206,7 +245,97 @@ async fn backfill_dates_legacy_rows_from_source_transcripts() {
 }
 
 #[tokio::test]
-async fn backfill_adds_claude_usage_counters_from_message_usage() {
+async fn dogfood_recovery_backfill_batches_resume_from_durable_cursor_after_restarts() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let (transcript, offsets) = write_tagged_transcript(&tmp);
+    let runtime = project_runtime(&tmp, &project).await;
+    seed_legacy_rows(
+        &runtime,
+        "cursor",
+        &[
+            legacy_message(
+                "cursor",
+                "m-0",
+                0,
+                "First day question.",
+                Some(&transcript),
+                Some(offsets[0]),
+            ),
+            legacy_message(
+                "cursor",
+                "m-1",
+                1,
+                "First day answer.",
+                Some(&transcript),
+                Some(offsets[1]),
+            ),
+            legacy_message(
+                "cursor",
+                "m-2",
+                2,
+                "Second day question.",
+                Some(&transcript),
+                Some(offsets[2]),
+            ),
+        ],
+    )
+    .await;
+    drop(runtime);
+
+    let first = project_runtime(&tmp, &project).await;
+    let TranscriptFactsBackfillOutcome::Pending {
+        cursor: first_cursor,
+    } = first
+        .advance_transcript_facts_backfill_for_test(1)
+        .await
+        .unwrap()
+    else {
+        panic!("first bounded batch must remain pending");
+    };
+    assert!(first_cursor > 0);
+    drop(first);
+
+    let second = project_runtime(&tmp, &project).await;
+    assert_eq!(
+        second
+            .transcript_facts_backfill_status_for_test()
+            .await
+            .unwrap(),
+        TranscriptFactsBackfillOutcome::Pending {
+            cursor: first_cursor
+        }
+    );
+    let TranscriptFactsBackfillOutcome::Pending {
+        cursor: second_cursor,
+    } = second
+        .advance_transcript_facts_backfill_for_test(1)
+        .await
+        .unwrap()
+    else {
+        panic!("second bounded batch must remain pending");
+    };
+    assert!(second_cursor > first_cursor);
+    drop(second);
+
+    let third = project_runtime(&tmp, &project).await;
+    drain_backfill(&third).await;
+    assert_eq!(marker_version(&third).await, Some(1));
+    for (message_id, expected) in [("m-0", DAY_ONE), ("m-1", DAY_ONE), ("m-2", DAY_TWO)] {
+        assert_eq!(
+            third
+                .session_message_for_test(HostAdmissionScope::Project, "cursor", message_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .timestamp,
+            Some(expected)
+        );
+    }
+}
+
+#[tokio::test]
+async fn dogfood_recovery_backfill_adds_claude_usage_counters_from_message_usage() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let runtime = project_runtime(&tmp, &project).await;
@@ -248,6 +377,7 @@ async fn backfill_adds_claude_usage_counters_from_message_usage() {
     drop(runtime);
 
     let db = project_runtime(&tmp, &project).await;
+    drain_backfill(&db).await;
     let assistant = db
         .session_message_for_test(HostAdmissionScope::Project, "claude", "c-1")
         .await
@@ -279,7 +409,7 @@ async fn backfill_adds_claude_usage_counters_from_message_usage() {
 }
 
 #[tokio::test]
-async fn backfill_attaches_codex_turn_usage_to_the_assistant_line() {
+async fn dogfood_recovery_backfill_attaches_codex_turn_usage_to_assistant_line() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let runtime = project_runtime(&tmp, &project).await;
@@ -310,6 +440,7 @@ async fn backfill_attaches_codex_turn_usage_to_the_assistant_line() {
     drop(runtime);
 
     let db = project_runtime(&tmp, &project).await;
+    drain_backfill(&db).await;
     let row = db
         .session_message_for_test(HostAdmissionScope::Project, "codex", "x-1")
         .await
@@ -326,7 +457,7 @@ async fn backfill_attaches_codex_turn_usage_to_the_assistant_line() {
 }
 
 #[tokio::test]
-async fn backfill_tolerates_missing_source_files_and_still_marks_done() {
+async fn dogfood_recovery_backfill_tolerates_missing_files_and_marks_done() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let gone = tmp.path().join("deleted-transcript.jsonl");
@@ -358,6 +489,7 @@ async fn backfill_tolerates_missing_source_files_and_still_marks_done() {
     drop(runtime);
 
     let db = project_runtime(&tmp, &project).await;
+    drain_backfill(&db).await;
     for message_id in ["m-gone", "m-nopath"] {
         let projected = db
             .session_message_for_test(HostAdmissionScope::Project, "cursor", message_id)
@@ -374,7 +506,7 @@ async fn backfill_tolerates_missing_source_files_and_still_marks_done() {
 }
 
 #[tokio::test]
-async fn backfill_leaves_already_dated_rows_untouched() {
+async fn dogfood_recovery_backfill_leaves_already_dated_rows_untouched() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let (transcript, offsets) = write_tagged_transcript(&tmp);
@@ -396,6 +528,7 @@ async fn backfill_leaves_already_dated_rows_untouched() {
     drop(runtime);
 
     let db = project_runtime(&tmp, &project).await;
+    drain_backfill(&db).await;
     let projected = db
         .session_message_for_test(HostAdmissionScope::Project, "cursor", "m-migrated")
         .await
@@ -411,7 +544,7 @@ async fn backfill_leaves_already_dated_rows_untouched() {
 }
 
 #[tokio::test]
-async fn backfill_preserves_existing_usage_and_other_metadata_keys() {
+async fn dogfood_recovery_backfill_preserves_existing_usage_and_metadata() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let runtime = project_runtime(&tmp, &project).await;
@@ -440,6 +573,7 @@ async fn backfill_preserves_existing_usage_and_other_metadata_keys() {
     drop(runtime);
 
     let db = project_runtime(&tmp, &project).await;
+    drain_backfill(&db).await;
     let row = db
         .session_message_for_test(HostAdmissionScope::Project, "claude", "c-keep")
         .await
