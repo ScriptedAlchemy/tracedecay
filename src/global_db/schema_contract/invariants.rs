@@ -199,6 +199,12 @@ pub(crate) async fn ensure_authority_invariants(
         )
         .await?;
     }
+    // The cursor repair and coverage passes below reconcile the observation
+    // suffix committed since the last trusted audit, so they must keep the
+    // resume watermark this pass started from. `observation_sequence` and the
+    // `checkpoint` rebound after the source-cursor loop both carry the
+    // *advanced* watermark, which would skip every row this pass just audited.
+    let audited_from_sequence = checkpoint.observation_sequence;
     let (observation_sequence, observations_audited) =
         validate_observation_authority_rows(conn, checkpoint.observation_sequence).await?;
     if exhaustive {
@@ -258,8 +264,8 @@ pub(crate) async fn ensure_authority_invariants(
             }
         }
     };
-    repair_committed_source_cursors(conn, checkpoint.observation_sequence).await?;
-    validate_observation_cursor_coverage(conn, checkpoint.observation_sequence).await?;
+    repair_committed_source_cursors(conn, audited_from_sequence).await?;
+    validate_observation_cursor_coverage(conn, audited_from_sequence).await?;
 
     repair_projection_frontier(conn, checkpoint.projection_checkpoint).await?;
     let projection_start = AuditCheckpoint {
