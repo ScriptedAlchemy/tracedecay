@@ -38,15 +38,16 @@ use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use crate::mcp::tools::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
-    SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
+    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalOmissionView,
+    SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
+    SessionRetrievalWorkerRetryClass,
     SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ports::TemporalExecutionSnapshot;
-use crate::query::temporal::ranking::DiversityLimits;
+use crate::query::temporal::ranking::{DiversityLimits, RankedCandidate};
 use crate::query::temporal::{TemporalHydratedResult, TemporalKernelResult};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::sessions::lcm::{
@@ -537,15 +538,7 @@ impl DaemonSessionRetrievalService {
         match outcome {
             SessionRetrievalOutcome::Complete { items, freshness } => {
                 let (page, skipped, _) = self.page(items).await;
-                if skipped == 0 {
-                    SessionRetrievalServiceOutcome::Complete { page, freshness }
-                } else {
-                    SessionRetrievalServiceOutcome::Partial {
-                        page,
-                        freshness,
-                        omitted: skipped,
-                    }
-                }
+                complete_page_outcome(page, freshness, skipped)
             }
             SessionRetrievalOutcome::CompleteZero { freshness } => {
                 SessionRetrievalServiceOutcome::CompleteZero {
@@ -606,6 +599,7 @@ impl DaemonSessionRetrievalService {
         let mut results = Vec::new();
         let mut anchors = Vec::new();
         let mut explanations = Vec::new();
+        let mut omissions = Vec::new();
         let mut coverage = TemporalCoverageCountsV1::default();
         let mut source_coverage = Vec::new();
         let mut watermarks = SessionTemporalWatermarksView::default();
@@ -629,20 +623,27 @@ impl DaemonSessionRetrievalService {
             if item.next_cursor.is_some() {
                 cursor = item.next_cursor.clone();
             }
-            for ranked in &item.ranked {
-                let hydration_already_unavailable = item.hydrated.iter().any(|hydrated| {
-                    hydrated.anchor_id() == &ranked.anchor_id
-                        && hydrated.state() != HydrationStateV1::Available
-                });
+            for (rank, ranked) in item.ranked.iter().enumerate() {
+                let hydrated = match page_hydration_slot(rank, ranked, &item.hydrated) {
+                    Ok(hydrated) => hydrated,
+                    Err(omission) => {
+                        skipped = skipped.saturating_add(1);
+                        omissions.push(omission);
+                        continue;
+                    }
+                };
                 let Some(result) = self
-                    .hydrate_result(&item.snapshot, ranked, &item.hydrated)
+                    .hydrate_result(&item.snapshot, ranked, hydrated)
                     .await
                 else {
                     skipped = skipped.saturating_add(1);
-                    if !hydration_already_unavailable {
-                        rendering_omitted = rendering_omitted.saturating_add(1);
-                        coverage.unknown = coverage.unknown.saturating_add(1);
-                    }
+                    rendering_omitted = rendering_omitted.saturating_add(1);
+                    coverage.unknown = coverage.unknown.saturating_add(1);
+                    omissions.push(SessionRetrievalOmissionView {
+                        rank: hydrated.rank(),
+                        anchor: ranked.anchor_id.clone(),
+                        reason: HydrationStateV1::RetainedButUnavailable,
+                    });
                     continue;
                 };
                 anchors.push(ranked.anchor_id.clone());
@@ -668,6 +669,7 @@ impl DaemonSessionRetrievalService {
                     source_coverage,
                     cursor,
                     explanations,
+                    omissions,
                     authorized_root: self.root.authorized_root.clone(),
                 },
             },
@@ -680,15 +682,10 @@ impl DaemonSessionRetrievalService {
         &self,
         snapshot: &TemporalExecutionSnapshot,
         ranked: &crate::query::temporal::ranking::RankedCandidate,
-        hydrated: &[TemporalHydratedResult],
+        hydrated: &TemporalHydratedResult,
     ) -> Option<SessionMessageSearchResult> {
-        let content = hydrated
-            .iter()
-            .find(|hydrated| {
-                hydrated.anchor_id() == &ranked.anchor_id
-                    && hydrated.state() == HydrationStateV1::Available
-            })?
-            .content()?;
+        let content = hydrated.content()?;
+        let authorized_project_key = snapshot.request().authorized_root()?.project_key();
         if ranked.evidence_role.as_deref() == Some("summary") {
             let provider = ranked.source.as_deref()?;
             let session_id = ranked.session.as_deref()?;
@@ -702,7 +699,13 @@ impl DaemonSessionRetrievalService {
                 .retriever_record_id
                 .clone();
             let text = std::str::from_utf8(content).ok()?.to_string();
-            let session = registered_session(self.database.as_ref(), provider, session_id).await?;
+            let session = registered_session(
+                self.database.as_ref(),
+                authorized_project_key,
+                provider,
+                session_id,
+            )
+            .await?;
             return Some(SessionMessageSearchResult {
                 session,
                 message: crate::sessions::SessionMessageRecord {
@@ -743,8 +746,17 @@ impl DaemonSessionRetrievalService {
             )
             .await
             .ok()?;
-        let session = registered_session(self.database.as_ref(), provider, session_id).await?;
-        if message.session_id != session.session_id {
+        let session = registered_session(
+            self.database.as_ref(),
+            authorized_project_key,
+            provider,
+            session_id,
+        )
+        .await?;
+        if message.provider != provider
+            || message.session_id != session_id
+            || session.project_key != authorized_project_key
+        {
             return None;
         }
         Some(SessionMessageSearchResult {
@@ -822,6 +834,16 @@ impl DaemonSessionRetrievalService {
                         "temporal rank {} at {}",
                         ranked.normalized_score_micros, ranked.knowledge_at_micros
                     ),
+                })
+                .collect(),
+            omissions: result
+                .hydrated
+                .iter()
+                .filter(|hydrated| hydrated.state() != HydrationStateV1::Available)
+                .map(|hydrated| SessionRetrievalOmissionView {
+                    rank: hydrated.rank(),
+                    anchor: hydrated.anchor_id().clone(),
+                    reason: hydrated.state(),
                 })
                 .collect(),
             authorized_root: self.root.authorized_root.clone(),
@@ -1297,8 +1319,52 @@ fn message_search_policy_digest() -> Option<[u8; 32]> {
     hex::decode(digest).ok()?.try_into().ok()
 }
 
+fn complete_page_outcome(
+    page: SessionRetrievalPageView,
+    freshness: SessionDataFreshness,
+    omitted: u64,
+) -> SessionRetrievalServiceOutcome {
+    if omitted == 0 {
+        SessionRetrievalServiceOutcome::Complete { page, freshness }
+    } else {
+        SessionRetrievalServiceOutcome::Partial {
+            page,
+            freshness,
+            omitted,
+        }
+    }
+}
+
+fn page_hydration_slot<'a>(
+    rank: usize,
+    ranked: &RankedCandidate,
+    hydrated: &'a [TemporalHydratedResult],
+) -> Result<&'a TemporalHydratedResult, SessionRetrievalOmissionView> {
+    let rank = u32::try_from(rank).expect("bounded retrieval rank must fit u32");
+    let Some(hydrated) = hydrated.get(rank as usize).filter(|hydrated| {
+        hydrated.rank() == rank
+            && hydrated.stable_id() == ranked.stable_id
+            && hydrated.anchor_id() == &ranked.anchor_id
+    }) else {
+        return Err(SessionRetrievalOmissionView {
+            rank,
+            anchor: ranked.anchor_id.clone(),
+            reason: HydrationStateV1::RetainedButUnavailable,
+        });
+    };
+    if hydrated.state() != HydrationStateV1::Available {
+        return Err(SessionRetrievalOmissionView {
+            rank,
+            anchor: ranked.anchor_id.clone(),
+            reason: hydrated.state(),
+        });
+    }
+    Ok(hydrated)
+}
+
 async fn registered_session(
     database: &RegisteredGlobalDb,
+    project_key: &str,
     provider: &str,
     session_id: &str,
 ) -> Option<SessionRecord> {
@@ -1309,8 +1375,8 @@ async fn registered_session(
                     ended_at, transcript_path, metadata_json, parent_session_id,
                     is_subagent, agent_id, parent_tool_use_id
              FROM sessions
-             WHERE provider = ?1 AND session_id = ?2",
-            crate::db::engine::params![provider, session_id],
+             WHERE project_key = ?1 AND provider = ?2 AND session_id = ?3",
+            crate::db::engine::params![project_key, provider, session_id],
         )
         .await
         .ok()?;
@@ -1424,6 +1490,90 @@ mod tests {
         assert!(
             eligibility < ranked_sink,
             "semantic eligibility must run before the ranking candidate sink"
+        );
+    }
+
+    #[test]
+    fn denied_shared_anchor_stays_at_its_rank_without_promoting_lower_candidate() {
+        fn ranked(stable_id: &str, anchor: &RetrievalAnchorId) -> RankedCandidate {
+            RankedCandidate {
+                stable_id: stable_id.to_string(),
+                anchor_id: anchor.clone(),
+                normalized_score_micros: 1,
+                knowledge_at_micros: 1,
+                logical_message: None,
+                turn: None,
+                session: Some(format!("session.{stable_id}")),
+                source: Some("cursor".to_string()),
+                evidence_role: Some("assistant".to_string()),
+                contributions: Vec::new(),
+            }
+        }
+
+        let anchor = RetrievalAnchorId::new("anchor.shared").unwrap();
+        let selected = [ranked("denied", &anchor), ranked("lower", &anchor)];
+        let hydrated = [
+            TemporalHydratedResult::unavailable_for_test(
+                0,
+                "denied",
+                anchor.clone(),
+                HydrationStateV1::Unauthorized,
+            ),
+            TemporalHydratedResult::available_for_test(
+                1,
+                "lower",
+                anchor.clone(),
+                b"lower candidate".to_vec(),
+            ),
+        ];
+
+        let omission = page_hydration_slot(0, &selected[0], &hydrated).unwrap_err();
+        assert_eq!(omission.rank, 0);
+        assert_eq!(omission.anchor, anchor);
+        assert_eq!(omission.reason, HydrationStateV1::Unauthorized);
+
+        let lower = page_hydration_slot(1, &selected[1], &hydrated).unwrap();
+        assert_eq!(lower.rank(), 1);
+        assert_eq!(lower.stable_id(), "lower");
+    }
+
+    #[test]
+    fn complete_page_with_typed_omission_becomes_partial_and_keeps_coverage() {
+        let anchor = RetrievalAnchorId::new("anchor.omitted").unwrap();
+        let page = SessionRetrievalPageView {
+            results: Vec::new(),
+            temporal: SessionTemporalMetadataView {
+                coverage: TemporalCoverageCountsV1 {
+                    visible: 0,
+                    hidden: 0,
+                    unknown: 1,
+                    redacted: 0,
+                },
+                omissions: vec![SessionRetrievalOmissionView {
+                    rank: 0,
+                    anchor: anchor.clone(),
+                    reason: HydrationStateV1::Unauthorized,
+                }],
+                ..SessionTemporalMetadataView::default()
+            },
+        };
+
+        let SessionRetrievalServiceOutcome::Partial {
+            page,
+            freshness,
+            omitted,
+        } = complete_page_outcome(page, SessionDataFreshness::Fresh, 1)
+        else {
+            panic!("complete page with an omission must become partial");
+        };
+        assert_eq!(freshness, SessionDataFreshness::Fresh);
+        assert_eq!(omitted, 1);
+        assert_eq!(page.temporal.coverage.unknown, 1);
+        assert_eq!(page.temporal.omissions[0].rank, 0);
+        assert_eq!(page.temporal.omissions[0].anchor, anchor);
+        assert_eq!(
+            page.temporal.omissions[0].reason,
+            HydrationStateV1::Unauthorized
         );
     }
 }

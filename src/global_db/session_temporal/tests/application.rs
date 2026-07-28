@@ -78,12 +78,8 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
     assert_eq!(items[0].coverage.visible, 2);
     assert_eq!(items[0].coverage.unknown, 0);
     assert!(items[0].lineage.is_empty());
-    assert!(
-        items[0]
-            .context
-            .rendered
-            .contains("duplicate root-wide payload")
-    );
+    assert!(items[0].context.rendered.contains("session alpha"));
+    assert!(items[0].context.rendered.contains("session beta"));
     let all_anchors = items[0]
         .ranked
         .iter()
@@ -96,6 +92,25 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
             .filter_map(|item| item.session.as_deref())
             .collect::<BTreeSet<_>>(),
         ["session.root.a", "session.root.b"].into()
+    );
+    assert!(
+        items[0]
+            .ranked
+            .iter()
+            .all(|item| item.session.as_deref() != Some("session.root.foreign"))
+    );
+    assert_eq!(
+        items[0]
+            .hydrated
+            .iter()
+            .filter_map(|item| item.content())
+            .map(|content| std::str::from_utf8(content).unwrap())
+            .collect::<BTreeSet<_>>(),
+        [
+            "root-wide payload from session alpha",
+            "root-wide payload from session beta",
+        ]
+        .into()
     );
 
     let filtered = service
@@ -119,7 +134,7 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
             SessionTemporalQuery::new(
                 SessionId::new("session.root.a").unwrap(),
                 Some("provider.application".to_owned()),
-                "duplicate",
+                "root-wide",
                 None,
                 TemporalModeV1::Current,
                 RetrievalGrainV1::Occurrence,
@@ -343,7 +358,7 @@ fn root_query(
     SessionTemporalQuery::new(
         SessionId::new(anchor_session).unwrap(),
         provider.map(str::to_owned),
-        "duplicate",
+        "root-wide",
         cursor,
         TemporalModeV1::Current,
         RetrievalGrainV1::Occurrence,

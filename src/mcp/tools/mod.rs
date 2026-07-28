@@ -42,6 +42,7 @@ pub(crate) use handlers::{
     SessionTemporalMetadataView, SessionTemporalWatermarksView, handle_projectless_admin_cli,
     handle_projectless_hook_runtime, replay_projectless_hermes_host_admission, utc_micros_value,
 };
+pub(crate) use handlers::session::message_search::SessionRetrievalOmissionView;
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
     handle_tool_call_with_registry_and_implicit_project, handle_user_lcm_tool,

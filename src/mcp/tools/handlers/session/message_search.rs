@@ -437,6 +437,13 @@ pub(crate) struct SessionRetrievalExplanationView {
     pub(crate) summary: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct SessionRetrievalOmissionView {
+    pub(crate) rank: u32,
+    pub(crate) anchor: RetrievalAnchorId,
+    pub(crate) reason: HydrationStateV1,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct SessionRetrievalNextActionView {
     pub(crate) kind: &'static str,
@@ -463,6 +470,8 @@ pub(crate) struct SessionTemporalMetadataView {
     pub(crate) source_coverage: Vec<SessionSourceCoverageV1>,
     pub(crate) cursor: Option<String>,
     pub(crate) explanations: Vec<SessionRetrievalExplanationView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) omissions: Vec<SessionRetrievalOmissionView>,
     pub(crate) authorized_root: Option<String>,
 }
 
@@ -738,6 +747,9 @@ fn temporal_value(
     });
     if !temporal.source_coverage.is_empty() {
         value["source_coverage"] = json!(temporal.source_coverage);
+    }
+    if !temporal.omissions.is_empty() {
+        value["omissions"] = json!(temporal.omissions);
     }
     value
 }
@@ -1243,6 +1255,7 @@ mod cutover_tests {
                 anchor: RetrievalAnchorId::new("anchor.message.1").unwrap(),
                 summary: "exact phrase and current evidence".to_string(),
             }],
+            omissions: Vec::new(),
             authorized_root: None,
         }
     }
