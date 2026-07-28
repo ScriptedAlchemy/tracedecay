@@ -252,6 +252,14 @@ fn oversized_needs_synthesis_expand_query_payload() -> Value {
         "provider": "claude",
         "session_id": "s1",
         "needs_synthesis": true,
+        "omitted": 2,
+        "coverage": {"visible": 1, "hidden": 0, "unknown": 1, "redacted": 0},
+        "anchors": ["anchor-1"],
+        "watermarks": {"generation": 7},
+        "explanations": [{"anchor": "anchor-1", "summary": "ranked evidence"}],
+        "omissions": [{"rank": 1, "anchor": "anchor-2", "reason": "unverifiable_legacy"}],
+        "next_cursor": "cursor-1",
+        "capped_sessions": {},
         "prompt": "What changed in the auth flow?",
         "context_blocks": context_blocks,
         "matches": matches,
@@ -294,6 +302,10 @@ fn lcm_expand_query_needs_synthesis_floor_is_bounded_valid_json() {
     assert_eq!(parsed["status"], "ok");
     assert_eq!(parsed["mcp_response_truncated"], true);
     assert_eq!(parsed["contract_truncated"], true);
+    assert_eq!(parsed["omitted"], 2);
+    assert_eq!(parsed["coverage"]["unknown"], 1);
+    assert_eq!(parsed["anchors"], json!([]));
+    assert_eq!(parsed["anchors_truncated_for_mcp"], true);
     // The synthesis contract survives: the bridge can still synthesize.
     assert!(parsed["synthesis_prompt"]["user"].as_str().is_some());
     assert!(parsed["synthesis_prompt"]["system"].as_str().is_some());
@@ -368,6 +380,14 @@ fn lcm_expand_query_in_budget_and_synthesis_compaction_paths_unchanged() {
     let compactable = json!({
         "status": "ok",
         "needs_synthesis": true,
+        "omitted": 2,
+        "coverage": {"visible": 1, "hidden": 0, "unknown": 1, "redacted": 0},
+        "anchors": ["anchor-1"],
+        "watermarks": {"generation": 7},
+        "explanations": [{"anchor": "anchor-1", "summary": "ranked evidence"}],
+        "omissions": [{"rank": 1, "anchor": "anchor-2", "reason": "unverifiable_legacy"}],
+        "next_cursor": "cursor-1",
+        "capped_sessions": {},
         "prompt": "q",
         "context_blocks": blocks,
     });
@@ -376,6 +396,12 @@ fn lcm_expand_query_in_budget_and_synthesis_compaction_paths_unchanged() {
     assert!(text.len() <= MAX_RESPONSE_CHARS);
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["needs_synthesis"], true);
+    assert_eq!(parsed["omitted"], 2);
+    assert_eq!(parsed["coverage"]["unknown"], 1);
+    assert_eq!(parsed["anchors"], json!(["anchor-1"]));
+    assert_eq!(parsed["anchors_truncated_for_mcp"], false);
+    assert_eq!(parsed["omissions"][0]["reason"], "unverifiable_legacy");
+    assert_eq!(parsed["next_cursor"], "cursor-1");
     assert!(
         parsed.get("response_handle").is_none(),
         "tier compaction must not reach the handle-storing floor"
