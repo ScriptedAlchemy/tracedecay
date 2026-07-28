@@ -128,6 +128,20 @@ pub(super) fn has_dirty_sentinel_at(path: &Path) -> bool {
     }
 }
 
+/// Returns whether a structured dirty marker belongs to a process that is
+/// still running. Legacy, malformed, clean, and unreadable markers are never
+/// treated as live work.
+pub(super) fn dirty_marker_owner_is_live(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<DirtyMarker>(&contents).ok())
+        .is_some_and(|marker| {
+            marker.schema == MARKER_SCHEMA
+                && marker.state == MarkerState::Dirty
+                && is_pid_alive(marker.owner.pid)
+        })
+}
+
 /// RAII guard that keeps a persistent lockfile kernel-locked. The directory
 /// entry is never removed, so a delayed Drop cannot unlink a newer owner's
 /// lock. Closing the file releases the lease even after a crash.

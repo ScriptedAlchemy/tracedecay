@@ -609,6 +609,39 @@ async fn empty_database_migrates_atomically_through_the_engine_runtime() {
 }
 
 #[tokio::test]
+async fn migration_reindex_only_follows_graph_invalidating_versions() {
+    assert!(super::graph_reindex_required(0, super::LATEST_VERSION));
+    assert!(super::graph_reindex_required(2, 3));
+    assert!(super::graph_reindex_required(16, 17));
+    assert!(!super::graph_reindex_required(17, super::LATEST_VERSION));
+    assert!(!super::graph_reindex_required(23, super::LATEST_VERSION));
+    assert!(!super::graph_reindex_required(24, super::LATEST_VERSION));
+
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute(
+        "DELETE FROM metadata WHERE key = ?1",
+        (super::GRAPH_GENERATION_SCHEMA_KEY,),
+    )
+    .await
+    .unwrap();
+    set_user_version(&conn, 24).await;
+
+    assert!(migrate_connection(&conn).await.unwrap());
+    let mut rows = conn
+        .query(
+            "SELECT value FROM metadata WHERE key = ?1",
+            (super::GRAPH_GENERATION_SCHEMA_KEY,),
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("generation stamp");
+    assert_eq!(
+        row.get::<String>(0).unwrap(),
+        super::LATEST_VERSION.to_string()
+    );
+}
+
+#[tokio::test]
 async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
     let (conn, _dir) = create_raw_db().await;
     super::configure_fresh_auto_vacuum(&conn, "test interrupted fresh schema")
