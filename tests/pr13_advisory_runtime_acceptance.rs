@@ -697,6 +697,27 @@ async fn production_host_ingest_uses_registered_project_runtime() {
     let (environment, project) = common::IsolatedEnv::acquire().await;
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn shared_edit() {}\n").unwrap();
+    // The advisory surface is scoped to a branch and head commit, so an
+    // uncommitted directory has no canonical feedback scope for the daemon to
+    // mount and the advisory cycle below would be legitimately unavailable.
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "tests@example.invalid"],
+        vec!["config", "user.name", "TraceDecay Tests"],
+        vec!["add", "."],
+        vec!["commit", "-m", "seed canonical graph"],
+    ] {
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(&project)
+            .output()
+            .expect("git command runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let init = common::tracedecay_command_with_home(environment.home())
         .arg("init")
         .current_dir(&project)
@@ -771,6 +792,27 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         payload["status"], "committed",
         "registered daemon ingest did not commit: {response}"
     );
+
+    // Codex records a turn in its rollout, not in the Stop event, so the
+    // project-scoped Stop ingest below has to find a rollout whose `cwd` is
+    // this project — exactly the shape the daemon's project scheduler admits.
+    let codex_sessions = environment.home().join(".codex/sessions");
+    std::fs::create_dir_all(&codex_sessions).unwrap();
+    let mut codex_meta: Value = serde_json::from_str(include_str!(
+        "fixtures/provider_normalization/codex/session_meta.input.json"
+    ))
+    .unwrap();
+    codex_meta["payload"]["id"] = json!("session-pr13-proximity");
+    codex_meta["payload"]["cwd"] = json!(project.clone());
+    let codex_message: Value = serde_json::from_str(include_str!(
+        "fixtures/provider_normalization/codex/agent_message.input.json"
+    ))
+    .unwrap();
+    std::fs::write(
+        codex_sessions.join("rollout-pr13-proximity.jsonl"),
+        format!("{codex_meta}\n{codex_message}\n"),
+    )
+    .unwrap();
 
     let mut stop: Value = serde_json::from_str(include_str!(
         "../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
