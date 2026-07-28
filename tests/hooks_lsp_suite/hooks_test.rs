@@ -629,8 +629,7 @@ fn test_cursor_post_tool_use_records_uninitialized_suppression() {
         "[package]\nname = \"uninitialized\"\n",
     )
     .unwrap();
-    let layout = resolve_layout_for_current_profile(&project_root).unwrap();
-    std::fs::create_dir_all(&layout.data_root).unwrap();
+    std::fs::create_dir_all(&profile_root).unwrap();
     let root = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
     let event = format!(
         r#"{{
@@ -644,7 +643,10 @@ fn test_cursor_post_tool_use_records_uninitialized_suppression() {
 
     assert!(tracedecay::hooks::cursor_post_tool_use_decision(&event).is_none());
 
-    let events = read_hook_analytics_events(&layout.data_root);
+    // The checkout is deliberately never enrolled, so the hook must not mint a
+    // store shard for it; its analytics belong to the profile-wide file.
+    assert!(!tracedecay::storage::has_enrollment_marker(&project_root));
+    let events = read_hook_analytics_events(&profile_root);
     assert!(analytics_contains(
         &events,
         "hint_candidate",

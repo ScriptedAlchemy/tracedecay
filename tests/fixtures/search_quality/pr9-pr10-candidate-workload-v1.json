@@ -691,7 +691,7 @@
     }
   },
   "schema_version": 1,
-  "source_repository_commit": "f1dfc76c0bc805fc29472d2bc53e727bbc6dad74",
+  "source_repository_commit": "8312618fee8109b16be09e65f45118b4e550fa14",
   "source_repository_tree": "587aed48f162f74765da3a35fc41850523ea377d",
   "workload_id": "pr9-pr10-production-candidate-workload-v1"
 }
