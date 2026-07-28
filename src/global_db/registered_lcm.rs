@@ -466,12 +466,6 @@ impl RegisteredGlobalDb {
             return Ok(result);
         }
 
-        let writer = self
-            .writer_connection()
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        doctor::prepare_apply(&writer).await?;
-        drop(writer);
-
         let applies_payload_gc = apply && mode == "gc";
         let mut gc_drain = if applies_payload_gc {
             let transaction = self
@@ -611,12 +605,6 @@ impl RegisteredGlobalDb {
         let mut drain =
             gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root).await?;
         transaction.commit().await?;
-
-        let writer = self
-            .writer_connection()
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        gc::prepare_payload_gc_backup(&writer, storage_root, cfg).await?;
-        drop(writer);
 
         let transaction = self
             .begin_write_transaction()

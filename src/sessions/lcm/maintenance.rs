@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::db::engine::{QueryExecutor, WalCheckpointExecutor, params};
+use crate::db::engine::{QueryExecutor, params};
 
 use super::LcmError;
 
@@ -21,13 +21,6 @@ impl BackupKind {
         match self {
             Self::Clean => "clean",
             Self::Gc => "gc",
-        }
-    }
-
-    fn checkpoint_label(self) -> &'static str {
-        match self {
-            Self::Clean => "clean",
-            Self::Gc => "GC",
         }
     }
 }
@@ -45,8 +38,14 @@ pub(super) async fn backup_database(
     let staging_path = staging_dir.join("sessions.db");
     let backup_path = published_dir.join("sessions.db");
     let result = async {
-        let byte_count = copy_sqlite_file_set(db_path, &staging_path)?;
-        verify_sqlite_backup(&staging_path).await?;
+        crate::sqlite_read_snapshot::backup_live_sqlite_database(db_path, &staging_path)
+            .await
+            .map_err(|error| LcmError::Io(error.to_string()))?;
+        sync_file(&staging_path)?;
+        let byte_count = fs::metadata(&staging_path)
+            .map_err(|error| LcmError::Io(error.to_string()))?
+            .len();
+        verify_sqlite_backup(&staging_path)?;
         sync_directory(&staging_dir)?;
         fs::rename(&staging_dir, &published_dir).map_err(|err| LcmError::Io(err.to_string()))?;
         sync_directory(&backup_dir)?;
@@ -65,23 +64,6 @@ pub(super) async fn backup_database(
         "path": backup_path,
         "byte_count": byte_count,
     }))
-}
-
-fn copy_sqlite_file_set(db_path: &Path, backup_path: &Path) -> Result<u64, LcmError> {
-    let mut byte_count =
-        fs::copy(db_path, backup_path).map_err(|err| LcmError::Io(err.to_string()))?;
-    sync_file(backup_path)?;
-    // Copy only the WAL sidecar. The -shm file is rebuildable shared memory
-    // that SQLite never reads from a backup, and its live byte-range locks
-    // make plain file reads fail with ERROR_LOCK_VIOLATION (os error 33) on
-    // Windows while any connection is open.
-    let source = sqlite_sidecar_path(db_path, "-wal");
-    if source.is_file() {
-        let target = sqlite_sidecar_path(backup_path, "-wal");
-        byte_count += fs::copy(&source, target).map_err(|err| LcmError::Io(err.to_string()))?;
-        sync_file(&sqlite_sidecar_path(backup_path, "-wal"))?;
-    }
-    Ok(byte_count)
 }
 
 fn allocate_backup_directory(
@@ -112,20 +94,9 @@ fn allocate_backup_directory(
     }
 }
 
-async fn verify_sqlite_backup(path: &Path) -> Result<(), LcmError> {
-    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
-    let mut file = fs::File::open(path).map_err(|error| LcmError::Io(error.to_string()))?;
-    let mut header = [0_u8; SQLITE_HEADER.len()];
-    use std::io::Read as _;
-    file.read_exact(&mut header)
-        .map_err(|error| LcmError::Io(error.to_string()))?;
-    if &header != SQLITE_HEADER {
-        return Err(LcmError::Db(format!(
-            "backup has invalid SQLite header: '{}'",
-            path.display()
-        )));
-    }
-    Ok(())
+fn verify_sqlite_backup(path: &Path) -> Result<(), LcmError> {
+    tracedecay_rusqlite_runtime::backup::verify_sqlite_snapshot(path)
+        .map_err(|error| LcmError::Db(error.to_string()))
 }
 
 fn sync_file(path: &Path) -> Result<(), LcmError> {
@@ -147,33 +118,6 @@ fn sync_directory(path: &Path) -> Result<(), LcmError> {
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
 fn sync_directory(_path: &Path) -> Result<(), LcmError> {
-    Ok(())
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(suffix);
-    PathBuf::from(sidecar)
-}
-
-pub(super) async fn checkpoint_wal_for_backup(
-    conn: &(impl WalCheckpointExecutor + ?Sized),
-    kind: BackupKind,
-) -> Result<(), LcmError> {
-    let mut rows = conn.checkpoint_wal_truncate().await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("WAL checkpoint returned no status row".to_string()))?;
-    let busy: i64 = row.get(0)?;
-    let log_frames: i64 = row.get(1)?;
-    let checkpointed_frames: i64 = row.get(2)?;
-    if busy != 0 || checkpointed_frames < log_frames {
-        return Err(LcmError::Db(format!(
-            "WAL checkpoint incomplete before {} backup: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}",
-            kind.checkpoint_label()
-        )));
-    }
     Ok(())
 }
 
@@ -228,10 +172,6 @@ mod tests {
                  CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
                  INSERT INTO messages(body) VALUES ('retained');",
             )
-            .unwrap();
-        let conn = TestConnection::open(&source_path);
-        checkpoint_wal_for_backup(&*conn, BackupKind::Gc)
-            .await
             .unwrap();
 
         let first = backup_database(&source_path, root.path(), BackupKind::Gc)

@@ -913,12 +913,12 @@ async fn create_consistent_branch_snapshot(
         if let Some(source) = retained_source {
             source.snapshot_to(&temp).await?;
         } else {
-            backup_live_sqlite_database(src, &temp).await.map_err(|error| {
-                crate::errors::TraceDecayError::Database {
+            crate::sqlite_read_snapshot::backup_live_sqlite_database(src, &temp)
+                .await
+                .map_err(|error| crate::errors::TraceDecayError::Database {
                     message: format!("failed to back up live branch database: {error}"),
                     operation: "create branch snapshot".to_owned(),
-                }
-            })?;
+                })?;
         }
         std::fs::hard_link(&temp, dst).map_err(|error| {
             crate::errors::TraceDecayError::Config {
@@ -936,28 +936,6 @@ async fn create_consistent_branch_snapshot(
         Err(error) => Err(error),
         Ok(()) => cleanup,
     }
-}
-
-async fn backup_live_sqlite_database(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let src = src.to_path_buf();
-    let dst = dst.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let source =
-            rusqlite::Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(std::io::Error::other)?;
-        let mut destination = rusqlite::Connection::open_with_flags(
-            &dst,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
-        )
-        .map_err(std::io::Error::other)?;
-        let backup = rusqlite::backup::Backup::new(&source, &mut destination)
-            .map_err(std::io::Error::other)?;
-        backup
-            .run_to_completion(128, std::time::Duration::from_millis(1), None)
-            .map_err(std::io::Error::other)
-    })
-    .await
-    .map_err(|error| std::io::Error::other(format!("branch backup task failed: {error}")))?
 }
 
 /// Compatibility wrapper for the PR-autotrack lifecycle. Administrative CLI
