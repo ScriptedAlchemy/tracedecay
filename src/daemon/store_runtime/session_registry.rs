@@ -75,7 +75,6 @@ impl RegisteredSchemaConvergenceMaintenance {
         &self,
         database: Arc<RegisteredGlobalDb>,
         convergence: Option<crate::global_db::schema_stages::RegisteredSchemaConvergence>,
-        backfill_structured_rows: bool,
     ) {
         let shard_id = database.binding().shard_id.clone();
         {
@@ -107,7 +106,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                 Some(convergence) => database.converge_schema(convergence).await,
                 None => Ok(()),
             };
-            let (status, run_structured_backfill) = match result {
+            let status = match result {
                 Ok(()) => {
                     crate::daemon::log_daemon_event(
                         "registered_schema_convergence",
@@ -117,10 +116,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                             ("shard", format!("{task_shard_id:?}")),
                         ],
                     );
-                    (
-                        RegisteredSchemaConvergenceStatus::Complete,
-                        backfill_structured_rows,
-                    )
+                    RegisteredSchemaConvergenceStatus::Complete
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -133,20 +129,13 @@ impl RegisteredSchemaConvergenceMaintenance {
                             ("error", message.clone()),
                         ],
                     );
-                    (
-                        RegisteredSchemaConvergenceStatus::Degraded { message },
-                        false,
-                    )
+                    RegisteredSchemaConvergenceStatus::Degraded { message }
                 }
             };
             statuses
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(task_shard_id, status);
-            if run_structured_backfill {
-                let _ =
-                    crate::sessions::transcript_backfill::backfill_structured_rows(&database).await;
-            }
         });
         self.tasks
             .lock()
@@ -463,11 +452,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         operation: &'static str,
     ) -> Result<Arc<RegisteredGlobalDb>> {
         let expected_binding: StoreRuntimeBindingV1 = runtime.binding().clone();
-        let schedule_structured_backfill = matches!(
-            &expected_binding.shard_id.scope,
-            tracedecay_store::StoreShardScopeV1::ProfileSessions
-                | tracedecay_store::StoreShardScopeV1::ProjectSessions { .. }
-        );
         let expected_locator = runtime.locator().verified().clone();
         let authority = runtime
             .database_authority(operation)
@@ -495,11 +479,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         };
         let database = Arc::new(database);
         if long_lived {
-            self.registered_schema_convergence.schedule(
-                Arc::clone(&database),
-                convergence,
-                schedule_structured_backfill,
-            );
+            self.registered_schema_convergence
+                .schedule(Arc::clone(&database), convergence);
         }
         Ok(database)
     }
