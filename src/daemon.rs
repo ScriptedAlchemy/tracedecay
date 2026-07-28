@@ -2527,6 +2527,7 @@ impl ProjectOpenTasks {
 struct DatabaseOwnerEntry<Server> {
     server: Server,
     last_used: Instant,
+    ready: bool,
 }
 
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
@@ -2548,19 +2549,32 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.servers.get(key).map(|entry| &entry.server)
     }
 
+    fn get_ready(&self, key: &ProjectServerKey) -> Option<&Server> {
+        self.servers
+            .get(key)
+            .filter(|entry| entry.ready)
+            .map(|entry| &entry.server)
+    }
+
     fn insert(&mut self, key: ProjectServerKey, server: Server) {
         self.insert_at(key, server, Instant::now());
     }
 
     fn insert_at(&mut self, key: ProjectServerKey, server: Server, last_used: Instant) {
-        self.servers
-            .insert(key, DatabaseOwnerEntry { server, last_used });
+        self.servers.insert(
+            key,
+            DatabaseOwnerEntry {
+                server,
+                last_used,
+                ready: true,
+            },
+        );
     }
 
     fn get_route(&self, route: &ProjectRouteKey) -> Option<(&ProjectServerKey, &Server)> {
         let key = self.aliases.get(route)?;
         let (key, entry) = self.servers.get_key_value(key)?;
-        Some((key, &entry.server))
+        entry.ready.then_some((key, &entry.server))
     }
 
     fn get_route_and_touch(
@@ -2569,8 +2583,20 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     ) -> Option<(&ProjectServerKey, &Server)> {
         let key = self.aliases.get(route)?.clone();
         let entry = self.servers.get_mut(&key)?;
+        if !entry.ready {
+            return None;
+        }
         entry.last_used = Instant::now();
         Some((self.aliases.get(route)?, &entry.server))
+    }
+
+    fn mark_ready(&mut self, key: &ProjectServerKey) -> bool {
+        let Some(entry) = self.servers.get_mut(key) else {
+            return false;
+        };
+        entry.ready = true;
+        entry.last_used = Instant::now();
+        true
     }
 
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
@@ -2584,6 +2610,23 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn insert_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey, server: Server) {
         self.insert(key.clone(), server);
         self.bind_route(route, key);
+    }
+
+    fn insert_pending_route(
+        &mut self,
+        route: ProjectRouteKey,
+        key: ProjectServerKey,
+        server: Server,
+    ) {
+        self.servers.insert(
+            key.clone(),
+            DatabaseOwnerEntry {
+                server,
+                last_used: Instant::now(),
+                ready: false,
+            },
+        );
+        self.aliases.insert(route, key);
     }
 
     #[allow(dead_code)] // in-flight daemon route binding — staged
@@ -2616,9 +2659,16 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Server: Clone,
         F: FnMut(&Server) -> bool,
     {
-        if let Some(existing) = self.get(&key).cloned() {
-            self.bind_route(route, key);
-            return Some((existing, false));
+        if let Some(existing) = self.servers.get_mut(&key) {
+            if existing.ready {
+                let server = existing.server.clone();
+                self.bind_route(route, key);
+                return Some((server, false));
+            }
+            existing.server = candidate.clone();
+            existing.last_used = Instant::now();
+            self.aliases.insert(route, key);
+            return Some((candidate, true));
         }
         while self.servers.len() >= capacity {
             let evict = self
@@ -2630,7 +2680,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             self.servers.remove(&evict);
             self.aliases.retain(|_, key| key != &evict);
         }
-        self.insert_route(route, key, candidate.clone());
+        self.insert_pending_route(route, key, candidate.clone());
         Some((candidate, true))
     }
 
@@ -4413,7 +4463,7 @@ async fn production_project_server(
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
-        let existing = servers.get(&key).cloned();
+        let existing = servers.get_ready(&key).cloned();
         if existing.is_some() {
             servers.bind_route(route.clone(), key.clone());
         }
@@ -4728,6 +4778,17 @@ async fn production_project_server(
                 canonical_project_path,
             )
             .await?;
+        }
+        let marked_ready = store_administration
+            .project_servers()
+            .lock()
+            .await
+            .mark_ready(&key);
+        if !marked_ready {
+            return Err(TraceDecayError::Config {
+                message: "project server disappeared before owner registration completed"
+                    .to_owned(),
+            });
         }
     }
     Ok(ProductionProjectComposition {
