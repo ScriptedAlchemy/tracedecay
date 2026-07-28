@@ -82,23 +82,81 @@ const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_mins(5)
 const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
     "project route open is backed off after an invariant rejection";
 
+fn sole_mounted_graph_matching(
+    graphs: &[Arc<crate::tracedecay::TraceDecay>],
+    predicate: impl Fn(&crate::tracedecay::TraceDecay) -> bool,
+) -> std::result::Result<Option<Arc<crate::tracedecay::TraceDecay>>, ()> {
+    let mut matches = graphs.iter().filter(|graph| predicate(graph.as_ref()));
+    let Some(graph) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(());
+    }
+    Ok(Some(Arc::clone(graph)))
+}
+
 fn retained_project_graph_resolver(
     administration: StoreAdministration,
 ) -> crate::mcp::server::RetainedProjectGraphResolver {
-    Arc::new(move |root: PathBuf| {
+    Arc::new(move |request| {
         let administration = administration.clone();
         Box::pin(async move {
-            let requested = authority::canonical_identity_path(&root).ok()?;
-            let mut matches = administration
-                .mounted_project_graphs()
-                .await
+            let graphs = administration.mounted_project_graphs().await;
+            let requested_root =
+                authority::canonical_identity_path(&request.requested_worktree_root).ok()?;
+            let registered_root =
+                authority::canonical_identity_path(&request.registered_root).ok()?;
+            let Some(owner) = request.owner.as_ref() else {
+                return sole_mounted_graph_matching(&graphs, |graph| {
+                    authority::canonical_identity_path(graph.project_root()).ok()
+                        == Some(requested_root.clone())
+                })
+                .ok()
+                .flatten();
+            };
+            let project_id = owner.project.project_id.as_str();
+            let candidates = graphs
                 .into_iter()
                 .filter(|graph| {
-                    authority::canonical_identity_path(graph.project_root()).ok()
-                        == Some(requested.clone())
-                });
-            let graph = matches.next()?;
-            matches.next().is_none().then_some(graph)
+                    graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+                        && request.requested_git_common_dir.as_ref().is_none_or(|requested| {
+                            let requested = authority::canonical_identity_path(requested).ok();
+                            let mounted = crate::worktree::git_common_dir(graph.project_root())
+                                .and_then(|path| authority::canonical_identity_path(&path).ok());
+                            mounted.is_none() || mounted == requested
+                        })
+                })
+                .collect::<Vec<_>>();
+            let branch_matches = |graph: &crate::tracedecay::TraceDecay| {
+                request.requested_branch.as_deref().is_some_and(|branch| {
+                    graph.serving_branch() == Some(branch) || graph.active_branch() == Some(branch)
+                })
+            };
+            let root_matches = |graph: &crate::tracedecay::TraceDecay, root: &Path| {
+                authority::canonical_identity_path(graph.project_root()).ok()
+                    == Some(root.to_path_buf())
+            };
+            for selected in [
+                sole_mounted_graph_matching(&candidates, |graph| {
+                    root_matches(graph, &requested_root) && branch_matches(graph)
+                }),
+                sole_mounted_graph_matching(&candidates, branch_matches),
+                sole_mounted_graph_matching(&candidates, |graph| {
+                    root_matches(graph, &requested_root)
+                }),
+                sole_mounted_graph_matching(&candidates, |graph| {
+                    root_matches(graph, &registered_root)
+                }),
+                sole_mounted_graph_matching(&candidates, |_| true),
+            ] {
+                match selected {
+                    Ok(Some(graph)) => return Some(graph),
+                    Ok(None) => {}
+                    Err(()) => return None,
+                }
+            }
+            None
         })
     })
 }

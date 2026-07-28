@@ -278,10 +278,44 @@ pub(crate) type SourceEditReconciliationExecutor =
 pub(crate) type RetainedProjectGraphFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Option<Arc<TraceDecay>>> + Send + 'static>>;
 
+#[derive(Clone)]
+pub(crate) struct RetainedProjectGraphRequest {
+    pub(crate) owner: Option<crate::global_db::ProjectRegistryContext>,
+    pub(crate) registered_root: PathBuf,
+    pub(crate) requested_worktree_root: PathBuf,
+    pub(crate) requested_git_common_dir: Option<PathBuf>,
+    pub(crate) requested_branch: Option<String>,
+}
+
+impl RetainedProjectGraphRequest {
+    pub(crate) fn for_registered_project(
+        owner: crate::global_db::ProjectRegistryContext,
+        requested_worktree_root: PathBuf,
+    ) -> Self {
+        Self {
+            registered_root: PathBuf::from(&owner.project.canonical_root),
+            requested_git_common_dir: crate::worktree::git_common_dir(&requested_worktree_root),
+            requested_branch: crate::branch::current_branch(&requested_worktree_root),
+            requested_worktree_root,
+            owner: Some(owner),
+        }
+    }
+
+    pub(crate) fn for_mounted_root(root: PathBuf) -> Self {
+        Self {
+            requested_git_common_dir: crate::worktree::git_common_dir(&root),
+            requested_branch: crate::branch::current_branch(&root),
+            registered_root: root.clone(),
+            requested_worktree_root: root,
+            owner: None,
+        }
+    }
+}
+
 /// Type-erased read bridge to a graph already mounted by the daemon. Project
 /// selectors must not reconstruct graph ownership from registry paths.
 pub(crate) type RetainedProjectGraphResolver =
-    Arc<dyn Fn(PathBuf) -> RetainedProjectGraphFuture + Send + Sync + 'static>;
+    Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectGraphFuture + Send + Sync + 'static>;
 
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
@@ -655,12 +689,21 @@ impl McpServer {
             ));
         }
         if !retained.is_empty() {
-            let resolver: RetainedProjectGraphResolver = Arc::new(move |requested_root| {
-                let requested = canonical_or_original(&requested_root);
-                let graph = retained
-                    .iter()
-                    .find(|(root, _)| *root == requested)
-                    .map(|(_, graph)| Arc::clone(graph));
+            let resolver: RetainedProjectGraphResolver = Arc::new(move |request| {
+                let requested = canonical_or_original(&request.requested_worktree_root);
+                let registered = canonical_or_original(&request.registered_root);
+                let project_id = request
+                    .owner
+                    .as_ref()
+                    .map(|owner| owner.project.project_id.as_str());
+                let mut matches = retained.iter().filter(|(root, graph)| {
+                    (*root == requested || *root == registered)
+                        && project_id.is_none_or(|project_id| {
+                            graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+                        })
+                });
+                let graph = matches.next().map(|(_, graph)| Arc::clone(graph));
+                let graph = matches.next().is_none().then_some(graph).flatten();
                 Box::pin(async move { graph })
             });
             context = context.with_retained_project_graph_resolver(resolver);
