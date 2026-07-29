@@ -307,6 +307,7 @@ impl<'a, S> CanonicalLateHydration<'a, S> {
         Ok(HydrationPageV1 { results, receipts })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn hydrate_authorized<P>(
         &mut self,
         request: &RetrievalRequest,
