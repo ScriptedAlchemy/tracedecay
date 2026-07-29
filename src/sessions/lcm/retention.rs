@@ -248,7 +248,7 @@ fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
 /// mirrors the dedupe safety predicate. A configured window emits a zero-byte
 /// record when clean, allowing Doctor to distinguish complete clean coverage
 /// from an unwired source.
-pub async fn read_session_retention_backlog(
+pub(crate) async fn read_session_retention_backlog(
     conn: &(impl QueryExecutor + ?Sized),
     store: StoreKeyV1,
     config: &LcmRetentionConfig,
@@ -379,7 +379,7 @@ async fn scoped_row_count(
 /// `provider` may be `"all"` to span every provider; `session_id` narrows to a
 /// single session. In [`RetentionMode::DryRun`] nothing is mutated and each
 /// phase reports the candidate count and bytes that *would* be reclaimed.
-pub async fn run_session_retention(
+pub(crate) async fn run_session_retention(
     conn: &Connection,
     storage_root: &Path,
     provider: &str,

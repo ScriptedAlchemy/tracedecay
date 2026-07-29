@@ -1133,7 +1133,12 @@ impl Database {
     /// broker. Primarily useful for fixtures and maintenance adapters that do
     /// not need to retain a raw writable connection.
     #[doc(hidden)]
-    pub async fn execute_write<P>(&self, operation: &str, sql: &str, params: P) -> Result<u64>
+    pub(crate) async fn execute_write<P>(
+        &self,
+        operation: &str,
+        sql: &str,
+        params: P,
+    ) -> Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {

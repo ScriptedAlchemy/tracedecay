@@ -54,7 +54,7 @@ pub struct ProductionSemanticRetrievalConfigurationStoreV1 {
 }
 
 impl ProductionSemanticRetrievalConfigurationStoreV1 {
-    pub async fn open(
+    pub(crate) async fn open(
         database: Arc<RegisteredGlobalDb>,
         scope: ResolvedScope,
     ) -> Result<Self, SemanticConfigurationBackendErrorV1> {
@@ -172,7 +172,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
     }
 
-    pub async fn preview_central_mutation(
+    pub(crate) async fn preview_central_mutation(
         &self,
         authority: &ConfigurationMutationAuthority,
         mutation: &DirectConfigurationMutation,

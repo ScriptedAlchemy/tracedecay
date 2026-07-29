@@ -591,7 +591,7 @@ impl McpServer {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
-    pub async fn new_with_global_db(
+    pub(crate) async fn new_with_global_db(
         cg: TraceDecay,
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
@@ -599,7 +599,7 @@ impl McpServer {
         Self::new_with_dbs(cg, scope_prefix, global_db.clone(), global_db, true).await
     }
 
-    pub async fn new_with_dbs(
+    pub(crate) async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
@@ -1286,7 +1286,7 @@ impl McpServer {
             .await
     }
 
-    pub fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
+    pub(crate) fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
         self.session_db.clone()
     }
 

@@ -122,7 +122,7 @@ impl CodeIndexSchedulerRegistryV1 {
         });
     }
 
-    pub fn open_worktree(
+    pub(in crate::daemon) fn open_worktree(
         &self,
         project_root: &Path,
         store_root: PathBuf,
@@ -135,7 +135,7 @@ impl CodeIndexSchedulerRegistryV1 {
         CodeIndexWorktreeSchedulerV1::open(project_root, store_root, Arc::clone(&self.byte_pool))
     }
 
-    pub fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
+    pub(in crate::daemon) fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
         self.byte_pool.stats()
     }
 
@@ -160,7 +160,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    pub async fn mount_worktree(
+    pub(in crate::daemon) async fn mount_worktree(
         &self,
         project_root: &Path,
         store_root: PathBuf,
@@ -311,7 +311,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Mount the accepted PR9 profile and query/cursor key owner for one exact
     /// admitted scope. The authority cannot be inherited by another project,
     /// repository, worktree, or ref.
-    pub async fn mount_pr9_query_authority(
+    pub(in crate::daemon) async fn mount_pr9_query_authority(
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
@@ -341,7 +341,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Revoke the live PR9 authority for one exact admitted scope before a
     /// committed profile refresh. A failed replacement therefore leaves
     /// search unavailable instead of serving the prior profile.
-    pub async fn clear_pr9_query_authority(
+    pub(in crate::daemon) async fn clear_pr9_query_authority(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
@@ -567,7 +567,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
     /// returning the latest complete generation, so external out-of-band changes
     /// are reconciled without any standing filesystem watcher.
-    pub async fn latest_complete_fresh(
+    pub(in crate::daemon) async fn latest_complete_fresh(
         &self,
         project_root: &Path,
     ) -> Option<LatestCompleteCodeIndexV1> {
@@ -647,7 +647,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// It serves only a generation whose freshness is already proven; stale,
     /// restored-unverified, or busy schedulers abstain after scheduling the
     /// background worker instead of reconciling on the caller.
-    pub async fn latest_complete_ready(
+    pub(in crate::daemon) async fn latest_complete_ready(
         &self,
         project_root: &Path,
     ) -> Option<LatestCompleteCodeIndexV1> {
@@ -694,7 +694,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Resolve one mounted root by the exact admitted repository/worktree/ref
     /// scope, then run that root's freshness ladder. A request never inherits
     /// whichever mounted worktree sorts first.
-    pub async fn latest_complete_fresh_for_scope(
+    pub(in crate::daemon) async fn latest_complete_fresh_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
@@ -722,7 +722,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     /// Resolve one exact scope and admit only an already-current generation.
-    pub async fn latest_complete_ready_for_scope(
+    pub(in crate::daemon) async fn latest_complete_ready_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {

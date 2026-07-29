@@ -183,7 +183,7 @@ pub struct SessionAuthorities<'a> {
 }
 
 impl<'a> SessionAuthorities<'a> {
-    pub const fn new(
+    pub(crate) const fn new(
         project: Option<&'a Arc<RegisteredGlobalDb>>,
         user: Option<&'a Arc<RegisteredGlobalDb>>,
     ) -> Self {
@@ -464,7 +464,7 @@ pub async fn handle_tool_call(
     .await
 }
 
-pub async fn handle_tool_call_with_registry(
+pub(crate) async fn handle_tool_call_with_registry(
     cg: &TraceDecay,
     tool_name: &str,
     args: Value,
@@ -488,17 +488,17 @@ pub async fn handle_tool_call_with_registry(
 
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
-    pub global_db: Option<&'a RegisteredGlobalDb>,
-    pub accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
-    pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    pub registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub(crate) global_db: Option<&'a RegisteredGlobalDb>,
+    pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub profile_root: Option<&'a Path>,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
-    pub doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    pub(crate) doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
-    pub code_index_freshness_reader:
+    pub(crate) code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
@@ -514,12 +514,13 @@ pub struct ToolCallRegistryOptions<'a> {
     /// The code-index generation authority producers resolve identity through.
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
-    pub code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
-    pub source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
-    pub source_edit_reconciliation_executor:
+    pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
+    pub(crate) source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
+    pub(crate) source_edit_reconciliation_executor:
         Option<crate::mcp::server::SourceEditReconciliationExecutor>,
-    pub code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    pub retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    pub(crate) retained_project_graph_resolver:
+        Option<crate::mcp::server::RetainedProjectGraphResolver>,
     pub preselected_project_reader: bool,
     pub session_authorities: SessionAuthorities<'a>,
 }

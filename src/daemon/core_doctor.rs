@@ -474,7 +474,7 @@ pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> se
     doctor_runtime_value_inner(handshake, None, false).await
 }
 
-pub(crate) async fn write_doctor_runtime_response(
+pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,

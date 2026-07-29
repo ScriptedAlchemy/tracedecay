@@ -423,7 +423,7 @@ pub type DaemonInvocationExecutorFuture<'a, T> = Pin<Box<dyn Future<Output = T> 
 /// Request correlation is already present on `DaemonInvocationRequest`; effect
 /// idempotency remains owned by each operation payload and is never reminted
 /// by this transport boundary.
-pub trait DaemonInvocationExecutor: Send + Sync {
+pub(crate) trait DaemonInvocationExecutor: Send + Sync {
     fn invoke_controlled(
         &self,
         request: crate::daemon::DaemonInvocationRequest,
