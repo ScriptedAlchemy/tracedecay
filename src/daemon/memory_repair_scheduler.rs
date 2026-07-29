@@ -609,6 +609,17 @@ async fn run_maintenance_repair_scheduler_tick(
             MemoryRepairPassDecision::Idle
         }
     };
+    if let Err(error) = database.release_connection_memory().await {
+        log_daemon_event(
+            "maintenance_repair_memory_release",
+            &[
+                ("project", project_path.display().to_string()),
+                ("outcome", "degraded".to_string()),
+                ("error", error.to_string()),
+            ],
+        );
+    }
+    crate::daemon::store_runtime::session_registry::release_process_allocator_memory();
     Ok(combine_repair_decisions(
         combine_repair_decisions(memory, session),
         transcript,
