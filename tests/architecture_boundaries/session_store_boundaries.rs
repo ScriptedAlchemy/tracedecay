@@ -159,6 +159,21 @@ fn inverted_session_modules_do_not_name_the_registered_database() {
     );
 }
 
+#[test]
+fn unfinished_workflow_reader_stays_snapshot_bound_and_crate_private() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(repository.join("src/sessions/workflow_state.rs"))
+        .expect("read unfinished workflow query");
+    assert!(
+        source.contains("pub(crate) async fn list_unfinished(\n    snapshot: &ReadSnapshot,"),
+        "the unfinished workflow query must keep its crate-private, snapshot-bound signature"
+    );
+    assert!(
+        !source.contains("RegisteredGlobalDb"),
+        "the unfinished workflow query must not reopen registered-database authority"
+    );
+}
+
 /// Moving the workflow-index constructor into `crate::store` widened it from a
 /// module-private struct literal to a crate-visible constructor. A read
 /// snapshot carries no shard scope, so `from_snapshot` cannot check authority
