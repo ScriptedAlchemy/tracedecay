@@ -133,6 +133,24 @@ pub(crate) fn resolve_query_scope(
             }
         })?;
     let registered_root = PathBuf::from(&owner.project.canonical_root);
+    if !registered_root.is_absolute() {
+        return Err(QueryScopeError::Resolution(format!(
+            "registered root '{}' is not absolute",
+            registered_root.display()
+        )));
+    }
+    let registered_root = registered_root.canonicalize().map_err(|error| {
+        QueryScopeError::Resolution(format!(
+            "registered root '{}' could not be canonicalized: {error}",
+            registered_root.display()
+        ))
+    })?;
+    let requested_root = requested_root.canonicalize().map_err(|error| {
+        QueryScopeError::Resolution(format!(
+            "requested root '{}' could not be canonicalized: {error}",
+            requested_root.display()
+        ))
+    })?;
     // A requested root at or inside the registered canonical root names the
     // registered worktree itself, so the scope anchors to the canonical root.
     // A requested root outside it is authorized only as the same repository
@@ -143,14 +161,14 @@ pub(crate) fn resolve_query_scope(
             registered_root
         } else {
             let registered_repository = repository_id_for_root(&registered_root)?;
-            let requested_repository = repository_id_for_root(requested_root)?;
+            let requested_repository = repository_id_for_root(&requested_root)?;
             if registered_repository != requested_repository {
                 return Err(QueryScopeError::UnauthorizedSiblingRoot {
                     registered_root: owner.project.canonical_root.clone(),
                     requested_root: requested_root.display().to_string(),
                 });
             }
-            requested_root.to_path_buf()
+            requested_root
         };
     #[allow(deprecated)]
     // CONSOLIDATION-CANDIDATE: cross through the slice-1 root façade until the
@@ -348,6 +366,80 @@ mod tests {
             Some("refs/heads/feature"),
         );
         linked_scope.validate().unwrap();
+    }
+
+    #[test]
+    fn dotdot_request_resolves_the_same_worktree_scope_as_daemon_authority() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("main-checkout");
+        std::fs::create_dir_all(&root).unwrap();
+        init_repo(&root);
+        let root = root.canonicalize().unwrap();
+        let linked = temp.path().join("linked-feature");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                linked.to_string_lossy().as_ref(),
+                "-b",
+                "feature-dotdot",
+            ],
+        );
+        let linked = linked.canonicalize().unwrap();
+        let requested = root.join("../linked-feature");
+        let owner = owner_for(&root, "project.mcp-scope-test");
+        let project_id =
+            tracedecay_domain::ProjectId::new("project.mcp-scope-test").unwrap();
+
+        let scope = resolve_query_scope(&owner, &requested).unwrap();
+        let daemon_scope =
+            crate::daemon::project_open_owners::resolved_scope_for_project(&linked, &project_id)
+                .unwrap();
+
+        assert_eq!(
+            scope, daemon_scope,
+            "dotdot spelling must not anchor identity to the lexical parent worktree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_request_resolves_the_same_worktree_scope_as_daemon_authority() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("main-checkout");
+        std::fs::create_dir_all(&root).unwrap();
+        init_repo(&root);
+        let root = root.canonicalize().unwrap();
+        let linked = temp.path().join("linked-feature");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                linked.to_string_lossy().as_ref(),
+                "-b",
+                "feature-symlink",
+            ],
+        );
+        let linked = linked.canonicalize().unwrap();
+        let requested = root.join("linked-alias");
+        symlink(&linked, &requested).unwrap();
+        let owner = owner_for(&root, "project.mcp-scope-test");
+        let project_id =
+            tracedecay_domain::ProjectId::new("project.mcp-scope-test").unwrap();
+
+        let scope = resolve_query_scope(&owner, &requested).unwrap();
+        let daemon_scope =
+            crate::daemon::project_open_owners::resolved_scope_for_project(&linked, &project_id)
+                .unwrap();
+
+        assert_eq!(
+            scope, daemon_scope,
+            "symlink spelling must not anchor identity to the lexical parent worktree"
+        );
     }
 
     #[test]
