@@ -1,8 +1,5 @@
 //! V22 compatibility projection and V23 fact-relation / compatibility-bank
 //! storage installers.
-//!
-//! Split out of the former single-file `schema` module as a pure mechanical
-//! move; contents are unchanged.
 
 use crate::errors::Result;
 

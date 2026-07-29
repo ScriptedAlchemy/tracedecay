@@ -1,7 +1,6 @@
 //! Compatibility fact-proposal lifecycle, transitions, and legacy imports.
 //!
-//! Split into submodules; every path previously reachable via this module
-//! is re-exported here so no external consumer changes.
+//! Re-exports below preserve every path used outside this module.
 
 mod lifecycle;
 mod records;

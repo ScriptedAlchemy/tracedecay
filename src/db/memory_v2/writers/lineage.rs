@@ -1,8 +1,5 @@
 //! Fact identity, mapping, feedback, event, assertion, and current-state
 //! writers.
-//!
-//! Split out of the former single-file `writers` module as a pure mechanical
-//! move; contents are unchanged.
 
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
