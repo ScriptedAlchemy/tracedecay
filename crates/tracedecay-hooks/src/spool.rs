@@ -879,16 +879,17 @@ fn acquire_lease(
     if !validate_regular_or_missing(&path)? {
         return Err(HookSpoolError::UnsafePath);
     }
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            return Err(HookSpoolError::WriterLeaseHeld);
-        }
-        Err(std::fs::TryLockError::Error(_)) => return Err(HookSpoolError::Io),
-    }
+    file.try_lock().map_err(map_try_lock_error)?;
     write_lease_file(&mut file, candidate)?;
     shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)?;
     Ok((candidate, file))
+}
+
+fn map_try_lock_error(error: std::fs::TryLockError) -> HookSpoolError {
+    match error {
+        std::fs::TryLockError::WouldBlock => HookSpoolError::WriterLeaseHeld,
+        std::fs::TryLockError::Error(_) => HookSpoolError::Io,
+    }
 }
 
 fn append_frame(path: &Path, frame: &[u8]) -> Result<(), HookSpoolError> {
@@ -1299,6 +1300,8 @@ pub fn hook_spool_checksum(input: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
     use crate::{
         HookCapabilityV1, HookEventFamily, HookEventSupportV1, HookEventV2, HookOrderingV1,
@@ -1583,6 +1586,57 @@ mod tests {
         );
         drop(spool);
         assert!(HookSpoolV1::open(&root.0, config(), UtcMicros(11)).is_ok());
+    }
+
+    #[test]
+    fn standard_try_lock_errors_keep_contention_distinct_from_io() {
+        assert_eq!(
+            map_try_lock_error(std::fs::TryLockError::WouldBlock),
+            HookSpoolError::WriterLeaseHeld
+        );
+        assert_eq!(
+            map_try_lock_error(std::fs::TryLockError::Error(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "denied",
+            ))),
+            HookSpoolError::Io
+        );
+    }
+
+    #[test]
+    fn writer_lease_contends_and_releases_across_processes() {
+        const MODE_ENV: &str = "TRACEDECAY_HOOK_SPOOL_LOCK_PROBE";
+        const ROOT_ENV: &str = "TRACEDECAY_HOOK_SPOOL_LOCK_ROOT";
+        if let Ok(mode) = std::env::var(MODE_ENV) {
+            let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("child lock root"));
+            match mode.as_str() {
+                "contended" => assert_eq!(
+                    HookSpoolV1::open(&root, config(), UtcMicros(11)).unwrap_err(),
+                    HookSpoolError::WriterLeaseHeld
+                ),
+                "released" => {
+                    HookSpoolV1::open(&root, config(), UtcMicros(12))
+                        .expect("OS releases lock when owner descriptor closes");
+                }
+                other => panic!("unknown child lock probe mode: {other}"),
+            }
+            return;
+        }
+
+        let root = TestDir::new("process-lease");
+        let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+        let test_name = "spool::tests::writer_lease_contends_and_releases_across_processes";
+        let run_child = |mode: &str| {
+            Command::new(std::env::current_exe().expect("current test binary"))
+                .args(["--exact", test_name, "--nocapture"])
+                .env(MODE_ENV, mode)
+                .env(ROOT_ENV, &root.0)
+                .status()
+                .expect("run lock probe child")
+        };
+        assert!(run_child("contended").success());
+        drop(spool);
+        assert!(run_child("released").success());
     }
 
     #[test]
