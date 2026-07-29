@@ -315,6 +315,113 @@ fn store_dependencies_are_exactly_the_contract_allowlist() {
 }
 
 #[test]
+fn migrate_dependencies_are_exactly_the_planning_allowlist() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-migrate");
+    let expected_direct = [
+        "serde",
+        "serde_json",
+        "tempfile",
+        "tracedecay-domain",
+        "tracedecay-store",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        direct, expected_direct,
+        "tracedecay-migrate plans migrations; it must not depend on databases, \
+         lifecycle leases, daemons, transports, or the root crate"
+    );
+    assert!(!direct.contains("tracedecay"));
+}
+
+/// The migration package decides *what* to migrate and records how far an
+/// attempt got. Acquiring the maintenance fence, opening a store, and driving
+/// the rusqlite runtime stay in root, so a future edit must not quietly pull
+/// that authority across the boundary.
+#[test]
+fn migrate_package_owns_no_store_or_lifecycle_authority() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let sources = rust_sources(&root.join("crates/tracedecay-migrate/src"));
+    assert!(
+        !sources.is_empty(),
+        "expected tracedecay-migrate sources; a vacuous scan proves nothing"
+    );
+    for (path, source) in &sources {
+        for forbidden in [
+            "crate::db",
+            "crate::global_db",
+            "crate::lifecycle_lease",
+            "crate::sqlite_read_snapshot",
+            "crate::daemon",
+            "rusqlite",
+            "tracedecay_rusqlite",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{}: migration planning must not reach store or lifecycle authority: {forbidden}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn root_uses_migrate_facades_instead_of_inline_sources() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        "src/migrate/durability.rs",
+        "src/migrate/inventory/model.rs",
+    ] {
+        assert!(
+            !root.join(path).exists(),
+            "root must not retain extracted migration source at {path}"
+        );
+    }
+    for (path, expected) in [
+        (
+            "src/migrate/mod.rs",
+            "pub use tracedecay_migrate::durability;",
+        ),
+        (
+            "src/migrate/inventory/mod.rs",
+            "pub use tracedecay_migrate::inventory::*;",
+        ),
+        (
+            "src/migrate/manifest.rs",
+            "pub use tracedecay_migrate::manifest::{",
+        ),
+    ] {
+        let source = std::fs::read_to_string(root.join(path))
+            .unwrap_or_else(|error| panic!("read migration facade {path}: {error}"));
+        assert!(
+            source.contains(expected),
+            "{path} must re-export the extracted module so caller paths stay stable"
+        );
+    }
+}
+
+fn rust_sources(dir: &std::path::Path) -> Vec<(PathBuf, String)> {
+    let mut sources = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return sources;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            sources.extend(rust_sources(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            sources.push((path, source));
+        }
+    }
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    sources
+}
+
+#[test]
 fn canonical_projector_is_pure_and_store_owned() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source =

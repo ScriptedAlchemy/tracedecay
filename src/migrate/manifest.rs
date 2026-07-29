@@ -1,9 +1,8 @@
-use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::migrate::inventory::{MigrationInventory, StoreStatus};
@@ -16,90 +15,40 @@ use crate::storage::{
     read_enrollment_marker, read_store_manifest, validate_project_id, write_store_manifest,
 };
 
-pub const MIGRATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// The manifest plan, its forward-only checkpoint ladder, and store-artifact
+/// path safety live in `tracedecay-migrate`; they decide and record without
+/// owning a store. Re-exported so `crate::migrate::manifest::*` stays the
+/// caller path.
+pub use tracedecay_migrate::manifest::{
+    ArtifactState, ArtifactStateTransitionError, MIGRATION_MANIFEST_SCHEMA_VERSION,
+    MigrationApplyReport, MigrationArtifact, MigrationCleanupSourcesReport, MigrationDestination,
+    MigrationEndpoint, MigrationExportReport, MigrationManifest, MigrationPlanOptions,
+    MigrationProtocol, MigrationRollbackReport, MigrationRollbackState, StoreArtifactPath,
+    StoreArtifactPathValidationError, load_manifest, validate_migration_id,
+};
+use tracedecay_migrate::manifest::{CheckpointWriter, save_manifest as write_checkpoint};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MigrationManifest {
-    pub migration_id: String,
-    pub schema_version: u32,
-    pub tracedecay_version: String,
-    pub created_at_unix: i64,
-    pub confirmation_token: String,
-    pub command_args: Vec<String>,
-    pub env_overrides: Vec<String>,
-    pub source: MigrationEndpoint,
-    pub destination: MigrationDestination,
-    pub validation_summaries: Vec<String>,
-    pub protocol: MigrationProtocol,
-    pub inventory: MigrationInventory,
-    pub artifacts: Vec<MigrationArtifact>,
-    #[serde(default)]
-    pub backup_artifacts: Vec<MigrationArtifact>,
+/// Satisfies the extracted checkpoint port with the root's owner-private store
+/// IO, so the manifest package never chooses permissions or temp-file policy.
+struct PrivateStoreCheckpointWriter;
+
+impl CheckpointWriter for PrivateStoreCheckpointWriter {
+    fn write_file(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        PrivateStoreIo::write_file(path, contents)
+    }
+
+    fn write_file_atomically(
+        &self,
+        path: &Path,
+        temp_path: &Path,
+        contents: &[u8],
+    ) -> io::Result<()> {
+        PrivateStoreIo::write_file_atomically(path, temp_path, contents)
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MigrationProtocol {
-    pub manifest_path: PathBuf,
-    pub temp_manifest_path: PathBuf,
-    pub lock_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactState {
-    Planned,
-    Locked,
-    Copied,
-    Verified,
-    Applied,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MigrationArtifact {
-    pub kind: String,
-    pub source_path: PathBuf,
-    pub target_path: Option<PathBuf>,
-    pub state: ArtifactState,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MigrationEndpoint {
-    pub project_root: Option<PathBuf>,
-    pub data_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MigrationDestination {
-    pub profile_root: Option<PathBuf>,
-    pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoreArtifactPath {
-    pub root: PathBuf,
-    pub relative_path: PathBuf,
-    pub absolute_path: PathBuf,
-    pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StoreArtifactPathValidationError {
-    PathTraversal,
-    NonNormalComponent,
-    NulByte,
-    Symlink,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationPlanOptions {
-    pub manifest_path: PathBuf,
-    pub migration_id: String,
-    pub tracedecay_version: String,
-    pub created_at_unix: i64,
-    pub confirmation_token: String,
-    pub target_profile_root: PathBuf,
-    pub project_id: String,
+pub fn save_manifest(manifest: &MigrationManifest) -> io::Result<()> {
+    write_checkpoint(&PrivateStoreCheckpointWriter, manifest)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,132 +65,10 @@ pub struct MigrationVerifyReport {
     pub issues: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MigrationApplyReport {
-    pub migration_id: String,
-    pub project_root: PathBuf,
-    pub profile_root: PathBuf,
-    pub project_id: String,
-    pub artifact_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MigrationRollbackReport {
-    pub migration_id: String,
-    pub artifact_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MigrationExportReport {
-    pub project_id: String,
-    pub source_profile_root: PathBuf,
-    pub source_data_root: PathBuf,
-    pub target_dir: PathBuf,
-    pub artifact_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MigrationCleanupSourcesReport {
-    pub migration_id: String,
-    pub removed_artifacts: usize,
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct SqliteFileFingerprint {
     size_bytes: u64,
     sha256: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MigrationRollbackState {
-    NotApplied,
-    PartialApply,
-    CutoverIncomplete,
-    DivergentTargets,
-    AppliedReady,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactStateTransitionError {
-    from: ArtifactState,
-    to: ArtifactState,
-}
-
-impl MigrationManifest {
-    pub fn new(
-        migration_id: impl Into<String>,
-        tracedecay_version: impl Into<String>,
-        created_at_unix: i64,
-        confirmation_token: impl Into<String>,
-        protocol: MigrationProtocol,
-        inventory: MigrationInventory,
-    ) -> Self {
-        let migration_id = migration_id.into();
-        let confirmation_token = confirmation_token.into();
-        Self {
-            migration_id,
-            schema_version: MIGRATION_MANIFEST_SCHEMA_VERSION,
-            tracedecay_version: tracedecay_version.into(),
-            created_at_unix,
-            confirmation_token,
-            command_args: Vec::new(),
-            env_overrides: Vec::new(),
-            source: MigrationEndpoint::default(),
-            destination: MigrationDestination::default(),
-            validation_summaries: Vec::new(),
-            protocol,
-            inventory,
-            artifacts: Vec::new(),
-            backup_artifacts: Vec::new(),
-        }
-    }
-}
-
-pub fn save_manifest(manifest: &MigrationManifest) -> io::Result<()> {
-    if manifest.confirmation_token.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "confirmation_token is required before saving a migration manifest",
-        ));
-    }
-    validate_migration_id(&manifest.migration_id).map_err(|message| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "invalid migration_id '{}': {message}",
-                manifest.migration_id
-            ),
-        )
-    })?;
-    let protocol = &manifest.protocol;
-    validate_protocol_paths(protocol, &manifest.migration_id)?;
-    let bytes = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
-    let mut lock_written = false;
-    let result = (|| {
-        PrivateStoreIo::write_file(&protocol.lock_path, manifest.migration_id.as_bytes())?;
-        lock_written = true;
-        PrivateStoreIo::write_file_atomically(
-            &protocol.manifest_path,
-            &protocol.temp_manifest_path,
-            &bytes,
-        )
-    })();
-    if lock_written {
-        let cleanup_result = fs::remove_file(&protocol.lock_path);
-        if result.is_ok()
-            && let Err(err) = cleanup_result
-            && err.kind() != io::ErrorKind::NotFound
-        {
-            return Err(err);
-        }
-    }
-    result
-}
-
-pub fn load_manifest(path: impl AsRef<Path>) -> io::Result<MigrationManifest> {
-    let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
 pub fn build_plan_manifest(
@@ -1809,163 +1636,4 @@ fn artifact_relative_path(path: &Path, data_dir: &Path) -> std::result::Result<P
                 data_dir.display()
             )
         })
-}
-
-fn validate_protocol_paths(protocol: &MigrationProtocol, migration_id: &str) -> io::Result<()> {
-    let expected = MigrationProtocol::for_manifest(&protocol.manifest_path, migration_id);
-    if protocol.temp_manifest_path != expected.temp_manifest_path
-        || protocol.lock_path != expected.lock_path
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "migration manifest protocol paths must be derived from manifest_path and migration_id",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_migration_id(migration_id: &str) -> std::result::Result<(), &'static str> {
-    if migration_id.is_empty() {
-        return Err("migration_id must not be empty");
-    }
-    if migration_id.contains('/') || migration_id.contains('\\') || migration_id.contains("..") {
-        return Err("migration_id must be a single safe path segment");
-    }
-    if !migration_id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-    {
-        return Err("migration_id contains unsupported characters");
-    }
-    Ok(())
-}
-
-impl MigrationProtocol {
-    pub fn for_manifest(manifest_path: impl AsRef<Path>, migration_id: &str) -> Self {
-        let manifest_path = manifest_path.as_ref().to_path_buf();
-        let file_name = manifest_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("migration-manifest.json");
-        let parent = manifest_path.parent().unwrap_or_else(|| Path::new(""));
-        Self {
-            temp_manifest_path: parent.join(format!(".{file_name}.{migration_id}.tmp")),
-            lock_path: parent.join(format!("{file_name}.lock")),
-            manifest_path,
-        }
-    }
-}
-
-impl MigrationArtifact {
-    pub fn new(
-        kind: impl Into<String>,
-        source_path: PathBuf,
-        target_path: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            kind: kind.into(),
-            source_path,
-            target_path,
-            state: ArtifactState::Planned,
-        }
-    }
-
-    pub fn transition_to(
-        &mut self,
-        next: ArtifactState,
-    ) -> std::result::Result<(), ArtifactStateTransitionError> {
-        if self.state.can_transition_to(&next) {
-            self.state = next;
-            Ok(())
-        } else {
-            Err(ArtifactStateTransitionError {
-                from: self.state.clone(),
-                to: next,
-            })
-        }
-    }
-}
-
-impl StoreArtifactPath {
-    pub fn from_relative(
-        root: &Path,
-        relative_path: &Path,
-        size_bytes: u64,
-    ) -> std::result::Result<Self, StoreArtifactPathValidationError> {
-        validate_artifact_relpath(relative_path)?;
-        let absolute_path = root.join(relative_path);
-        reject_symlink_components(root, relative_path)?;
-        Ok(Self {
-            root: root.to_path_buf(),
-            relative_path: relative_path.to_path_buf(),
-            absolute_path,
-            size_bytes,
-        })
-    }
-}
-
-impl ArtifactState {
-    fn can_transition_to(&self, next: &Self) -> bool {
-        matches!(
-            (self, next),
-            (Self::Planned, Self::Locked)
-                | (Self::Locked, Self::Copied)
-                | (Self::Copied, Self::Verified)
-                | (Self::Verified, Self::Applied)
-                | (
-                    Self::Planned | Self::Locked | Self::Copied | Self::Verified,
-                    Self::Failed
-                )
-        )
-    }
-}
-
-impl fmt::Display for ArtifactStateTransitionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "invalid migration artifact state transition from {:?} to {:?}",
-            self.from, self.to
-        )
-    }
-}
-
-impl std::error::Error for ArtifactStateTransitionError {}
-
-fn validate_artifact_relpath(
-    relative_path: &Path,
-) -> std::result::Result<(), StoreArtifactPathValidationError> {
-    if relative_path.to_string_lossy().contains('\0') {
-        return Err(StoreArtifactPathValidationError::NulByte);
-    }
-    if relative_path.is_absolute() {
-        return Err(StoreArtifactPathValidationError::PathTraversal);
-    }
-    for component in relative_path.components() {
-        match component {
-            Component::Normal(_) => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(StoreArtifactPathValidationError::PathTraversal);
-            }
-            Component::CurDir => return Err(StoreArtifactPathValidationError::NonNormalComponent),
-        }
-    }
-    Ok(())
-}
-
-fn reject_symlink_components(
-    root: &Path,
-    relative_path: &Path,
-) -> std::result::Result<(), StoreArtifactPathValidationError> {
-    let mut current = root.to_path_buf();
-    for component in relative_path.components() {
-        current.push(component.as_os_str());
-        if current
-            .symlink_metadata()
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            return Err(StoreArtifactPathValidationError::Symlink);
-        }
-    }
-    Ok(())
 }
