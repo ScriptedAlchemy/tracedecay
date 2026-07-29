@@ -4457,6 +4457,7 @@ async fn production_project_server(
     cancellation: &CancellationToken,
     #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
 ) -> Result<ProductionProjectComposition> {
+    let project_open_started = Instant::now();
     project_open_cancellation_checkpoint(cancellation)?;
     ensure_registered_project_route(
         store_administration,
@@ -4546,6 +4547,17 @@ async fn production_project_server(
     } else {
         (initial_cg, initial_deferred_post_open_health, initial_key)
     };
+    log_daemon_event(
+        "project_open_phase",
+        &[
+            ("project", canonical_project_path.display().to_string()),
+            ("phase", "graph_admitted".to_owned()),
+            (
+                "elapsed_ms",
+                project_open_started.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
     project_open_cancellation_checkpoint(cancellation)?;
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await?;
@@ -4622,12 +4634,36 @@ async fn production_project_server(
                 message: "project session runtime requires an authoritative project identity"
                     .to_owned(),
             })?;
+    let project_sessions_started = Instant::now();
     let registered_project_session_db = store_administration
         .registered_project_session_database(cg.project_root(), cg.store_layout())
         .await?;
+    log_daemon_event(
+        "project_open_phase",
+        &[
+            ("project", canonical_project_path.display().to_string()),
+            ("phase", "project_sessions_admitted".to_owned()),
+            (
+                "elapsed_ms",
+                project_sessions_started.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
+    let profile_sessions_started = Instant::now();
     let registered_user_session_db = store_administration
         .registered_profile_session_database()
         .await?;
+    log_daemon_event(
+        "project_open_phase",
+        &[
+            ("project", canonical_project_path.display().to_string()),
+            ("phase", "profile_sessions_admitted".to_owned()),
+            (
+                "elapsed_ms",
+                profile_sessions_started.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
     let registered_profile_db = store_administration.registered_profile_database().await?;
     let registry_db = Arc::clone(&registered_profile_db);
     let session_db = Arc::clone(&registered_project_session_db);
@@ -4819,7 +4855,19 @@ async fn production_project_server(
         context = context.with_automation_scheduler_reconciler(reconciler);
     }
     project_open_cancellation_checkpoint(cancellation)?;
+    let mcp_construction_started = Instant::now();
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
+    log_daemon_event(
+        "project_open_phase",
+        &[
+            ("project", canonical_project_path.display().to_string()),
+            ("phase", "mcp_core_constructed".to_owned()),
+            (
+                "elapsed_ms",
+                mcp_construction_started.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
     if cancellation.is_cancelled() {
         candidate.cancel_startup_transcript_ingest();
         candidate.shutdown().await;
@@ -4882,6 +4930,17 @@ async fn production_project_server(
             }
             servers.servers_for_owner(&key.owner)
         };
+        log_daemon_event(
+            "project_open_phase",
+            &[
+                ("project", canonical_project_path.display().to_string()),
+                ("phase", "core_published".to_owned()),
+                (
+                    "elapsed_ms",
+                    project_open_started.elapsed().as_millis().to_string(),
+                ),
+            ],
+        );
         if let Some(database) = deferred_post_open_health
             && let Err(error) = database.repair_fts_after_open().await
         {
