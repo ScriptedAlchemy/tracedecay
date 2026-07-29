@@ -1,5 +1,4 @@
-//! Node lookup, directory, qualified-name, and search-ranking query tests (split from
-//! `db_query_test.rs`).
+//! Node lookup, directory, qualified-name, and search-ranking query tests.
 
 use super::*;
 

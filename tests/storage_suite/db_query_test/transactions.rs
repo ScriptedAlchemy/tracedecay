@@ -1,5 +1,4 @@
-//! Transaction rollback tests for failed batch writes (split from
-//! `db_query_test.rs`).
+//! Transaction rollback tests for failed batch writes.
 
 use super::*;
 

@@ -1,5 +1,4 @@
-//! Edge insertion, deletion, and constraint tests (split from
-//! `db_query_test.rs`).
+//! Edge insertion, deletion, and constraint tests.
 
 use super::*;
 

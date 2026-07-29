@@ -1,5 +1,3 @@
-//! `analytics_test` domain tests, split mechanically from `mcp_server_test.rs`.
-
 use crate::common::EnvVarGuard;
 use crate::mcp_server_test::support::*;
 use serde_json::json;

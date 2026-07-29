@@ -1,6 +1,5 @@
 #![allow(clippy::too_many_arguments, clippy::clone_on_copy)] // test builders
-//! Shared fixtures and helpers for the MCP handler test domains,
-//! split mechanically from `mcp_handler_test.rs`.
+//! Shared fixtures and helpers for the MCP handler test domains.
 
 use crate::common;
 use crate::fixture;

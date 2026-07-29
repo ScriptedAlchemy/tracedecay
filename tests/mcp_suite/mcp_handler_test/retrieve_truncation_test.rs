@@ -1,5 +1,3 @@
-//! `retrieve_truncation_test` domain tests, split mechanically from `mcp_handler_test.rs`.
-
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fmt::Write as _;

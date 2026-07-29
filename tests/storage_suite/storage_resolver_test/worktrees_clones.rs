@@ -1,5 +1,4 @@
-//! Linked-worktree and same-remote clone identity tests (split from
-//! `storage_resolver_test.rs`).
+//! Linked-worktree and same-remote clone identity tests.
 
 use super::*;
 

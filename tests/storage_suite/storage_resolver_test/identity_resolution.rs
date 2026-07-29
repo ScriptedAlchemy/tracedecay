@@ -1,5 +1,4 @@
-//! Observation-store identity resolution and legacy cutover/adoption tests (split from
-//! `storage_resolver_test.rs`).
+//! Observation-store identity resolution and legacy cutover/adoption tests.
 
 use super::*;
 
