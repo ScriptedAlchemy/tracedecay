@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 
 use tracedecay_store::{
@@ -157,8 +158,36 @@ impl TranscriptStore for GlobalDbTranscriptStore<'_> {
 }
 
 impl TranscriptIngestStore for GlobalDbTranscriptStore<'_> {
-    fn registered_observation_database(&self) -> Option<&RegisteredGlobalDb> {
-        Some(self.db)
+    fn advance_parse_offset_monotonic(
+        &self,
+        cursor_path: &Path,
+        offset: ParseOffset,
+    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+        async move {
+            self.db
+                .advance_parse_offset_result(&Self::path_text(cursor_path), offset)
+                .await
+                .map_err(|error| Self::persistence_error(cursor_path, error))
+        }
+    }
+
+    fn record_session_ingest_activity(
+        &self,
+        project_root: &Path,
+        units: u64,
+        provider: &'static str,
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            crate::application::event_lane::publish(
+                self.db,
+                crate::application::event_lane::ActivityFamilyV1::SessionIngest,
+                project_root,
+                None,
+                units,
+                Some(provider),
+            )
+            .await;
+        }
     }
 
     async fn get_session(

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -14,8 +15,9 @@ use tracedecay_domain::{
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
-    ObservationStore, ObservationStoreError, ObservationStoreResult, ProjectionPersistOutcome,
-    StoreShardScopeV1, StoredObservation, build_scope_resolution_authorization_v1,
+    ObservationStore, ObservationStoreError, ObservationStoreResult, ParseOffset,
+    ProjectionPersistOutcome, StoreShardScopeV1, StoredObservation,
+    build_scope_resolution_authorization_v1,
 };
 
 use crate::application::anchor_resolution::{
@@ -582,6 +584,104 @@ impl<'a> HostAdmissionAuthorities<'a> {
 
 pub struct HostAdmissionFacade<'a> {
     authorities: HostAdmissionAuthorities<'a>,
+}
+
+pub(crate) trait ObservationCaptureAdmissionPort {
+    fn capture_observation(
+        &self,
+        request: CaptureObservationRequest,
+    ) -> impl Future<Output = Result<CaptureObservationOutcome, HostAdmissionOutcome>> + Send;
+
+    fn advance_non_durable_source_cursor(
+        &self,
+        advance: ObservationCursorAdvance,
+        cancellation: ObservationCancellation,
+    ) -> impl Future<Output = Result<CursorAdvanceOutcome, HostAdmissionOutcome>> + Send;
+
+    fn get_source_cursor<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> impl Future<Output = Result<Option<ObservationSourceCursorV1>, HostAdmissionOutcome>> + Send + 'a;
+
+    fn drain_projection_queue<'a>(
+        &'a self,
+        provider: &'a str,
+        scope: &'a ObservationScopeV1,
+        cancellation: &'a ObservationCancellation,
+        max: usize,
+    ) -> impl Future<Output = Result<HostProjectionDrainOutcome, HostAdmissionOutcome>> + Send + 'a;
+}
+
+pub(crate) trait TranscriptCursorAdmissionPort {
+    fn get_parse_offset<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        path: &'a str,
+    ) -> impl Future<Output = Result<Option<ParseOffset>, HostAdmissionOutcome>> + Send + 'a;
+
+    fn advance_parse_offset<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        path: &'a str,
+        offset: ParseOffset,
+    ) -> impl Future<Output = Result<(), HostAdmissionOutcome>> + Send + 'a;
+}
+
+impl ObservationCaptureAdmissionPort for HostAdmissionFacade<'_> {
+    fn capture_observation(
+        &self,
+        request: CaptureObservationRequest,
+    ) -> impl Future<Output = Result<CaptureObservationOutcome, HostAdmissionOutcome>> + Send {
+        HostAdmissionFacade::capture_observation(self, request)
+    }
+
+    fn advance_non_durable_source_cursor(
+        &self,
+        advance: ObservationCursorAdvance,
+        cancellation: ObservationCancellation,
+    ) -> impl Future<Output = Result<CursorAdvanceOutcome, HostAdmissionOutcome>> + Send {
+        HostAdmissionFacade::advance_non_durable_source_cursor(self, advance, cancellation)
+    }
+
+    fn get_source_cursor<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> impl Future<Output = Result<Option<ObservationSourceCursorV1>, HostAdmissionOutcome>> + Send + 'a
+    {
+        HostAdmissionFacade::get_source_cursor(self, source, scope)
+    }
+
+    fn drain_projection_queue<'a>(
+        &'a self,
+        provider: &'a str,
+        scope: &'a ObservationScopeV1,
+        cancellation: &'a ObservationCancellation,
+        max: usize,
+    ) -> impl Future<Output = Result<HostProjectionDrainOutcome, HostAdmissionOutcome>> + Send + 'a
+    {
+        HostAdmissionFacade::drain_projection_queue(self, provider, scope, cancellation, max)
+    }
+}
+
+impl TranscriptCursorAdmissionPort for HostAdmissionFacade<'_> {
+    fn get_parse_offset<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        path: &'a str,
+    ) -> impl Future<Output = Result<Option<ParseOffset>, HostAdmissionOutcome>> + Send + 'a {
+        HostAdmissionFacade::get_parse_offset(self, scope, path)
+    }
+
+    fn advance_parse_offset<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        path: &'a str,
+        offset: ParseOffset,
+    ) -> impl Future<Output = Result<(), HostAdmissionOutcome>> + Send + 'a {
+        HostAdmissionFacade::advance_parse_offset(self, scope, path, offset)
+    }
 }
 
 impl<'a> HostAdmissionFacade<'a> {
@@ -3409,7 +3509,8 @@ impl HostAdmissionTestRuntimeV1 {
                     source: std::io::Error::other(error.to_string()),
                 },
             )?;
-        crate::sessions::source::try_ingest_source(database, source, project_root, max_new_bytes)
+        let store = crate::store::GlobalDbTranscriptStore::new(database);
+        crate::sessions::source::try_ingest_source(&store, source, project_root, max_new_bytes)
             .await
     }
 
@@ -4883,19 +4984,16 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> crate::sessions::source::TranscriptIngestResult<
         crate::sessions::shared::TranscriptIngestStats,
     > {
-        crate::sessions::source::try_ingest_source(
-            self.project_database_for_test().map_err(|error| {
-                crate::sessions::source::TranscriptIngestError::ScanIo {
-                    operation: "bind registered project session test runtime",
-                    path: project_root.to_path_buf(),
-                    source: std::io::Error::other(error.to_string()),
-                }
-            })?,
-            source,
-            project_root,
-            max_new_bytes,
-        )
-        .await
+        let database = self.project_database_for_test().map_err(|error| {
+            crate::sessions::source::TranscriptIngestError::ScanIo {
+                operation: "bind registered project session test runtime",
+                path: project_root.to_path_buf(),
+                source: std::io::Error::other(error.to_string()),
+            }
+        })?;
+        let store = crate::store::GlobalDbTranscriptStore::new(database);
+        crate::sessions::source::try_ingest_source(&store, source, project_root, max_new_bytes)
+            .await
     }
 
     /// Runs one selected provider through the exact registered project authority.
