@@ -2634,6 +2634,12 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         true
     }
 
+    fn remove(&mut self, key: &ProjectServerKey) -> Option<Server> {
+        let entry = self.servers.remove(key)?;
+        self.aliases.retain(|_, alias| alias != key);
+        Some(entry.server)
+    }
+
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
         debug_assert!(self.servers.contains_key(&key));
         if let Some(entry) = self.servers.get_mut(&key) {
@@ -4463,12 +4469,21 @@ async fn production_project_server(
     if let Some(attempts) = project_open_attempts {
         attempts.fetch_add(1, Ordering::Relaxed);
     }
+    let synchronous_post_open_health = store_administration
+        .requires_synchronous_health(canonical_project_path)
+        .await;
     let (cg, deferred_post_open_health) = Box::pin(open_project_for_handshake(
         canonical_project_path,
         handshake,
         store_administration,
+        !synchronous_post_open_health,
     ))
     .await?;
+    if synchronous_post_open_health {
+        store_administration
+            .clear_synchronous_health(canonical_project_path)
+            .await;
+    }
     project_open_cancellation_checkpoint(cancellation)?;
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await?;
@@ -4806,8 +4821,21 @@ async fn production_project_server(
                     .to_owned(),
             });
         }
-        if let Some(database) = deferred_post_open_health {
-            let _ = database.repair_fts_after_open().await?;
+        if let Some(database) = deferred_post_open_health
+            && let Err(error) = database.repair_fts_after_open().await
+        {
+            route_registered.store(false, Ordering::Release);
+            resolved.cancel_startup_transcript_ingest();
+            store_administration
+                .require_synchronous_health(canonical_project_path)
+                .await;
+            let removed = store_administration
+                .project_servers()
+                .lock()
+                .await
+                .remove(&key);
+            debug_assert!(removed.is_some());
+            return Err(error);
         }
         ensure_git_index_transactions_for_mutation_owners(
             store_administration,
@@ -6066,6 +6094,7 @@ async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
+    defer_post_open_health: bool,
 ) -> Result<(crate::tracedecay::TraceDecay, Option<crate::db::Database>)> {
     let open_options = handshake.open_options();
     let registry_database = store_administration.registered_profile_database().await?;
@@ -6137,21 +6166,36 @@ async fn open_project_for_handshake(
         .registered_project_session_database(project_path, &store_layout)
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
-    match crate::tracedecay::TraceDecay::open_with_registered_configuration_deferred_post_open_health(
-        project_path,
-        open_options.clone(),
-        store_layout.clone(),
-        Arc::clone(&configuration_database),
-        Arc::clone(&registry_database),
-        Arc::clone(&runtime_registry),
-    )
-    .await
-    {
+    let open_result = if defer_post_open_health {
+        crate::tracedecay::TraceDecay::open_with_registered_configuration_deferred_post_open_health(
+            project_path,
+            open_options.clone(),
+            store_layout.clone(),
+            Arc::clone(&configuration_database),
+            Arc::clone(&registry_database),
+            Arc::clone(&runtime_registry),
+        )
+        .await
+    } else {
+        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            project_path,
+            open_options.clone(),
+            store_layout.clone(),
+            Arc::clone(&configuration_database),
+            Arc::clone(&registry_database),
+            Arc::clone(&runtime_registry),
+        )
+        .await
+    };
+    match open_result {
         Ok(cg) => {
-            let deferred_post_open_health = cg.db().clone();
-            Ok((cg, Some(deferred_post_open_health)))
+            let deferred_post_open_health =
+                defer_post_open_health.then(|| cg.db().clone());
+            Ok((cg, deferred_post_open_health))
         }
-        Err(open_err) if is_readonly_database_error(&open_err) => {
+        Err(open_err)
+            if defer_post_open_health && is_readonly_database_error(&open_err) =>
+        {
             match crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
                 project_path,
                 open_options,
