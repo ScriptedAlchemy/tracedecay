@@ -7,87 +7,62 @@ use fs2::FileExt;
 #[cfg(unix)]
 use serde_json::Value;
 
-use crate::common::{self, IsolatedEnv};
+use crate::common;
+use crate::common::fixture::{ClosedRegisteredProject, GitFixture, TestProfile};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::load_branch_meta;
-use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-// These tests resolve the profile layout from the live HOME without pinning
-// it, so under threaded `cargo test` they must not overlap with suite
-// modules whose guards mutate HOME/USERPROFILE mid-test.
-use crate::support::HOME_ENV_LOCK;
-
-fn git(project: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(["-c", "core.hooksPath=.git/no-hooks"])
-        .args(args)
-        .current_dir(project)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
-    assert!(
-        output.status.success(),
-        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+/// An indexed project on `main` that has been closed so a later checkout can
+/// reopen against a live branch tip.
+struct BranchSafetyProject {
+    repo: GitFixture,
+    project: ClosedRegisteredProject,
 }
 
-fn commit_all(project: &Path, message: &str) {
-    git(project, &["add", "."]);
-    git(
-        project,
-        &[
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay-test@example.com",
-            "commit",
-            "-m",
-            message,
-        ],
-    );
-}
+impl BranchSafetyProject {
+    async fn indexed_on_main() -> Self {
+        let profile = TestProfile::acquire().await;
+        let repo = GitFixture::primary(profile.path("project"));
+        fs::create_dir_all(repo.root().join("src")).unwrap();
+        fs::write(
+            repo.root().join("src/lib.rs"),
+            "pub fn indexed_on_main() {}\n",
+        )
+        .unwrap();
+        repo.commit_all("initial commit");
+        let project = profile.enroll_indexed(repo.root()).await.close().await;
+        Self { repo, project }
+    }
 
-fn project_data_dir(project: &Path) -> PathBuf {
-    resolve_layout_for_current_profile(project)
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .data_root
-}
+    fn root(&self) -> &Path {
+        self.project.root()
+    }
 
-fn profile_open_options(env: &IsolatedEnv) -> TraceDecayOpenOptions {
-    let profile_root = env.home().join(".tracedecay");
-    TraceDecayOpenOptions {
-        global_db_path: Some(profile_root.join("global.db")),
-        profile_root: Some(profile_root),
+    fn data_root(&self) -> &Path {
+        self.project.data_root()
+    }
+
+    fn open_options(&self) -> TraceDecayOpenOptions {
+        self.project.open_options()
+    }
+
+    async fn reopen(&self) -> TraceDecay {
+        self.project.reopen().await
     }
 }
 
-async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
-    let (env, project) = IsolatedEnv::acquire().await;
-    let open_options = profile_open_options(&env);
+async fn open_untracked_project() -> (BranchSafetyProject, TraceDecay) {
+    let fixture = BranchSafetyProject::indexed_on_main().await;
 
-    git(&project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
-    commit_all(&project, "initial commit");
-
-    let main = TraceDecay::init_with_options(&project, open_options.clone())
-        .await
-        .unwrap();
-    main.index_all().await.unwrap();
-    drop(main);
-
-    git(&project, &["checkout", "-b", "feature/untracked"]);
+    fixture.repo.run(&["checkout", "-b", "feature/untracked"]);
     fs::write(
-        project.join("src/untracked_only.rs"),
+        fixture.root().join("src/untracked_only.rs"),
         "pub fn untracked_only() {}\n",
     )
     .unwrap();
 
-    let feature = TraceDecay::open_with_options(&project, open_options)
-        .await
-        .unwrap();
+    let feature = fixture.reopen().await;
     assert_eq!(feature.active_branch(), Some("feature/untracked"));
     assert_eq!(feature.serving_branch(), Some("feature/untracked"));
     assert!(!feature.is_fallback());
@@ -96,21 +71,69 @@ async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
     assert_eq!(layout.sync_lock_path, layout.data_root.join("sync.lock"));
     assert_ne!(feature.db_path(), layout.graph_db_path);
 
-    (env, project, feature)
+    (fixture, feature)
+}
+
+async fn open_detached_fallback_project() -> (BranchSafetyProject, TraceDecay) {
+    let fixture = BranchSafetyProject::indexed_on_main().await;
+
+    fixture.repo.run(&["checkout", "--detach"]);
+
+    fs::write(
+        fixture.root().join("src/detached_only.rs"),
+        "pub fn detached_only() {}\n",
+    )
+    .unwrap();
+
+    let fallback = fixture.reopen().await;
+    assert_eq!(fallback.active_branch(), None);
+    assert_eq!(fallback.serving_branch(), Some("main"));
+    assert!(fallback.is_fallback());
+    assert!(
+        fallback
+            .fallback_warning()
+            .unwrap_or_default()
+            .contains("detached HEAD"),
+        "detached HEAD should explain the fallback branch"
+    );
+
+    (fixture, fallback)
+}
+
+async fn assert_main_db_missing_symbol(
+    fixture: &BranchSafetyProject,
+    symbol: &str,
+    message: &str,
+) {
+    fixture.repo.run(&["checkout", "main"]);
+    let main = fixture.reopen().await;
+    let results = main.search(symbol, 10).await.unwrap();
+    assert!(results.is_empty(), "{message}");
+}
+
+fn assert_fallback_write_refused(operation: &str, err: impl std::fmt::Display) {
+    let message = err.to_string();
+    assert!(
+        message.contains("fallback")
+            && (message.contains("tracedecay branch add")
+                || message.contains("Check out a tracked branch")),
+        "unexpected {operation} error: {message}"
+    );
 }
 
 #[tokio::test]
 // Regression: init and reopen must use the same graph-scoped lock.
 async fn init_index_uses_graph_specific_sync_lock() {
-    let (_env, project) = IsolatedEnv::acquire().await;
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
+    let profile = TestProfile::acquire().await;
+    let project_root = profile.path("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(project_root.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
 
-    let cg = TraceDecay::init(&project).await.unwrap();
-    let lock_path = PathBuf::from(format!("{}.sync.lock", cg.db_path().display()));
+    let project = profile.enroll(&project_root).await;
+    let lock_path = PathBuf::from(format!("{}.sync.lock", project.db_path().display()));
     fs::write(&lock_path, std::process::id().to_string()).unwrap();
 
-    let err = match cg.index_all().await {
+    let err = match project.index_all().await {
         Ok(_) => panic!("active graph lock must block init indexing"),
         Err(err) => err,
     };
@@ -122,8 +145,8 @@ async fn init_index_uses_graph_specific_sync_lock() {
 
 #[tokio::test]
 async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
-    let (env, project, feature) = open_untracked_project().await;
-    let open_options = profile_open_options(&env);
+    let (fixture, feature) = open_untracked_project().await;
+    let open_options = fixture.open_options();
     let layout = feature.store_layout().clone();
     let corrupt_db = feature.db_path().to_path_buf();
     feature.checkpoint().await.unwrap();
@@ -146,7 +169,7 @@ async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
     fs::write(&dirty_path, dirty_bytes).unwrap();
     fs::write(&layout.dirty_path, dirty_bytes).unwrap();
 
-    let repaired = TraceDecay::open_with_options(&project, open_options)
+    let repaired = TraceDecay::open_with_options(fixture.root(), open_options)
         .await
         .expect("a corrupt derived branch index should rebuild from its tracked ancestor");
     assert_eq!(repaired.active_branch(), Some("feature/untracked"));
@@ -196,8 +219,8 @@ async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
 
 #[tokio::test]
 async fn corrupt_derived_branch_repair_waits_for_the_active_sync_lease() {
-    let (env, project, feature) = open_untracked_project().await;
-    let open_options = profile_open_options(&env);
+    let (fixture, feature) = open_untracked_project().await;
+    let open_options = fixture.open_options();
     let corrupt_db = feature.db_path().to_path_buf();
     let recovery_root = feature.store_layout().data_root.join("recovery");
     feature.checkpoint().await.unwrap();
@@ -219,7 +242,7 @@ async fn corrupt_derived_branch_repair_waits_for_the_active_sync_lease() {
         .unwrap();
     active_lock.try_lock_exclusive().unwrap();
 
-    let error = match TraceDecay::open_with_options(&project, open_options.clone()).await {
+    let error = match TraceDecay::open_with_options(fixture.root(), open_options.clone()).await {
         Ok(_) => panic!("active writer lease must block branch recovery"),
         Err(error) => error,
     };
@@ -233,7 +256,7 @@ async fn corrupt_derived_branch_repair_waits_for_the_active_sync_lease() {
     assert!(!recovery_root.exists());
 
     drop(active_lock);
-    let repaired = TraceDecay::open_with_options(&project, open_options)
+    let repaired = TraceDecay::open_with_options(fixture.root(), open_options)
         .await
         .expect("repair should proceed after the active lease is released");
     assert!(repaired.db().quick_check().await.unwrap());
@@ -243,17 +266,17 @@ async fn corrupt_derived_branch_repair_waits_for_the_active_sync_lease() {
 
 #[tokio::test]
 async fn open_honors_and_clears_legacy_dirty_sentinel() {
-    let (_env, project) = IsolatedEnv::acquire().await;
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
+    let profile = TestProfile::acquire().await;
+    let project_root = profile.path("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(project_root.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
 
-    let cg = TraceDecay::init(&project).await.unwrap();
-    cg.index_all().await.unwrap();
-    let legacy_dirty = cg.store_layout().data_root.join("dirty");
+    let project = profile.enroll_indexed(&project_root).await;
+    let legacy_dirty = project.store_layout().data_root.join("dirty");
     fs::write(&legacy_dirty, "interrupted legacy writer").unwrap();
-    drop(cg);
+    let project = project.close().await;
 
-    let reopened = TraceDecay::open(&project).await.unwrap();
+    let reopened = project.reopen().await;
     assert!(
         !legacy_dirty.exists(),
         "successful recovery must clear legacy sentinel"
@@ -261,74 +284,9 @@ async fn open_honors_and_clears_legacy_dirty_sentinel() {
     drop(reopened);
 }
 
-async fn open_detached_fallback_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
-    let (env, project) = IsolatedEnv::acquire().await;
-    let open_options = profile_open_options(&env);
-
-    git(&project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
-    commit_all(&project, "initial commit");
-
-    let main = TraceDecay::init_with_options(&project, open_options.clone())
-        .await
-        .unwrap();
-    main.index_all().await.unwrap();
-    drop(main);
-
-    git(&project, &["checkout", "--detach"]);
-
-    fs::write(
-        project.join("src/detached_only.rs"),
-        "pub fn detached_only() {}\n",
-    )
-    .unwrap();
-
-    let fallback = TraceDecay::open_with_options(&project, open_options)
-        .await
-        .unwrap();
-    assert_eq!(fallback.active_branch(), None);
-    assert_eq!(fallback.serving_branch(), Some("main"));
-    assert!(fallback.is_fallback());
-    assert!(
-        fallback
-            .fallback_warning()
-            .unwrap_or_default()
-            .contains("detached HEAD"),
-        "detached HEAD should explain the fallback branch"
-    );
-
-    (env, project, fallback)
-}
-
-async fn assert_main_db_missing_symbol(
-    env: &IsolatedEnv,
-    project: &Path,
-    symbol: &str,
-    message: &str,
-) {
-    git(project, &["checkout", "main"]);
-    let main = TraceDecay::open_with_options(project, profile_open_options(env))
-        .await
-        .unwrap();
-    let results = main.search(symbol, 10).await.unwrap();
-    assert!(results.is_empty(), "{message}");
-}
-
-fn assert_fallback_write_refused(operation: &str, err: impl std::fmt::Display) {
-    let message = err.to_string();
-    assert!(
-        message.contains("fallback")
-            && (message.contains("tracedecay branch add")
-                || message.contains("Check out a tracked branch")),
-        "unexpected {operation} error: {message}"
-    );
-}
-
 #[tokio::test]
 async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (env, project, feature) = open_untracked_project().await;
+    let (fixture, feature) = open_untracked_project().await;
 
     assert!(
         !feature
@@ -339,7 +297,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
         "auto-tracked branch should contain the branch-only symbol"
     );
 
-    let meta = load_branch_meta(&project_data_dir(&project)).unwrap();
+    let meta = load_branch_meta(fixture.data_root()).unwrap();
     let feature_entry = meta
         .branches
         .get("feature/untracked")
@@ -348,8 +306,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 
     drop(feature);
     assert_main_db_missing_symbol(
-        &env,
-        &project,
+        &fixture,
         "untracked_only",
         "auto-tracked branch sync must not index branch files into main DB",
     )
@@ -358,8 +315,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 
 #[tokio::test]
 async fn fallback_writes_are_refused_by_all_sync_entry_points() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (env, project, fallback) = open_detached_fallback_project().await;
+    let (fixture, fallback) = open_detached_fallback_project().await;
 
     let err = fallback
         .sync()
@@ -388,8 +344,7 @@ async fn fallback_writes_are_refused_by_all_sync_entry_points() {
 
     drop(fallback);
     assert_main_db_missing_symbol(
-        &env,
-        &project,
+        &fixture,
         "detached_only",
         "fallback write attempts must not index detached files into main DB",
     )
@@ -398,41 +353,33 @@ async fn fallback_writes_are_refused_by_all_sync_entry_points() {
 
 #[tokio::test]
 async fn detached_linked_worktree_uses_worktree_local_index() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (_env, project) = IsolatedEnv::acquire().await;
-    let project = project.as_path();
-    let linked = project.parent().unwrap().join("linked-detached-worktree");
+    let profile = TestProfile::acquire().await;
+    let repo = GitFixture::primary(profile.path("project"));
+    fs::create_dir_all(repo.root().join("src")).unwrap();
+    fs::write(repo.root().join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
+    repo.commit_all("initial commit");
 
-    git(project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
-    commit_all(project, "initial commit");
-
-    let main = TraceDecay::init(project).await.unwrap();
-    main.index_all().await.unwrap();
-    drop(main);
-
-    git(
-        project,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            linked.to_str().unwrap(),
-            "HEAD",
-        ],
-    );
+    let project = profile.enroll_indexed(repo.root()).await.close().await;
+    let linked = profile.scratch().join("linked-detached-worktree");
+    let linked = repo.detached_worktree(&linked);
     fs::write(
         linked.join("src/worktree_only.rs"),
         "pub fn worktree_only() {}\n",
     )
     .unwrap();
 
-    let worktree = TraceDecay::init(&linked).await.unwrap();
+    // A detached linked worktree collapses onto the primary project identity,
+    // so reopen through the same profile options rather than synthesizing a
+    // second standalone profile at the worktree path.
+    let worktree = TraceDecay::init_with_options(&linked, project.open_options())
+        .await
+        .unwrap();
     worktree.index_all().await.unwrap();
     drop(worktree);
 
-    let reopened = TraceDecay::open(&linked).await.unwrap();
+    let reopened = TraceDecay::open_with_options(&linked, project.open_options())
+        .await
+        .unwrap();
     assert_eq!(reopened.active_branch(), None);
     assert_eq!(reopened.serving_branch(), None);
     assert!(!reopened.is_fallback());
@@ -448,34 +395,27 @@ async fn detached_linked_worktree_uses_worktree_local_index() {
 
 #[tokio::test]
 async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (env, project) = IsolatedEnv::acquire().await;
-    let open_options = profile_open_options(&env);
-    let project = project.as_path();
+    let fixture = BranchSafetyProject::indexed_on_main().await;
+    let open_options = fixture.open_options();
 
-    git(project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
-    commit_all(project, "initial commit");
+    // Seed persisted metadata on main before branching.
+    {
+        let main = fixture.reopen().await;
+        main.set_tokens_saved(111).await.unwrap();
+        main.checkpoint().await.unwrap();
+        drop(main);
+    }
 
-    let main = TraceDecay::init_with_options(project, open_options.clone())
-        .await
-        .unwrap();
-    main.index_all().await.unwrap();
-    main.set_tokens_saved(111).await.unwrap();
-    main.checkpoint().await.unwrap();
-    drop(main);
-
-    git(project, &["checkout", "-b", "feature/parent"]);
+    fixture.repo.run(&["checkout", "-b", "feature/parent"]);
     fs::write(
-        project.join("src/feature_only.rs"),
+        fixture.root().join("src/feature_only.rs"),
         "pub fn feature_only() {}\n",
     )
     .unwrap();
-    commit_all(project, "feature commit");
+    fixture.repo.commit_all("feature commit");
 
     let feature_outcome = TraceDecay::add_branch_tracking_with_options(
-        project,
+        fixture.root(),
         "feature/parent",
         open_options.clone(),
     )
@@ -483,37 +423,38 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     .unwrap();
     assert_eq!(feature_outcome, BranchAddOutcome::Added);
 
-    let feature_cg = TraceDecay::open_with_options(project, open_options.clone())
+    let feature_cg = TraceDecay::open_with_options(fixture.root(), open_options.clone())
         .await
         .unwrap();
     feature_cg.set_tokens_saved(777).await.unwrap();
     feature_cg.checkpoint().await.unwrap();
     drop(feature_cg);
 
-    git(project, &["checkout", "-b", "topic/child"]);
+    fixture.repo.run(&["checkout", "-b", "topic/child"]);
     fs::write(
-        project.join("src/topic_only.rs"),
+        fixture.root().join("src/topic_only.rs"),
         "pub fn topic_only() {}\n",
     )
     .unwrap();
-    commit_all(project, "topic commit");
+    fixture.repo.commit_all("topic commit");
 
-    let topic_outcome =
-        TraceDecay::add_branch_tracking_with_options(project, "topic/child", open_options.clone())
-            .await
-            .unwrap();
+    let topic_outcome = TraceDecay::add_branch_tracking_with_options(
+        fixture.root(),
+        "topic/child",
+        open_options.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(topic_outcome, BranchAddOutcome::Added);
 
-    let meta = load_branch_meta(&project_data_dir(project)).unwrap();
+    let meta = load_branch_meta(fixture.data_root()).unwrap();
     let topic_entry = meta
         .branches
         .get("topic/child")
         .expect("topic branch should be recorded in branch metadata");
     assert_eq!(topic_entry.parent.as_deref(), Some("feature/parent"));
 
-    let topic_cg = TraceDecay::open_branch_with_options(project, "topic/child", open_options)
-        .await
-        .unwrap();
+    let topic_cg = fixture.project.open_branch("topic/child").await;
     assert_eq!(
         topic_cg.get_tokens_saved().await.unwrap(),
         777,
@@ -535,38 +476,27 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
 
 #[tokio::test]
 async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (env, project) = IsolatedEnv::acquire().await;
-    let open_options = profile_open_options(&env);
-    let project = project.as_path();
+    let fixture = BranchSafetyProject::indexed_on_main().await;
+    let open_options = fixture.open_options();
 
-    git(project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
-    commit_all(project, "initial commit");
-
-    let main = TraceDecay::init_with_options(project, open_options.clone())
-        .await
-        .unwrap();
-    main.index_all().await.unwrap();
-    drop(main);
-
-    let tracedecay_dir = project_data_dir(project);
-    let meta_path = tracedecay_dir.join("branch-meta.json");
+    let meta_path = fixture.data_root().join("branch-meta.json");
     fs::write(&meta_path, b"{not valid json").unwrap();
 
-    git(project, &["checkout", "-b", "feature/corrupt-meta"]);
+    fixture.repo.run(&["checkout", "-b", "feature/corrupt-meta"]);
     fs::write(
-        project.join("src/feature_only.rs"),
+        fixture.root().join("src/feature_only.rs"),
         "pub fn feature_only() {}\n",
     )
     .unwrap();
-    commit_all(project, "feature commit");
+    fixture.repo.commit_all("feature commit");
 
-    let err =
-        TraceDecay::add_branch_tracking_with_options(project, "feature/corrupt-meta", open_options)
-            .await
-            .expect_err("corrupt metadata must stop branch tracking instead of being replaced");
+    let err = TraceDecay::add_branch_tracking_with_options(
+        fixture.root(),
+        "feature/corrupt-meta",
+        open_options,
+    )
+    .await
+    .expect_err("corrupt metadata must stop branch tracking instead of being replaced");
 
     assert!(
         err.to_string().contains("corrupt branch metadata"),
@@ -581,21 +511,18 @@ async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
 
 #[test]
 fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
-    let _env_lock = HOME_ENV_LOCK.blocking_lock();
-    let (env, project) = IsolatedEnv::acquire_blocking();
-    let project = project.as_path();
+    let profile = TestProfile::acquire_blocking();
+    let repo = GitFixture::primary(profile.path("project"));
+    fs::create_dir_all(repo.root().join("src")).unwrap();
+    fs::write(repo.root().join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    repo.commit_all("initial commit");
 
-    git(project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
-    commit_all(project, "initial commit");
-
-    let _daemon = common::spawn_tracedecay_daemon(env.home());
+    let _daemon = common::spawn_tracedecay_daemon(profile.home());
     let mut init_command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut init_command, env.home());
+    common::apply_tracedecay_home_env(&mut init_command, profile.home());
     let init = init_command
         .arg("init")
-        .arg(project)
+        .arg(repo.root())
         .output()
         .expect("tracedecay init");
     assert!(
@@ -605,23 +532,26 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
         String::from_utf8_lossy(&init.stderr)
     );
 
-    let tracedecay_dir = project_data_dir(project);
-    let meta_path = tracedecay_dir.join("branch-meta.json");
+    // CLI init enrolls through the daemon; read the layout the init wrote
+    // rather than re-resolving against a second profile.
+    let layout = tracedecay::storage::resolve_layout_for_current_profile(repo.root())
+        .unwrap_or_else(|err| panic!("failed to resolve CLI-initialized layout: {err}"));
+    let meta_path = layout.data_root.join("branch-meta.json");
     fs::write(&meta_path, b"{not valid json").unwrap();
 
-    git(project, &["checkout", "-b", "feature/corrupt-meta"]);
+    repo.run(&["checkout", "-b", "feature/corrupt-meta"]);
     fs::write(
-        project.join("src/feature_only.rs"),
+        repo.root().join("src/feature_only.rs"),
         "pub fn feature_only() {}\n",
     )
     .unwrap();
-    commit_all(project, "feature commit");
+    repo.commit_all("feature commit");
 
     let mut branch_add_command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut branch_add_command, env.home());
+    common::apply_tracedecay_home_env(&mut branch_add_command, profile.home());
     let output = branch_add_command
         .args(["branch", "add", "feature/corrupt-meta", "--path"])
-        .arg(project)
+        .arg(repo.root())
         .output()
         .expect("tracedecay branch add");
 
@@ -646,34 +576,35 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
 #[cfg(unix)]
 #[tokio::test]
 async fn cli_branch_add_uses_managed_daemon_as_the_only_database_writer() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (env, project) = IsolatedEnv::acquire().await;
-    let open_options = profile_open_options(&env);
-    let project = project.as_path();
+    // Daemon CLI tests must not keep a HostAdmission registry mounted: that
+    // holds the profile global.db writer lease and the spawned daemon cannot
+    // mount the same store. Use the profile only for isolation + open options.
+    let profile = TestProfile::acquire().await;
+    let repo = GitFixture::primary(profile.path("project"));
+    fs::create_dir_all(repo.root().join("src")).unwrap();
+    fs::write(repo.root().join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    repo.commit_all("initial commit");
 
-    git(project, &["init", "-b", "main"]);
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
-    commit_all(project, "initial commit");
-
-    let main = TraceDecay::init_with_options(project, open_options)
+    let open_options = profile.open_options();
+    let main = TraceDecay::init_with_options(repo.root(), open_options)
         .await
         .unwrap();
     main.index_all().await.unwrap();
+    let data_root = main.store_layout().data_root.clone();
     drop(main);
 
-    git(project, &["checkout", "-b", "feature/daemon-owned"]);
+    repo.run(&["checkout", "-b", "feature/daemon-owned"]);
     fs::write(
-        project.join("src/daemon_owned.rs"),
+        repo.root().join("src/daemon_owned.rs"),
         "pub fn daemon_owned() {}\n",
     )
     .unwrap();
-    commit_all(project, "feature commit");
+    repo.commit_all("feature commit");
 
-    let daemon_socket = common::daemon_socket_path(env.home());
-    let _daemon = common::spawn_tracedecay_daemon(env.home());
+    let daemon_socket = common::daemon_socket_path(profile.home());
+    let _daemon = common::spawn_tracedecay_daemon(profile.home());
     let authority: Value = serde_json::from_slice(
-        &fs::read(env.home().join(".tracedecay/daemon-authority.json"))
+        &fs::read(profile.home().join(".tracedecay/daemon-authority.json"))
             .expect("read isolated daemon authority record"),
     )
     .expect("parse isolated daemon authority record");
@@ -681,11 +612,11 @@ async fn cli_branch_add_uses_managed_daemon_as_the_only_database_writer() {
         .as_u64()
         .expect("daemon authority record should contain its PID");
 
-    let branch_add = common::tracedecay_command_with_home(env.home())
-        .current_dir(project)
+    let branch_add = common::tracedecay_command_with_home(profile.home())
+        .current_dir(repo.root())
         .env("TRACEDECAY_DAEMON_SOCKET", &daemon_socket)
         .args(["branch", "add", "feature/daemon-owned", "--path"])
-        .arg(project)
+        .arg(repo.root())
         .output()
         .expect("tracedecay branch add through the isolated daemon");
     assert!(
@@ -704,22 +635,22 @@ async fn cli_branch_add_uses_managed_daemon_as_the_only_database_writer() {
         "the CLI must proxy branch add to the daemon instead of attempting local database authority:\n{branch_add_text}"
     );
 
-    let meta = load_branch_meta(&project_data_dir(project)).expect("load branch metadata");
+    let meta = load_branch_meta(&data_root).expect("load branch metadata");
     let branch_entry = meta
         .branches
         .get("feature/daemon-owned")
         .expect("daemon branch add should record the feature branch");
     assert_eq!(branch_entry.parent.as_deref(), Some("main"));
-    let branch_db = project_data_dir(project).join(&branch_entry.db_file);
+    let branch_db = data_root.join(&branch_entry.db_file);
     assert!(
         branch_db.is_file(),
         "daemon branch add should create the recorded branch store at {}",
         branch_db.display()
     );
 
-    let project_arg = project.to_string_lossy().to_string();
-    let runtime_output = common::tracedecay_command_with_home(env.home())
-        .current_dir(project)
+    let project_arg = repo.root().to_string_lossy().to_string();
+    let runtime_output = common::tracedecay_command_with_home(profile.home())
+        .current_dir(repo.root())
         .env("TRACEDECAY_DAEMON_SOCKET", &daemon_socket)
         .args([
             "tool",
