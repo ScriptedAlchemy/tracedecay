@@ -323,7 +323,7 @@ fn list_project_directories_page(
 }
 
 /// Builds one project-scoped report on the daemon's blocking pool so bounded
-/// read-only SQLite samples cannot stall the async authority loop.
+/// read-only `SQLite` samples cannot stall the async authority loop.
 pub async fn build_project_storage_report_from_daemon(
     profile_root: &Path,
     project_id: &str,

@@ -1725,10 +1725,10 @@ mod tests {
         }
     }
 
-    fn selector_options<'a>(
-        registry: &'a SelectorRegistry,
+    fn selector_options(
+        registry: &SelectorRegistry,
         graphs: Vec<Arc<TraceDecay>>,
-    ) -> ToolCallRegistryOptions<'a> {
+    ) -> ToolCallRegistryOptions<'_> {
         let graphs = Arc::new(
             graphs
                 .into_iter()

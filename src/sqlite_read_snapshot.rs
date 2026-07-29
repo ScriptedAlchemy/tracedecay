@@ -259,7 +259,7 @@ impl SnapshotDatabase {
         }
     }
 
-    /// Writes this frozen logical snapshot to one standalone SQLite file.
+    /// Writes this frozen logical snapshot to one standalone `SQLite` file.
     ///
     /// The backup reads only the already-captured immutable/copy connection;
     /// it never opens the live source authority.

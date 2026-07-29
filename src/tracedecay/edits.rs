@@ -1800,7 +1800,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_edit_plan_capture_retains_exact_pre_and_post_bytes() {
-        let (_, files) = capture_source_edit_plan(async {
+        let ((), files) = capture_source_edit_plan(async {
             capture_planned_source_edit("src/lib.rs", Some("before\n"), Some("after\n"));
         })
         .await;

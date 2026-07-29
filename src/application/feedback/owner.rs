@@ -455,6 +455,52 @@ fn valid_request_handle(handle: &str) -> bool {
         && !handle.chars().any(char::is_control)
 }
 
+fn project_feedback_evidence<T>(
+    result: ApplicationResult<FeedbackDiagnosticsReadResultV1>,
+    project: impl FnOnce(FeedbackDiagnosticsReadResultV1) -> T,
+) -> ApplicationResult<T> {
+    result.map(|envelope| {
+        let ApplicationEnvelope {
+            contract,
+            request_id,
+            scope,
+            outcome,
+        } = envelope;
+        let ApplicationOutcome::Evidence(packet) = outcome else {
+            unreachable!("feedback reads return evidence outcomes");
+        };
+        let EvidencePacket {
+            temporal,
+            authority,
+            evidence_authorities,
+            coverage,
+            omissions,
+            scores,
+            contributions,
+            page,
+            execution,
+            payload,
+        } = packet;
+        ApplicationEnvelope::evidence(
+            contract,
+            request_id,
+            scope,
+            EvidencePacket {
+                temporal,
+                authority,
+                evidence_authorities,
+                coverage,
+                omissions,
+                scores,
+                contributions,
+                page,
+                execution,
+                payload: payload.map(project),
+            },
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use tracedecay_application::feedback::FeedbackDiagnosticsReadResultV1;
@@ -530,50 +576,4 @@ mod tests {
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
     }
-}
-
-fn project_feedback_evidence<T>(
-    result: ApplicationResult<FeedbackDiagnosticsReadResultV1>,
-    project: impl FnOnce(FeedbackDiagnosticsReadResultV1) -> T,
-) -> ApplicationResult<T> {
-    result.map(|envelope| {
-        let ApplicationEnvelope {
-            contract,
-            request_id,
-            scope,
-            outcome,
-        } = envelope;
-        let ApplicationOutcome::Evidence(packet) = outcome else {
-            unreachable!("feedback reads return evidence outcomes");
-        };
-        let EvidencePacket {
-            temporal,
-            authority,
-            evidence_authorities,
-            coverage,
-            omissions,
-            scores,
-            contributions,
-            page,
-            execution,
-            payload,
-        } = packet;
-        ApplicationEnvelope::evidence(
-            contract,
-            request_id,
-            scope,
-            EvidencePacket {
-                temporal,
-                authority,
-                evidence_authorities,
-                coverage,
-                omissions,
-                scores,
-                contributions,
-                page,
-                execution,
-                payload: payload.map(project),
-            },
-        )
-    })
 }

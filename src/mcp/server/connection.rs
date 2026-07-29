@@ -36,42 +36,6 @@ fn queued_cancellable_request_key(
         .then_some(expected)
 }
 
-#[cfg(test)]
-mod cancellable_queue_tests {
-    use super::*;
-
-    #[test]
-    fn queued_request_cancellation_is_type_preserving() {
-        let pending = VecDeque::from([
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "tools/call",
-                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
-            })
-            .to_string(),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": "tracedecay_git_status", "arguments": {}},
-            })
-            .to_string(),
-        ]);
-
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")
-                .is_some()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(1), "connection").is_none()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
-        );
-    }
-}
-
 impl McpServer {
     async fn write_response_line_or_revoke(
         &self,
@@ -838,5 +802,41 @@ impl McpServer {
             0,
             project_host_admission_replay::ProjectHostAdmissionReplayTask::backoff_count,
         )
+    }
+}
+
+#[cfg(test)]
+mod cancellable_queue_tests {
+    use super::*;
+
+    #[test]
+    fn queued_request_cancellation_is_type_preserving() {
+        let pending = VecDeque::from([
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "1",
+                "method": "tools/call",
+                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "tracedecay_git_status", "arguments": {}},
+            })
+            .to_string(),
+        ]);
+
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")
+                .is_some()
+        );
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!(1), "connection").is_none()
+        );
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
+        );
     }
 }

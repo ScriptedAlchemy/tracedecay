@@ -23,7 +23,7 @@ pub struct NodeMetrics {
 }
 
 /// Distinct file-pair rows requested per page of the whole-graph adjacency
-/// scan. Stays under the SQLite runtime's per-query materialization admission.
+/// scan. Stays under the `SQLite` runtime's per-query materialization admission.
 const ADJACENCY_SCAN_PAGE_ROWS: i64 = 2_000;
 
 /// Bounded whole-graph file adjacency plus the rows examined to build it.

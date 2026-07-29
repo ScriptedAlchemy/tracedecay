@@ -21,7 +21,7 @@ pub const LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT: &str = "You answer questions
 
 /// Rows requested per keyset page of a whole-table LCM scan.
 ///
-/// The SQLite runtime rejects any single query that materializes more than its
+/// The `SQLite` runtime rejects any single query that materializes more than its
 /// admission limit, so whole-table reads arrive as a sequence of pages that are
 /// aggregated incrementally. The result stays a complete scan.
 pub(crate) const LCM_SCAN_PAGE_ROWS: i64 = 512;

@@ -5680,7 +5680,7 @@ mod tests {
         }
     }
 
-    /// Install the two-component OpenCode set, then attempt a repair whose
+    /// Install the two-component `OpenCode` set, then attempt a repair whose
     /// registration adapter rewrites `plugins/core.json` with `second_bytes`.
     /// Returns the repair outcome plus the writer for further assertions.
     fn wedge_repair_with_second_writer(

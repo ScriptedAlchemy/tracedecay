@@ -478,7 +478,7 @@ mod tests {
             time: "1 +0000",
         };
         GitOidV1::new(
-            repo.new_commit_as(signature, signature, "fixture", tree, parent.into_iter())
+            repo.new_commit_as(signature, signature, "fixture", tree, parent)
                 .unwrap()
                 .id()
                 .to_hex()

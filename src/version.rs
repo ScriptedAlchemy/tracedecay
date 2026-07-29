@@ -98,7 +98,7 @@ mod tests {
     }
 
     /// A published crate has no `.git`, so there is no commit to name and no
-    /// dangling `+` for a SemVer parser to choke on.
+    /// dangling `+` for a `SemVer` parser to choke on.
     #[test]
     fn a_build_without_git_reports_bare_package_version() {
         assert_eq!(compose_build_version("0.0.66", None, false), "0.0.66");

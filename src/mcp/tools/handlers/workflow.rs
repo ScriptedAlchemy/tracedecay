@@ -873,11 +873,8 @@ async fn managed_test_document_content_digests(
     outcomes.sort_by_key(|(index, _)| *index);
     let mut digests = BTreeMap::new();
     for (_, outcome) in outcomes {
-        match outcome? {
-            Some((uri, digest)) => {
-                digests.insert(uri, digest);
-            }
-            None => {}
+        if let Some((uri, digest)) = outcome? {
+            digests.insert(uri, digest);
         }
     }
     Ok(digests)

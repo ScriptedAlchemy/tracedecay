@@ -251,7 +251,7 @@ impl<'a> From<&'a UnresolvedRef> for CanonicalUnresolvedRefRow<'a> {
 /// Canonical digest of the extraction rows. Operational timestamps are
 /// omitted through borrowed DTOs and rows are canonically ordered by their
 /// serialized canonical form before one payload serialization. The borrowed
-/// form stays byte-identical to the legacy serde_json::Value canonicalization
+/// form stays byte-identical to the legacy `serde_json::Value` canonicalization
 /// the pinned digest identity was minted from.
 fn rows_digest(
     file: &ValidatedCodeFileV1,

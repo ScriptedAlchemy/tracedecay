@@ -1640,7 +1640,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
     assert_eq!(std::fs::read(&db_path).unwrap(), before);
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_occurrences_fts
              WHERE session_occurrences_fts MATCH 'temporalorphan'",
         )
@@ -1652,7 +1652,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
     assert_eq!(std::fs::read(&db_path).unwrap(), before);
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_summary_nodes_fts
              WHERE session_summary_nodes_fts MATCH 'temporalorphan'",
         )
@@ -1660,17 +1660,17 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
         1
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_occurrences").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_occurrences").await,
         0
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_summary_nodes").await,
         0
     );
     assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (2, 2));
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_occurrences_fts
              WHERE session_occurrences_fts MATCH 'temporalorphan'",
         )
@@ -1679,7 +1679,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
     );
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_summary_nodes_fts
              WHERE session_summary_nodes_fts MATCH 'temporalorphan'",
         )
@@ -1687,11 +1687,11 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
         0
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_occurrences").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_occurrences").await,
         0
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_summary_nodes").await,
         0
     );
     assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (0, 0));

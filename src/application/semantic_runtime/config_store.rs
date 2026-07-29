@@ -960,7 +960,7 @@ mod tests {
             accepted_profile("pr9.bootstrap.pass.v1", &RetrieverKind::PR9_FALLBACK_LANES);
         assert!(accepted.is_exact_pr9_fallback());
         let compatibility = RetrievalRuntimeCompatibilityV1 {
-            retrieval_ceiling: accepted.profile().retrieval_budget.clone(),
+            retrieval_ceiling: accepted.profile().retrieval_budget,
             semantic: None,
             semantic_ceiling: None,
             rerank: None,

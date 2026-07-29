@@ -5248,9 +5248,7 @@ async fn production_project_server(
                 Ok(())
             }
             .await;
-            if let Err(error) = full_setup {
-                return Err(error);
-            }
+            full_setup?;
             if *current_key.lock().await != key {
                 return Err(TraceDecayError::Config {
                     message: "project changed branch during full capability admission".to_owned(),
