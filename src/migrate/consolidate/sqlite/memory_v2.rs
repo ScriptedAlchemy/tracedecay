@@ -11,18 +11,6 @@ use tracedecay_store::MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1;
 
 use super::{db_error, db_message, query_i64};
 
-/// Unions the source shard's `memory_v2` durable authority into the attached
-/// target graph connection. Every carried table is owner-bound (fact ids embed
-/// the owner digest), so rows are unioned by their identity columns with
-/// `INSERT OR IGNORE` — never renumbered — mirroring the observation-authority
-/// merge. The one exception is the derived `memory_v2_current_facts`
-/// projection, which is reconciled with deletion terminality so a tombstoned
-/// fact in either shard is never resurrected by an older live copy from the
-/// other shard.
-///
-/// The connection must already have `source` attached and
-/// `PRAGMA defer_foreign_keys = ON` set (as `merge_one_graph` does), because the
-/// union crosses foreign keys between the durable tables.
 #[derive(Clone, Copy)]
 pub(super) enum LegacyMappingPolicy {
     PreserveSourceRows,
@@ -73,6 +61,18 @@ pub(super) async fn merge_memory_v2_owner_archives(
     Ok(proofs)
 }
 
+/// Unions the source shard's `memory_v2` durable authority into the attached
+/// target graph connection. Every carried table is owner-bound (fact ids embed
+/// the owner digest), so rows are unioned by their identity columns with
+/// `INSERT OR IGNORE` — never renumbered — mirroring the observation-authority
+/// merge. The one exception is the derived `memory_v2_current_facts`
+/// projection, which is reconciled with deletion terminality so a tombstoned
+/// fact in either shard is never resurrected by an older live copy from the
+/// other shard.
+///
+/// The connection must already have `source` attached and
+/// `PRAGMA defer_foreign_keys = ON` set (as `merge_registered_graph_facts`
+/// does), because the union crosses foreign keys between the durable tables.
 pub(super) async fn merge_memory_v2_authority(
     conn: &impl Executor,
     legacy_mapping_policy: LegacyMappingPolicy,
