@@ -5486,6 +5486,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-code-index",
  "tracedecay-domain",
+ "tracedecay-host-integration",
  "tracedecay-hooks",
  "tracedecay-lsp",
  "tracedecay-migrate",
@@ -5578,6 +5579,18 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracedecay-application",
+ "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-host-integration"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
  "tracedecay-domain",
 ]
 

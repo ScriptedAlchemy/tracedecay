@@ -8,30 +8,39 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use fs2::FileExt;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 use tracedecay_domain::canonical_json_bytes;
-pub use tracedecay_domain::{
-    HostCapabilityRecordV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1,
-    HostCapabilityV1, HostKindV1, stock_host_capabilities,
+pub use tracedecay_host_integration::{
+    ClineFamilyAdmissionV1, ClineFamilyEvidenceV1, ClineFamilyProviderV1,
+    EmbeddedHostIntegrationEvidenceV1, EmbeddedNativeHostFixtureV1,
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HOST_BUNDLE_SCHEMA_VERSION, HostBundleArtifactContentV1,
+    HostBundleArtifactV1, HostBundleBackupArtifactV1, HostBundleBackupReceiptV1,
+    HostBundleComponentV1, HostBundleError, HostBundleInstallReceiptV1, HostBundleJournalEntryV1,
+    HostBundleJournalStateV1, HostBundleJournalV1, HostBundleLifecycleOpV1, HostBundleManifestV1,
+    HostBundleReceiptArtifactV1, HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1,
+    HostBundleVerificationAdapterV1, HostCapabilityRecordV1, HostCapabilityStateV1,
+    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetJournalComponentV1,
+    HostComponentSetJournalStateV1, HostComponentSetJournalV1, HostComponentSetReceiptV1,
+    HostKindV1, HostNativeFixtureEvidenceV1, HostRegistrationEvidenceV1, HostRegistrationRouteV1,
+    MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS, MAX_MANIFEST_ARTIFACTS,
+    MAX_RELATIVE_PATH_BYTES, stock_host_capabilities, validate_identifier,
+    validate_relative_install_path,
+};
+use tracedecay_host_integration::{
+    cline_family_evidence_from_embedded_assets,
+    native_host_edit_stop_conformance_evidence_from_embedded_assets,
+    stock_host_native_fixture_evidence_from_embedded_assets,
+    stock_host_registration_evidence as stock_host_registration_evidence_from_contract,
 };
 
-const HOST_BUNDLE_SCHEMA_VERSION: u16 = 1;
-const MAX_MANIFEST_ARTIFACTS: usize = 128;
-const MAX_HOST_COMPONENTS: usize = 4;
-const MAX_RELATIVE_PATH_BYTES: usize = 512;
-const MAX_IDENTIFIER_BYTES: usize = 128;
-const MAX_ARTIFACT_CONTENT_BYTES: usize = 1024 * 1024;
-const HOST_BUNDLE_RECEIPT_SCHEMA_VERSION: u16 = 1;
 const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
 const HOST_BUNDLE_JOURNAL_FILE: &str = "journal.v1.json";
 /// Legacy shared component-set journal name. One journal per lifecycle root
@@ -60,287 +69,10 @@ pub const fn stock_host_kinds() -> [HostKindV1; 12] {
     HostKindV1::ALL
 }
 
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum HostBundleComponentV1 {
-    Core,
-    Agent,
-    ContextMcp,
-    OperatorMcp,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostBundleLifecycleOpV1 {
-    Install,
-    Update,
-    Repair,
-    Uninstall,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostRegistrationRouteV1 {
-    ClaudeConfiguredLanguageLsp,
-    CursorNativeDiagnostics,
-    OpenCodeCustomLsp,
-    Hook,
-    Mcp,
-    Cli,
-}
-
-/// Evidence behind one stock-host registration route. `starts_analyzer` is
-/// explicit so a projection bridge cannot silently claim or spawn the
-/// language analyzer itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct HostRegistrationEvidenceV1 {
-    pub route: HostRegistrationRouteV1,
-    pub state: HostCapabilityStateV1,
-    pub evidence_ref: &'static str,
-    pub starts_analyzer: bool,
-}
-
-/// Truthful host registration matrix used by packaging and conformance
-/// consumers. Evidence references are stable repository or host-contract
-/// identifiers, never inferred compatibility claims.
+/// Evidence references are stable repository or host-contract identifiers.
+/// Their capability semantics live in the root-free host-integration crate.
 pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistrationEvidenceV1> {
-    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::{
-        CheckedInEvidenceMissing, HostApiAbsent, HostRegistrationUnsupported, NativeFixtureLimited,
-    };
-    use HostRegistrationRouteV1::{
-        ClaudeConfiguredLanguageLsp, Cli, CursorNativeDiagnostics, Hook, Mcp, OpenCodeCustomLsp,
-    };
-
-    let mut evidence = vec![HostRegistrationEvidenceV1 {
-        route: Cli,
-        state: if host == HostKindV1::CursorCloud {
-            Unavailable(HostRegistrationUnsupported)
-        } else {
-            Supported
-        },
-        evidence_ref: "src/tool_command.rs",
-        starts_analyzer: false,
-    }];
-    match host {
-        HostKindV1::ClaudeCode => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: ClaudeConfiguredLanguageLsp,
-                state: Supported,
-                evidence_ref: "plugin/.lsp.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/hooks/hooks-claude.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/.mcp.json",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::CursorDesktop => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: CursorNativeDiagnostics,
-                state: Supported,
-                evidence_ref: "plugin/cursor-native-extension/package.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/hooks/hooks-cursor.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/mcp-cursor.json",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::CursorCloud => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "cursor_cloud_native_hook_fixture_absent_v1",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Unavailable(HostRegistrationUnsupported),
-                evidence_ref: "cursor_cloud_host_registration_absent_v1",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::Codex => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/hooks/hooks-codex.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/.mcp.json",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::Hermes => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "src/agents/hermes/templates.rs",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/hermes/profile_config.rs",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::Kiro => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Degraded(NativeFixtureLimited),
-                evidence_ref: "tests/fixtures/host_events/kiro/baseline.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/kiro.rs",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::ClineFamily => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Unavailable(HostApiAbsent),
-                evidence_ref: "cline_family_hook_evidence_absent_v1",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "cline_user_mcp_settings_v1",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
-            let evidence_ref = match host {
-                HostKindV1::Cline => "src/agents/cline.rs",
-                HostKindV1::RooCode => "src/agents/roo_code.rs",
-                HostKindV1::Kilo => "src/agents/kilo.rs",
-                _ => unreachable!(),
-            };
-            evidence.extend([
-                HostRegistrationEvidenceV1 {
-                    route: Hook,
-                    state: Unavailable(CheckedInEvidenceMissing),
-                    evidence_ref: "tests/fixtures/transcript_golden/cline_like/manifest.json",
-                    starts_analyzer: false,
-                },
-                HostRegistrationEvidenceV1 {
-                    route: Mcp,
-                    state: Supported,
-                    evidence_ref,
-                    starts_analyzer: false,
-                },
-            ]);
-        }
-        HostKindV1::KimiCode => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/.kimi-plugin/plugin.json",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/.kimi-plugin/plugin.json",
-                starts_analyzer: false,
-            },
-        ]),
-        HostKindV1::OpenCode => evidence.extend([
-            HostRegistrationEvidenceV1 {
-                route: OpenCodeCustomLsp,
-                state: Supported,
-                evidence_ref: "src/agents/opencode.rs",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Hook,
-                state: Supported,
-                evidence_ref: "plugin/opencode/tracedecay.ts",
-                starts_analyzer: false,
-            },
-            HostRegistrationEvidenceV1 {
-                route: Mcp,
-                state: Supported,
-                evidence_ref: "src/agents/opencode.rs",
-                starts_analyzer: false,
-            },
-        ]),
-    }
-    evidence
-}
-
-/// Source-backed native hook fixture evidence. The fixture digest is computed
-/// from the checked-in bytes; no protocol field or event is synthesized.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct HostNativeFixtureEvidenceV1 {
-    pub host: HostKindV1,
-    pub provider: &'static str,
-    pub source_path: &'static str,
-    pub fixture_digest: [u8; 32],
-    pub evidenced_event: &'static str,
-    pub edit: HostCapabilityStateV1,
-    pub stop: HostCapabilityStateV1,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClineFamilyProviderV1 {
-    Cline,
-    RooCode,
-    Kilo,
-}
-
-/// Admission recorded by the checked-in Cline-family evidence packet for one
-/// exact provider. Only `Verified` is a packaged-route claim; a documented
-/// protocol that was never captured locally stays unverified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClineFamilyAdmissionV1 {
-    Verified,
-    DocumentedUnverified,
-    Unavailable,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ClineFamilyEvidenceV1 {
-    pub provider: ClineFamilyProviderV1,
-    pub registration: HostRegistrationEvidenceV1,
-    pub evidence_packet_path: &'static str,
-    pub evidence_packet_digest: [u8; 32],
-    pub transcript_manifest_path: &'static str,
-    pub transcript_manifest_digest: [u8; 32],
-    pub admission: ClineFamilyAdmissionV1,
-    /// Verbatim reason recorded by the packet for this exact provider. It is
-    /// `None` only for a verified route.
-    pub unavailable_reason: Option<String>,
-    pub edit: HostCapabilityStateV1,
-    pub stop: HostCapabilityStateV1,
+    stock_host_registration_evidence_from_contract(host)
 }
 
 const CLINE_FAMILY_EVIDENCE_PACKET_PATH: &str =
@@ -351,273 +83,62 @@ const CLINE_FAMILY_TRANSCRIPT_MANIFEST_PATH: &str =
     "tests/fixtures/transcript_golden/cline_like/manifest.json";
 const CLINE_FAMILY_TRANSCRIPT_MANIFEST: &[u8] =
     include_bytes!("../../tests/fixtures/transcript_golden/cline_like/manifest.json");
+static EMBEDDED_NATIVE_HOST_FIXTURES: [EmbeddedNativeHostFixtureV1; 7] = [
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::ClaudeCode,
+        bytes: include_bytes!("../../tests/fixtures/packaged_host_events/claude.json"),
+    },
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::Codex,
+        bytes: include_bytes!("../../tests/fixtures/packaged_host_events/codex.json"),
+    },
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::CursorDesktop,
+        bytes: include_bytes!("../../tests/fixtures/packaged_host_events/cursor.json"),
+    },
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::Hermes,
+        bytes: include_bytes!("../../tests/fixtures/packaged_host_events/hermes.json"),
+    },
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::Kiro,
+        bytes: include_bytes!("../../tests/fixtures/packaged_host_events/kiro.json"),
+    },
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::KimiCode,
+        bytes: include_bytes!("../../tests/fixtures/packaged_host_events/kimi-code.json"),
+    },
+    EmbeddedNativeHostFixtureV1 {
+        host: HostKindV1::OpenCode,
+        bytes: include_bytes!("../../tests/fixtures/packaged_host_events/opencode/baseline.json"),
+    },
+];
 
-#[derive(Deserialize)]
-struct ClineFamilyEvidencePacketV1 {
-    providers: Vec<ClineFamilyPacketProviderV1>,
+fn embedded_host_integration_evidence() -> EmbeddedHostIntegrationEvidenceV1 {
+    EmbeddedHostIntegrationEvidenceV1 {
+        cline_family_evidence_packet_path: CLINE_FAMILY_EVIDENCE_PACKET_PATH,
+        cline_family_evidence_packet: CLINE_FAMILY_EVIDENCE_PACKET,
+        cline_family_transcript_manifest_path: CLINE_FAMILY_TRANSCRIPT_MANIFEST_PATH,
+        cline_family_transcript_manifest: CLINE_FAMILY_TRANSCRIPT_MANIFEST,
+        native_fixtures: &EMBEDDED_NATIVE_HOST_FIXTURES,
+    }
 }
 
-#[derive(Deserialize)]
-struct ClineFamilyPacketProviderV1 {
-    provider: String,
-    host_hook_admission: ClineFamilyAdmissionV1,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-/// Read one provider's admission straight from the checked-in evidence packet.
-/// Family resemblance, an adapter source file, or a shared configuration shape
-/// never substitutes for the packet: a provider the packet does not admit as
-/// `Verified` is reported unavailable with the packet's own exact reason.
 pub fn cline_family_evidence(provider: ClineFamilyProviderV1) -> Option<ClineFamilyEvidenceV1> {
-    use HostCapabilityStateV1::{Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing;
-
-    let packet_provider = match provider {
-        ClineFamilyProviderV1::Cline => "cline",
-        ClineFamilyProviderV1::RooCode => "roo-code",
-        ClineFamilyProviderV1::Kilo => "kilo",
-    };
-    let packet =
-        serde_json::from_slice::<ClineFamilyEvidencePacketV1>(CLINE_FAMILY_EVIDENCE_PACKET).ok()?;
-    let entry = packet
-        .providers
-        .into_iter()
-        .find(|entry| entry.provider == packet_provider)?;
-    let verified = entry.host_hook_admission == ClineFamilyAdmissionV1::Verified;
-    let route_state = if verified {
-        Supported
-    } else {
-        Unavailable(CheckedInEvidenceMissing)
-    };
-    Some(ClineFamilyEvidenceV1 {
-        provider,
-        registration: HostRegistrationEvidenceV1 {
-            route: HostRegistrationRouteV1::Mcp,
-            state: route_state,
-            evidence_ref: CLINE_FAMILY_EVIDENCE_PACKET_PATH,
-            starts_analyzer: false,
-        },
-        evidence_packet_path: CLINE_FAMILY_EVIDENCE_PACKET_PATH,
-        evidence_packet_digest: Sha256::digest(CLINE_FAMILY_EVIDENCE_PACKET).into(),
-        transcript_manifest_path: CLINE_FAMILY_TRANSCRIPT_MANIFEST_PATH,
-        transcript_manifest_digest: Sha256::digest(CLINE_FAMILY_TRANSCRIPT_MANIFEST).into(),
-        admission: entry.host_hook_admission,
-        unavailable_reason: (!verified).then(|| {
-            entry
-                .reason
-                .unwrap_or_else(|| "no_reason_recorded_by_evidence_packet".to_string())
-        }),
-        edit: route_state,
-        stop: route_state,
-    })
+    cline_family_evidence_from_embedded_assets(&embedded_host_integration_evidence(), provider)
 }
 
-/// Consume authoritative checked-in Hook V2 fixtures or source declarations.
-/// A documented-but-not-captured declaration remains degraded rather than
-/// being promoted to native capture evidence.
 pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNativeFixtureEvidenceV1> {
-    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::{CheckedInEvidenceMissing, NativeFixtureLimited};
-
-    let unavailable = Unavailable(CheckedInEvidenceMissing);
-    let (provider, source_path, bytes, evidenced_event, edit, stop): (
-        &'static str,
-        &'static str,
-        &'static [u8],
-        &'static str,
-        HostCapabilityStateV1,
-        HostCapabilityStateV1,
-    ) = match host {
-        HostKindV1::ClaudeCode => (
-            "claude",
-            "crates/tracedecay-hooks/fixtures/host_events/claude.json",
-            include_bytes!("../../tests/fixtures/packaged_host_events/claude.json"),
-            "PostToolUse,Stop",
-            Supported,
-            Supported,
-        ),
-        HostKindV1::Codex => (
-            "codex",
-            "crates/tracedecay-hooks/fixtures/host_events/codex.json",
-            include_bytes!("../../tests/fixtures/packaged_host_events/codex.json"),
-            "Stop",
-            unavailable,
-            Supported,
-        ),
-        HostKindV1::CursorDesktop => (
-            "cursor",
-            "crates/tracedecay-hooks/fixtures/host_events/cursor.json",
-            include_bytes!("../../tests/fixtures/packaged_host_events/cursor.json"),
-            "afterFileEdit",
-            Supported,
-            unavailable,
-        ),
-        HostKindV1::Hermes => (
-            "hermes",
-            "crates/tracedecay-hooks/fixtures/host_events/hermes.json",
-            include_bytes!("../../tests/fixtures/packaged_host_events/hermes.json"),
-            "post_tool_call,on_session_end",
-            Supported,
-            Supported,
-        ),
-        HostKindV1::Kiro => (
-            "kiro",
-            "crates/tracedecay-hooks/fixtures/host_events/kiro.json",
-            include_bytes!("../../tests/fixtures/packaged_host_events/kiro.json"),
-            "userPromptSubmit",
-            unavailable,
-            unavailable,
-        ),
-        HostKindV1::KimiCode => (
-            "kimi_code",
-            "crates/tracedecay-hooks/fixtures/host_events/kimi-code.json",
-            include_bytes!("../../tests/fixtures/packaged_host_events/kimi-code.json"),
-            "PostToolUse,Stop",
-            Supported,
-            Supported,
-        ),
-        HostKindV1::OpenCode => (
-            "opencode",
-            "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json",
-            include_bytes!("../../tests/fixtures/packaged_host_events/opencode/baseline.json"),
-            "file.edited,session.idle",
-            Degraded(NativeFixtureLimited),
-            Degraded(NativeFixtureLimited),
-        ),
-        HostKindV1::CursorCloud
-        | HostKindV1::ClineFamily
-        | HostKindV1::Cline
-        | HostKindV1::RooCode
-        | HostKindV1::Kilo => return None,
-    };
-    Some(HostNativeFixtureEvidenceV1 {
+    stock_host_native_fixture_evidence_from_embedded_assets(
+        &embedded_host_integration_evidence(),
         host,
-        provider,
-        source_path,
-        fixture_digest: Sha256::digest(bytes).into(),
-        evidenced_event,
-        edit,
-        stop,
-    })
+    )
 }
 
 pub fn native_host_edit_stop_conformance_evidence() -> Vec<HostNativeFixtureEvidenceV1> {
-    [
-        HostKindV1::ClaudeCode,
-        HostKindV1::Codex,
-        HostKindV1::CursorDesktop,
-        HostKindV1::Hermes,
-        HostKindV1::Kiro,
-        HostKindV1::KimiCode,
-        HostKindV1::OpenCode,
-    ]
-    .into_iter()
-    .filter_map(stock_host_native_fixture_evidence)
-    .collect()
-}
-
-/// One generated artifact. Contents and credentials never enter the manifest;
-/// the content digest identifies bytes compiled into the first-party catalog.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostBundleArtifactV1 {
-    pub relative_path: String,
-    pub artifact_digest: [u8; 32],
-    pub ownership_marker: String,
-}
-
-/// Generated first-party projection for one host/component. It references the one
-/// integration/catalog authority and duplicates no workflow semantics.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostBundleManifestV1 {
-    pub schema_version: u16,
-    pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
-    pub integration_manifest_digest: [u8; 32],
-    pub catalog_digest: [u8; 32],
-    pub configuration_snapshot_id: String,
-    pub effective_behavior_digest: [u8; 32],
-    pub resolution_provenance_digest: [u8; 32],
-    pub protocol_min: u16,
-    pub protocol_max: u16,
-    pub artifacts: Vec<HostBundleArtifactV1>,
-}
-
-impl HostBundleManifestV1 {
-    pub fn validate_structure(&self) -> Result<(), HostBundleError> {
-        if self.schema_version != HOST_BUNDLE_SCHEMA_VERSION {
-            return Err(HostBundleError::UnsupportedManifestVersion);
-        }
-        if self.integration_manifest_digest == [0; 32]
-            || self.catalog_digest == [0; 32]
-            || self.effective_behavior_digest == [0; 32]
-            || self.resolution_provenance_digest == [0; 32]
-            || self.protocol_min == 0
-            || self.protocol_min > self.protocol_max
-        {
-            return Err(HostBundleError::InvalidManifest);
-        }
-        validate_identifier(&self.configuration_snapshot_id)?;
-        if self.artifacts.is_empty() || self.artifacts.len() > MAX_MANIFEST_ARTIFACTS {
-            return Err(HostBundleError::InvalidManifest);
-        }
-        for (index, artifact) in self.artifacts.iter().enumerate() {
-            validate_relative_install_path(Path::new(&artifact.relative_path))?;
-            validate_identifier(&artifact.ownership_marker)?;
-            if artifact.artifact_digest == [0; 32]
-                || self.artifacts[..index]
-                    .iter()
-                    .any(|existing| existing.relative_path == artifact.relative_path)
-            {
-                return Err(HostBundleError::InvalidManifest);
-            }
-        }
-        Ok(())
-    }
-
-    /// Canonical first-party catalog bytes used for content identity.
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, HostBundleError> {
-        canonical_json_bytes(&HostBundleCatalogPayloadV1 {
-            schema_version: self.schema_version,
-            host: self.host,
-            component: self.component,
-            integration_manifest_digest: self.integration_manifest_digest,
-            catalog_digest: self.catalog_digest,
-            configuration_snapshot_id: &self.configuration_snapshot_id,
-            effective_behavior_digest: self.effective_behavior_digest,
-            resolution_provenance_digest: self.resolution_provenance_digest,
-            protocol_min: self.protocol_min,
-            protocol_max: self.protocol_max,
-            artifacts: &self.artifacts,
-        })
-        .map_err(|_| HostBundleError::CanonicalizationFailed)
-    }
-
-    pub fn canonical_digest(&self) -> Result<[u8; 32], HostBundleError> {
-        Ok(Sha256::digest(self.canonical_bytes()?).into())
-    }
-}
-
-#[derive(Serialize)]
-struct HostBundleCatalogPayloadV1<'a> {
-    schema_version: u16,
-    host: HostKindV1,
-    component: HostBundleComponentV1,
-    integration_manifest_digest: [u8; 32],
-    catalog_digest: [u8; 32],
-    configuration_snapshot_id: &'a str,
-    effective_behavior_digest: [u8; 32],
-    resolution_provenance_digest: [u8; 32],
-    protocol_min: u16,
-    protocol_max: u16,
-    artifacts: &'a [HostBundleArtifactV1],
-}
-
-/// First-party catalog identity verifier.
-pub trait HostBundleVerificationAdapterV1 {
-    fn verify_manifest(&self, manifest: &HostBundleManifestV1) -> Result<(), HostBundleError>;
+    native_host_edit_stop_conformance_evidence_from_embedded_assets(
+        &embedded_host_integration_evidence(),
+    )
 }
 
 /// Verify embedded first-party catalog identity and content digests, then
@@ -653,41 +174,6 @@ pub fn plan_verified_complete_lifecycle_mutation(
         orphan_observed,
         |manifest| verifier.verify_manifest(manifest),
     )
-}
-
-pub(super) fn validate_identifier(value: &str) -> Result<(), HostBundleError> {
-    if value.is_empty()
-        || value.len() > MAX_IDENTIFIER_BYTES
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    {
-        return Err(HostBundleError::InvalidManifest);
-    }
-    Ok(())
-}
-
-/// Lexically validate a manifest path. Absolute paths, parent traversal,
-/// platform prefixes, NUL, and ambiguous `.` components are rejected.
-pub fn validate_relative_install_path(path: &Path) -> Result<(), HostBundleError> {
-    let bytes = path.as_os_str().as_encoded_bytes();
-    if bytes.is_empty()
-        || bytes.len() > MAX_RELATIVE_PATH_BYTES
-        || bytes.contains(&0)
-        || path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::Prefix(_)
-                    | Component::RootDir
-                    | Component::ParentDir
-                    | Component::CurDir
-            )
-        })
-    {
-        return Err(HostBundleError::UnsafeInstallPath);
-    }
-    Ok(())
 }
 
 /// Resolve a validated target while rejecting a symlink at the install root or
@@ -777,42 +263,6 @@ pub struct HostBundleMutationPlanV1 {
     pub component: HostBundleComponentV1,
     pub mutations: Vec<HostArtifactMutationV1>,
     pub rollback_required: bool,
-}
-
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub enum HostBundleError {
-    #[error("host capability is unsupported and must not be emulated")]
-    UnsupportedCapability,
-    #[error("bundle manifest schema version is unsupported")]
-    UnsupportedManifestVersion,
-    #[error("bundle manifest is structurally invalid")]
-    InvalidManifest,
-    #[error("first-party component identity or content digest is invalid")]
-    CatalogMismatch,
-    #[error("bundle manifest payload cannot be canonicalized")]
-    CanonicalizationFailed,
-    #[error("bundle does not address the requested host/component")]
-    WrongTarget,
-    #[error("lifecycle mutation requires explicit confirmation")]
-    ConfirmationRequired,
-    #[error("bundle ownership marker conflicts or is ambiguous")]
-    OwnershipConflict,
-    #[error("install target is absolute, traversing, symlinked, or otherwise unsafe")]
-    UnsafeInstallPath,
-    #[error("observed installation state is incomplete or duplicated")]
-    InvalidObservedState,
-    #[error("Hermes must bind exactly one user TraceDecay profile")]
-    InvalidHermesProfileBinding,
-    #[error("bundle artifact content is missing, oversized, duplicated, or digest-mismatched")]
-    ArtifactContentMismatch,
-    #[error("host bundle receipt or operation journal is invalid")]
-    ReceiptCorrupted,
-    #[error("host bundle atomic filesystem operation failed")]
-    StorageFailure,
-    #[error("host bundle interrupted operation requires recovery before mutation")]
-    RecoveryRequired,
-    #[error("confirmed host lifecycle preview is stale or does not match apply")]
-    StalePreview,
 }
 
 /// Refuse silent emulation of unsupported/degraded host capabilities.
@@ -1132,15 +582,6 @@ fn adopts_pre_receipt_artifact(
         && state.cataloged_ownership_marker.as_deref() == Some(artifact.ownership_marker.as_str())
 }
 
-/// Bytes obtained from the verified embedded host bundle. They are checked
-/// against the cataloged artifact digest before any host path is touched and
-/// are never copied into receipts or journals.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostBundleArtifactContentV1 {
-    pub relative_path: String,
-    pub bytes: Vec<u8>,
-}
-
 /// Execution-specific input kept separate from the public lifecycle request
 /// so existing plan consumers do not accidentally gain filesystem authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1231,97 +672,6 @@ pub struct HostBundleLifecyclePreviewV1 {
     pub confirmation_required: bool,
     pub competing_extension_claims: Vec<CompetingHostExtensionClaimV1>,
     pub rollback: HostBundleRollbackSeamV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostBundleReceiptArtifactV1 {
-    pub relative_path: String,
-    pub artifact_digest: [u8; 32],
-    pub ownership_marker: String,
-}
-
-/// Durable local receipt. It is a host-install ownership record, not a
-/// product/configuration store and contains no artifact content or credentials.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostBundleInstallReceiptV1 {
-    pub schema_version: u16,
-    pub operation_id: [u8; 16],
-    pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
-    pub operation: HostBundleLifecycleOpV1,
-    pub manifest_digest: [u8; 32],
-    pub artifacts: Vec<HostBundleReceiptArtifactV1>,
-    pub rollback_boundary: HostBundleRollbackBoundaryV1,
-    #[serde(default)]
-    pub rollback_history: Vec<[u8; 16]>,
-}
-
-/// Durable, content-free inventory for an operator-requested host-component
-/// backup. Artifact bytes live in the capability-rooted lifecycle directory;
-/// the receipt binds their exact digests and the manifest needed to restore
-/// them through the normal confirmed lifecycle transaction.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostBundleBackupReceiptV1 {
-    pub schema_version: u16,
-    pub operation_id: [u8; 16],
-    pub host: HostKindV1,
-    pub component: HostBundleComponentV1,
-    pub manifest: HostBundleManifestV1,
-    pub source_receipt_digest: [u8; 32],
-    pub artifacts: Vec<HostBundleBackupArtifactV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostBundleBackupArtifactV1 {
-    pub relative_path: String,
-    pub artifact_digest: [u8; 32],
-    pub ownership_marker: String,
-    pub snapshot_name: String,
-}
-
-/// Durable proof that a named backup was restored through the rollback-safe
-/// lifecycle writer. The embedded install receipt remains the ownership
-/// authority for the restored component.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostBundleRestoreReceiptV1 {
-    pub schema_version: u16,
-    pub operation_id: [u8; 16],
-    pub backup_operation_id: [u8; 16],
-    pub restored_receipt: HostBundleInstallReceiptV1,
-}
-
-/// Durable aggregate commit marker for a complete host component set. The
-/// individual component receipts remain the Doctor API; this receipt only
-/// binds them to their common atomic operation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostComponentSetReceiptV1 {
-    pub schema_version: u16,
-    pub operation_id: [u8; 16],
-    pub host: HostKindV1,
-    pub operation: HostBundleLifecycleOpV1,
-    pub component_manifests: Vec<HostBundleManifestV1>,
-    pub component_receipts: Vec<HostBundleInstallReceiptV1>,
-    #[serde(default)]
-    pub confirmed_plan_digest: Option<[u8; 32]>,
-    #[serde(default)]
-    pub base_registration_revision: Option<[u8; 32]>,
-    #[serde(default)]
-    pub current_registration_revision: Option<[u8; 32]>,
-    #[serde(default)]
-    pub artifact_state_revision: Option<[u8; 32]>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostBundleRollbackBoundaryV1 {
-    Pending,
-    Passed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -2810,69 +2160,6 @@ fn validate_feedback_switch_manifests(
         return Err(HostBundleError::WrongTarget);
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum HostBundleJournalStateV1 {
-    Prepared,
-    Committed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostBundleJournalEntryV1 {
-    relative_path: String,
-    backup_name: Option<String>,
-    backup_created: bool,
-    wrote_new: bool,
-    installed_digest: Option<[u8; 32]>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostBundleJournalV1 {
-    schema_version: u16,
-    operation_id: [u8; 16],
-    host: HostKindV1,
-    component: HostBundleComponentV1,
-    operation: HostBundleLifecycleOpV1,
-    manifest_digest: [u8; 32],
-    state: HostBundleJournalStateV1,
-    previous_receipt: Option<HostBundleInstallReceiptV1>,
-    entries: Vec<HostBundleJournalEntryV1>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum HostComponentSetJournalStateV1 {
-    Prepared,
-    Staged,
-    Applied,
-    Verified,
-    Committed,
-    RolledBack,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostComponentSetJournalComponentV1 {
-    manifest: HostBundleManifestV1,
-    previous_receipt: Option<HostBundleInstallReceiptV1>,
-    entries: Vec<HostBundleJournalEntryV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HostComponentSetJournalV1 {
-    schema_version: u16,
-    operation_id: [u8; 16],
-    host: HostKindV1,
-    operation: HostBundleLifecycleOpV1,
-    state: HostComponentSetJournalStateV1,
-    registration_staged: bool,
-    registration_applied: bool,
-    components: Vec<HostComponentSetJournalComponentV1>,
 }
 
 struct PreparedHostComponentSetComponentV1 {
@@ -5318,6 +4605,26 @@ fn component_slug(component: HostBundleComponentV1) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_integration_contracts_are_owned_by_the_leaf_crate() {
+        assert_eq!(
+            std::any::type_name::<HostBundleManifestV1>(),
+            "tracedecay_host_integration::HostBundleManifestV1"
+        );
+        assert_eq!(
+            std::any::type_name::<HostBundleInstallReceiptV1>(),
+            "tracedecay_host_integration::HostBundleInstallReceiptV1"
+        );
+        assert_eq!(
+            std::any::type_name::<HostBundleJournalV1>(),
+            "tracedecay_host_integration::HostBundleJournalV1"
+        );
+        assert_eq!(
+            std::any::type_name::<HostNativeFixtureEvidenceV1>(),
+            "tracedecay_host_integration::HostNativeFixtureEvidenceV1"
+        );
+    }
 
     #[test]
     fn kimi_repair_actions_name_the_interactive_plugins_flow() {
