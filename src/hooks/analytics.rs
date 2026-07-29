@@ -187,7 +187,10 @@ impl HookTimingSpan {
         let mut state = self.state();
         if timed_out {
             state.timed_out = Some(true);
-            merge_disposition(&mut state.disposition, disposition_timeout("hook_timeout"));
+            merge_disposition(
+                &mut state.disposition,
+                HookDispositionTelemetry::timeout("hook_timeout"),
+            );
         } else if state.timed_out.is_none() {
             state.timed_out = Some(false);
         }
@@ -213,7 +216,7 @@ impl HookTimingSpan {
         note_daemon_payload(&mut state, payload_bytes);
         merge_disposition(
             &mut state.disposition,
-            disposition_unknown("notify_outcome_unavailable"),
+            HookDispositionTelemetry::unknown("notify_outcome_unavailable"),
         );
     }
 
@@ -268,7 +271,7 @@ impl Drop for HookTimingSpan {
         // never invented Supported.
         let disposition = state
             .disposition
-            .unwrap_or_else(|| disposition_unknown("disposition_absent"));
+            .unwrap_or_else(|| HookDispositionTelemetry::unknown("disposition_absent"));
         let telemetry = HookCompletedTelemetry {
             schema_version: HOST_HOOK_TELEMETRY_SCHEMA_VERSION,
             coverage: HostHookTelemetryCoverage::HostMeasured,
@@ -461,47 +464,14 @@ fn bounded_identifier(value: &str) -> String {
     value.to_string()
 }
 
-fn disposition_daemon_unavailable() -> HookDispositionTelemetry {
-    HookDispositionTelemetry::daemon_unavailable()
-}
-
-fn disposition_timeout(reason_code: &'static str) -> HookDispositionTelemetry {
-    HookDispositionTelemetry::timeout(reason_code)
-}
-
-fn disposition_unknown(reason_code: &'static str) -> HookDispositionTelemetry {
-    HookDispositionTelemetry::unknown(reason_code)
-}
-
-#[cfg(test)]
-fn disposition(
-    status: HostAdmissionStatus,
-    retryable: bool,
-    reason_code: Option<&str>,
-) -> HookDispositionTelemetry {
-    HookDispositionTelemetry::from_parts(status, Some(retryable), reason_code.map(str::to_owned))
-}
-
-#[cfg(test)]
-fn disposition_class(
-    status: HostAdmissionStatus,
-    reason_code: Option<&str>,
-) -> HookDispositionClass {
-    disposition(status, false, reason_code).class
-}
-
 fn disposition_from_daemon_output(output: &Value) -> Option<HookDispositionTelemetry> {
     if let Some(admission) = output.get("admission") {
-        return disposition_from_wire_object(admission);
+        return HookDispositionTelemetry::from_daemon_wire(admission);
     }
     if output.get("status").and_then(Value::as_str).is_some() {
-        return disposition_from_wire_object(output);
+        return HookDispositionTelemetry::from_daemon_wire(output);
     }
     None
-}
-
-fn disposition_from_wire_object(value: &Value) -> Option<HookDispositionTelemetry> {
-    HookDispositionTelemetry::from_daemon_wire(value)
 }
 
 fn disposition_from_daemon_error(error: &TraceDecayError) -> HookDispositionTelemetry {
@@ -509,8 +479,10 @@ fn disposition_from_daemon_error(error: &TraceDecayError) -> HookDispositionTele
         return HookDispositionTelemetry::from_hook_runtime_error(reason_code, retryable);
     }
     match error {
-        TraceDecayError::Config { .. } | TraceDecayError::Io(_) => disposition_daemon_unavailable(),
-        _ => disposition_unknown("daemon_error"),
+        TraceDecayError::Config { .. } | TraceDecayError::Io(_) => {
+            HookDispositionTelemetry::daemon_unavailable()
+        }
+        _ => HookDispositionTelemetry::unknown("daemon_error"),
     }
 }
 
@@ -800,28 +772,33 @@ mod tests {
     #[test]
     fn disposition_classifier_distinguishes_outcomes() {
         assert_eq!(
-            disposition_timeout("hook_timeout").class,
+            HookDispositionTelemetry::timeout("hook_timeout").class,
             HookDispositionClass::Timeout
         );
         assert_eq!(
-            disposition_daemon_unavailable().class,
+            HookDispositionTelemetry::daemon_unavailable().class,
             HookDispositionClass::Transport
         );
         assert_eq!(
-            disposition_class(HostAdmissionStatus::Backpressured, Some("hook_cancelled")),
+            HookDispositionTelemetry::from_parts(
+                HostAdmissionStatus::Backpressured,
+                Some(false),
+                Some("hook_cancelled".to_owned()),
+            )
+            .class,
             HookDispositionClass::Cancellation
         );
         assert_eq!(
-            disposition_unknown("unknown_provider").class,
+            HookDispositionTelemetry::unknown("unknown_provider").class,
             HookDispositionClass::Unknown
         );
-        let typed_success = disposition_from_wire_object(&serde_json::json!({
+        let typed_success = HookDispositionTelemetry::from_daemon_wire(&serde_json::json!({
             "status": "supported",
             "retryable": false
         }))
         .expect("typed success");
         assert_eq!(typed_success.status, HostAdmissionStatus::Supported);
-        let untrusted = disposition_from_wire_object(&serde_json::json!({
+        let untrusted = HookDispositionTelemetry::from_daemon_wire(&serde_json::json!({
             "status": "degraded",
             "retryable": false,
             "reason_code": "private reasoning content"

@@ -261,9 +261,22 @@ fn render_workflows_md(value: &Value) -> String {
         "run" if value.get("found").and_then(Value::as_bool) == Some(true) => {
             render_run_detail_md(&mut md, value);
         }
+        "run" => render_run_not_found_md(&mut md, value),
         _ => render_run_list_md(&mut md, value),
     }
     md.render()
+}
+
+/// A run id the index looked for and does not hold.
+///
+/// Distinct from an empty scope. The caller named one run, so the list
+/// renderer's "no runs recorded for this scope" would answer a question they
+/// did not ask and hide that the id itself is unknown.
+fn render_run_not_found_md(md: &mut Md, value: &Value) {
+    md.heading(2, "Workflow Run");
+    md.field("run", &format!("`{}`", render::field_str(value, "run_id")));
+    md.blank()
+        .empty_note("No workflow run is recorded under this id.");
 }
 
 fn render_run_list_md(md: &mut Md, value: &Value) {
@@ -479,6 +492,34 @@ mod tests {
             assert!(!message.is_empty());
             assert_eq!(message, reason.message());
         }
+    }
+
+    /// Three different answers to "show me runs" must read differently: the
+    /// scope holds none, the named run does not exist, and the index could not
+    /// be consulted. Collapsing any pair tells the reader the index looked when
+    /// it did not, or that a scope is empty when only one id is missing.
+    #[test]
+    fn empty_scope_missing_run_and_unavailable_index_render_differently() {
+        let empty_scope = render_workflows_md(&json!({
+            "status": "ok",
+            "mode": "session",
+            "session_id": "s_alpha",
+            "runs": [],
+            "count": 0,
+        }));
+        let missing_run = render_workflows_md(&run_not_found_payload("wf_absent"));
+        let unavailable =
+            render_unavailable_md(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message());
+
+        assert_ne!(empty_scope, missing_run);
+        assert_ne!(missing_run, unavailable);
+        assert_ne!(empty_scope, unavailable);
+
+        // The missing run names the id the caller asked for, and must not claim
+        // the whole scope is empty.
+        assert!(missing_run.contains("wf_absent"));
+        assert!(!missing_run.contains("for this scope"));
+        assert!(empty_scope.contains("for this scope"));
     }
 
     /// The unbuilt-index and unretained-authority states must not share a

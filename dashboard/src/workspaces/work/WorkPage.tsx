@@ -1,82 +1,216 @@
 import { StateChip } from '../../ui/StateChip.tsx';
-import { Corners, Legend, Panel, WorkspaceHeader } from '../../ui/instrument.tsx';
+import { Corners, Legend, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
+import {
+  WIRE_AUTHORITY,
+  WITHHELD_WORK,
+  type WithheldSurface,
+  withheldPresentation,
+} from './authority.ts';
 
-const CONTRACT_GATE_EXPLANATION =
+/**
+ * Work — channel thirteen.
+ *
+ * The workspace is routed, named and reachable, and its data plane is closed.
+ * That is the whole design: a Kanban board, a dependency DAG or a run status
+ * drawn here today would be this dashboard's own invention, and inventing them
+ * is the one thing this surface must never do. So it draws the boundary itself —
+ * every projection, command and stream Work is made of, each carrying the
+ * generated contract it waits on and the state it is actually in.
+ *
+ * No fetch is issued. Without a generated Work contract there is no request or
+ * response shape to send, and hand-writing one here would put a second,
+ * unreviewed wire format in the dashboard.
+ */
+
+const GATE_SENTENCE =
   'No generated Work read model is available in this build. Kanban, DAG, timeline, causal, workload, runtime, and control state are withheld rather than inferred.';
+
+/** What the aside reports, and the exact words for each. Read model, projection,
+ * command and stream fail separately, so each is stated separately rather than
+ * collapsed into one "unavailable". */
+const BOUNDARY: readonly { term: string; reading: string }[] = [
+  { term: 'Work read model', reading: 'Not generated' },
+  { term: 'Projections', reading: 'Not rendered' },
+  { term: 'Commands', reading: 'Not exposed' },
+  { term: 'Activity stream', reading: 'Not registered' },
+];
+
+/** The reasons present in one group, in row order and without repeats.
+ *
+ * The chips carry the state; the group says why once. Sixteen rows each
+ * repeating "no generated read model" beside its own chip is the same sentence
+ * sixteen times, which reads as noise rather than as an inventory. */
+function reasonSummaries(surfaces: readonly WithheldSurface[]): string[] {
+  const summaries = surfaces.map((surface) => withheldPresentation(surface.reason).summary);
+  return [...new Set(summaries)];
+}
+
+function WithheldRow({ surface }: { surface: WithheldSurface }) {
+  const presentation = withheldPresentation(surface.reason);
+  return (
+    <tr className="border-t border-edge-subtle align-top" data-work-surface={surface.id}>
+      <th scope="row" className="px-2 py-1.5 text-left font-medium text-text-primary">
+        {surface.name}
+      </th>
+      <td className="px-2 py-1.5 text-text-secondary max-md:hidden">{surface.draws}</td>
+      <td className="px-2 py-1.5">
+        <span className="td-value whitespace-nowrap text-text-secondary">{surface.requires}</span>
+      </td>
+      {/* From `lg` the state label stays on one line, which keeps the rows one
+        * line tall and the ledger scannable. Below it the chip is allowed to
+        * wrap, because a nowrap chip is width the 320px reflow budget does not
+        * have. */}
+      <td className="px-2 py-1.5 lg:whitespace-nowrap">
+        <StateChip kind={presentation.state} />
+      </td>
+    </tr>
+  );
+}
 
 export function WorkPage() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-0">
+    <div
+      // The surface's own reading, for the accessibility and visual gates: this
+      // page has one state and it is not a partial render of a wired workspace.
+      data-work-authority="uncontracted"
+      // The shell owns `main#td-main` and its scroller; a workspace that
+      // scrolls does it in a labelled, focusable region of its own, which is
+      // the only internal scrolling Plan 11 licenses.
+      className="flex h-full min-w-0 flex-col overflow-auto"
+      tabIndex={0}
+      role="region"
+      aria-label="Work content"
+    >
       <WorkspaceHeader
         path="work"
         title="Work"
-        note="Canonical task graph · contract gated"
+        note="canonical task graph · no generated read model in this build"
+        actions={
+          <StateChip
+            kind="unsupported_schema"
+            detail="Work contract absent"
+            className="ml-auto shrink-0 max-sm:hidden"
+          />
+        }
       />
 
-      <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-3 sm:p-4">
-        <div className="mx-auto flex min-h-full w-full max-w-5xl items-center justify-center">
-          <Panel
-            legend="Work contract gate"
-            className="w-full"
-            bodyClassName="p-0"
-            footer={
-              <p className="text-3xs tracking-[0.04em] text-text-muted">
-                No Work projection or command is exposed without generated contract authority.
+      <div data-work-ledger className="min-w-0 flex-1 p-3 sm:p-4">
+        <div className="mx-auto grid min-w-0 max-w-[1600px] gap-3 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-4">
+          <div className="flex min-w-0 flex-col gap-3">
+            <Panel legend="why this channel draws nothing">
+              <p className="max-w-3xl text-sm leading-6 text-text-primary">{GATE_SENTENCE}</p>
+              <p className="mt-3 max-w-3xl text-xs leading-5 text-text-secondary">
+                Work is the canonical task graph and the minimal execution runtime, read through
+                the one generated contract module this dashboard validates every response against.
+                That module carries no Work payload, so there is no projection to render, no
+                command to offer, and no stream to subscribe to — and a lane, an edge or a run
+                status assembled here instead would be invented rather than read.
               </p>
-            }
-          >
-            <div className="grid min-w-0 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
-              <div className="min-w-0 p-4 sm:p-6 lg:p-8">
-                <StateChip
-                  kind="unsupported_schema"
-                  detail="generated Work read model absent"
-                />
-                <p className="mt-5 text-3xs font-semibold uppercase tracking-[0.18em] text-text-muted">
-                  Contract-bound workspace
-                </p>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-text-primary sm:text-base">
-                  {CONTRACT_GATE_EXPLANATION}
-                </p>
-                <p className="mt-4 max-w-2xl text-xs leading-5 text-text-secondary">
-                  The workspace shell remains visible so unavailable authority is explicit; its
-                  data plane stays closed until the generated contract can represent canonical
-                  Work state.
-                </p>
-              </div>
+              <p className="mt-3 max-w-3xl text-xs leading-5 text-text-secondary">
+                The ledger below is everything Work is made of, each row naming the contract it
+                waits on. The only measured fact on this page is this build's own contract
+                inventory.
+              </p>
+            </Panel>
 
-              <aside className="min-w-0 border-t border-edge-subtle bg-surface-0 p-4 sm:p-6 lg:border-l lg:border-t-0">
-                <div className="relative min-w-0 border border-edge-subtle bg-surface-1 p-4">
-                  <Corners />
-                  <Legend
-                    trailing={
-                      <span className="text-3xs font-semibold uppercase tracking-[0.14em] text-state-unsupported-schema">
-                        Withheld
-                      </span>
-                    }
-                  >
-                    Authority boundary
-                  </Legend>
-
-                  <dl className="mt-5 space-y-3 text-xs">
-                    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 border-b border-edge-subtle pb-3">
-                      <dt className="text-text-muted">Read model</dt>
-                      <dd className="text-right font-medium text-text-primary">Not generated</dd>
-                    </div>
-                    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 border-b border-edge-subtle pb-3">
-                      <dt className="text-text-muted">Projection state</dt>
-                      <dd className="text-right font-medium text-text-primary">Not rendered</dd>
-                    </div>
-                    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3">
-                      <dt className="text-text-muted">Work commands</dt>
-                      <dd className="text-right font-medium text-text-primary">Not exposed</dd>
-                    </div>
-                  </dl>
+            {WITHHELD_WORK.map((group) => (
+              <Panel
+                key={group.id}
+                legend={group.legend}
+                bodyClassName="p-0"
+                elevation="well"
+                footer={
+                  <p className="text-3xs tracking-[0.04em] text-text-muted">
+                    Withheld here because there is {reasonSummaries(group.surfaces).join(', and ')}.
+                  </p>
+                }
+              >
+                <div
+                  // Focusable and named: the ledger outruns 320px and 400% zoom
+                  // sideways, and a scroll container a keyboard cannot reach is
+                  // content nobody can read.
+                  role="region"
+                  aria-label={`${group.legend} table`}
+                  tabIndex={0}
+                  className="min-w-0 overflow-x-auto"
+                >
+                  <table className="w-full border-collapse text-2xs">
+                    <caption className="sr-only">
+                      Every one of the {group.legend}, with the generated contract it requires and
+                      the state it is in. All are withheld in this build.
+                    </caption>
+                    <thead className="bg-surface-2">
+                      <tr className="text-left text-text-secondary">
+                        <th scope="col" className="px-2 py-1 font-medium">
+                          Surface
+                        </th>
+                        <th scope="col" className="px-2 py-1 font-medium max-md:hidden">
+                          What it would draw
+                        </th>
+                        <th scope="col" className="px-2 py-1 font-medium">
+                          Requires
+                        </th>
+                        <th scope="col" className="px-2 py-1 font-medium">
+                          State
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.surfaces.map((surface) => (
+                        <WithheldRow key={surface.id} surface={surface} />
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              </aside>
+              </Panel>
+            ))}
+          </div>
+
+          <aside className="flex min-w-0 flex-col gap-3">
+            <div className="relative min-w-0 border border-edge-subtle bg-surface-1 p-3 pt-4">
+              <Corners />
+              <Ticks count={24} />
+              <Legend
+                trailing={
+                  <span className="shrink-0 text-3xs font-semibold uppercase tracking-[0.14em] text-state-unsupported-schema">
+                    Withheld
+                  </span>
+                }
+              >
+                boundary
+              </Legend>
+
+              <dl className="mt-4 space-y-2.5 text-xs">
+                {BOUNDARY.map((entry) => (
+                  <div
+                    key={entry.term}
+                    className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 border-b border-edge-subtle pb-2.5 last:border-b-0 last:pb-0"
+                  >
+                    <dt className="min-w-0 truncate text-text-muted">{entry.term}</dt>
+                    <dd className="td-value min-w-0 break-words text-right font-medium text-text-primary">
+                      {entry.reading}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
             </div>
-          </Panel>
+
+            <Panel legend="what opens this channel">
+              <p className="text-xs leading-5 text-text-secondary">
+                A Work payload has to enter through{' '}
+                <span className="td-value text-text-primary">{WIRE_AUTHORITY}</span> and be
+                regenerated into the dashboard's contracts module. The rows above then become
+                reads; until they do, this channel stays navigable and closed rather than
+                plausible.
+              </p>
+              <p className="mt-3 text-3xs leading-5 text-text-muted">
+                The other twelve channels are unaffected: each keeps its own contract and its own
+                state.
+              </p>
+            </Panel>
+          </aside>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

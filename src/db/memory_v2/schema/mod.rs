@@ -1,9 +1,7 @@
 //! Owner-scoped V2 fact-lineage schema installers and upgrades.
 //!
-//! This module was split from a single 1774-line `schema.rs` into focused
-//! submodules along schema-family boundaries. The moves are purely mechanical:
-//! no SQL, string, or behavior changed. Re-exports below preserve every
-//! `schema::` path relied on by the rest of `memory_v2`.
+//! Re-exports below preserve every `schema::` path relied on by the rest of
+//! `memory_v2`.
 
 mod baseline;
 mod compatibility;

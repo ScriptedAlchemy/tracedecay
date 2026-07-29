@@ -1,8 +1,5 @@
 //! Proposal-log schema rebuilds, projection indexes, integrity triggers, and
 //! the V22 feedback-history repair seed.
-//!
-//! Split out of the former single-file `schema` module as a pure mechanical
-//! move; contents are unchanged.
 
 use crate::db::engine::params;
 use crate::errors::Result;

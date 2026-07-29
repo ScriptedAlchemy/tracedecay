@@ -16,7 +16,7 @@ use tracedecay_hooks::{
     decode_bound_native_hook_event, deliver_hook_feedback, finish_synchronous_hook,
 };
 
-use super::analytics::HookTimingSpan;
+use super::analytics::{HookTimingSpan, elapsed_us};
 use super::daemon_ports::{
     ContextScoutFeedbackCommitV1, DaemonAdmissionPort, DaemonContextScoutFeedbackPort,
     DaemonDeliveryReceiptPort, DaemonFeedbackNoticeDeliveryPort, DaemonOpenCodeLspUpdatePort,
@@ -388,14 +388,6 @@ fn native_context_scout_lifecycle(
 
 const HOOK_ADMISSION_ACK_BUDGET_MICROS: u64 = 25_000;
 
-fn elapsed_micros(started: Instant) -> u64 {
-    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-}
-
-fn admission_window(started: Instant) -> Option<(HookSynchronousDeadlineV1, Duration)> {
-    admission_window_after_elapsed(elapsed_micros(started))
-}
-
 fn admission_window_after_elapsed(elapsed: u64) -> Option<(HookSynchronousDeadlineV1, Duration)> {
     let deadline = HookSynchronousDeadlineV1::after_elapsed(elapsed)?;
     let admission_remaining = HOOK_ADMISSION_ACK_BUDGET_MICROS.checked_sub(elapsed)?;
@@ -559,7 +551,7 @@ async fn dispatch_decoded(
         ..
     } = prepared;
     let binding = &snapshot.binding;
-    let immediate = match admission_window(started) {
+    let immediate = match admission_window_after_elapsed(elapsed_us(started)) {
         Some((deadline, timeout)) => match tokio::time::timeout(
             timeout,
             admit_async_exact_scope(&envelope, binding, deadline, admission),
@@ -601,7 +593,7 @@ async fn dispatch_decoded(
         immediate,
         replay,
         now_utc(),
-        elapsed_micros(started),
+        elapsed_us(started),
     );
     let feedback_notice = admission.take_feedback_notice();
     match completed {
@@ -610,7 +602,7 @@ async fn dispatch_decoded(
                 configuration_revision: snapshot.revision,
                 route: HookFeedbackDeliveryRouteV1::HookV2,
             };
-            let deadline = HookSynchronousDeadlineV1::after_elapsed(elapsed_micros(started));
+            let deadline = HookSynchronousDeadlineV1::after_elapsed(elapsed_us(started));
             let scout_receipt = match (result.rendered_guidance.as_ref(), guidance_envelope_id) {
                 (Some(_), Some(envelope_id)) => {
                     Some(crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {

@@ -629,10 +629,14 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
 async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon() {
     use std::io::{BufRead, BufReader, Read};
     use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn restart_window_marker() {}\n").await;
+    // Granted once serve is running with its request queued, so the rebind
+    // lands inside the restart window without timing the window by clock.
+    let (rebind_tx, rebind_rx) = mpsc::channel();
     let socket_path = common::daemon_socket_path(home.path());
     fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
 
@@ -655,7 +659,9 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
     // fallback and exercises the client-side version-skew warning.
     let listener_path = socket_path.clone();
     let fake_daemon = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(400));
+        rebind_rx
+            .recv()
+            .expect("serve should grant the rebind permit");
         let listener = UnixListener::bind(&listener_path).expect("bind restarted daemon socket");
         listener
             .set_nonblocking(true)
@@ -737,6 +743,9 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
         .unwrap();
     }
     drop(child.stdin.take());
+    // serve is up and its request is queued, so the socket was absent for at
+    // least one probe. Let the "restarted daemon" claim it now.
+    rebind_tx.send(()).expect("grant the rebind permit");
 
     let output = child
         .wait_with_output()
