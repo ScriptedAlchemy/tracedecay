@@ -7,7 +7,7 @@
 
 use crate::manifest::{
     cargo_source_layout, filesystem_rust_sources, git_tracked_paths,
-    inspect_physical_manifest_paths, physical_manifest_layout,
+    inspect_physical_manifest_paths, physical_manifest_layout, query_allowed_packages,
 };
 use crate::module_scanner::{
     SourceReference, Token, matching_delimiter, normalize_identifier, normalize_relative,
@@ -19,6 +19,13 @@ use std::path::{Path, PathBuf};
 
 const FORBIDDEN_LIBSQL_CRATE: &str = "libsql";
 
+/// Dependency roots the query kernel source may name.
+///
+/// Beyond the language roots, every entry must be a declared dependency of
+/// `crates/tracedecay-query/Cargo.toml`. `tracedecay_application` is
+/// deliberately absent: the kernel reaches it only transitively through
+/// `tracedecay_code_index`, so naming it here would turn an accepted transitive
+/// edge into a direct layering violation.
 const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "alloc",
     "core",
@@ -33,9 +40,9 @@ const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "tracedecay_code_index",
     "tracedecay_domain",
     "tracedecay_policy",
-    "tracedecay_store",
     "zeroize",
 ];
+const QUERY_LANGUAGE_ROOTS: &[&str] = &["alloc", "core", "std"];
 /// Pure compile-time macros re-exported from allowlisted crates. Unlike the
 /// built-in macros in [`QUERY_ALLOWED_MACROS`], these must be imported before
 /// use, so the import-shadowing guard deliberately does not flag them.
@@ -1472,7 +1479,7 @@ fn query_source_guard_allows_comments_strings_and_query_contracts() {
 
         use {::serde::Serialize, std::collections::BTreeSet};
         use tracedecay_domain::session::SessionId;
-        use tracedecay_store::memory::StorePort;
+        use tracedecay_policy::retention::RetentionWindow;
         use crate::temporal::ports::TemporalReadPort;
 
         #[derive(Clone, Debug, Serialize)]
@@ -1488,7 +1495,72 @@ fn query_source_guard_allows_comments_strings_and_query_contracts() {
 
     assert!(
         query_source_violations(source).is_empty(),
-        "comments, strings, and domain/store/query contracts must be allowed"
+        "comments, strings, and domain/policy/query contracts must be allowed"
+    );
+}
+
+/// The query kernel depends on `tracedecay-code-index`, which depends on
+/// `tracedecay-application`. That makes application types reachable from the
+/// kernel's dependency closure, so the decision has to be explicit: the
+/// transitive edge is accepted, but a direct one is not. The kernel may name
+/// only `tracedecay_code_index`; naming `tracedecay_application` — including
+/// through a code-index re-export path — is a layering violation.
+#[test]
+fn query_source_guard_refuses_direct_application_layer_paths() {
+    assert!(
+        !QUERY_ALLOWED_ROOTS.contains(&"tracedecay_application"),
+        "tracedecay_application must not become a query source root"
+    );
+    for (name, source) in [
+        (
+            "direct import",
+            "use tracedecay_application::ResolvedScope;",
+        ),
+        (
+            "aliased import",
+            "use tracedecay_application::RequestContext as Context;",
+        ),
+        (
+            "qualified path",
+            "fn scope() -> tracedecay_application::ResolvedScope { unreachable!() }",
+        ),
+    ] {
+        let violations = query_source_violations(source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("tracedecay_application")),
+            "query source guard accepted a direct application path via {name}: {violations:?}"
+        );
+    }
+
+    let transitive_owner = query_source_violations(
+        "use tracedecay_code_index::historical_query::HistoricalSourceAuthorizationV1;",
+    );
+    assert!(
+        transitive_owner.is_empty(),
+        "the code-index hop that owns the application edge must stay allowed: {transitive_owner:?}"
+    );
+}
+
+/// Both query allowlists describe the same dependency contract from different
+/// angles: `QUERY_ALLOWED_ROOTS` gates source paths, `QUERY_ALLOWED_PACKAGES`
+/// gates manifest entries. Drift between them is how a root outlives the
+/// dependency that justified it.
+#[test]
+fn query_source_roots_agree_with_the_query_package_allowlist() {
+    let packages = query_allowed_packages()
+        .iter()
+        .map(|package| normalize_identifier(package))
+        .collect::<BTreeSet<_>>();
+    let roots = QUERY_ALLOWED_ROOTS
+        .iter()
+        .filter(|root| !QUERY_LANGUAGE_ROOTS.contains(*root))
+        .map(|root| normalize_identifier(root))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        roots, packages,
+        "query source roots and query package allowlist must describe the same dependencies"
     );
 }
 
