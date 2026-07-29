@@ -2674,6 +2674,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         true
     }
 
+    #[cfg(test)]
     fn remove(&mut self, key: &ProjectServerKey) -> Option<Server> {
         let entry = self.servers.remove(key)?;
         self.aliases.retain(|_, alias| alias != key);
@@ -3291,6 +3292,7 @@ impl DaemonEngine {
             .remove(&key);
     }
 
+    #[cfg(test)]
     async fn project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -3472,6 +3474,7 @@ impl DaemonEngine {
     /// Opens or resolves a project server while writer administration is held.
     /// Watcher and scheduler activation happen only after this returns so those
     /// components can acquire the same coordinator without recursive locking.
+    #[cfg(test)]
     async fn open_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -3503,7 +3506,7 @@ impl DaemonEngine {
             &self.http_application_registry,
             &canonical_project_path,
             handshake,
-            ProductionProjectCompositionRuntime::Unix(self.clone()),
+            ProductionProjectCompositionRuntime::Unix(Box::new(self.clone())),
             cancellation,
             #[cfg(test)]
             Some(&self.project_open_attempts),
@@ -4493,7 +4496,7 @@ async fn shutdown_portable_project_open_tasks(
 #[derive(Clone)]
 enum ProductionProjectCompositionRuntime {
     #[cfg(unix)]
-    Unix(DaemonEngine),
+    Unix(Box<DaemonEngine>),
     #[cfg(any(not(unix), test, feature = "test-transport"))]
     Portable {
         semantic_auto_download: bool,
@@ -4575,6 +4578,7 @@ struct ProductionProjectComposition {
     canonical_project_path: PathBuf,
     server: Arc<crate::mcp::McpServer>,
     inserted: bool,
+    #[cfg(any(test, feature = "test-transport"))]
     semantic_auto_download_enabled: Option<bool>,
 }
 
@@ -4619,6 +4623,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
             inserted: false,
+            #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: None,
         });
     }
@@ -4640,6 +4645,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
             inserted: false,
+            #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: None,
         });
     }
@@ -4745,6 +4751,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: existing,
             inserted: false,
+            #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
         });
     }
@@ -5229,14 +5236,19 @@ async fn production_project_server(
                 let dependent_owners = if project_database_is_read_only {
                     None
                 } else {
+                    let source_edit_mutation_ready =
+                        source_edit_mutation_ready.ok_or_else(|| TraceDecayError::Config {
+                            message:
+                                "writable project did not install source edit preview authority"
+                                    .to_owned(),
+                        })?;
                     let state = project_open_owners::register_project_open_production_owners(
                         invocation,
                         store_administration.git_index_transaction_services(),
                         canonical_project_path,
                         &project_id,
                         full_candidate.as_ref(),
-                        source_edit_mutation_ready
-                            .expect("writable projects install source edit preview authority"),
+                        source_edit_mutation_ready,
                     )
                     .await?;
                     log_full_setup_phase("independent_owners_registered");
@@ -5356,6 +5368,7 @@ async fn production_project_server(
         canonical_project_path: canonical_project_path.to_path_buf(),
         server: resolved,
         inserted,
+        #[cfg(any(test, feature = "test-transport"))]
         semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
     })
 }
@@ -5364,7 +5377,7 @@ async fn production_project_server(
 struct ProductionProjectHarnessResourcesV1 {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    _project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     servers: HashMap<PathBuf, Arc<crate::mcp::McpServer>>,
     _database_scope: crate::db::DaemonDatabaseScope,
     _lifecycle_lease: crate::lifecycle_lease::LifecycleLease,
@@ -5552,7 +5565,7 @@ impl ProductionProjectCompositionHarnessV1 {
             resources: Some(ProductionProjectHarnessResourcesV1 {
                 store_administration,
                 invocation,
-                project_open_gates,
+                _project_open_gates: project_open_gates,
                 servers,
                 _database_scope: database_scope,
                 _lifecycle_lease: lifecycle_lease,
