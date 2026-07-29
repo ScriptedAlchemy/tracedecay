@@ -676,7 +676,8 @@ async fn sessions_git_backfill(
 }
 
 async fn sessions_unfinished(db: &RegisteredGlobalDb, limit: usize) -> Result<Value> {
-    let items = crate::sessions::workflow_state::list_unfinished(db, limit)
+    let items = crate::store::GlobalDbWorkflowStore::new(db)
+        .list_unfinished_workflows(limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;
     Ok(json!({ "items": items }))

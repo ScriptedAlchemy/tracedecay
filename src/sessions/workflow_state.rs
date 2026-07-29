@@ -11,8 +11,7 @@
 
 use serde::Serialize;
 
-use crate::db::engine::params;
-use crate::global_db::RegisteredGlobalDb;
+use crate::db::engine::{ReadSnapshot, params};
 
 /// Max characters of collapsed evidence text kept per unfinished-run row before
 /// a single-character `…` truncation, so one row never dominates the listing.
@@ -29,14 +28,12 @@ pub struct WorkflowStateItem {
     pub evidence: String,
 }
 
+/// Reads through one caller-pinned snapshot, so every returned row is observed
+/// at a single database generation. The store adapter owns opening it.
 pub async fn list_unfinished(
-    db: &RegisteredGlobalDb,
+    snapshot: &ReadSnapshot,
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {
-    let snapshot = db
-        .read_snapshot()
-        .await
-        .map_err(|error| error.to_string())?;
     let limit = limit.clamp(1, 250) as i64;
     let mut rows = snapshot
         .query(
