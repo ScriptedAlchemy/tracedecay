@@ -4,6 +4,7 @@ members = [
     "crates/tracedecay-application",
     "crates/tracedecay-code-index",
     "crates/tracedecay-domain",
+    "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
     "crates/tracedecay-lsp",
     "crates/tracedecay-migrate",
@@ -259,6 +260,7 @@ tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0" }
 tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
+tracedecay-host-integration = { path = "crates/tracedecay-host-integration", version = "0.1.0" }
 tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
 tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
