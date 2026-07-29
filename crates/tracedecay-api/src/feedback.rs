@@ -133,9 +133,10 @@ pub fn feedback_status_envelope<T, Error>(
     };
 
     let coverage = match presentation.coverage {
-        FeedbackStatusCoverageV1::Known => {
-            DashboardCoverageV1::complete(presentation.denominators.eligible, "feedback_observations")
-        }
+        FeedbackStatusCoverageV1::Known => DashboardCoverageV1::complete(
+            presentation.denominators.eligible,
+            "feedback_observations",
+        ),
         FeedbackStatusCoverageV1::Partial
         | FeedbackStatusCoverageV1::Sampled
         | FeedbackStatusCoverageV1::Capped => DashboardCoverageV1::partial(
@@ -163,7 +164,9 @@ pub fn feedback_status_envelope<T, Error>(
         FeedbackStatusCoverageV1::Stale => DashboardFreshnessV1 {
             state: DashboardFreshnessStateV1::Stale,
             observed_at_micros: presentation.last_observed_at_micros,
-            watermark: presentation.producer_sequence.map(|value| value.to_string()),
+            watermark: presentation
+                .producer_sequence
+                .map(|value| value.to_string()),
         },
         FeedbackStatusCoverageV1::Unknown => DashboardFreshnessV1::unknown(),
         FeedbackStatusCoverageV1::Known
@@ -172,7 +175,9 @@ pub fn feedback_status_envelope<T, Error>(
         | FeedbackStatusCoverageV1::Capped => DashboardFreshnessV1 {
             state: DashboardFreshnessStateV1::Fresh,
             observed_at_micros: presentation.last_observed_at_micros,
-            watermark: presentation.producer_sequence.map(|value| value.to_string()),
+            watermark: presentation
+                .producer_sequence
+                .map(|value| value.to_string()),
         },
     };
     let source_watermark = presentation
@@ -188,12 +193,17 @@ pub fn feedback_status_envelope<T, Error>(
             .or(presentation.last_observed_at_micros)
             .unwrap_or_else(now_micros),
     };
-    let mut envelope =
-        DashboardEnvelopeV1::new(scope, domain_state, coverage, freshness, presentation.payload)
-            .with_legal_actions(vec![DashboardLegalActionRefV1::new(
-                DashboardLegalActionKindV1::Refresh,
-                FEEDBACK_STATUS_REFRESH_OPERATION,
-            )]);
+    let mut envelope = DashboardEnvelopeV1::new(
+        scope,
+        domain_state,
+        coverage,
+        freshness,
+        presentation.payload,
+    )
+    .with_legal_actions(vec![DashboardLegalActionRefV1::new(
+        DashboardLegalActionKindV1::Refresh,
+        FEEDBACK_STATUS_REFRESH_OPERATION,
+    )]);
     envelope.source_watermark = source_watermark;
     envelope.time = time;
     envelope

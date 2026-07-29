@@ -9,8 +9,8 @@ use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
     SETTINGS_REFRESH_OPERATION, USER_SETTINGS_APPLY_OPERATION,
     configuration_application_problem_error, configuration_authority_unavailable_error,
-    configuration_revision_conflict_error, parse_project_settings_patch,
-    parse_user_settings_patch, settings_validation_error, validate_user_settings_patch,
+    configuration_revision_conflict_error, parse_project_settings_patch, parse_user_settings_patch,
+    settings_validation_error, validate_user_settings_patch,
 };
 
 use super::DashboardState;
@@ -39,8 +39,10 @@ use crate::user_config;
 
 pub(crate) use tracedecay_api::configuration::{ProjectSettingsPatch, UserSettingsPatch};
 
-type ApiResult =
-    std::result::Result<Json<DashboardEnvelopeV1<SettingsPayloadV1>>, DashboardConfigurationRouteErrorV1>;
+type ApiResult = std::result::Result<
+    Json<DashboardEnvelopeV1<SettingsPayloadV1>>,
+    DashboardConfigurationRouteErrorV1,
+>;
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
 
@@ -284,9 +286,7 @@ pub(crate) async fn patch_user_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_user_settings_patch(patch)?;
-    validate_user_settings_patch(&patch, |value| {
-        user_config::parse_duration(value).is_some()
-    })?;
+    validate_user_settings_patch(&patch, |value| user_config::parse_duration(value).is_some())?;
 
     let mutation = match state
         .user_settings
@@ -323,10 +323,8 @@ async fn settings_envelope(
     state: &DashboardState,
     resync_recommended: Option<bool>,
     restart_recommended: Option<bool>,
-) -> std::result::Result<
-    DashboardEnvelopeV1<SettingsPayloadV1>,
-    DashboardConfigurationRouteErrorV1,
-> {
+) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
+{
     let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
         .map_err(|_| configuration_authority_unavailable_error())?;
     let legacy_config_path = state.config_path.clone();
@@ -620,7 +618,9 @@ fn project_preview_error(
                 &actual,
             )
         }
-        ProjectSettingsPreviewErrorV1::InvalidAuthority => configuration_authority_unavailable_error(),
+        ProjectSettingsPreviewErrorV1::InvalidAuthority => {
+            configuration_authority_unavailable_error()
+        }
     }
 }
 
