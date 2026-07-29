@@ -1,9 +1,10 @@
-//! PR12 LSP composition over the canonical feedback runtime.
+//! Production LSP composition over the canonical feedback runtime.
 //!
 //! The adapter mints authorized reads through [`Pr12FeedbackRuntime`] and
 //! invokes its daemon owner. The cloned [`ProjectFeedbackStore`] is the same
-//! durable publication/dedupe authority used by the Plan 09 cycle; this module
-//! creates no feedback store, cache, cursor codec, or diagnostic authority.
+//! durable publication/dedupe authority used by the feedback cycle; this
+//! module creates no feedback store, cache, cursor codec, or diagnostic
+//! authority.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -33,6 +34,9 @@ use tracedecay_domain::feedback::{
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, ManifestDigest, UtcMicros,
 };
+use tracedecay_lsp::analyzer::adapters::{LspAdapterDefinition, builtin_adapters};
+use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
+use tracedecay_lsp::analyzer::client::LspDocument;
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
 use tracedecay_store::DiagnosticStore as _;
 use url::Url;
@@ -66,9 +70,6 @@ use crate::daemon::lsp_gateway::{
     byte_offset_to_utf16_position,
 };
 use crate::db::Database;
-use crate::diagnostics::lsp::adapters::builtin_adapters;
-use crate::diagnostics::lsp::broker::DiagnosticBroker;
-use crate::diagnostics::lsp::client::LspDocument;
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
@@ -2199,7 +2200,7 @@ fn canonical_application_value<T: Serialize>(
 /// Mount-ready bundle construction. The same concrete feedback source is
 /// shared by cycle triggers, managed diagnostics, and context projections.
 #[allow(clippy::too_many_arguments)]
-pub fn pr12_lsp_session_factory<F>(
+pub fn lsp_session_factory<F>(
     runtime: tokio::runtime::Handle,
     feedback_runtime: Arc<Pr12FeedbackRuntime>,
     database: Database,
@@ -2248,6 +2249,8 @@ where
         upstream_capabilities,
     ))
 }
+
+pub use lsp_session_factory as pr12_lsp_session_factory;
 
 fn test_run_projection(
     root: AdmittedRoot,
@@ -2570,9 +2573,7 @@ fn impact_coverage(state: Option<FeedbackImpactStateV1>) -> ContextCoverage {
     }
 }
 
-fn adapter_for_path(
-    path: &Path,
-) -> Option<crate::diagnostics::lsp::adapters::LspAdapterDefinition> {
+fn adapter_for_path(path: &Path) -> Option<LspAdapterDefinition> {
     let extension = path.extension()?.to_str()?;
     builtin_adapters().into_iter().find(|adapter| {
         adapter.extensions.iter().any(|candidate| {

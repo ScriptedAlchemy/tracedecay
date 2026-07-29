@@ -38,6 +38,10 @@ use tracedecay_domain::{
     RefId, UtcMicros, canonical_sha256,
 };
 use tracedecay_hooks::{HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookHostV1};
+use tracedecay_lsp::{
+    ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
+    GatewayCapabilities, LspRuntimeFailure, LspRuntimeFuture, TRACEDECAY_CONTEXT_REVISION,
+};
 use tracedecay_tool_catalog::CapabilityId;
 
 use super::{
@@ -96,10 +100,7 @@ use crate::application::primitives::{
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
-use crate::daemon::lsp_gateway::{
-    ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    GatewayCapabilities, LspRuntimeFailure, LspRuntimeFuture,
-};
+use crate::daemon::lsp_gateway::DaemonLspSessionFactory;
 use crate::daemon::service::invocation::{
     daemon_operation_event_authority, observe_accepted_feedback_cycle_terminal,
 };
@@ -857,18 +858,19 @@ fn source_edit_authority_error() -> TraceDecayError {
 impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthorizationV1 {
     fn authorize(&self, observed_at: UtcMicros) -> ProductionFeedbackCycleAuthorizationFuture<'_> {
         Box::pin(async move {
-            let current = self.configuration.client().current().await.map_err(|_| {
-                crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-authorization")
-            })?;
+            let current = self
+                .configuration
+                .client()
+                .current()
+                .await
+                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-authorization"))?;
             daemon_owned_project_source_access_at(
                 &self.scope,
                 &self.project_root,
                 &current,
                 observed_at,
             )
-            .map_err(|_| {
-                crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-authorization")
-            })
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-authorization"))
         })
     }
 }
@@ -930,7 +932,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
     configuration: crate::config::PinnedRuntimeConfiguration,
     requester: ActorId,
     mounted_providers: Vec<MountedLspProvider>,
-    lsp_session_factory: Arc<crate::daemon::lsp_gateway::Pr12LspSessionFactory>,
+    lsp_session_factory: Arc<DaemonLspSessionFactory>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
     admitted_root_uri: String,
@@ -1583,11 +1585,11 @@ async fn register_production_lsp_owner(
     diagnostic_broker: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     admitted_providers: &[AdmittedLspProvider],
     root_uri: String,
-) -> Result<Arc<crate::daemon::lsp_gateway::Pr12LspSessionFactory>> {
+) -> Result<Arc<DaemonLspSessionFactory>> {
     let (languages, gateway_capabilities) = production_lsp_registration(admitted_providers);
     invocation
         .lsp_owner_registrar()
-        .build_and_register_pr12(
+        .build_and_register(
             project_root.to_path_buf(),
             database,
             Arc::new(invocation.code_index_schedulers.clone()),
@@ -1605,7 +1607,7 @@ async fn register_production_lsp_owner(
 fn production_lsp_registration(
     admitted_providers: &[AdmittedLspProvider],
 ) -> (Vec<String>, GatewayCapabilities) {
-    let revision = crate::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
+    let revision = TRACEDECAY_CONTEXT_REVISION;
     let gateway_capabilities = GatewayCapabilities {
         semantic: graph_semantic_capabilities(),
         context_projections: BTreeMap::from([
@@ -1636,7 +1638,7 @@ async fn register_production_advisory_owner(
     feedback_scope: FeedbackScopeV1,
     feedback_cycle: Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
     feedback_lsp_input: Pr12FeedbackCycleLspInput,
-    lsp_session_factory: Arc<crate::daemon::lsp_gateway::Pr12LspSessionFactory>,
+    lsp_session_factory: Arc<DaemonLspSessionFactory>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
     root_uri: String,
