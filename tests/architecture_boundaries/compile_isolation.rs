@@ -11,6 +11,18 @@ use serde::Deserialize;
 struct CargoMetadata {
     packages: Vec<CargoPackage>,
     resolve: CargoResolve,
+    workspace_members: Vec<String>,
+}
+
+impl CargoMetadata {
+    fn workspace_member_names(&self) -> BTreeSet<String> {
+        let members = self.workspace_members.iter().collect::<BTreeSet<_>>();
+        self.packages
+            .iter()
+            .filter(|package| members.contains(&package.id))
+            .map(|package| package.name.clone())
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -104,6 +116,10 @@ fn direct_dependencies(metadata: &CargoMetadata, package_name: &str) -> BTreeSet
         .collect()
 }
 
+/// The only packages allowed to compile grammars, structural search, or the root
+/// indexer. Every other workspace member is held to the closure below.
+const INDEXING_PACKAGES: &[&str] = &["tracedecay", "tracedecay-code-index", "tracedecay-query"];
+
 #[test]
 fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
     let metadata = cargo_metadata();
@@ -116,13 +132,30 @@ fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
         "tree-sitter-language",
     ]);
 
-    for package in [
-        "tracedecay-application",
-        "tracedecay-domain",
-        "tracedecay-policy",
-        "tracedecay-store",
-    ] {
-        let closure = dependency_closure(&metadata, package);
+    // Derived from workspace membership rather than a named list, so a newly
+    // extracted crate is covered the moment it joins the workspace. A named
+    // list left the capture, host-integration, and migrate extractions
+    // unguarded here until someone thought to add them.
+    let members = metadata.workspace_member_names();
+    for indexing in INDEXING_PACKAGES {
+        assert!(
+            members.contains(*indexing),
+            "{indexing} is exempt from the grammar closure but is not a workspace member; \
+             re-scope INDEXING_PACKAGES instead of leaving a stale exemption"
+        );
+    }
+    let guarded = members
+        .iter()
+        .filter(|member| !INDEXING_PACKAGES.contains(&member.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !guarded.is_empty(),
+        "workspace membership must resolve, otherwise this guard proves nothing"
+    );
+
+    for package in guarded {
+        let closure = dependency_closure(&metadata, &package);
         let violations = closure
             .iter()
             .filter(|dependency| {
@@ -312,6 +345,51 @@ fn store_dependencies_are_exactly_the_contract_allowlist() {
         direct, expected_direct,
         "tracedecay-store dependencies must remain exactly contract-only"
     );
+}
+
+#[test]
+fn capture_dependencies_are_exactly_the_provider_kernel_allowlist() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-capture");
+    let expected_direct = [
+        "hex",
+        "serde_json",
+        "sha2",
+        "thiserror",
+        "tracedecay-domain",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        direct, expected_direct,
+        "provider capture kernels normalize captured payloads; they must not depend \
+         on stores, transports, hosts, or the root crate"
+    );
+    assert!(!direct.contains("tracedecay"));
+}
+
+#[test]
+fn host_integration_dependencies_are_exactly_the_contract_allowlist() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-host-integration");
+    let expected_direct = [
+        "schemars",
+        "serde",
+        "serde_json",
+        "sha2",
+        "thiserror",
+        "tracedecay-domain",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        direct, expected_direct,
+        "host integration owns manifests, receipts, journals, and evidence as values; \
+         installing them belongs to an adapter, so no store, transport, or root crate"
+    );
+    assert!(!direct.contains("tracedecay"));
 }
 
 #[test]
