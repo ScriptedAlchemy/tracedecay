@@ -4,9 +4,16 @@
 //! binding and its application result after dispatch, then encodes that result
 //! for HTTP. It owns no store, query, policy, or LSP tunnel authority.
 //!
+//! [`read_model`] is the normative dashboard presentation envelope and the
+//! generation source for the frontend's wire contracts; [`doctor`] owns the
+//! read-only Doctor/health route descriptors and their DTO mapping. Both
+//! translate admitted application contracts and evaluate nothing themselves.
+//!
 #![forbid(unsafe_code)]
 
+pub mod doctor;
 mod http;
+pub mod read_model;
 mod sse;
 
 use serde::Serialize;

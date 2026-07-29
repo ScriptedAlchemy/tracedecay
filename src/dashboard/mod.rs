@@ -1223,7 +1223,12 @@ fn project_api_router() -> Router<DashboardState> {
         // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
-        .route("/api/doctor/findings", get(doctor_findings_api::findings))
+        // Read-only Doctor/health paths come from the API-owned descriptors in
+        // `tracedecay_api::doctor` so the mount cannot drift from them.
+        .route(
+            tracedecay_api::doctor::DOCTOR_FINDINGS_ROUTE_PATH,
+            get(doctor_findings_api::findings),
+        )
         .route(
             "/api/doctor/remediations/preview",
             post(doctor_remediation_api::preview),
@@ -1240,7 +1245,10 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/storage/telemetry",
             get(storage_telemetry_api::telemetry),
         )
-        .route("/api/storage/findings", get(storage_findings_api::findings))
+        .route(
+            tracedecay_api::doctor::STORAGE_FINDINGS_ROUTE_PATH,
+            get(storage_findings_api::findings),
+        )
         .route(
             "/api/code-index/freshness",
             get(code_index_freshness_api::freshness),

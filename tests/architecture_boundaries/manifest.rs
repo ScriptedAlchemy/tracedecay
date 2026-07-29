@@ -51,6 +51,7 @@ const CONTRACT_PACKAGE_ALLOWLISTS: &[(&str, &[&str])] = &[
         &[
             "axum",
             "futures-util",
+            "schemars",
             "serde",
             "serde_json",
             "thiserror",

@@ -5514,6 +5514,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
