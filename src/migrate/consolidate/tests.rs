@@ -36,6 +36,7 @@ use crate::memory::types::{
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 use crate::tracedecay::TraceDecayOpenOptions;
 
+mod configuration;
 mod external_source;
 mod lifecycle;
 mod memory;
