@@ -348,7 +348,19 @@ fn migrate_package_owns_no_store_or_lifecycle_authority() {
         !sources.is_empty(),
         "expected tracedecay-migrate sources; a vacuous scan proves nothing"
     );
+    // Guard the guard: stripping documentation must not also hide real code.
+    assert!(
+        strip_line_comments("use rusqlite::Connection;").contains("rusqlite"),
+        "comment stripping must leave code that reaches store authority visible"
+    );
+    assert!(
+        !strip_line_comments("//! drives the rusqlite runtime in root").contains("rusqlite"),
+        "prose naming the boundary must not trip this guard"
+    );
     for (path, source) in &sources {
+        // Scan code only: these modules legitimately *name* the authority they
+        // must not reach when documenting the boundary.
+        let code = strip_line_comments(source);
         for forbidden in [
             "crate::db",
             "crate::global_db",
@@ -359,12 +371,20 @@ fn migrate_package_owns_no_store_or_lifecycle_authority() {
             "tracedecay_rusqlite",
         ] {
             assert!(
-                !source.contains(forbidden),
+                !code.contains(forbidden),
                 "{}: migration planning must not reach store or lifecycle authority: {forbidden}",
                 path.display()
             );
         }
     }
+}
+
+fn strip_line_comments(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
