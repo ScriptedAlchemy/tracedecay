@@ -200,15 +200,15 @@ impl CodeIndexSchedulerRegistryV1 {
             &project_root,
             super::scoped_code_index_store_root(&store_root, &project_root),
         )?;
-        if let Some(hook) = semantic_schedule {
+        if let Some(hook) = semantic_schedule.clone() {
             opened.replace_semantic_schedule_hook(Some(hook));
         }
+        let restored_generation = opened.latest_complete();
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        let needs_initial_reconcile = active_generation_encoded_bytes.load(Ordering::Acquire) == 0;
-        let serving_generation = Arc::new(RwLock::new(None));
+        let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let (wake, shutting_down) = {
@@ -302,9 +302,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
-        if needs_initial_reconcile {
-            initial_wake.notify_one();
+        if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
+            let _ = hook(&latest.generation);
         }
+        // A restored generation remains immutable serving evidence, but current
+        // worktree truth still has to be proven without waiting for a query.
+        initial_wake.notify_one();
         Ok(true)
     }
 
