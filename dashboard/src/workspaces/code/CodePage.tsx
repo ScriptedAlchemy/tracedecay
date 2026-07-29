@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Waypoints } from 'lucide-react';
+import { Suspense, lazy, useState } from 'react';
+import { ArrowLeft, Waypoints } from 'lucide-react';
 import {
   DataRow,
   ExplorerSplit,
@@ -21,7 +21,7 @@ import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
-import { TraceView, type TraceFocus } from './TraceView.tsx';
+import type { TraceFocus } from './TraceView.tsx';
 import {
   type GraphNode,
   type GraphOverviewPayload,
@@ -30,6 +30,17 @@ import {
   type GraphSubgraphPayload,
   GraphSubgraphPayloadSchema,
 } from '../../contracts/wire.ts';
+
+// Imports live at the top of a module; a `lazy` dynamic import is the
+// documented exception, because the point is that the module is NOT fetched
+// until it is needed. The trace drill-in is a thousand lines plus the whole of
+// `viz/trace` — canvas renderer, spring integrator, palette — and most visits
+// to this workspace never open it, so it is its own chunk rather than dead
+// weight in the spine's. The `TraceFocus` import above stays a normal
+// top-level type import: types are erased, so it costs nothing at runtime.
+const TraceView = lazy(() =>
+  import('./TraceView.tsx').then((m) => ({ default: m.TraceView })),
+);
 
 const BASE = '/api/plugins/graph';
 
@@ -189,14 +200,18 @@ export function CodePage() {
       }
       list={
         traced ? (
-          <TraceView
-            focus={traced}
-            onClose={() => setTraced(null)}
-            onFocusChange={(node) => {
-              setTraced(node);
-              setSelected(node);
-            }}
-          />
+          <Suspense
+            fallback={<TraceChunkFallback focus={traced} onClose={() => setTraced(null)} />}
+          >
+            <TraceView
+              focus={traced}
+              onClose={() => setTraced(null)}
+              onFocusChange={(node) => {
+                setTraced(node);
+                setSelected(node);
+              }}
+            />
+          </Suspense>
         ) : (
           // Two scroll containers, one inside the other: the archetype already
           // scrolls the list slot, and this pane pinned itself to `h-full` of
@@ -355,6 +370,60 @@ export function CodePage() {
         ) : undefined
       }
     />
+  );
+}
+
+/**
+ * What stands in the list slot while the trace chunk is being fetched.
+ *
+ * The geometry is `TraceView`'s own opening row — same 32px header, same rule,
+ * same padding, same back control in the same place — so the surface does not
+ * shift when the chunk arrives and a keyboard reader is never stranded in a
+ * pane with no way out of it.
+ *
+ * What it must NOT do is look like a trace. At this point no neighbour request
+ * has been issued at all, so there is no field, no count and no symbol list to
+ * stand in for; a skeleton of the readout plate or a `0` under `Callers` would
+ * be a fabricated reading of a query that has not been asked. It reports the
+ * one thing that is true — the module is still loading — and says plainly that
+ * this is not an empty neighbourhood. The focus name is the symbol the reader
+ * just chose, which is already in hand and not a guess.
+ */
+function TraceChunkFallback({
+  focus,
+  onClose,
+}: {
+  focus: TraceFocus;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col" data-testid="trace-chunk-fallback">
+      <header className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex shrink-0 items-center gap-1 text-2xs text-text-muted hover:text-text-primary focus-visible:text-text-primary"
+        >
+          <ArrowLeft aria-hidden size={12} />
+          Back to spine
+        </button>
+        <span aria-hidden className="td-rule" />
+        <h2 className="td-title min-w-0 truncate">
+          <span className="text-text-muted">trace · </span>
+          {displayName(focus)}
+        </h2>
+      </header>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <p
+          role="status"
+          className="px-2.5 py-2 text-2xs leading-relaxed text-state-loading"
+        >
+          loading the trace view — the code for this surface is still arriving. No
+          call edge has been requested yet, so nothing here is an empty
+          neighbourhood, a zero or a settled field.
+        </p>
+      </div>
+    </div>
   );
 }
 

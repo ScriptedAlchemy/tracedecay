@@ -17,28 +17,15 @@
 //! that discovers run directories and parses transcripts, and the
 //! `tracedecay_workflows` query surface, build on the APIs defined here.
 
-use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
+pub use tracedecay_sessions::{
+    WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus,
+};
 
 use crate::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
 use crate::sessions::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
-
-/// Scopes a `tracedecay_message_search` to the agent transcripts of one
-/// workflow run, mirroring [`GitScopeFilter`] as a search-only concern. The
-/// run's messages are the messages of its agents (rows in `workflow_agents`).
-/// The session-message search applies this with an `EXISTS` pushdown.
-/// Serializes so the applied filter echoes cleanly into the payload.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct WorkflowScopeFilter {
-    /// The `wf_*` run whose agents' messages to keep.
-    pub run_id: String,
-    /// When set, narrows the scope to just this one agent of the run
-    /// (matched on `workflow_agents.agent_label`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_label: Option<String>,
-}
 
 /// Schema version recorded in `session_schema_migrations` under
 /// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
@@ -88,141 +75,6 @@ impl From<crate::sessions::git_correlation::GitCorrelationError> for WorkflowInd
             }
         }
     }
-}
-
-/// Lifecycle state of a workflow run or agent.
-///
-/// Mirrors the Claude Code run JSON `status` / agent `state` vocabulary while
-/// tolerating unknown strings (forward-compat): anything unrecognized folds to
-/// [`WorkflowStatus::Unknown`] rather than failing ingest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowStatus {
-    /// Still executing (run dir present, no terminal result yet).
-    Running,
-    /// Reached a successful terminal result.
-    Completed,
-    /// Terminated in error / blocked / interrupted.
-    Failed,
-    /// Status not recorded or not recognized.
-    Unknown,
-}
-
-impl WorkflowStatus {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// Normalizes an on-disk status/state token. Recognizes the Claude Code
-    /// run vocabulary (`completed`, `running`, `failed`, `error`, `blocked`,
-    /// agent `done`/`in_progress`); everything else becomes `Unknown`.
-    pub fn from_disk(value: &str) -> Self {
-        let trimmed = value.trim();
-        if matches_token(trimmed, &["completed", "done", "success", "succeeded"]) {
-            Self::Completed
-        } else if matches_token(
-            trimmed,
-            &["running", "in_progress", "started", "active", "pending"],
-        ) {
-            Self::Running
-        } else if matches_token(
-            trimmed,
-            &[
-                "failed",
-                "error",
-                "errored",
-                "blocked",
-                "interrupted",
-                "cancelled",
-                "canceled",
-                "timeout",
-                "timed_out",
-            ],
-        ) {
-            Self::Failed
-        } else {
-            Self::Unknown
-        }
-    }
-}
-
-/// One indexed workflow run (`wf_*` directory + its `workflows/<run_id>.json`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowRun {
-    /// `wf_*` run id (also the transcript directory name). Primary key.
-    pub run_id: String,
-    /// The user-thread session that spawned this run; the run inherits this
-    /// session's git spans. May be empty when the parent could not be resolved
-    /// from disk (orphan run dir), in which case git-scope joins skip it.
-    pub parent_session_id: String,
-    /// Workflow name from the run meta (`workflowName` / `meta.name`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Serialized `phases` array from the run meta, verbatim JSON text.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase_json: Option<String>,
-    pub status: WorkflowStatus,
-    /// Run start (unix seconds). Derived from `startTime`/`timestamp`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_ts: Option<i64>,
-    /// Run end (unix seconds). `started_ts + durationMs` when only a duration
-    /// is recorded.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ended_ts: Option<i64>,
-    /// Final run result rendered to a short summary string (the run JSON
-    /// `summary`, or a truncated `result`), never the full result blob.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_summary: Option<String>,
-    /// Number of agents recorded for the run (`agentCount`), for a cheap
-    /// list-view count without joining `workflow_agents`.
-    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
-    pub agent_count: i64,
-}
-
-/// One workflow agent: a single per-phase subagent invocation within a run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowAgent {
-    pub run_id: String,
-    /// Human label from the run's `workflowProgress` (`label`, e.g.
-    /// `mine:claude-transcripts`). Unique within a run together with
-    /// `agent_id`.
-    pub agent_label: String,
-    /// Claude agent id (`agentId`, e.g. `a17141dbe5a308242`) — the stem of the
-    /// transcript file. Empty when a progress row lacked one.
-    pub agent_id: String,
-    /// Phase title this agent ran under (`phaseTitle`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Absolute path to the agent's `agent-<id>.jsonl` transcript, when the
-    /// file was found on disk. Drill-down reads replay from here.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcript_path: Option<String>,
-    /// The agent's own session id, when the transcript recorded one distinct
-    /// from the parent thread.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_session_id: Option<String>,
-    pub status: WorkflowStatus,
-    /// Model that ran the agent (`model`), when recorded.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Total tokens (input+output, summed from transcript `usage`), when known.
-    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
-    pub tokens: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_ts: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ended_ts: Option<i64>,
-}
-
-fn matches_token(value: &str, tokens: &[&str]) -> bool {
-    tokens.iter().any(|token| value.eq_ignore_ascii_case(token))
 }
 
 /// Ensures the workflow-index tables exist in the session store. Version-gated
