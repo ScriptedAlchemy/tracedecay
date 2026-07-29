@@ -116,6 +116,12 @@ impl McpServer {
             pre_cancelled,
         ));
         tokio::pin!(handling);
+        // One-shot clients (the CLI and the stdio proxy) shut down their write
+        // half once the request is on the wire, so end-of-input means "no more
+        // requests", not "peer is gone". Stop watching for cancellations and
+        // keep serving the in-flight response. Cancel only on actual peer loss
+        // (read/write I/O failure) or explicit shutdown/cancel paths.
+        let mut peer_input_closed = false;
         loop {
             tokio::select! {
                 response = &mut handling => return Ok((response, false)),
@@ -125,16 +131,19 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = transport.read_line() => {
+                incoming = transport.read_line(), if !peer_input_closed => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
+                            peer_input_closed = true;
+                            continue;
+                        }
+                        Err(error) => {
                             if let Some(id) = request.id.as_ref() {
                                 let _ = self.cancel_application_surface_request(id, &connection_scope);
                             }
-                            return Ok((None, true));
+                            return Err(error.into());
                         }
-                        Err(error) => return Err(error.into()),
                     };
                     let parsed = serde_json::from_str::<JsonRpcRequest>(line.trim());
                     if let Ok(notification) = &parsed
@@ -412,14 +421,14 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        let monitored_tool_call = request.method == "tools/call"
+                        let cancellable_tool_call = request.method == "tools/call"
                             && request
                                 .params
                                 .as_ref()
                                 .and_then(|params| params.get("name"))
                                 .and_then(Value::as_str)
-                                .is_some();
-                        if monitored_tool_call {
+                                .is_some_and(super::requests::tool_supports_live_cancellation);
+                        if cancellable_tool_call {
                             let shutdown_requested = async {
                                 if listen_for_process_signals {
                                     #[cfg(unix)]
@@ -514,6 +523,12 @@ impl McpServer {
                             Ok(true) => {}
                             Ok(false) => break 'connection,
                             Err(error) => {
+                                if let Some((id, _)) = &revocable_tool_call {
+                                    let _ = self.cancel_application_surface_request(
+                                        id,
+                                        connection_route.memory_request_scope(),
+                                    );
+                                }
                                 self.shutdown_if(shutdown_on_exit).await;
                                 return Err(error.into());
                             }
@@ -534,6 +549,12 @@ impl McpServer {
                     Ok(false) => break 'connection,
                     Err(error) => {
                         tracing::error!(error = %error, "failed to write MCP response");
+                        if let Some((id, _)) = &revocable_tool_call {
+                            let _ = self.cancel_application_surface_request(
+                                id,
+                                connection_route.memory_request_scope(),
+                            );
+                        }
                         self.shutdown_if(shutdown_on_exit).await;
                         return Err(error.into());
                     }

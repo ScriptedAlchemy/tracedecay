@@ -601,6 +601,105 @@ async fn cancellable_tool_call_is_answered_after_client_half_close() {
     );
 }
 
+/// A hard peer-loss read error during an in-flight cancellable `tools/call`
+/// must cancel the request and fail the connection without writing a response.
+#[tokio::test]
+async fn cancellable_tool_call_is_cancelled_on_peer_read_failure() {
+    struct PeerLossTransport {
+        request: Option<String>,
+        written: Vec<String>,
+    }
+
+    impl tracedecay::mcp::transport::McpTransport for PeerLossTransport {
+        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+            match self.request.take() {
+                Some(line) => Ok(Some(line)),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "peer lost during tools/call",
+                )),
+            }
+        }
+
+        async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.written.push(line.to_string());
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (server, _dir) = setup_server().await;
+    let mut transport = PeerLossTransport {
+        request: Some(jsonrpc_request(
+            json!(42),
+            "tools/call",
+            json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
+        )),
+        written: Vec::new(),
+    };
+
+    let err = server
+        .run_connection(&mut transport)
+        .await
+        .expect_err("peer read failure should fail the connection");
+    assert!(
+        err.to_string().contains("peer lost during tools/call"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        transport.written.is_empty(),
+        "peer-loss cancellation must not write a tools/call response, got {:?}",
+        transport.written
+    );
+}
+
+/// A write-side peer loss after the request has been accepted must fail the
+/// connection rather than pretending the response was delivered.
+#[tokio::test]
+async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
+    struct WriteFailTransport {
+        request: Option<String>,
+    }
+
+    impl tracedecay::mcp::transport::McpTransport for WriteFailTransport {
+        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+            Ok(self.request.take())
+        }
+
+        async fn write_line(&mut self, _line: &str) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "peer write half gone",
+            ))
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (server, _dir) = setup_server().await;
+    let mut transport = WriteFailTransport {
+        request: Some(jsonrpc_request(
+            json!(43),
+            "tools/call",
+            json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
+        )),
+    };
+
+    let err = server
+        .run_connection(&mut transport)
+        .await
+        .expect_err("peer write failure should fail the connection");
+    assert!(
+        err.to_string().contains("peer write half gone"),
+        "unexpected error: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 7. test_tools_call_status
 // ---------------------------------------------------------------------------
