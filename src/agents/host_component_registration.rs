@@ -156,8 +156,8 @@ impl HostComponentRegistrationDelegate {
         });
         if self.project_path.is_some() {
             CompatibilityRegistrationMode::LegacyIntegration
-        } else if self.integration.id() == "kimi"
-            || (self.integration.id() == "opencode"
+        } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
+            || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
                 && component_set.components.iter().any(|component| {
                     matches!(
                         component.manifest.component,
@@ -167,7 +167,9 @@ impl HostComponentRegistrationDelegate {
                 }))
         {
             CompatibilityRegistrationMode::DeployedActivation
-        } else if self.integration.id() == "opencode" || !includes_core {
+        } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
+            || !includes_core
+        {
             CompatibilityRegistrationMode::ArtifactOnly
         } else {
             CompatibilityRegistrationMode::LegacyIntegration
@@ -188,7 +190,7 @@ impl HostComponentRegistrationDelegate {
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
     ) -> bool {
-        self.integration.id() == "opencode"
+        component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
             && component_set.components.iter().any(|component| {
                 component.manifest.component
                     == crate::agents::host_bundle_v2::HostBundleComponentV1::Core
@@ -225,7 +227,7 @@ impl HostComponentRegistrationDelegate {
         if !self.requires_competing_analyzer_preflight(component_set) {
             return Ok(());
         }
-        let Some((config, _)) = self.opencode_registration_document()? else {
+        let Some((config, _)) = self.opencode_registration_document(component_set)? else {
             return Ok(());
         };
         let aliased = config
@@ -250,9 +252,10 @@ impl HostComponentRegistrationDelegate {
     /// that cannot see the surface must never report it as clear.
     fn opencode_registration_document(
         &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
     ) -> Result<Option<(serde_json::Value, [u8; 32])>, crate::agents::host_bundle_v2::HostBundleError>
     {
-        if self.integration.id() != "opencode" {
+        if component_set.host != crate::agents::host_bundle_v2::HostKindV1::OpenCode {
             return Ok(None);
         }
         let Some(path) = &self.registration_path else {
@@ -282,7 +285,8 @@ impl HostComponentRegistrationDelegate {
         if !self.requires_competing_analyzer_preflight(component_set) {
             return Ok(Vec::new());
         }
-        let Some((config, evidence_digest)) = self.opencode_registration_document()? else {
+        let Some((config, evidence_digest)) = self.opencode_registration_document(component_set)?
+        else {
             return Ok(Vec::new());
         };
         let tracedecay_extensions = opencode_tracedecay_extensions(component_set);

@@ -100,7 +100,9 @@ pub fn unsupported_host_component_set_reason(
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
         // is packaged.
-        HostKindV1::CursorCloud => Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported),
+        HostKindV1::CursorCloud => {
+            Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
+        }
         // Kiro's hook route is degraded by its own native fixture, and the
         // Cline family has no checked-in evidence admitting a packaged route.
         HostKindV1::Kiro => Some(HostCapabilityUnavailableReasonV1::NativeFixtureLimited),
@@ -197,7 +199,10 @@ pub fn verified_embedded_project_host_component_set(
         let artifacts = vec![HostBundleArtifactV1 {
             relative_path: relative_path.clone(),
             artifact_digest: Sha256::digest(&bytes).into(),
-            ownership_marker: format!("tracedecay.{}.{component_name}.v1", host_name(host)),
+            ownership_marker: format!(
+                "tracedecay.{}.{component_name}.v1",
+                host.descriptor().slug()
+            ),
         }];
         let manifest = HostBundleManifestV1 {
             schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
@@ -345,7 +350,8 @@ fn verified_embedded_host_bundle_with_tracedecay_bin(
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
     require_component_capabilities(host, component)
         .map_err(|_| HostBundleRegistryError::Incompatible)?;
-    let host_name = host_name(host);
+    let host_descriptor = host.descriptor();
+    let host_name = host_descriptor.slug();
     let component_name = component_name(component);
     let assets = component_assets(host, component, tracedecay_bin)?;
     let artifacts = assets
@@ -652,23 +658,6 @@ fn render_compiled_asset(body: &str) -> String {
     body.replace("\"__TRACEDECAY_BIN__\"", &encoded)
         .replace("\"__TRACEDECAY_SYNC__\"", &sync)
         .replace("\"__TRACEDECAY_STOP__\"", &stop)
-}
-
-fn host_name(host: HostKindV1) -> &'static str {
-    match host {
-        HostKindV1::ClaudeCode => "claude-code",
-        HostKindV1::CursorDesktop => "cursor-desktop",
-        HostKindV1::CursorCloud => "cursor-cloud",
-        HostKindV1::Codex => "codex",
-        HostKindV1::Hermes => "hermes",
-        HostKindV1::Kiro => "kiro",
-        HostKindV1::ClineFamily => "cline-family",
-        HostKindV1::Cline => "cline",
-        HostKindV1::RooCode => "roo-code",
-        HostKindV1::Kilo => "kilo",
-        HostKindV1::KimiCode => "kimi-code",
-        HostKindV1::OpenCode => "opencode",
-    }
 }
 
 fn component_name(component: HostBundleComponentV1) -> &'static str {

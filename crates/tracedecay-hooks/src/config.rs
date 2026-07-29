@@ -19,7 +19,7 @@ pub const MAX_HOOK_CONFIGURATION_BYTES: usize = 64 * 1024;
 const DIRECTORY_SYNC_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
 pub fn hook_configuration_path(data_root: &Path, host: HookHostV1) -> PathBuf {
-    data_root.join(format!("hook-config-{}.json", host.as_key()))
+    data_root.join(format!("hook-config-{}.json", host.hook_key()))
 }
 
 /// Daemon-issued configuration that a hook process can consume. All identity

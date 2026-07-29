@@ -4,7 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay session contracts and provider-neutral ports"
-include = ["/src/**"]
+include = ["/src/**", "/tests/**"]
 
 [dependencies]
+regex = "1"
 serde = { version = "1", features = ["derive"] }

@@ -1780,7 +1780,7 @@ pub fn inspect_installed_host_bundle_components_at(
         let restore_action = format!(
             "run `tracedecay feedback-rollback restore --state {} --yes` for {}",
             state_path,
-            host_cli_id(host)
+            host.descriptor().cli_id()
         );
         let component = HostBundleComponentV1::Core;
         if let Some(result) = components
@@ -1871,7 +1871,7 @@ fn corrupt_component_result(
         (Some(host), Some(component)) => format!(
             "remove the corrupt receipt {}, then run `tracedecay install --agent {} --component {} --yes`",
             receipt_path.display(),
-            host_cli_id(host),
+            host.descriptor().cli_id(),
             component_slug(component)
         ),
         _ => format!(
@@ -1900,7 +1900,8 @@ fn repair_action(
         return "run `tracedecay install --agent kimi` to refresh the staged bundle, then open Kimi Code and run `/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay`; rerun Doctor to verify registration".to_string();
     }
     let component = component_slug(component);
-    let host = host_cli_id(host);
+    let host_descriptor = host.descriptor();
+    let host = host_descriptor.cli_id();
     match state {
         HostBundleComponentDoctorStateV1::Current => "none".to_string(),
         HostBundleComponentDoctorStateV1::Repairable
@@ -1916,22 +1917,6 @@ fn repair_action(
         | HostBundleComponentDoctorStateV1::Corrupt => {
             format!("run `tracedecay reinstall --component {component} --yes`")
         }
-    }
-}
-
-fn host_cli_id(host: HostKindV1) -> &'static str {
-    match host {
-        HostKindV1::ClaudeCode => "claude",
-        HostKindV1::CursorDesktop | HostKindV1::CursorCloud => "cursor",
-        HostKindV1::Codex => "codex",
-        HostKindV1::Hermes => "hermes",
-        HostKindV1::Kiro => "kiro",
-        HostKindV1::ClineFamily => "cline",
-        HostKindV1::Cline => "cline",
-        HostKindV1::RooCode => "roo-code",
-        HostKindV1::Kilo => "kilo",
-        HostKindV1::KimiCode => "kimi",
-        HostKindV1::OpenCode => "opencode",
     }
 }
 
@@ -4522,7 +4507,7 @@ fn component_set_stage_name(component: HostBundleComponentV1, relative_path: &st
 fn receipt_file(host: HostKindV1, component: HostBundleComponentV1) -> String {
     format!(
         "receipt.{}.{}.v1.json",
-        host_slug(host),
+        host.descriptor().slug(),
         component_slug(component)
     )
 }
@@ -4542,7 +4527,7 @@ fn receipt_file(host: HostKindV1, component: HostBundleComponentV1) -> String {
 /// is already host-scoped (`receipt_file`), and the single writer lock still
 /// serializes all mutation within a lifecycle root.
 fn component_set_journal_file(host: HostKindV1) -> String {
-    format!("component-set-journal.{}.v1.json", host_slug(host))
+    format!("component-set-journal.{}.v1.json", host.descriptor().slug())
 }
 
 fn component_set_receipt_file(operation_id: [u8; 16]) -> String {
@@ -4571,26 +4556,9 @@ fn receipt_identity_from_file_name(file_name: &str) -> Option<(HostKindV1, HostB
 fn expected_ownership_marker(host: HostKindV1, component: HostBundleComponentV1) -> String {
     format!(
         "tracedecay.{}.{}.v1",
-        host_slug(host),
+        host.descriptor().slug(),
         component_slug(component)
     )
-}
-
-fn host_slug(host: HostKindV1) -> &'static str {
-    match host {
-        HostKindV1::ClaudeCode => "claude-code",
-        HostKindV1::CursorDesktop => "cursor-desktop",
-        HostKindV1::CursorCloud => "cursor-cloud",
-        HostKindV1::Codex => "codex",
-        HostKindV1::Hermes => "hermes",
-        HostKindV1::Kiro => "kiro",
-        HostKindV1::ClineFamily => "cline-family",
-        HostKindV1::Cline => "cline",
-        HostKindV1::RooCode => "roo-code",
-        HostKindV1::Kilo => "kilo",
-        HostKindV1::KimiCode => "kimi-code",
-        HostKindV1::OpenCode => "opencode",
-    }
 }
 
 fn component_slug(component: HostBundleComponentV1) -> &'static str {
