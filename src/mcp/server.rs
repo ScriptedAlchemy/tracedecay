@@ -565,6 +565,10 @@ pub struct McpServer {
 }
 
 impl McpServer {
+    pub(crate) fn doctor_report_ready(&self) -> bool {
+        self.dashboard_doctor_report_reader.is_some()
+    }
+
     /// Creates a new MCP server backed by the given code graph.
     ///
     /// Index freshness for source-editing tools is maintained by a lazy
