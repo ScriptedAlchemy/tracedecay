@@ -29,6 +29,12 @@ pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Hermes,
 ];
 
+const MAX_CODEX_SOURCE_FAILURES_PER_PASS: usize = 8;
+
+fn codex_source_failure_saturates_pass(failure_count: usize, retryable: bool) -> bool {
+    retryable || failure_count >= MAX_CODEX_SOURCE_FAILURES_PER_PASS
+}
+
 pub(super) struct ProjectProviderRun<'a> {
     pub(super) project_root: &'a Path,
     pub(super) project_id: &'a ProjectId,
@@ -92,12 +98,23 @@ impl<'a> ProjectProviderRun<'a> {
                     deferred |= progress.source_deferred || progress.bytes_consumed > remaining;
                     remaining = remaining.saturating_sub(progress.bytes_consumed);
                 }
-                Err(error) => outcome.add_failure(warn_transcript_catch_up_failure(
-                    "codex",
-                    "observation",
-                    &error,
-                    "project Codex observation catch-up failed",
-                )),
+                Err(error) => {
+                    let failure = warn_transcript_catch_up_failure(
+                        "codex",
+                        "observation",
+                        &error,
+                        "project Codex observation catch-up failed",
+                    );
+                    let stop = codex_source_failure_saturates_pass(
+                        outcome.failures.len().saturating_add(1),
+                        failure.retryable,
+                    );
+                    outcome.add_failure(failure);
+                    if stop {
+                        deferred = true;
+                        break;
+                    }
+                }
             }
         }
         outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
@@ -307,4 +324,22 @@ async fn ingest_project_claude_observations(
         cancellation.clone(),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_CODEX_SOURCE_FAILURES_PER_PASS, codex_source_failure_saturates_pass};
+
+    #[test]
+    fn codex_source_failures_bound_each_provider_pass() {
+        assert!(!codex_source_failure_saturates_pass(
+            MAX_CODEX_SOURCE_FAILURES_PER_PASS - 1,
+            false,
+        ));
+        assert!(codex_source_failure_saturates_pass(
+            MAX_CODEX_SOURCE_FAILURES_PER_PASS,
+            false,
+        ));
+        assert!(codex_source_failure_saturates_pass(1, true));
+    }
 }
