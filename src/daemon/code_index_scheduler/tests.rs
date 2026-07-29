@@ -656,6 +656,60 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduler_notifications_release_registry_while_reconcile_is_busy() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locked_tx.send(()).expect("announce scheduler lock");
+        release_rx.recv().expect("release scheduler lock");
+    });
+    locked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("scheduler lock acquisition");
+
+    let notification_registry = registry.clone();
+    let project_root = fixture.path().to_path_buf();
+    let edited_path = fixture.path().join("src/lib.rs");
+    let notification = tokio::spawn(async move {
+        notification_registry
+            .notify_path(&project_root, edited_path)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let registry_read = tokio::time::timeout(
+        Duration::from_millis(100),
+        registry.scheduler_handle(fixture.path()),
+    )
+    .await;
+    assert!(
+        registry_read.is_ok(),
+        "scheduler notification must not retain the mounted-worktree registry lock"
+    );
+
+    release_tx.send(()).expect("release scheduler");
+    assert!(notification.await.expect("notification task"));
+    blocker.join().expect("scheduler blocker");
+    registry.shutdown().await;
+}
+
 #[test]
 fn saved_edit_incremental_publish() {
     let fixture = GitFixture::new(&[(

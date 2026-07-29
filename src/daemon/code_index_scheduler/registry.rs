@@ -390,7 +390,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<Arc<crate::query::retrieval::Pr9QueryAuthorityV1>> {
-        let mounted = self.mounted.lock().await;
+        let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
         for worktree in mounted.values() {
             if worktree.repository_id != scope.repository_id
@@ -433,12 +433,14 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get(&project_root) else {
-            return false;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            Arc::clone(&worktree.scheduler)
         };
-        worktree
-            .scheduler
+        scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_path(path);
@@ -453,16 +455,18 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get(&project_root) else {
-            return false;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            Arc::clone(&worktree.scheduler)
         };
         let absolute = rel_paths
             .iter()
             .map(|rel| project_root.join(rel))
             .collect::<Vec<_>>();
-        worktree
-            .scheduler
+        scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_hook_paths(absolute);
@@ -653,7 +657,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
         let (scheduler, serving_generation) = {
-            let mounted = self.mounted.lock().await;
+            let mounted = self.mounted.try_lock().ok()?;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
@@ -727,7 +731,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let root = {
-            let mounted = self.mounted.lock().await;
+            let mounted = self.mounted.try_lock().ok()?;
             let mut matched = None;
             for (root, worktree) in mounted.iter() {
                 if worktree.repository_id == scope.repository_id
