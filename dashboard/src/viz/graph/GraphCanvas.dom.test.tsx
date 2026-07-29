@@ -62,6 +62,15 @@ vi.mock('graphology-layout-forceatlas2', () => ({
 vi.mock('sigma', () => ({
   default: class MockSigma {
     private readonly container: HTMLElement;
+    /** Sigma stacks several canvas layers over the container and hands them
+     * back by id; the renderer asks for that map to find the ones whose WebGL
+     * context can be lost. `GraphCanvas.context.dom.test.tsx` is where losing
+     * one is exercised. */
+    private readonly layers: Record<string, HTMLCanvasElement> = {
+      edges: document.createElement('canvas'),
+      nodes: document.createElement('canvas'),
+      hoverNodes: document.createElement('canvas'),
+    };
 
     constructor(
       graph: Graph,
@@ -82,6 +91,10 @@ vi.mock('sigma', () => ({
     }
 
     setCustomBBox() {}
+
+    getCanvases() {
+      return this.layers;
+    }
 
     /** Real Sigma exposes `resize(force?: boolean): this`; a live renderer
      * absorbs a container resize through it rather than being rebuilt. */

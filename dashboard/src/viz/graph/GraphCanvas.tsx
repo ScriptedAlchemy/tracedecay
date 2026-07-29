@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ActivationField } from './activation.ts';
 import { isMeasuredField } from './layout.ts';
-import { hasWebGl } from './renderer.ts';
+import { hasWebGl, watchWebGlContext } from './renderer.ts';
 import {
   buildEmergentScene,
   buildMeasuredScene,
@@ -139,6 +139,30 @@ export function GraphCanvas({
   const [engineFailedFor, setEngineFailedFor] = useState<readonly GraphCanvasNode[] | null>(
     null,
   );
+  /**
+   * The topology whose GPU context was lost after it had been drawn, if one
+   * was.
+   *
+   * The only failure on this canvas that arrives after a successful frame, and
+   * the one with no symptom of its own: a lost context leaves the last drawn
+   * pixels frozen, or clears them to nothing, and either reading is false. So
+   * it is stated, and held as the topology it happened to for the same reason
+   * the engine failure is — different nodes are a different attempt.
+   */
+  const [contextLostFor, setContextLostFor] = useState<readonly GraphCanvasNode[] | null>(
+    null,
+  );
+  /**
+   * Releases the watch on the WebGL layers of the renderer that is, or was,
+   * live.
+   *
+   * Held for as long as this canvas is mounted rather than for one scene's
+   * lifetime: a lost context has to take its renderer down with it, and the
+   * restore that brings the field back is dispatched at the canvas of the
+   * renderer that died. A watch released with the scene could report the loss
+   * but never the recovery.
+   */
+  const contextWatchRef = useRef<(() => void) | null>(null);
 
   /**
    * Attach the observer as the container mounts rather than in an effect: an
@@ -244,6 +268,12 @@ export function GraphCanvas({
     return () => observer.disconnect();
   }, []);
 
+  // The context watch is the one piece of wiring that outlives the scene it was
+  // armed for, so releasing it is this canvas's own last act. The effect below
+  // cannot: it has already unwound, along with the container it owned, by the
+  // time a restore can arrive.
+  useEffect(() => () => contextWatchRef.current?.(), []);
+
   // The scene's own lifetime. The dependency list is deliberately exactly the
   // set that invalidates a composed field: its topology, the axis it is framed
   // in, whether the container has a box at all, and any teardown that happened
@@ -280,6 +310,30 @@ export function GraphCanvas({
         if (teardownRef.current === detach) teardownRef.current = null;
       };
       teardownRef.current = detach;
+      // Sigma keeps no watch of its own, so a GPU context dropped after this
+      // field was drawn would leave a frozen or blank canvas on screen while
+      // everything around it went on presenting a drawn graph.
+      contextWatchRef.current?.();
+      contextWatchRef.current = watchWebGlContext(scene.webGlCanvases, {
+        onLost: () => {
+          if (cancelled) return;
+          // Synchronously, ahead of any frame the overlay has already asked
+          // for: the renderer died with its context, and this is the same
+          // one-way latch the size observer tears a live scene down through,
+          // so the animation loop stops and the pointer wiring goes with it.
+          detach?.();
+          setContextLostFor(nodes);
+        },
+        onRestored: () => {
+          // Deliberately NOT gated on `cancelled`: by the time a restore lands
+          // this effect has unwound along with the container it owned, which is
+          // precisely why nothing is installed from here. Clearing the state
+          // re-renders the container and the generation makes the rebuild
+          // observable to the effect, which then owns whatever it measures.
+          setContextLostFor(null);
+          setTeardownGeneration((generation) => generation + 1);
+        },
+      });
     };
 
     if (isMeasuredField(nodes)) {
@@ -372,6 +426,20 @@ export function GraphCanvas({
       </GraphUnavailable>
     );
   }
+  // The one failure that happens to a field that WAS drawn. The frozen last
+  // frame is the trap: it is a picture of a graph, so it reads as a live one,
+  // and a cleared context reads as an empty one. Neither is a reading, so the
+  // canvas is taken down and this is said in its place.
+  if (contextLostFor === nodes) {
+    return (
+      <GraphUnavailable>
+        the graph canvas lost its WebGL context, so the{' '}
+        {nodes.length.toLocaleString()}-symbol field is no longer being drawn —
+        the symbol list carries the same relations, and the field returns if the
+        browser restores the context
+      </GraphUnavailable>
+    );
+  }
   return (
     <figure className={cn('flex flex-col gap-1.5', fill && 'h-full min-h-0')}>
       <div
@@ -432,8 +500,9 @@ export function GraphCanvas({
   );
 }
 
-/** A field that could NOT be drawn — no WebGL context, no layout engine, or a
- * graph past this renderer's tier.
+/** A field that is NOT being drawn — no WebGL context, no layout engine, a
+ * graph past this renderer's tier, or a context the GPU took back after the
+ * field had been composed.
  *
  * Distinct from an empty field on purpose, and the distinction has to be visible
  * rather than only readable: "nothing is here" and "this could not be rendered"
