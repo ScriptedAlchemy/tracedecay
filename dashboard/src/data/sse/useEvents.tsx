@@ -77,30 +77,77 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
     [clock, connection],
   );
   useEffect(() => {
-    // A gap or overflow is one canonical invalidation/refetch. `stale` stays
-    // sticky until that refetch settles and reseeds the reducer, and settling
+    // A gap or overflow is one canonical invalidation/refetch, and settling it
     // waits on every active query, which can easily outlast several ticks.
     // Re-issuing per tick would fan one overflow into a refetch storm at the
-    // exact moment the client is already behind.
-    let reseeding = false;
-    return clock.subscribe(() => {
-      // A tick also fires for connection-state changes, which carry no batch.
-      if (!connection.reducer.hasPending()) return;
-      const batch = connection.reducer.takeBatch();
-      const canonical = batch.refetch || batch.stale;
-      if (canonical && reseeding) return;
-      const invalidations = invalidationKeysForBatch(batch).map((queryKey) =>
+    // exact moment the client is already behind, so only one runs at a time —
+    // but "one at a time" must not mean "the rest are lost". The reducer owns
+    // whether a refresh is still owed, so a signal raised inside the window
+    // outlives the drain that cleared its batch flag, and the batch itself is
+    // always applied rather than thrown away.
+    const { reducer } = connection;
+    // A refresh outlives a teardown, and its settle can now start a follow-up,
+    // so the chain has to know when the provider stopped caring.
+    let stopped = false;
+
+    const invalidate = (keys: ReadonlyArray<ReadonlyArray<string>>): Array<Promise<void>> =>
+      keys.map((queryKey) =>
         queryKey.length === 0
           ? queryClient.invalidateQueries()
           : queryClient.invalidateQueries({ queryKey: [...queryKey] }),
       );
-      if (!canonical) return;
-      reseeding = true;
-      void Promise.allSettled(invalidations).then(() => {
-        connection.reducer.reset();
-        reseeding = false;
+
+    function startCanonicalRefresh(keys: ReadonlyArray<ReadonlyArray<string>>): void {
+      const token = reducer.beginReseed();
+      void refreshFailure(invalidate(keys)).then((failure) => {
+        if (failure === null) reducer.commitReseed(token);
+        else reducer.abortReseed(token, failure);
+        // If a signal arrived while that was in flight, the commit superseded
+        // nothing and exactly one follow-up runs here. The reducer refuses a
+        // further one until a genuinely newer signal arrives, so the chain is
+        // bounded by real signals rather than by ticks.
+        pump();
       });
+    }
+
+    function pump(): void {
+      if (!stopped && reducer.canonicalRefreshOutstanding()) {
+        startCanonicalRefresh([CANONICAL_INVALIDATION_KEY]);
+      }
+    }
+
+    function applyTargeted(batch: SseBatch): void {
+      for (const pending of invalidate(targetedInvalidationKeys(batch))) {
+        void pending.catch(() => {
+          // A targeted refresh that rejected leaves its slice unfresh. Escalate
+          // to the canonical path rather than leaving the rejection unobserved.
+          reducer.requestCanonicalRefresh('invalidation_failed');
+          pump();
+        });
+      }
+    }
+
+    const unsubscribe = clock.subscribe(() => {
+      // A tick also fires for connection-state changes, which carry no batch.
+      if (!reducer.hasPending()) return;
+      const batch = reducer.takeBatch();
+      if ((batch.refetch || batch.stale) && reducer.canonicalRefreshOutstanding()) {
+        // The whole-projection key this maps a canonical batch to subsumes every
+        // targeted key, so it is the only refresh this batch needs.
+        startCanonicalRefresh(invalidationKeysForBatch(batch));
+        return;
+      }
+      // Not the batch that starts a refresh — either nothing canonical happened,
+      // or one is already in flight and this batch has to wait its turn. Either
+      // way its events name query roots that are narrower than the canonical
+      // reseed and still worth refreshing now; discarding them was the defect.
+      applyTargeted(batch);
+      pump();
     });
+    return () => {
+      stopped = true;
+      unsubscribe();
+    };
   }, [clock, connection, queryClient]);
   return (
     <EventsContext.Provider value={connection}>
@@ -109,10 +156,26 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
   );
 }
 
+/** The canonical whole-projection refresh: every query, no key filter. */
+const CANONICAL_INVALIDATION_KEY: ReadonlyArray<string> = [];
+
 export function invalidationKeysForBatch(
   batch: SseBatch,
 ): ReadonlyArray<ReadonlyArray<string>> {
-  if (batch.refetch || batch.stale) return [[]];
+  if (batch.refetch || batch.stale) return [CANONICAL_INVALIDATION_KEY];
+  return targetedInvalidationKeys(batch);
+}
+
+/**
+ * The query roots the batch's own events name, with no canonical escalation.
+ * These stay valid while a canonical refresh is in flight: each is narrower than
+ * the whole-projection reseed, so issuing them costs one refetch apiece and
+ * keeps the view honest instead of waiting out a refresh that may take several
+ * ticks to settle.
+ */
+export function targetedInvalidationKeys(
+  batch: SseBatch,
+): ReadonlyArray<ReadonlyArray<string>> {
   let storage = false;
   let projects = false;
   for (const event of batch.events) {
@@ -124,6 +187,25 @@ export function invalidationKeysForBatch(
   if (storage) keys.push(['storage', 'telemetry']);
   if (projects) keys.push(['projects']);
   return keys;
+}
+
+/**
+ * Await every invalidation and report the first rejection instead of treating it
+ * as success. `Promise.allSettled` on its own hides failures — a rejected
+ * invalidation still resolves the aggregate — which is how a refresh that never
+ * happened came to clear the projection's stale flag.
+ */
+async function refreshFailure(invalidations: Array<Promise<void>>): Promise<string | null> {
+  const results = await Promise.allSettled(invalidations);
+  for (const result of results) {
+    if (result.status === 'rejected') return describeRejection(result.reason);
+  }
+  return null;
+}
+
+function describeRejection(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  return typeof reason === 'string' && reason.length > 0 ? reason : 'canonical refresh rejected';
 }
 
 export function useEventsConnection(): SseConnection | null {

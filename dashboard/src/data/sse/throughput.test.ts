@@ -120,19 +120,25 @@ describe("SSE queue ceiling — the plan's 5,000 events / 10 MiB", () => {
     }
     expect(reducer.takeBatch().stale).toBe(true);
 
-    reducer.reset();
+    reducer.commitReseed(reducer.beginReseed());
 
-    // One second at the peak rate, drained on the 100 ms grid.
+    // One second at the peak rate, drained on the 100 ms grid. The stream picks
+    // up at 10,000, well past the 5,000 the overflow refused, so the first tick
+    // honestly reports that jump as a gap — a reseed establishes a fresh
+    // baseline for the projection, not amnesia about the revision sequence.
     let delivered = 0;
+    let gapTicks = 0;
     for (let tick = 0; tick < RENDER_TICKS_PER_SECOND; tick += 1) {
       for (let i = 0; i < 100; i += 1) {
         reducer.ingest(envelope(10_000 + tick * 100 + i));
       }
       const batch = reducer.takeBatch();
       expect(batch.stale).toBe(false);
+      if (batch.refetch) gapTicks += 1;
       delivered += batch.events.length;
     }
     expect(delivered).toBe(1_000);
+    expect(gapTicks).toBe(1);
   });
 });
 

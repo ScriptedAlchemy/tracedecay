@@ -116,8 +116,8 @@ async fn message_search_rejects_unsupported_project_scope() {
     }
 }
 
-/// The PR15-deferred `all_registered` scope cannot be paired with a
-/// single-project selector.
+/// The `all_registered` scope cannot be paired with a single-project
+/// selector.
 #[tokio::test]
 async fn message_search_rejects_all_registered_with_project_selector() {
     let (cg, _env, _dir) = setup_empty_project().await;

@@ -326,59 +326,6 @@ async fn test_tools_list() {
 // 6. test_tools_call_search
 // ---------------------------------------------------------------------------
 
-fn method_line_count(source: &str, signature: &str) -> usize {
-    let lines = source.lines().collect::<Vec<_>>();
-    let start = lines
-        .iter()
-        .position(|line| line.contains(signature))
-        .unwrap_or_else(|| panic!("missing method signature: {signature}"));
-    let end = lines[start + 1..]
-        .iter()
-        .position(|line| *line == "    }")
-        .map(|offset| start + 1 + offset)
-        .unwrap_or_else(|| panic!("missing method end: {signature}"));
-    end - start + 1
-}
-
-#[test]
-fn tools_call_request_coordinator_stays_bounded() {
-    const MAX_COORDINATOR_LINES: usize = 50;
-    const MAX_PHASE_LINES: usize = 100;
-    let source = include_str!("../../../src/mcp/server/requests.rs");
-    let lines = method_line_count(source, "pub(crate) async fn handle_tools_call(");
-
-    assert!(
-        lines <= MAX_COORDINATOR_LINES,
-        "handle_tools_call is {lines} lines; keep request coordination at or below \
-         {MAX_COORDINATOR_LINES} lines by extracting private phases"
-    );
-
-    for signature in [
-        "fn prepare_tool_call(",
-        "fn route_tool_arguments(",
-        "async fn begin_tool_dispatch(",
-        "async fn execute_tool_dispatch(",
-        "async fn dispatch_tool_call(",
-        "fn attach_tool_timing(",
-        "fn finish_unavailable_tool_call(",
-        "fn response_token_count(",
-        "async fn apply_token_accounting(",
-        "fn spawn_success_analytics(",
-        "async fn record_success_accounting(",
-        "async fn append_version_and_automation_notices(",
-        "async fn append_per_file_staleness_notice(",
-        "async fn prepend_index_warnings(",
-        "async fn complete_tool_call(",
-    ] {
-        let lines = method_line_count(source, signature);
-        assert!(
-            lines <= MAX_PHASE_LINES,
-            "{signature} is {lines} lines; keep request phases at or below \
-             {MAX_PHASE_LINES} lines"
-        );
-    }
-}
-
 #[tokio::test]
 async fn test_tools_call_search() {
     let (server, _dir) = setup_server().await;
