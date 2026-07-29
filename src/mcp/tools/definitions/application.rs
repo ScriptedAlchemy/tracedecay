@@ -133,7 +133,7 @@ pub(super) fn def_git_status() -> ToolDefinition {
     git_read_definition(
         "status",
         "Read typed Git status",
-        "Read the PR9 typed status summary through the exact registered project/worktree authority.",
+        "Read the typed status summary through the exact registered project/worktree authority.",
         json!({}),
         &[],
     )
@@ -143,7 +143,7 @@ pub(super) fn def_git_diff() -> ToolDefinition {
     git_read_definition(
         "diff",
         "Read typed Git diff",
-        "Read a bounded PR9 structured diff through the exact registered project/worktree authority.",
+        "Read a bounded structured diff through the exact registered project/worktree authority.",
         json!({
             "scope": {
                 "type": "string",
@@ -167,7 +167,7 @@ pub(super) fn def_git_history() -> ToolDefinition {
     git_read_definition(
         "history",
         "Read typed Git history",
-        "Read bounded PR9 commit history through the exact registered project/worktree authority.",
+        "Read bounded commit history through the exact registered project/worktree authority.",
         json!({
             "count": {
                 "type": "integer",
@@ -190,7 +190,7 @@ pub(super) fn def_git_blame() -> ToolDefinition {
     git_read_definition(
         "blame",
         "Read typed Git blame",
-        "Read bounded PR9 line provenance through the exact registered project/worktree authority.",
+        "Read bounded line provenance through the exact registered project/worktree authority.",
         json!({
             "path": string_property("Admitted-root-relative file path."),
             "follow_renames": {"type": "boolean", "default": false}
@@ -203,7 +203,7 @@ pub(super) fn def_git_hunks() -> ToolDefinition {
     git_read_definition(
         "hunks",
         "Read typed Git hunks",
-        "Mint bounded PR9 HunkRef evidence for a working-tree or staged diff; commit-range hunks are not applicable.",
+        "Mint bounded HunkRef evidence for a working-tree or staged diff; commit-range hunks are not applicable.",
         json!({
             "scope": {
                 "type": "string",
@@ -256,7 +256,7 @@ pub(super) fn def_git_preview() -> ToolDefinition {
                 },
                 "repository_snapshot": {
                     "type": "object",
-                    "description": "Exact PR9 repository state snapshot used for compare-and-swap validation."
+                    "description": "Exact repository state snapshot used for compare-and-swap validation."
                 },
                 "selected_hunks": {
                     "type": "array",
