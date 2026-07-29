@@ -5,11 +5,11 @@
 //! `src/store` adapters. These guards pin the modules that finished that
 //! inversion so a convenience wrapper cannot quietly reintroduce the edge.
 //!
-//! Both guards name explicit files rather than directory roots, because the
-//! sibling `tests.rs` modules legitimately open a registered database to build
-//! fixtures. Files are listed directly instead of resolved through
-//! `filesystem_rust_sources`, which walks directories only and would drop a
-//! file root silently.
+//! The forbidden-path guards name explicit files rather than directory roots,
+//! because the sibling `tests.rs` modules legitimately open a registered
+//! database to build fixtures. Listing them literally also lets each guard
+//! assert its subjects still exist, so a rename cannot shrink the guarded set
+//! into a vacuous pass.
 //!
 //! The forbidden-path scan mirrors the helper in `dependency_boundaries`; it is
 //! restated here so this module owns its own contract, and the two can fold
@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::manifest::filesystem_rust_sources;
 use crate::module_scanner::tokenize;
 use crate::query_kernel::{scan_extern_crate_bindings, scan_qualified_paths, scan_use_bindings};
 
@@ -41,6 +42,9 @@ const PORT_ONLY_SESSION_MODULES: &[&str] = &[
 /// Registered-database modules on the temporal read path that carry no edge
 /// back into `crate::sessions`.
 const SESSION_FREE_GLOBAL_DB_MODULES: &[&str] = &["src/global_db/session_temporal/mod.rs"];
+
+/// The sole adapter allowed to build a workflow-index reader.
+const GUARDED_WORKFLOW_SNAPSHOT_ADAPTER: &str = "src/store/workflow.rs";
 
 fn forbidden_prefix(path: &[String], prefixes: &[&[&str]]) -> Option<String> {
     prefixes
@@ -106,6 +110,48 @@ fn inverted_session_modules_do_not_name_the_registered_database() {
         "these session modules must take store ports, not the registered database or a driver; \
          put the registered-database entry point on the `crate::store` adapter instead:\n{}",
         violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// Moving the workflow-index constructor into `crate::store` widened it from a
+/// module-private struct literal to a crate-visible constructor. A read
+/// snapshot carries no shard scope, so `from_snapshot` cannot check authority
+/// itself and the ProjectSessions refusal lives in the adapter. That gate only
+/// holds while the adapter stays the single caller.
+#[test]
+fn the_workflow_index_reader_is_built_only_behind_the_project_sessions_gate() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("src")].into_iter().collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve root-crate Rust sources");
+    assert!(
+        !sources.is_empty(),
+        "root-crate sources must resolve, otherwise this guard proves nothing"
+    );
+
+    let callers = sources
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(repository.join(path))
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                .contains("RegisteredWorkflowIndexSnapshot::from_snapshot")
+        })
+        .map(|path| path.display().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        callers,
+        BTreeSet::from([GUARDED_WORKFLOW_SNAPSHOT_ADAPTER.to_string()]),
+        "`from_snapshot` accepts any read snapshot, so only the adapter that first refuses a \
+         non-ProjectSessions scope may call it"
+    );
+
+    let adapter = fs::read_to_string(repository.join(GUARDED_WORKFLOW_SNAPSHOT_ADAPTER))
+        .expect("read the workflow store adapter");
+    assert!(
+        adapter.contains("StoreShardScopeV1::ProjectSessions")
+            && adapter.contains("workflow index requires ProjectSessions authority"),
+        "the workflow store adapter must refuse a non-ProjectSessions scope before it opens the \
+         workflow-index snapshot"
     );
 }
 
