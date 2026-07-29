@@ -550,6 +550,42 @@ fn source_project_open_mounts_each_production_owner_once() {
     );
 }
 
+/// Semantic generation restore may be much slower than the exact graph and
+/// SQLite-backed owner mounts. Independent production capabilities must be
+/// published before that capability-specific warm-up begins.
+#[test]
+fn source_project_open_publishes_independent_owners_before_semantic_restore() {
+    const ORCHESTRATOR: &str = "register_project_open_production_owners";
+    let primitive = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        ORCHESTRATOR,
+        "open_pr12_production_primitive_runtime",
+    );
+    let feedback = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        ORCHESTRATOR,
+        "register_production_feedback_cycle",
+    );
+    let lsp = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        ORCHESTRATOR,
+        "register_production_lsp_owner",
+    );
+    let semantic = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        ORCHESTRATOR,
+        "register_semantic_activation_owner",
+    );
+    assert_eq!(primitive.len(), 1, "primitive runtime must open once");
+    assert_eq!(feedback.len(), 1, "feedback cycle must register once");
+    assert_eq!(lsp.len(), 1, "LSP owner must register once");
+    assert_eq!(semantic.len(), 1, "semantic activation must register once");
+    assert!(
+        primitive[0] < semantic[0] && feedback[0] < semantic[0] && lsp[0] < semantic[0],
+        "independent owners must publish before semantic generation restore"
+    );
+}
+
 /// The daemon invocation protocol must not reacquire the legacy owner-injection
 /// escape hatch.
 ///
