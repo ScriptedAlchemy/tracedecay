@@ -8,6 +8,9 @@ mod projection;
 mod query;
 mod rebuild;
 mod refresh;
+/// LCM compatibility rendering over one frozen registered-store snapshot. The
+/// DB-free shaping it applies is owned by
+/// [`crate::application::session::lcm::render`].
 mod registered_lcm_render;
 mod retrieval;
 mod schema;
@@ -22,6 +25,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 
+use crate::application::session::lcm::contracts::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
+    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
+};
+use crate::application::session::lcm::render::{
+    CanonicalLcmSourceHydration, apply_canonical_summary_source_content,
+};
 use crate::application::session::{
     AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
@@ -38,11 +48,6 @@ use crate::query::temporal::ports::{
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::SessionMessageRecord;
-use crate::sessions::lcm::{
-    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
-    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
-    render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content},
-};
 
 pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub(crate) use self::direct::ResolvedDirectAnchor;

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use crate::application::session::compatibility::projected_content_hash;
 use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::message_storage_text;
@@ -1833,7 +1834,7 @@ async fn ingest_active_messages(
         replay["role"] = Value::String(role.clone());
         replay["content"] = original_content.clone();
         let initial_metadata_json = active_message_metadata(message, &replay);
-        let expected_content_hash = raw::sha256_hex(&storage_text);
+        let expected_content_hash = projected_content_hash(&storage_text);
         if let Some(existing) = existing_state.as_ref() {
             let matches_stored_row = existing.ordinal == ordinal
                 && existing.content_hash == expected_content_hash
@@ -2143,7 +2144,7 @@ fn deterministic_message_id(
 ) -> String {
     format!(
         "active_{}",
-        raw::sha256_hex(&format!(
+        projected_content_hash(&format!(
             "{provider}\0{session_id}\0{idx}\0{role}\0{content}"
         ))
     )

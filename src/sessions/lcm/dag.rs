@@ -3,6 +3,7 @@ use std::future::Future;
 
 use tracedecay_domain::HydrationStateV1;
 
+use crate::application::session::compatibility::projected_content_hash;
 use crate::db::engine::{QueryExecutor, Value, params};
 
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
@@ -22,7 +23,7 @@ pub(crate) async fn insert_summary_node(
     publisher: &impl LcmSummaryPublicationPort,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
-    let summary_hash = raw::sha256_hex(&draft.summary_text);
+    let summary_hash = projected_content_hash(&draft.summary_text);
     let node_id = summary_node_id(
         &draft.provider,
         &draft.session_id,
@@ -259,7 +260,7 @@ pub fn summary_node_id(
         "source_refs": source_refs,
         "summary_hash": summary_hash,
     });
-    format!("sum_{}", raw::sha256_hex(&input.to_string()))
+    format!("sum_{}", projected_content_hash(&input.to_string()))
 }
 
 pub(crate) async fn load_summary_node(

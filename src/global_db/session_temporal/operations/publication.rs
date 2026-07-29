@@ -4,9 +4,9 @@ use crate::db::engine::{Executor, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{EntityKind, RetrievalAnchorRecord, RetrievalAnchorTargetV2};
 
+use crate::application::session::compatibility::projected_content_hash;
 use crate::sessions::lcm::{
     dag::LcmSummaryPublicationPort,
-    raw,
     types::{
         LcmError, LcmImmutableSummaryPublication, LcmSummaryNode, LcmSummaryPublicationDisposition,
         LcmSummaryPublicationReceipt,
@@ -64,7 +64,7 @@ pub(crate) async fn publish_immutable_summary(
 
     let summary_id = publication.summary_id.as_str();
     let draft = &publication.draft;
-    let summary_hash = raw::sha256_hex(&draft.summary_text);
+    let summary_hash = projected_content_hash(&draft.summary_text);
     let created_at = unixepoch(conn).await?.max(
         sources
             .iter()
@@ -78,7 +78,7 @@ pub(crate) async fn publish_immutable_summary(
     let typed_summary_anchor =
         sources::build_summary_anchor(conn, summary_id, &sources, created_at).await?;
     let summary_anchor_id = typed_summary_anchor.as_ref().map_or_else(
-        || format!("anchor_summary_{}", raw::sha256_hex(summary_id)),
+        || format!("anchor_summary_{}", projected_content_hash(summary_id)),
         |anchor| anchor.anchor_id().as_str().to_string(),
     );
     let receipt_id = receipt_id(summary_id, &summary_hash);
@@ -146,7 +146,7 @@ pub(crate) async fn publish_immutable_summary(
         generation,
         frozen_watermarks_json: frozen_watermarks_json.clone(),
         source_horizon_json: source_horizon,
-        publication_manifest_digest: raw::sha256_hex(&publication_json),
+        publication_manifest_digest: projected_content_hash(&publication_json),
     };
     insert_sanitization_receipt(conn, &receipt_id, &summary_hash, &frozen_receipt).await?;
     sources::insert_payload_manifests(conn, summary_id, &manifest, created_at).await?;
@@ -262,7 +262,7 @@ async fn exact_replay_receipt(
     let expected_identity = logical_identity_digest(&publication.draft)?;
     let expected_receipt = receipt_id(
         summary_id,
-        &raw::sha256_hex(&publication.draft.summary_text),
+        &projected_content_hash(&publication.draft.summary_text),
     );
     if !manifest.matches_draft(&publication.draft)
         || manifest.predecessor_summary_id != publication.predecessor_summary_id
@@ -503,7 +503,7 @@ async fn load_and_verify_receipt(
         || receipt.disposition != "accepted"
         || receipt.published_at != created_at
         || receipt.source_horizon_json != manifest.source_horizon_json
-        || receipt.publication_manifest_digest != raw::sha256_hex(&manifest_json)
+        || receipt.publication_manifest_digest != projected_content_hash(&manifest_json)
         || receipt.generation <= 0
         || serde_json::from_str::<Value>(&receipt.frozen_watermarks_json).is_err()
     {

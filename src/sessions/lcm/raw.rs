@@ -178,7 +178,7 @@ async fn upsert_inline_raw_message(
 ) -> bool {
     let snippet = derived_text_for_snippet(text);
     let index = derived_text_for_index(text);
-    let content_hash = sha256_hex(text);
+    let content_hash = projected_content_hash(text);
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
@@ -1075,7 +1075,7 @@ fn sensitive_placeholder(pattern_name: &str, secret: &str) -> String {
         secret.len()
     )];
     if pattern_name != "password_assignment" {
-        let digest = sha256_hex(secret);
+        let digest = projected_content_hash(secret);
         parts.push(format!("sha256={}", &digest[..16]));
     }
     format!("{}]", parts.join("; "))
@@ -1142,10 +1142,6 @@ fn add_ingest_protection_metadata(metadata: &mut JsonValue, protection: &IngestP
     if let Some(object) = metadata.as_object_mut() {
         object.insert("ingest_protection".to_string(), JsonValue::Object(ingest));
     }
-}
-
-pub(crate) fn sha256_hex(content: &str) -> String {
-    projected_content_hash(content)
 }
 
 #[cfg(test)]

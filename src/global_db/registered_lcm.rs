@@ -3,6 +3,7 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 
 use crate::{
+    application::session::compatibility::projected_content_hash,
     db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params},
     sessions::{
         SessionMessageRecord,
@@ -406,7 +407,7 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let summary_hash = raw::sha256_hex(&draft.summary_text);
+        let summary_hash = projected_content_hash(&draft.summary_text);
         let mut successor_id = crate::sessions::lcm::dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
@@ -417,7 +418,7 @@ impl RegisteredGlobalDb {
         if successor_id == node_id {
             successor_id = format!(
                 "sum_{}",
-                raw::sha256_hex(&format!(
+                projected_content_hash(&format!(
                     "{node_id}\0{}",
                     draft.metadata_json.as_deref().unwrap_or_default()
                 ))

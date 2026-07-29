@@ -793,7 +793,9 @@ impl RegisteredGlobalDb {
                         }
                         TranscriptWritePolicy::ProjectionOnly => {
                             let text =
-                                crate::sessions::lcm::raw::derived_text_for_index(&message.text);
+                                crate::application::session::compatibility::derived_text_for_index(
+                                    &message.text,
+                                );
                             if !Self::upsert_session_message_projection(
                                 &transaction,
                                 message,
