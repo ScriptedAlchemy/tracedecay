@@ -18,6 +18,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use crate::request_identity::{
     derive_feedback_observation_idempotency, derive_feedback_source_event_idempotency,
 };
+use crate::timeutil::nearest_rank;
 
 const OBSERVATION_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.observation.plan26.v1";
 const SOURCE_EVENT_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.source-event.plan26.v1";
@@ -1059,12 +1060,8 @@ fn scalar_metric(
 }
 
 fn percentile_95(samples: &mut [u64]) -> Option<u64> {
-    if samples.is_empty() {
-        return None;
-    }
     samples.sort_unstable();
-    let rank = samples.len().saturating_mul(95).div_ceil(100);
-    samples.get(rank.saturating_sub(1)).copied()
+    nearest_rank(samples, 95)
 }
 
 fn source_event_duration_micros(event: &Plan26FeedbackSourceEventV1) -> Option<u64> {

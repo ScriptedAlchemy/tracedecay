@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::timeutil::nearest_rank;
+
 #[path = "candidate_output.rs"]
 pub mod candidate_output;
 #[path = "pr10_native.rs"]
@@ -1188,8 +1190,7 @@ fn evaluate_resources(
 fn p99_latency_us(samples: &[u64]) -> Option<u64> {
     let mut ordered = samples.to_vec();
     ordered.sort_unstable();
-    let rank = ordered.len().saturating_mul(99).div_ceil(100);
-    ordered.get(rank.saturating_sub(1)).copied()
+    nearest_rank(&ordered, 99)
 }
 
 const fn pass_if(condition: bool) -> DirectEvaluationStatusV1 {
