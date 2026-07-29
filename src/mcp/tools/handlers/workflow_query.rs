@@ -84,6 +84,9 @@ fn parse_mode(args: &Value) -> Result<WorkflowMode> {
 /// `runs` and `count` are deliberately absent: a read that never reached an
 /// index has no count, and emitting `0` here would let a caller that only reads
 /// `count` mistake an unavailable index for an empty one.
+///
+/// `reason` and `retryable` follow the typed-error shape the session-retrieval
+/// surface already uses, so a caller reads unavailability the same way here.
 fn index_unavailable_payload(reason: WorkflowIndexUnavailableReason) -> Value {
     json!({
         "status": "unavailable",
@@ -92,7 +95,7 @@ fn index_unavailable_payload(reason: WorkflowIndexUnavailableReason) -> Value {
             "code": "workflow_index_unavailable",
             "message": reason.message(),
             "reason": reason.as_str(),
-            "retryable": false,
+            "retryable": reason.is_retryable(),
         }
     })
 }
@@ -190,7 +193,8 @@ fn run_not_found_payload(run_id: &str) -> Value {
 }
 
 /// Says which state was hit instead of a bare "no index" line, so the markdown
-/// reader learns which mount to fix rather than assuming there are no runs.
+/// reader learns whether to wait for the index or to fix the mount, rather than
+/// assuming there are no runs.
 fn render_unavailable_md(message: &str) -> String {
     let mut md = Md::new();
     md.heading(2, "Workflow Runs");
@@ -450,14 +454,16 @@ mod tests {
     /// must find nothing to read rather than a zero it can mistake for a result.
     #[test]
     fn unavailable_payload_names_the_state_instead_of_reporting_zero_runs() {
-        for (reason, wire) in [
+        for (reason, wire, retryable) in [
             (
                 WorkflowIndexUnavailableReason::AuthorityNotRetained,
                 "authority_not_retained",
+                false,
             ),
             (
-                WorkflowIndexUnavailableReason::SchemaNotInstalled,
-                "schema_not_installed",
+                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+                "workflow_index_not_built",
+                true,
             ),
         ] {
             let payload = index_unavailable_payload(reason);
@@ -465,7 +471,7 @@ mod tests {
             assert_ne!(payload["status"], "ok");
             assert_eq!(payload["error"]["code"], "workflow_index_unavailable");
             assert_eq!(payload["error"]["reason"], wire);
-            assert_eq!(payload["error"]["retryable"], false);
+            assert_eq!(payload["error"]["retryable"], retryable);
             assert!(payload.get("count").is_none(), "no count without a read");
             assert!(payload.get("runs").is_none(), "no runs without a read");
             // The message must carry the state, not a generic absence.
@@ -475,17 +481,17 @@ mod tests {
         }
     }
 
-    /// The missing-schema and unretained-authority states must not share a
+    /// The unbuilt-index and unretained-authority states must not share a
     /// message, or markdown readers cannot tell the two apart.
     #[test]
     fn unavailable_markdown_distinguishes_the_states() {
-        let no_schema =
-            render_unavailable_md(WorkflowIndexUnavailableReason::SchemaNotInstalled.message());
+        let not_built =
+            render_unavailable_md(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message());
         let no_authority =
             render_unavailable_md(WorkflowIndexUnavailableReason::AuthorityNotRetained.message());
-        assert_ne!(no_schema, no_authority);
-        assert!(no_schema.contains("workflow index schema"));
-        assert!(!no_schema.contains('{'), "markdown must not leak JSON");
+        assert_ne!(not_built, no_authority);
+        assert!(not_built.contains("has not been built"));
+        assert!(!not_built.contains('{'), "markdown must not leak JSON");
     }
 
     #[test]

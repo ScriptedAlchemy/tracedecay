@@ -79,7 +79,7 @@ impl DaemonWorkflowIndexReadService {
         let snapshot = self.snapshot().await?;
         if Self::schema_missing(&snapshot).await? {
             return Ok(WorkflowRunListOutcome::Unavailable(
-                WorkflowIndexUnavailableReason::SchemaNotInstalled,
+                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
             ));
         }
         let runs = match &scope {
@@ -108,7 +108,7 @@ impl DaemonWorkflowIndexReadService {
         // the index looked and the run is absent. It cannot know that.
         if Self::schema_missing(&snapshot).await? {
             return Ok(WorkflowRunDetailOutcome::Unavailable(
-                WorkflowIndexUnavailableReason::SchemaNotInstalled,
+                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
             ));
         }
         let Some(run) = snapshot.run_for_id(&run_id).await.map_err(workflow_error)? else {
