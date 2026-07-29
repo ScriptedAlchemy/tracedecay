@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -12,10 +12,7 @@ use crate::context::source_read::{SourceReadRequest, read_source, resolve_indexe
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{RegisteredGlobalDb, SessionIngestHealth};
 use crate::path_tree::format_compact_annotated_path_list;
-use crate::project_registry::{
-    ProjectRegistryView, PublicCodeProject, PublicProjectRegistryContext,
-    build_project_registry_view, render_project_registry_view,
-};
+use crate::project_registry::{ProjectRegistryView, render_project_registry_view};
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
 use crate::types::{NodeKind, Visibility};
@@ -23,7 +20,15 @@ use crate::types::{NodeKind, Visibility};
 use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::dependency_hints;
-use super::support::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
+use super::project_registry::{
+    ProjectRegistryContextCommand, ProjectRegistryContextOutcome, ProjectRegistryListingCommand,
+    ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryReadPort,
+    ProjectRegistrySelector, list_registered_projects, read_registered_project_context,
+};
+use super::support::{
+    effective_path, filter_by_scope, is_explicit_project_path_selector, require_node_id,
+    unique_file_paths,
+};
 
 /// Daemon-only sync entry point used by the first-party CLI. It is deliberately
 /// not advertised in the MCP catalog: external agents should rely on the
@@ -433,18 +438,6 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
         .map_or(default, |value| value.clamp(1, max))
 }
 
-/// Resolves the mounted client project registry, if any. `None` is the
-/// typed missing-registry state: a direct server without a mounted registry
-/// is expected (fresh profile, no daemon), so the registry tools report it
-/// as a stable `not_found` payload rather than a tool error. This never
-/// opens a default registry itself — the fallback removed in the
-/// `RegisteredGlobalDb` cutover stays removed.
-fn open_project_registry_read_only(
-    global_db: Option<&RegisteredGlobalDb>,
-) -> Option<(PathBuf, &RegisteredGlobalDb)> {
-    global_db.map(|db| (db.db_path().to_path_buf(), db))
-}
-
 fn project_registry_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
     render_registry_result(Some(cg.project_root()), args, payload)
 }
@@ -502,57 +495,28 @@ fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
     )
 }
 
-/// Resolves the active project's registry id by looking up `cg`'s project
-/// root in the registry, the same identity lookup the `tracedecay projects`
-/// CLI performs for its own `active_project_id` (see `src/project_cmd.rs`).
-async fn active_project_id(cg: &TraceDecay, db: &RegisteredGlobalDb) -> Result<Option<String>> {
-    let project_root = cg.project_root();
-    let git_common_dir = crate::worktree::git_common_dir(project_root);
-    Ok(db
-        .project_registry_context_by_identity(project_root, git_common_dir.as_deref())
-        .await?
-        .map(|context| context.project.project_id))
-}
-
 /// Handles `tracedecay_project_list` tool calls.
 pub(super) async fn handle_project_list(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&RegisteredGlobalDb>,
+    registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
-    let Some((registry_path, db)) = open_project_registry_read_only(global_db) else {
-        let mut payload = registry_missing_payload();
-        let (title, summary, project_tree) = empty_registry_view_payload("registered projects");
-        payload["title"] = title;
-        payload["summary"] = summary;
-        payload["project_tree"] = project_tree;
-        payload["limit"] = json!(limit);
-        payload["truncated"] = json!(false);
-        return Ok(registry_result(&args, &payload));
-    };
-    let active_id = active_project_id(cg, db).await?;
-    let mut projects = db.list_code_projects(limit + 1).await?;
-    let truncated = projects.len() > limit;
-    projects.truncate(limit);
-    let contexts = db.project_registry_contexts_for_projects(&projects).await?;
-    let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
-    let projects = projects
-        .iter()
-        .map(|project| PublicCodeProject::from_record(project, active_id.as_deref()))
-        .collect::<Vec<_>>();
-    Ok(registry_result(
+    let outcome = list_registered_projects(
+        registry,
+        ProjectRegistryListingCommand {
+            active_project_root: cg.project_root().to_path_buf(),
+            scope: ProjectRegistryListingScope::All,
+            limit,
+        },
+    )
+    .await?;
+    Ok(registry_listing_result(
         &args,
-        &json!({
-            "status": "ok",
-            "title": "registered projects",
-            "registry_path": display_path(&registry_path),
-            "limit": limit,
-            "truncated": truncated,
-            "summary": view.summary,
-            "project_tree": view.project_tree,
-            "projects": projects,
-        }),
+        "registered projects",
+        None,
+        limit,
+        outcome,
     ))
 }
 
@@ -560,117 +524,130 @@ pub(super) async fn handle_project_list(
 pub(super) async fn handle_project_search(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&RegisteredGlobalDb>,
+    registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
-    let query =
-        args.get("query")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: query".to_string(),
-            })?;
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "missing required parameter: query".to_string(),
+        })?
+        .to_owned();
     let limit = bounded_limit(&args, 10, 50);
-    let Some((registry_path, db)) = open_project_registry_read_only(global_db) else {
-        let mut payload = registry_missing_payload();
-        let (title, summary, project_tree) =
-            empty_registry_view_payload(&format!("projects matching \"{query}\""));
-        payload["title"] = title;
-        payload["summary"] = summary;
-        payload["project_tree"] = project_tree;
-        payload["query"] = json!(query);
-        payload["limit"] = json!(limit);
-        payload["truncated"] = json!(false);
-        return Ok(registry_result(&args, &payload));
-    };
-    let active_id = active_project_id(cg, db).await?;
-    let mut projects = db.try_search_code_projects(query, limit + 1).await?;
-    let truncated = projects.len() > limit;
-    projects.truncate(limit);
-    let contexts = db.project_registry_contexts_for_projects(&projects).await?;
-    let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
-    let projects = projects
-        .iter()
-        .map(|project| PublicCodeProject::from_record(project, active_id.as_deref()))
-        .collect::<Vec<_>>();
-    Ok(registry_result(
+    let outcome = list_registered_projects(
+        registry,
+        ProjectRegistryListingCommand {
+            active_project_root: cg.project_root().to_path_buf(),
+            scope: ProjectRegistryListingScope::Matching {
+                query: query.clone(),
+            },
+            limit,
+        },
+    )
+    .await?;
+    Ok(registry_listing_result(
         &args,
-        &json!({
-            "status": "ok",
-            "title": format!("projects matching \"{query}\""),
-            "registry_path": display_path(&registry_path),
-            "query": query,
-            "limit": limit,
-            "truncated": truncated,
-            "summary": view.summary,
-            "project_tree": view.project_tree,
-            "projects": projects,
-        }),
+        &format!("projects matching \"{query}\""),
+        Some(&query),
+        limit,
+        outcome,
     ))
 }
 
-fn project_context_alias_path<'a>(cg: &'a TraceDecay, args: &'a Value) -> (PathBuf, bool) {
+/// Renders a listing outcome, keeping the missing-registry state a stable
+/// `not_found` payload with the same summary/tree keys as the `ok` shape.
+fn registry_listing_result(
+    args: &Value,
+    title: &str,
+    query: Option<&str>,
+    limit: usize,
+    outcome: ProjectRegistryListingOutcome,
+) -> ToolResult {
+    match outcome {
+        ProjectRegistryListingOutcome::RegistryUnavailable => {
+            let mut payload = registry_missing_payload();
+            let (title, summary, project_tree) = empty_registry_view_payload(title);
+            payload["title"] = title;
+            payload["summary"] = summary;
+            payload["project_tree"] = project_tree;
+            if let Some(query) = query {
+                payload["query"] = json!(query);
+            }
+            payload["limit"] = json!(limit);
+            payload["truncated"] = json!(false);
+            registry_result(args, &payload)
+        }
+        ProjectRegistryListingOutcome::Listing(listing) => {
+            let mut payload = json!({
+                "status": "ok",
+                "title": title,
+                "registry_path": display_path(&listing.registry_path),
+                "limit": limit,
+                "truncated": listing.truncated,
+                "summary": listing.view.summary,
+                "project_tree": listing.view.project_tree,
+                "projects": listing.projects,
+            });
+            if let Some(query) = query {
+                payload["query"] = json!(query);
+            }
+            registry_result(args, &payload)
+        }
+    }
+}
+
+fn project_context_selector(cg: &TraceDecay, args: &Value) -> ProjectRegistrySelector {
+    if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
+        return ProjectRegistrySelector::ProjectId(project_id.to_owned());
+    }
     let Some(path) = args.get("path").and_then(Value::as_str) else {
-        return (cg.project_root().to_path_buf(), true);
+        return ProjectRegistrySelector::Path {
+            path: cg.project_root().to_path_buf(),
+            allow_git_identity: true,
+        };
     };
     let path = Path::new(path);
-    let allow_git_identity = path.is_absolute()
-        && RegisteredGlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
-    (path.to_path_buf(), allow_git_identity)
+    let allow_git_identity =
+        path.is_absolute() && is_explicit_project_path_selector(path.to_string_lossy().as_ref());
+    ProjectRegistrySelector::Path {
+        path: path.to_path_buf(),
+        allow_git_identity,
+    }
 }
 
 /// Handles `tracedecay_project_context` tool calls.
 pub(super) async fn handle_project_context(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&RegisteredGlobalDb>,
+    registry: Option<&dyn ProjectRegistryReadPort>,
 ) -> Result<ToolResult> {
-    let Some((registry_path, db)) = open_project_registry_read_only(global_db) else {
-        return Ok(project_registry_result(
-            cg,
-            &args,
-            &registry_missing_payload(),
-        ));
-    };
-    let context = if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
-        db.project_registry_context_by_id(project_id).await?
-    } else {
-        let (alias_path, allow_git_identity) = project_context_alias_path(cg, &args);
-        if let Some(context) = db.project_registry_context_by_alias(&alias_path).await? {
-            Some(context)
-        } else if allow_git_identity {
-            let git_common_dir = crate::worktree::git_common_dir(&alias_path);
-            db.project_registry_context_by_identity(&alias_path, git_common_dir.as_deref())
-                .await?
-        } else {
-            None
-        }
-    };
-    let Some(context) = context else {
-        return Ok(project_registry_result(
-            cg,
-            &args,
-            &json!({
-                "status": "not_found",
-                "registry_path": display_path(&registry_path),
-                "project": null,
-                "aliases": [],
-                "stores": [],
-            }),
-        ));
-    };
-    let active_id = active_project_id(cg, db).await?;
-    let is_active = active_id.as_deref() == Some(context.project.project_id.as_str());
-    Ok(project_registry_result(
-        cg,
-        &args,
-        &json!({
-            "status": "ok",
-            "is_active": is_active,
+    let outcome = read_registered_project_context(
+        registry,
+        ProjectRegistryContextCommand {
+            active_project_root: cg.project_root().to_path_buf(),
+            selector: project_context_selector(cg, &args),
+        },
+    )
+    .await?;
+    let payload = match outcome {
+        ProjectRegistryContextOutcome::RegistryUnavailable => registry_missing_payload(),
+        ProjectRegistryContextOutcome::NotFound { registry_path } => json!({
+            "status": "not_found",
             "registry_path": display_path(&registry_path),
-            "project": PublicProjectRegistryContext::new(&context, active_id.as_deref()).project,
+            "project": null,
+            "aliases": [],
+            "stores": [],
+        }),
+        ProjectRegistryContextOutcome::Context(context) => json!({
+            "status": "ok",
+            "is_active": context.is_active,
+            "registry_path": display_path(&context.registry_path),
+            "project": context.project,
             "aliases": context.aliases,
             "stores": context.stores,
         }),
-    ))
+    };
+    Ok(project_registry_result(cg, &args, &payload))
 }
 
 /// Handles `tracedecay_files` tool calls.

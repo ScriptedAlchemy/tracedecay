@@ -25,6 +25,7 @@ pub mod health;
 pub mod hook_runtime;
 pub mod info;
 pub mod memory;
+mod project_registry;
 pub mod redundancy;
 pub mod session;
 pub mod skills;
@@ -32,6 +33,12 @@ mod support;
 pub mod workflow;
 pub mod workflow_query;
 
+pub(crate) use project_registry::{
+    ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
+    ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
+    ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
+    ProjectRegistryReadPort, ProjectRegistrySelector,
+};
 pub(crate) use session::message_search::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
@@ -492,6 +499,9 @@ pub async fn handle_tool_call_with_registry(
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
     pub global_db: Option<&'a RegisteredGlobalDb>,
+    /// Daemon-owned project-registry reads. `None` is the typed
+    /// missing-registry state, not an empty registry.
+    pub project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
     pub accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
@@ -532,6 +542,7 @@ impl Default for ToolCallRegistryOptions<'_> {
     fn default() -> Self {
         Self {
             global_db: None,
+            project_registry_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
             registered_savings_db: None,
@@ -1243,12 +1254,14 @@ async fn dispatch_info_tools(
             server_stats,
             scope_prefix,
         )),
-        "tracedecay_project_list" => info::handle_project_list(cg, args, options.global_db).await,
+        "tracedecay_project_list" => {
+            info::handle_project_list(cg, args, options.project_registry_reads).await
+        }
         "tracedecay_project_search" => {
-            info::handle_project_search(cg, args, options.global_db).await
+            info::handle_project_search(cg, args, options.project_registry_reads).await
         }
         "tracedecay_project_context" => {
-            info::handle_project_context(cg, args, options.global_db).await
+            info::handle_project_context(cg, args, options.project_registry_reads).await
         }
         "tracedecay_files" => info::handle_files(cg, args, selected_scope_prefix).await,
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,

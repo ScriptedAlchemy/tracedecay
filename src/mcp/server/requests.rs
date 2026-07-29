@@ -931,6 +931,7 @@ impl McpServer {
             self.scope_prefix(),
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_deref(),
+                project_registry_reads: self.project_registry_reads.as_deref(),
                 accounting_db: self.accounting_db.as_deref(),
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
