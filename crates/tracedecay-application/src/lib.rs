@@ -26,6 +26,7 @@ pub mod policy;
 pub mod result;
 pub mod retained_surfaces;
 pub mod retrieval;
+pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
 
@@ -39,6 +40,7 @@ pub use authorization::{
     SourceAuthorizationSnapshot,
 };
 pub use configuration::{
+    ConfigurationGetRequestV1, ConfigurationSetRequestV1,
     configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
     configuration_surface_operation,
 };
@@ -87,8 +89,10 @@ pub use external_source::{
     SourceSanitizationAuthorityV1,
 };
 pub use feedback::{
-    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
-    feedback_surface_operation,
+    FeedbackExpandRequestV1, FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1,
+    FeedbackHandleRequestV1, FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort,
+    FeedbackReadService, feedback_surface_catalog_contribution,
+    feedback_surface_handler_descriptors, feedback_surface_operation,
 };
 pub use framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, file_len, io_error, read_bounded,
@@ -173,6 +177,12 @@ pub use retrieval::{
     TestRetrievalPort, callable_code_catalog_contribution, callable_code_handler_descriptors,
     callable_code_operation, callable_code_operations, callable_code_request_schema,
     callable_code_result_schema,
+};
+pub use settings_preview::{
+    MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
+    UserSettingsPatchInputV1, UserSettingsPreviewErrorV1, UserSettingsPreviewV1,
+    UserSettingsValuesV1, parse_duration_label, prepare_user_settings_preview,
+    validate_project_settings_patch, validate_user_settings_values,
 };
 pub use source_edit::{
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
