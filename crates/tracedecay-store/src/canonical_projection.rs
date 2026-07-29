@@ -1,6 +1,5 @@
 //! Pure deterministic reducers for canonical observation projections.
 
-use serde_json::Value;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationFactV1, CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
@@ -8,62 +7,11 @@ use tracedecay_domain::{
     ObservationScopeV1,
 };
 
+use crate::cursor_dispatch::{cursor_dispatch_model, dispatch_text, is_subagent_dispatch_tool};
 use crate::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
 };
-
-fn cursor_model_string(value: &Value) -> Option<String> {
-    [
-        "model",
-        "model_id",
-        "modelId",
-        "model_name",
-        "modelName",
-        "model_slug",
-        "modelSlug",
-        "model_display_name",
-        "modelDisplayName",
-        "display_model",
-        "displayModel",
-        "display_model_name",
-        "displayModelName",
-    ]
-    .into_iter()
-    .find_map(|key| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|model| !model.trim().is_empty())
-            .map(str::to_string)
-    })
-}
-
-fn cursor_dispatch_model(item: &Value) -> Option<String> {
-    item.get("input")
-        .and_then(cursor_model_string)
-        .or_else(|| cursor_model_string(item))
-}
-
-fn is_subagent_dispatch_tool(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent")
-}
-
-fn dispatch_text(item: &Value) -> Option<String> {
-    let input = item.get("input").unwrap_or(item);
-    let mut parts = Vec::new();
-    for key in ["description", "prompt", "subagent_type"] {
-        if let Some(value) = input
-            .get(key)
-            .or_else(|| item.get(key))
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            parts.push(value.to_string());
-        }
-    }
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
-}
 
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,

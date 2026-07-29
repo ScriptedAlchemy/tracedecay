@@ -15,6 +15,9 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProjectId,
     ProviderId, RetentionClass, SessionId,
 };
+use tracedecay_store::cursor_dispatch::{
+    cursor_dispatch_model, cursor_model_string, dispatch_text, is_subagent_dispatch_tool,
+};
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::application::host_admission::HostAdmissionFacade;
@@ -1983,44 +1986,8 @@ fn event_dispatch_messages(
     out
 }
 
-fn cursor_model_string(value: &Value) -> Option<String> {
-    [
-        "model",
-        "model_id",
-        "modelId",
-        "model_name",
-        "modelName",
-        "model_slug",
-        "modelSlug",
-        "model_display_name",
-        "modelDisplayName",
-        "display_model",
-        "displayModel",
-        "display_model_name",
-        "displayModelName",
-    ]
-    .into_iter()
-    .find_map(|key| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|model| !model.trim().is_empty())
-            .map(str::to_string)
-    })
-}
-
 fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
     cursor_model_string(record).or_else(|| cursor_model_string(message))
-}
-
-pub(crate) fn cursor_dispatch_model(item: &Value) -> Option<String> {
-    item.get("input")
-        .and_then(cursor_model_string)
-        .or_else(|| cursor_model_string(item))
-}
-
-pub(crate) fn is_subagent_dispatch_tool(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent")
 }
 
 fn content_is_only_subagent_dispatch(content: &Value) -> bool {
@@ -2035,22 +2002,6 @@ fn content_is_only_subagent_dispatch(content: &Value) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(is_subagent_dispatch_tool)
         })
-}
-
-pub(crate) fn dispatch_text(item: &Value) -> Option<String> {
-    let input = item.get("input").unwrap_or(item);
-    let mut parts = Vec::new();
-    for key in ["description", "prompt", "subagent_type"] {
-        if let Some(value) = input
-            .get(key)
-            .or_else(|| item.get(key))
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            parts.push(value.to_string());
-        }
-    }
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn content_kind(content: &Value) -> Option<&'static str> {

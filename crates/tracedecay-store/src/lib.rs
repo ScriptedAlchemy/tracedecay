@@ -6,6 +6,7 @@
 
 mod canonical_projection;
 pub mod configuration;
+pub mod cursor_dispatch;
 pub mod diagnostics;
 pub mod evidence_assembly;
 pub mod external_source;
