@@ -64,6 +64,7 @@ use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use same_file::Handle;
+use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sync;
@@ -409,7 +410,8 @@ fn sync_source_edit_directory(directory: &Dir) -> Result<()> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PlannedSourceEditFile {
     pub relative_path: String,
     pub expected: Option<String>,
@@ -452,6 +454,45 @@ pub(crate) async fn apply_source_edit_plan<T>(
         .await;
     let complete = state.lock().expect("source edit apply lock").consumed.len() == expected_count;
     (result, complete)
+}
+
+pub(crate) fn rollback_planned_source_edit_files(
+    project_root: &Path,
+    files: &[PlannedSourceEditFile],
+) -> Result<()> {
+    let observed = files
+        .iter()
+        .map(|file| {
+            let current = read_source_edit_candidate(project_root, Path::new(&file.relative_path))?;
+            let expected = file.expected.as_deref().map(str::as_bytes);
+            let intended = file.intended.as_deref().map(str::as_bytes);
+            if current.as_deref() != expected && current.as_deref() != intended {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "source edit crash recovery refused foreign bytes in {}",
+                        file.relative_path
+                    ),
+                });
+            }
+            Ok(current)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (file, current) in files.iter().zip(observed).rev() {
+        if current.as_deref() == file.expected.as_deref().map(str::as_bytes) {
+            continue;
+        }
+        let (Some(current), Some(expected)) = (file.intended.as_deref(), file.expected.as_deref())
+        else {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "source edit crash recovery cannot restore a created or removed file: {}",
+                    file.relative_path
+                ),
+            });
+        };
+        publish_planned_source_edit(project_root, &file.relative_path, Some(current), expected)?;
+    }
+    Ok(())
 }
 
 pub(super) fn capture_planned_source_edit(
@@ -522,6 +563,23 @@ pub(super) fn publish_planned_source_edit(
 }
 
 impl TraceDecay {
+    pub(crate) async fn recover_source_edit_preimages(
+        &self,
+        files: &[PlannedSourceEditFile],
+    ) -> Result<()> {
+        rollback_planned_source_edit_files(&self.project_root, files)?;
+        for file in files {
+            let Some(expected) = &file.expected else {
+                continue;
+            };
+            let authority =
+                SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
+            self.reindex_file(&file.relative_path, expected, &authority)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Applies one immutable API-migration file family through the source-edit
     /// CAS authority. Every candidate is captured during preview. Real apply
     /// validates every preimage before the first write and restores all
@@ -602,15 +660,37 @@ impl TraceDecay {
                 site.disposition == tracedecay_application::ApiMigrationSiteDispositionV1::Changed
             })
             .count();
+        let compatibility_operations = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                tracedecay_application::ApiMigrationOperationRequestV1::InsertCompatibility {
+                    operation_id,
+                    ..
+                } => Some(operation_id.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let compatibility_sites = plan
             .sites
             .iter()
-            .filter(|site| site.reason.contains("compatibility"))
+            .filter(|site| compatibility_operations.contains(site.operation_id.as_str()))
             .count();
+        let protected_operations = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                tracedecay_application::ApiMigrationOperationRequestV1::AssertStableValue {
+                    operation_id,
+                    ..
+                } => Some(operation_id.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let protected_values_verified = plan
             .sites
             .iter()
-            .filter(|site| site.reason.starts_with("protected "))
+            .filter(|site| protected_operations.contains(site.operation_id.as_str()))
             .count();
         if dry_run {
             return Ok(tracedecay_application::ApiMigrationApplyResultV1 {

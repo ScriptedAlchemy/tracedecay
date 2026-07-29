@@ -594,6 +594,19 @@ mod tests {
         ManifestDigest::new(value).unwrap()
     }
 
+    fn api_migration_plan() -> ApiMigrationPlanV1 {
+        ApiMigrationPlanV1 {
+            family_id: "family.mcp-route".to_owned(),
+            repository_revision: "HEAD".to_owned(),
+            graph_revision: digest(EXPECTED_STATE),
+            operations: Vec::new(),
+            sites: Vec::new(),
+            files: Vec::new(),
+            blocked: false,
+            plan_digest: digest(PREDICTED_STATE),
+        }
+    }
+
     async fn fixture_graph(project_root: &Path) -> (TraceDecay, crate::db::DaemonDatabaseScope) {
         let profile_root = project_root.join(".tracedecay-test-profile");
         let open_options = TraceDecayOpenOptions {
@@ -740,7 +753,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seven_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
+    async fn eight_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -791,6 +804,17 @@ mod tests {
         handle_move_symbol(
             &graph,
             json!({"symbol":"old","dest_file":"src/new.rs"}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        let plan = api_migration_plan();
+        handle_api_migration_apply(
+            &graph,
+            json!({
+                "plan": plan,
+                "plan_digest": PREDICTED_STATE
+            }),
             invocation_context(Some(executor)),
         )
         .await
@@ -809,6 +833,7 @@ mod tests {
                 SourceEditKind::ReplaceSymbol,
                 SourceEditKind::InsertAtSymbol,
                 SourceEditKind::MoveSymbol,
+                SourceEditKind::ApiMigrationApply,
             ]
         );
         assert!(seen.iter().all(|invocation| invocation.edit.dry_run()));
@@ -834,6 +859,16 @@ mod tests {
                 update_references: false,
                 ..
             }
+        ));
+        assert!(matches!(
+            &seen[7].edit,
+            SourceEditRequest::ApiMigrationApply {
+                plan,
+                plan_digest,
+                dry_run: true,
+                verify: true,
+            } if plan.family_id == "family.mcp-route"
+                && &plan.plan_digest == plan_digest
         ));
         for invocation in seen.iter() {
             assert_eq!(
