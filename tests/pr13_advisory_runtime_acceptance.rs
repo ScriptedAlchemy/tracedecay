@@ -805,12 +805,16 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         String::from_utf8_lossy(&advisory.stderr)
     );
     let advisory: Value = serde_json::from_slice(&advisory.stdout).unwrap();
+    assert_four_pillar_terminal_cycle(&advisory);
+}
 
-    // `producer_contributions` is a fixed list in the daemon payload, so
-    // searching the serialized response for pillar names proves nothing. The
-    // terminal cycle object is the only place the four pillars report real
-    // state, so assert against that object's typed contents instead.
-    let cycle = find_advisory_cycle(&advisory).unwrap_or_else(|| {
+/// Asserts the four-pillar terminal state Plan 37 requires of one advisory
+/// cycle. `producer_contributions` is a fixed literal array in the daemon
+/// payload, so searching the serialized response for pillar names proves
+/// nothing; the terminal cycle object is the only place the pillars report
+/// real state.
+fn assert_four_pillar_terminal_cycle(advisory: &Value) {
+    let cycle = find_advisory_cycle(advisory).unwrap_or_else(|| {
         panic!("advisory result carried no four-pillar terminal cycle object: {advisory}")
     });
 
@@ -829,9 +833,9 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         "a terminated cycle always reports the state of every evaluated provider: {cycle}"
     );
 
-    // This project has no GitHub or CI provider access, so those pillars are
-    // genuinely unavailable. Plan 37 requires that to stay visible per pillar
-    // rather than collapsing into one clean, empty answer.
+    // The acceptance project has no GitHub or CI provider access, so those
+    // pillars are genuinely unavailable. Plan 37 requires that to stay visible
+    // per pillar rather than collapsing into one clean, empty answer.
     let incomplete = provider_states
         .iter()
         .filter(|state| **state != ProviderEvaluationStateV1::SupportedCompletedComplete)
@@ -854,6 +858,92 @@ async fn production_host_ingest_uses_registered_project_runtime() {
             !published,
             "an incomplete-coverage cycle is not publishable: {cycle}"
         );
+    }
+}
+
+/// The gate above only runs after a daemon round trip, so prove here that it
+/// actually rejects every way a four-pillar result can lie. Without this the
+/// gate could silently rot back into the substring check it replaced.
+#[test]
+fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
+    // MCP delivers the evidence document as JSON text inside the envelope.
+    let envelope = |cycle: Value| json!({"content": [{"text": cycle.to_string()}]});
+    let contributions = json!([
+        "github_review_ingest",
+        "ci_failure_localize",
+        "feedback_proximity"
+    ]);
+
+    assert_four_pillar_terminal_cycle(&envelope(json!({
+        "request_handle": "rh.fixture",
+        "cycle": {
+            "termination": "incomplete_coverage",
+            "provider_states": ["unavailable", "unavailable", "supported_completed_complete"],
+            "published": false,
+        },
+        "producer_contributions": contributions.clone(),
+    })));
+
+    // Every case below is expected to panic, so keep the default hook from
+    // printing a backtrace per rejection.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcomes = [
+        (
+            "a payload carrying only the fixed contribution list",
+            json!({ "producer_contributions": contributions }),
+        ),
+        (
+            "a clean termination beside an unavailable pillar",
+            json!({"cycle": {
+                "termination": "clean",
+                "provider_states": ["unavailable", "supported_completed_complete"],
+                "published": true,
+            }}),
+        ),
+        (
+            "pillar states collapsed into complete coverage",
+            json!({"cycle": {
+                "termination": "clean",
+                "provider_states": ["supported_completed_complete"],
+                "published": true,
+            }}),
+        ),
+        (
+            "an incomplete-coverage cycle claiming publication",
+            json!({"cycle": {
+                "termination": "incomplete_coverage",
+                "provider_states": ["unavailable"],
+                "published": true,
+            }}),
+        ),
+        (
+            "an untyped termination",
+            json!({"cycle": {
+                "termination": "mostly_fine",
+                "provider_states": ["unavailable"],
+                "published": false,
+            }}),
+        ),
+        (
+            "an untyped provider state",
+            json!({"cycle": {
+                "termination": "blocked",
+                "provider_states": ["mostly_fine"],
+                "published": false,
+            }}),
+        ),
+    ]
+    .map(|(reason, payload)| {
+        let envelope = envelope(payload);
+        let rejected =
+            std::panic::catch_unwind(|| assert_four_pillar_terminal_cycle(&envelope)).is_err();
+        (reason, rejected)
+    });
+    std::panic::set_hook(previous_hook);
+
+    for (reason, rejected) in outcomes {
+        assert!(rejected, "the four-pillar gate accepted {reason}");
     }
 }
 
