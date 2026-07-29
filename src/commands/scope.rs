@@ -6,6 +6,12 @@
 //! an unregistered exact root, an unusable selector, a malformed registry
 //! response, or a sibling-root resolution fails closed — the CLI never
 //! substitutes another project (no CWD or sibling fallback).
+//!
+//! This module owns only the CLI-specific brokering: the daemon handshake,
+//! the registry status taxonomy, and payload field extraction. The resolution
+//! guards (canonicalization, sibling-root authorization, digest revalidation)
+//! and the daemon-owned identity delegation live in the single root-façade
+//! path (`tracedecay::application::context::resolve_registered_root_scope`).
 
 use std::path::{Path, PathBuf};
 
@@ -92,35 +98,25 @@ fn scope_from_registry_payload(
         "registered project root",
         requested,
     )?;
-    let requested_root =
-        canonicalize_absolute_root(requested, "requested project root", requested)?;
-    if requested_root != canonical && !requested_root.starts_with(&canonical) {
-        return Err(config_error(format!(
-            "project selector '{}' resolved to registered root '{}'; refusing to serve a sibling root implicitly",
-            requested.display(),
-            canonical.display()
-        )));
-    }
     let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
         config_error(format!(
             "registry project id for '{}' is not canonical: {error}",
             requested.display()
         ))
     })?;
+    // The requested-root canonicalization, sibling-root authorization, and
+    // scope-digest revalidation all live in the single root-façade path; the
+    // CLI keeps only the registry brokering and selector taxonomy above.
     #[allow(deprecated)]
     // the CLI crosses through the root facade until the application boundary owns resolution
-    let scope = tracedecay::application::context::resolve_exact_root_scope(&canonical, &project_id)
-        .map_err(|error| {
-            config_error(format!(
-                "failed to resolve exact application scope for '{}': {error}",
-                canonical.display()
-            ))
-        })?;
-    // A scope whose digest does not match its fields is stale or tampered and
-    // must never cross the boundary.
-    scope.validate().map_err(|error| {
+    let scope = tracedecay::application::context::resolve_registered_root_scope(
+        &canonical,
+        requested,
+        &project_id,
+    )
+    .map_err(|error| {
         config_error(format!(
-            "resolved scope for '{}' failed validation: {error}",
+            "failed to resolve exact application scope for '{}': {error}",
             canonical.display()
         ))
     })?;

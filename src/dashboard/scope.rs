@@ -18,19 +18,19 @@ use tracedecay_domain::ProjectId;
 ///
 /// `project_id` must be the registered identity validated from the store
 /// layout; `None` (missing registry) or a non-canonical id fails closed. The
-/// repository/worktree/reference identity is delegated to the daemon-owned
-/// exact-root authority so the dashboard never re-derives it from paths.
-///
-// CONSOLIDATION-CANDIDATE: align with the slice-1 root-façade adapter
-// (`crate::application::context::resolve_exact_root_scope`) once the
-// deprecated façade's deletion pass picks a single owner for exact-root
-// resolution outside the daemon.
+/// resolution itself is the single consolidated path behind the root façade
+/// (`crate::application::context::resolve_exact_root_scope`), so the
+/// dashboard never re-derives repository/worktree identity from paths.
 pub(crate) fn resolve_dashboard_scope(
     project_root: &Path,
     project_id: Option<&str>,
 ) -> Option<tracedecay_application::ResolvedScope> {
     let project_id = ProjectId::new(project_id?).ok()?;
-    crate::daemon::project_open_owners::resolved_scope_for_project(project_root, &project_id).ok()
+    #[allow(deprecated)]
+    // the dashboard crosses through the deprecated root façade until the
+    // application boundary owns scope resolution
+    let scope = crate::application::context::resolve_exact_root_scope(project_root, &project_id);
+    scope.ok()
 }
 
 #[cfg(test)]
