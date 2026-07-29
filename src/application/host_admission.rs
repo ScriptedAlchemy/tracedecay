@@ -4226,6 +4226,21 @@ impl HostAdmissionTestRuntimeV1 {
             .await
     }
 
+    pub async fn lcm_status_deep_for_test(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+        self.primary_session_database_for_test()
+            .lcm_status_with_options(
+                provider,
+                session_id,
+                true,
+                &crate::sessions::lcm::LcmGcConfig::default(),
+            )
+            .await
+    }
+
     #[doc(hidden)]
     pub async fn lcm_describe_for_test(
         &self,
