@@ -329,21 +329,6 @@ impl RegisteredGlobalDb {
         .map_err(|error| registered_error("run registered session retention", error))
     }
 
-    pub(crate) async fn observation_retention_report(
-        &self,
-        generation: Option<&str>,
-        config: &super::observation::retention::ObservationRetentionConfig,
-        now: i64,
-    ) -> crate::errors::Result<super::observation::retention::ObservationRetentionReport> {
-        self.run_observation_retention(
-            generation,
-            config,
-            super::observation::retention::RetentionMode::DryRun,
-            now,
-        )
-        .await
-    }
-
     pub(crate) async fn run_observation_retention(
         &self,
         generation: Option<&str>,
