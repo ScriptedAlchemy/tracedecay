@@ -284,9 +284,8 @@ impl AgentIntegration for CodexIntegration {
                     entry.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay")
                 })
             });
-        let mcp_current = load_json_file(&plugin_dir.join(".mcp.json"))
-            .pointer("/mcpServers/graph")
-            .is_some();
+        let mcp_current =
+            codex_mcp_timeouts_current(&load_json_file(&plugin_dir.join(".mcp.json")));
         if matches!(
             component,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
@@ -756,6 +755,8 @@ fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) 
     let mut mcp: serde_json::Value = serde_json::from_str(&stamped)?;
     let server = &mut mcp["mcpServers"]["graph"];
     server["args"] = policy.mcp_args();
+    server["startup_timeout_sec"] = CODEX_MCP_STARTUP_TIMEOUT_SECS.into();
+    server["tool_timeout_sec"] = CODEX_MCP_TOOL_TIMEOUT_SECS.into();
     match policy.mcp_env() {
         Some(env) => server["env"] = env,
         None => {
@@ -821,6 +822,22 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
 /// the current bundle no longer registers them.
 const CODEX_LEGACY_HOOK_SUBCOMMANDS: &[&str] = &["hook-codex-pre-tool-use"];
 const CODEX_DEFAULT_MARKETPLACE_NAME: &str = "personal";
+const CODEX_MCP_STARTUP_TIMEOUT_SECS: u64 = 120;
+const CODEX_MCP_TOOL_TIMEOUT_SECS: u64 = 900;
+
+fn codex_mcp_timeouts_current(mcp: &serde_json::Value) -> bool {
+    let Some(server) = mcp.pointer("/mcpServers/graph") else {
+        return false;
+    };
+    server
+        .get("startup_timeout_sec")
+        .and_then(serde_json::Value::as_u64)
+        == Some(CODEX_MCP_STARTUP_TIMEOUT_SECS)
+        && server
+            .get("tool_timeout_sec")
+            .and_then(serde_json::Value::as_u64)
+            == Some(CODEX_MCP_TOOL_TIMEOUT_SECS)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum CodexHookTrustState {
@@ -1888,18 +1905,14 @@ fn doctor_check_plugin_dir(
 
     let mcp_path = plugin_dir.join(".mcp.json");
     let mcp = load_json_file(&mcp_path);
-    if mcp
-        .get("mcpServers")
-        .and_then(|servers| servers.get("graph"))
-        .is_some()
-    {
+    if codex_mcp_timeouts_current(&mcp) {
         dc.pass(&format!(
-            "Codex plugin MCP server registered in {}",
+            "Codex plugin MCP server registered with managed timeouts in {}",
             mcp_path.display()
         ));
     } else {
         dc.fail(&format!(
-            "Codex plugin MCP server missing in {} — rerun tracedecay Codex install",
+            "Codex plugin MCP server missing or has stale timeouts in {} — run `tracedecay update-plugin`",
             mcp_path.display()
         ));
     }

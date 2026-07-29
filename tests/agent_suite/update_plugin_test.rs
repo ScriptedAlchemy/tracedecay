@@ -1593,6 +1593,8 @@ fn codex_install_renders_structurally_valid_bundle() {
     assert_eq!(server["type"], "stdio");
     assert_eq!(server["command"], json!(NEW_BIN));
     assert_eq!(server["args"], json!(["serve"]));
+    assert_eq!(server["startup_timeout_sec"], json!(120));
+    assert_eq!(server["tool_timeout_sec"], json!(900));
     assert_eq!(server["env"], json!({ "TRACEDECAY_ENABLE_GLOBAL_DB": "1" }));
 }
 
@@ -1615,6 +1617,8 @@ fn codex_local_install_renders_project_scoped_mcp() {
     let server = &mcp["mcpServers"]["graph"];
     assert_eq!(server["command"], json!(NEW_BIN));
     assert_eq!(server["args"], json!(["serve", "--path", "."]));
+    assert_eq!(server["startup_timeout_sec"], json!(120));
+    assert_eq!(server["tool_timeout_sec"], json!(900));
     assert!(
         server.get("env").is_none(),
         "project-local installs must not enable the global DB"
