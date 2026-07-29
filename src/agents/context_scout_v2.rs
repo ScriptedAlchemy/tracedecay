@@ -640,6 +640,17 @@ pub async fn select_model_assisted_context_scout(
             });
         }
     };
+    if !execution.matches_limits(limits) {
+        return Err(ContextScoutErrorV1::InvalidLimits);
+    }
+    if let Err(error) = execution.checkpoint() {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: error.into(),
+            model_receipt: None,
+        });
+    }
     let Some(request) = model_request(input, limits)? else {
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
@@ -648,6 +659,14 @@ pub async fn select_model_assisted_context_scout(
             model_receipt: None,
         });
     };
+    if let Err(error) = execution.validate_input(&request) {
+        return Ok(ContextScoutSelectionV1 {
+            route: ContextScoutRouteV1::DeterministicFallback,
+            decision: deterministic,
+            model_outcome: error.into(),
+            model_receipt: None,
+        });
+    }
     let requested_backend = model.backend();
     let max_input_tokens = execution.max_input_tokens;
     let max_output_tokens = execution.max_output_tokens;
@@ -721,10 +740,11 @@ fn valid_model_receipt(
             .is_some_and(|model| !model.trim().is_empty() && model.len() <= MAX_SCOUT_TEXT_BYTES)
         && receipt
             .input_tokens
-            .is_none_or(|tokens| tokens <= max_input_tokens as u64)
+            .is_some_and(|tokens| tokens <= max_input_tokens as u64)
         && receipt
             .output_tokens
-            .is_none_or(|tokens| tokens <= max_output_tokens as u64)
+            .is_some_and(|tokens| tokens <= max_output_tokens as u64)
+        && receipt.estimated_cost_microusd.is_some()
 }
 
 fn model_request(
@@ -862,6 +882,32 @@ pub struct ContextScoutCoalescerV1 {
 }
 
 impl ContextScoutCoalescerV1 {
+    fn restore(&mut self, work: ContextScoutWorkV1) -> Result<(), ContextScoutErrorV1> {
+        work.address.validate()?;
+        if work.generation == 0 || work.input_watermark == [0; 32] {
+            return Err(ContextScoutErrorV1::StaleWork);
+        }
+        if !self.active.contains_key(&work.address)
+            && self.active.len() >= MAX_SCOUT_ACTIVE_ADDRESSES
+        {
+            return Err(ContextScoutErrorV1::CapacityExceeded);
+        }
+        match self.active.get(&work.address) {
+            Some(current) if current.generation > work.generation => Ok(()),
+            Some(current) if current.generation == work.generation => {
+                if current == &work {
+                    Ok(())
+                } else {
+                    Err(ContextScoutErrorV1::StaleWork)
+                }
+            }
+            _ => {
+                self.active.insert(work.address, work);
+                Ok(())
+            }
+        }
+    }
+
     pub fn enqueue(
         &mut self,
         address: ContextScoutAddressV1,
@@ -1321,10 +1367,12 @@ pub trait ContextScoutDurableStoreV1: Send + Sync {
         work: ContextScoutWorkV1,
     ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1>;
 
-    /// Atomically records the delivery receipt for this exact queue entry.
+    /// Atomically records the delivery receipt for this exact claimed queue
+    /// entry. The lease is part of the write authority; an entry alone can
+    /// never complete delivery after requeue or takeover.
     fn record_delivery<'a>(
         &'a self,
-        entry: &'a ContextScoutDurableQueueEntryV1,
+        claim: &'a ContextScoutDurableClaimV1,
         receipt: &'a ContextScoutDeliveryReceiptV1,
     ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1>;
 
@@ -1381,10 +1429,10 @@ where
 
     fn record_delivery<'a>(
         &'a self,
-        entry: &'a ContextScoutDurableQueueEntryV1,
+        claim: &'a ContextScoutDurableClaimV1,
         receipt: &'a ContextScoutDeliveryReceiptV1,
     ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        (**self).record_delivery(entry, receipt)
+        (**self).record_delivery(claim, receipt)
     }
 
     fn record_feedback<'a>(
@@ -1535,6 +1583,23 @@ impl<S, M> ContextScoutDurableRuntimeV1<S, M> {
         self.coalescer.is_current(work)
     }
 
+    pub(crate) fn restore_startup(
+        &mut self,
+        startup: &ContextScoutDurableStartupOutcomeV1,
+    ) -> Result<(), ContextScoutErrorV1> {
+        let ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated } = startup else {
+            return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+        };
+        if *truncated {
+            return Err(ContextScoutErrorV1::CapacityExceeded);
+        }
+        for entry in entries {
+            entry.validate()?;
+            self.coalescer.restore(entry.work)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn replace_model(&mut self, model: M) {
         self.model = model;
     }
@@ -1682,19 +1747,20 @@ where
     /// Validate receipt identity before delegating an atomic durable completion.
     pub async fn complete_delivery(
         &mut self,
-        entry: &ContextScoutDurableQueueEntryV1,
+        claim: &ContextScoutDurableClaimV1,
         receipt: &ContextScoutDeliveryReceiptV1,
     ) -> Result<ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1> {
-        entry.validate()?;
-        validate_context_scout_delivery_receipt(&entry.envelope, receipt)?;
-        let outcome = self.store.record_delivery(entry, receipt).await;
+        claim.entry.validate()?;
+        claim.lease.validate(receipt.delivered_at)?;
+        validate_context_scout_delivery_receipt(&claim.entry.envelope, receipt)?;
+        let outcome = self.store.record_delivery(claim, receipt).await;
         if matches!(
             outcome,
             ContextScoutDurableStoreOutcomeV1::Stored
                 | ContextScoutDurableStoreOutcomeV1::Duplicate
-        ) && self.coalescer.is_current(entry.work)
+        ) && self.coalescer.is_current(claim.entry.work)
         {
-            self.coalescer.cancel(entry.work)?;
+            self.coalescer.cancel(claim.entry.work)?;
             self.last_delivery_outcome = Some(receipt.outcome);
         }
         Ok(outcome)
@@ -1865,6 +1931,31 @@ mod tests {
             MAX_SCOUT_MODEL_INPUT_TOKENS,
             MAX_SCOUT_MODEL_OUTPUT_TOKENS,
         ));
+    }
+
+    #[test]
+    fn successful_model_receipt_requires_usage_and_cost_evidence() {
+        for receipt in [
+            ContextScoutModelReceiptV1 {
+                input_tokens: None,
+                ..model_receipt()
+            },
+            ContextScoutModelReceiptV1 {
+                output_tokens: None,
+                ..model_receipt()
+            },
+            ContextScoutModelReceiptV1 {
+                estimated_cost_microusd: None,
+                ..model_receipt()
+            },
+        ] {
+            assert!(!valid_model_receipt(
+                &receipt,
+                ContextScoutModelBackendV1::CodexAppServer,
+                MAX_SCOUT_MODEL_INPUT_TOKENS,
+                MAX_SCOUT_MODEL_OUTPUT_TOKENS,
+            ));
+        }
     }
 
     #[test]
@@ -2214,6 +2305,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_cancelled_execution_never_calls_the_model_assistant() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let execution = ContextScoutModelExecutionV1::new(
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            cancellation,
+            ContextScoutLimitsV1::bounded_defaults(),
+        )
+        .unwrap();
+        let selection = select_model_assisted_context_scout(
+            &input(vec![candidate(1, 10)]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &RecordingModel {
+                calls: Arc::clone(&calls),
+            },
+            execution,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            selection.model_outcome,
+            ContextScoutModelRunOutcomeV1::Cancelled
+        );
+        assert!(selection.model_receipt.is_none());
+    }
+
+    #[tokio::test]
     async fn duplicate_candidate_keys_and_duplicate_model_citations_fail_closed() {
         let duplicate = input(vec![candidate(1, 10), candidate(1, 9)]);
         assert_eq!(
@@ -2251,11 +2372,17 @@ mod tests {
 
         let mut limits = ContextScoutLimitsV1::bounded_defaults();
         limits.max_model_input_tokens = 1;
+        let execution = ContextScoutModelExecutionV1::new(
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            CancellationToken::new(),
+            limits,
+        )
+        .unwrap();
         let selection = select_model_assisted_context_scout(
             &input(vec![candidate(1, 10)]),
             limits,
             &BadModel,
-            model_execution(),
+            execution,
         )
         .await
         .unwrap();
@@ -2417,14 +2544,14 @@ mod tests {
 
         fn record_delivery<'a>(
             &'a self,
-            entry: &'a ContextScoutDurableQueueEntryV1,
+            claim: &'a ContextScoutDurableClaimV1,
             receipt: &'a ContextScoutDeliveryReceiptV1,
         ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
             let mut state = self.0.lock().unwrap();
             if state.receipts.iter().any(|existing| existing == receipt) {
                 return Box::pin(async { ContextScoutDurableStoreOutcomeV1::Duplicate });
             }
-            if state.entries.get(&entry.envelope.envelope_id) != Some(entry) {
+            if state.entries.get(&claim.entry.envelope.envelope_id) != Some(&claim.entry) {
                 return Box::pin(async { ContextScoutDurableStoreOutcomeV1::Unavailable });
             }
             state.receipts.push(receipt.clone());
@@ -2561,6 +2688,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_restores_the_latest_durable_work_generation() {
+        let store = DurableStore::default();
+        let mut runtime = ContextScoutDurableRuntimeV1::new(store.clone(), BadModel);
+        let first = input(vec![candidate(1, 10)]);
+        runtime
+            .prepare(
+                &first,
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap();
+        let mut second = first.clone();
+        second.input_watermark = [21; 32];
+        second.envelope_id = [22; 16];
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry: second, .. } = runtime
+            .prepare(
+                &second,
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("second generation should enqueue");
+        };
+        assert_eq!(second.work.generation, 2);
+
+        let startup = store.startup(UtcMicros(10), 32).await;
+        let mut restarted = ContextScoutDurableRuntimeV1::new(store, BadModel);
+        restarted.restore_startup(&startup).unwrap();
+        let mut third = first;
+        third.input_watermark = [23; 32];
+        third.envelope_id = [24; 16];
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry: third, .. } = restarted
+            .prepare(
+                &third,
+                ContextScoutLimitsV1::bounded_defaults(),
+                ContextScoutRuntimeModeV1::Deterministic,
+                model_execution(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("post-restart generation should enqueue");
+        };
+        assert_eq!(third.work.generation, 3);
+    }
+
+    #[tokio::test]
     async fn controlled_model_execution_cannot_widen_daemon_limits() {
         let store = DurableStore::default();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -2665,7 +2844,14 @@ mod tests {
             delivered_at: UtcMicros(20),
             outcome: ContextScoutOutcomeV1::Displayed,
         };
-        runtime.complete_delivery(&entry, &receipt).await.unwrap();
+        let claim = ContextScoutDurableClaimV1 {
+            entry: (*entry).clone(),
+            lease: ContextScoutLeaseV1 {
+                lease_id: [30; 16],
+                expires_at: UtcMicros(40),
+            },
+        };
+        runtime.complete_delivery(&claim, &receipt).await.unwrap();
         runtime
             .record_feedback(
                 &receipt,

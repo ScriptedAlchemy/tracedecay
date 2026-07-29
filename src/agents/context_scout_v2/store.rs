@@ -450,6 +450,30 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStartupOutcomeV1::Unavailable)
     }
 
+    pub(crate) async fn work_snapshot(
+        &self,
+        now: UtcMicros,
+        limit: usize,
+    ) -> ContextScoutDurableStartupOutcomeV1 {
+        if now.0 <= 0 || limit == 0 || limit > MAX_SCOUT_ACTIVE_ADDRESSES {
+            return ContextScoutDurableStartupOutcomeV1::Unavailable;
+        }
+        self.update_state("restore Context Scout work generations", |state| {
+            state.recover_expired_claims(now);
+            let mut entries = state
+                .entries
+                .iter()
+                .map(|stored| stored.entry.clone())
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|entry| (entry.work.address, entry.work.generation));
+            let truncated = entries.len() > limit;
+            entries.truncate(limit);
+            ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated }
+        })
+        .await
+        .unwrap_or(ContextScoutDurableStartupOutcomeV1::Unavailable)
+    }
+
     async fn enqueue_inner(
         &self,
         entry: ContextScoutDurableQueueEntryV1,
@@ -484,6 +508,13 @@ impl ProjectContextScoutDurableStoreV1 {
                 .iter()
                 .position(|stored| stored.entry.work.address == entry.work.address)
             {
+                let existing = &state.entries[index].entry;
+                if existing == &entry {
+                    return ContextScoutDurableStoreOutcomeV1::Duplicate;
+                }
+                if existing.work.generation >= entry.work.generation {
+                    return ContextScoutDurableStoreOutcomeV1::Superseded;
+                }
                 let existing = state.entries.remove(index);
                 state.add_tombstone(existing.entry.work);
             } else if state.entries.len() == MAX_SCOUT_ACTIVE_ADDRESSES {
@@ -607,16 +638,17 @@ impl ProjectContextScoutDurableStoreV1 {
 
     async fn record_delivery_inner(
         &self,
-        entry: &ContextScoutDurableQueueEntryV1,
+        claim: &ContextScoutDurableClaimV1,
         receipt: &ContextScoutDeliveryReceiptV1,
     ) -> ContextScoutDurableStoreOutcomeV1 {
-        if entry.validate().is_err()
-            || !self.in_scope(entry.work.address)
-            || validate_context_scout_delivery_receipt(&entry.envelope, receipt).is_err()
+        if claim.entry.validate().is_err()
+            || claim.lease.validate(receipt.delivered_at).is_err()
+            || !self.in_scope(claim.entry.work.address)
+            || validate_context_scout_delivery_receipt(&claim.entry.envelope, receipt).is_err()
         {
             return ContextScoutDurableStoreOutcomeV1::Unavailable;
         }
-        let entry = entry.clone();
+        let claim = claim.clone();
         let receipt = receipt.clone();
         self.update_state("record Context Scout delivery", move |state| {
             if let Some(existing) = state
@@ -632,44 +664,50 @@ impl ProjectContextScoutDurableStoreV1 {
                     .iter_mut()
                     .find(|binding| binding.envelope_id == receipt.envelope_id)
                 {
-                    if binding.address != entry.work.address {
+                    if binding.address != claim.entry.work.address {
                         return ContextScoutDurableStoreOutcomeV1::Superseded;
                     }
                     if binding
                         .entry
                         .as_ref()
-                        .is_some_and(|stored| stored != &entry)
+                        .is_some_and(|stored| stored != &claim.entry)
                     {
                         return ContextScoutDurableStoreOutcomeV1::Superseded;
                     }
-                    if binding.entry.as_ref() == Some(&entry) {
+                    if binding.entry.as_ref() == Some(&claim.entry) {
                         return ContextScoutDurableStoreOutcomeV1::Duplicate;
                     }
-                    binding.entry = Some(entry.clone());
+                    binding.entry = Some(claim.entry.clone());
                 } else {
                     state.delivery_addresses.push(StoredDeliveryAddressV1 {
-                        envelope_id: entry.envelope.envelope_id,
-                        address: entry.work.address,
-                        entry: Some(entry.clone()),
+                        envelope_id: claim.entry.envelope.envelope_id,
+                        address: claim.entry.work.address,
+                        entry: Some(claim.entry.clone()),
                     });
                 }
                 state.refresh_delivery_provenance();
                 return ContextScoutDurableStoreOutcomeV1::Stored;
             }
-            let Some(index) = state
-                .entries
-                .iter()
-                .position(|stored| stored.entry == entry)
-            else {
-                return ContextScoutDurableStoreOutcomeV1::Unavailable;
+            let Some(index) = state.entries.iter().position(|stored| {
+                stored.entry == claim.entry && stored.lease == Some(claim.lease)
+            }) else {
+                return if state
+                    .entries
+                    .iter()
+                    .any(|stored| stored.entry.work.address == claim.entry.work.address)
+                {
+                    ContextScoutDurableStoreOutcomeV1::Superseded
+                } else {
+                    ContextScoutDurableStoreOutcomeV1::Unavailable
+                };
             };
             state.entries.remove(index);
-            state.add_tombstone(entry.work);
+            state.add_tombstone(claim.entry.work);
             state.receipts.push(receipt);
             state.delivery_addresses.push(StoredDeliveryAddressV1 {
-                envelope_id: entry.envelope.envelope_id,
-                address: entry.work.address,
-                entry: Some(entry.clone()),
+                envelope_id: claim.entry.envelope.envelope_id,
+                address: claim.entry.work.address,
+                entry: Some(claim.entry.clone()),
             });
             state.trim_receipts();
             state.refresh_delivery_provenance();
@@ -754,10 +792,10 @@ impl ContextScoutDurableStoreV1 for ProjectContextScoutDurableStoreV1 {
 
     fn record_delivery<'a>(
         &'a self,
-        entry: &'a ContextScoutDurableQueueEntryV1,
+        claim: &'a ContextScoutDurableClaimV1,
         receipt: &'a ContextScoutDeliveryReceiptV1,
     ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        Box::pin(self.record_delivery_inner(entry, receipt))
+        Box::pin(self.record_delivery_inner(claim, receipt))
     }
 
     fn record_feedback<'a>(

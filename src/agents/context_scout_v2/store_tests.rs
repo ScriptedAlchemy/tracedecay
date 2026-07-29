@@ -123,6 +123,13 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
         restarted.requeue(reclaimed).await,
         ContextScoutDurableStoreOutcomeV1::Duplicate
     );
+    let delivery_claim = match restarted
+        .claim(pending.work.address, UtcMicros(23), lease(24, 40))
+        .await
+    {
+        ContextScoutDurableClaimOutcomeV1::Claimed(claimed) => claimed,
+        other => panic!("expected delivery claim, got {other:?}"),
+    };
 
     let receipt = ContextScoutDeliveryReceiptV1 {
         receipt_id: [23; 16],
@@ -131,11 +138,11 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
         outcome: ContextScoutOutcomeV1::Displayed,
     };
     assert_eq!(
-        restarted.record_delivery(&pending, &receipt).await,
+        restarted.record_delivery(&delivery_claim, &receipt).await,
         ContextScoutDurableStoreOutcomeV1::Stored
     );
     assert_eq!(
-        restarted.record_delivery(&pending, &receipt).await,
+        restarted.record_delivery(&delivery_claim, &receipt).await,
         ContextScoutDurableStoreOutcomeV1::Duplicate
     );
     let feedback = ContextScoutFeedbackV1 {
@@ -185,6 +192,109 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
             ..
         }) if deliveries.len() == 1
     ));
+}
+
+#[tokio::test]
+async fn delivery_requires_the_current_claim_after_lease_takeover() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let pending = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let stale = match store
+        .claim(pending.work.address, UtcMicros(10), lease(41, 20))
+        .await
+    {
+        ContextScoutDurableClaimOutcomeV1::Claimed(claimed) => claimed,
+        other => panic!("expected initial claim, got {other:?}"),
+    };
+    assert!(matches!(
+        store.startup(UtcMicros(21), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Ready { .. }
+    ));
+    let _current = match store
+        .claim(pending.work.address, UtcMicros(22), lease(42, 40))
+        .await
+    {
+        ContextScoutDurableClaimOutcomeV1::Claimed(claimed) => claimed,
+        other => panic!("expected replacement claim, got {other:?}"),
+    };
+    let receipt = ContextScoutDeliveryReceiptV1 {
+        receipt_id: [43; 16],
+        envelope_id: pending.envelope.envelope_id,
+        delivered_at: UtcMicros(15),
+        outcome: ContextScoutOutcomeV1::Displayed,
+    };
+
+    assert_eq!(
+        store.record_delivery(&stale, &receipt).await,
+        ContextScoutDurableStoreOutcomeV1::Superseded
+    );
+}
+
+#[tokio::test]
+async fn restart_generation_snapshot_includes_a_live_claim_without_requeueing_it() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let pending = entry(project_id, 4);
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    assert!(matches!(
+        store
+            .claim(pending.work.address, UtcMicros(10), lease(46, 50))
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Claimed(_)
+    ));
+    assert_eq!(
+        store.startup(UtcMicros(11), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Ready {
+            entries: Vec::new(),
+            truncated: false,
+        }
+    );
+    assert_eq!(
+        store.work_snapshot(UtcMicros(11), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Ready {
+            entries: vec![pending],
+            truncated: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn older_work_generation_cannot_replace_newer_durable_entry() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let newer = entry(project_id, 3);
+    assert_eq!(
+        store.enqueue(newer.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+
+    let mut older = entry(project_id, 2);
+    older.envelope.envelope_id = [44; 16];
+    older.envelope.candidate.dedupe_key = [45; 32];
+    assert_eq!(
+        store.enqueue(older).await,
+        ContextScoutDurableStoreOutcomeV1::Superseded
+    );
+    assert_eq!(
+        store.startup(UtcMicros(1), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Ready {
+            entries: vec![newer],
+            truncated: false,
+        }
+    );
 }
 
 #[tokio::test]
@@ -330,7 +440,15 @@ async fn legacy_delivery_provenance_fails_closed_until_exact_replay_migrates_it(
         ContextScoutRecentReadOutcomeV1::Unavailable
     );
     assert_eq!(
-        store.record_delivery(&delivered, &receipt).await,
+        store
+            .record_delivery(
+                &ContextScoutDurableClaimV1 {
+                    entry: delivered.clone(),
+                    lease: lease(24, 40),
+                },
+                &receipt,
+            )
+            .await,
         ContextScoutDurableStoreOutcomeV1::Stored
     );
     drop(store);
