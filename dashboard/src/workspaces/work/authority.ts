@@ -3,11 +3,10 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 /**
  * What Work owes, and what this build is able to honour.
  *
- * PR14 gives Work the Plan 24 canonical task graph and the minimal Plan 32
- * runtime. None of it can be drawn yet: `DashboardContractCatalogV1` carries no
- * Work payload, so the generated contracts module every dashboard read is
- * validated against holds no Work read model, no Work command and no
- * task-activity stream.
+ * Work is the canonical task graph and the execution runtime over it. None of it
+ * can be drawn yet: `DashboardContractCatalogV1` carries no Work payload, so the
+ * generated contracts module every dashboard read is validated against holds no
+ * Work read model, no Work command and no task-activity stream.
  *
  * The rows below are therefore a derivation of plan scope, not a reading of
  * backend state. The only claim they make about the running daemon is the one
@@ -23,12 +22,12 @@ export type WithheldReason = 'read_model_absent' | 'command_absent' | 'stream_ab
 
 export interface WithheldSurface {
   readonly id: string;
-  /** The projection, command or stream, named as Plan 24/32 names it. */
+  /** The projection, command or stream, named as the design authority names it. */
   readonly name: string;
   /** What it would draw once its contract exists — the shape of the absence,
    * so a reviewer can see what is missing rather than only that something is. */
   readonly draws: string;
-  /** The generated contract the PR14 cut names for it. */
+  /** The generated contract it reads or writes through. */
   readonly requires: string;
   readonly reason: WithheldReason;
 }
@@ -63,12 +62,11 @@ export function withheldPresentation(reason: WithheldReason): WithheldPresentati
 }
 
 /**
- * The PR14 Work cut, by plan authority.
+ * Everything Work is made of.
  *
- * Plan 24 §"Work experience and projections" for the ten projections, the PR14
- * §"Files and interfaces" contract list for the commands, and Plan 24's
- * `task_activity` for the stream. Held as data rather than markup so the
- * ledger, the tests and any later wired surface enumerate the same set once.
+ * Held as data rather than markup so the ledger, the tests and the wired
+ * surfaces that replace them enumerate one set once. As each contract lands,
+ * its row leaves this list and becomes a read.
  */
 export const WITHHELD_WORK: readonly WithheldGroup[] = [
   {

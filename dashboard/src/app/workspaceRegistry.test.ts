@@ -5,7 +5,15 @@ import { STORY_SURFACES } from '../../stories/registry.ts';
 import { CHANNELS } from './channels.ts';
 import { WORKSPACES } from './routes.tsx';
 
-const EXISTING_WORKSPACES = [
+/**
+ * The channel order, spelled out.
+ *
+ * A workspace's channel number is part of its identity — the nav rail prints it
+ * and every workspace header repeats it — so the order is pinned here rather
+ * than derived from the registry it is checking. Reordering this list renumbers
+ * live surfaces, which is exactly the change that should have to be deliberate.
+ */
+const CHANNEL_ORDER = [
   ['brain', 'Brain'],
   ['explorer', 'Explorer'],
   ['loom', 'Loom'],
@@ -18,6 +26,7 @@ const EXISTING_WORKSPACES = [
   ['observatory', 'Observatory'],
   ['costs', 'Costs'],
   ['settings', 'Settings'],
+  ['work', 'Work'],
 ] as const;
 
 function descriptors(items: readonly { path: string; label: string }[]) {
@@ -25,9 +34,8 @@ function descriptors(items: readonly { path: string; label: string }[]) {
 }
 
 describe('workspace registry', () => {
-  it('preserves the twelve existing workspaces and adds Work as the thirteenth', () => {
-    expect(descriptors(WORKSPACES).slice(0, 12)).toEqual(EXISTING_WORKSPACES);
-    expect(descriptors(WORKSPACES)[12]).toEqual(['work', 'Work']);
+  it('routes the thirteen workspaces in their fixed channel order', () => {
+    expect(descriptors(WORKSPACES)).toEqual(CHANNEL_ORDER);
   });
 
   it('keeps routes, shell channels, and visual audit surfaces aligned', () => {
