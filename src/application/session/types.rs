@@ -8,7 +8,7 @@ use tracedecay_domain::{
 
 use crate::application::context::{
     CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
-    ResolvedSessionIdentity, SessionOwner, application_grant_digest,
+    ResolvedSessionIdentity, SessionOwner, session_application_grant_digest,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -101,7 +101,7 @@ pub struct SessionRequestBinding {
 }
 
 impl SessionRequestBinding {
-    pub fn new(
+    pub(crate) fn new(
         identity: ResolvedSessionIdentity,
         capability_digest: CapabilityDigest,
         policy_digest: PolicyDigest,
@@ -130,10 +130,17 @@ impl SessionRequestBinding {
         if &scope != context.scope() {
             return Err(SessionAuthorizationError::WrongScope);
         }
-        let digest = application_grant_digest(
+        if self.cancellation.application_token_id()
+            != Some(context.cancellation().token_id.as_str())
+        {
+            return Err(SessionAuthorizationError::WrongContext);
+        }
+        let digest = session_application_grant_digest(
             self.capability_digest,
             self.policy_digest,
             self.configuration_digest,
+            &self.cancellation,
+            self.budgets,
         )
         .map_err(|_| SessionAuthorizationError::WrongContext)?;
         if &digest != &context.grant().digest {
@@ -689,7 +696,7 @@ mod tests {
     use crate::application::context::{
         BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest,
         ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
-        SessionStoreId, application_grant_digest,
+        SessionStoreId,
     };
 
     const DIGEST: [u8; 32] = [0xa5; 32];
@@ -792,10 +799,19 @@ mod tests {
         let capability = CapabilityDigest::new(capability_digest);
         let policy = PolicyDigest::new(policy_digest);
         let configuration = ConfigurationDigest::new(configuration_digest);
+        let cancellation = CancellationToken::for_application_request(&request_id);
+        let budgets = RequestBudgets::new(64, 4096, 16).unwrap();
         let grant = CapabilityGrantSnapshot::new(
             CapabilityGrantId::new("grant.session.application").unwrap(),
             1,
-            application_grant_digest(capability, policy, configuration).unwrap(),
+            session_application_grant_digest(
+                capability,
+                policy,
+                configuration,
+                &cancellation,
+                budgets,
+            )
+            .unwrap(),
             actor.clone(),
             UtcMicros(1),
             UtcMicros(i64::MAX - 1),
@@ -811,7 +827,7 @@ mod tests {
             grant,
             request_id.clone(),
             Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
-            CancellationContext::active(format!("cancellation.{}", request_id.as_str())).unwrap(),
+            CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
         )
         .unwrap();
         let binding = SessionRequestBinding::new(
@@ -819,8 +835,8 @@ mod tests {
             capability,
             policy,
             configuration,
-            CancellationToken::new(),
-            RequestBudgets::new(64, 4096, 16).unwrap(),
+            cancellation,
+            budgets,
         );
         TestRequestContext { request, binding }
     }
@@ -1208,8 +1224,8 @@ mod tests {
             context.capability_digest(),
             context.policy_digest(),
             context.configuration_digest(),
-            CancellationToken::new(),
-            RequestBudgets::new(64, 4096, 16).unwrap(),
+            context.binding.cancellation.clone(),
+            context.binding.budgets,
         );
 
         assert_eq!(
@@ -1232,8 +1248,8 @@ mod tests {
             context.capability_digest(),
             context.policy_digest(),
             context.configuration_digest(),
-            CancellationToken::new(),
-            RequestBudgets::new(64, 4096, 16).unwrap(),
+            context.binding.cancellation.clone(),
+            context.binding.budgets,
         );
         assert_eq!(
             wrong_scope.validate_context(&context),
@@ -1245,13 +1261,54 @@ mod tests {
             CapabilityDigest::new([0x11; 32]),
             context.policy_digest(),
             context.configuration_digest(),
-            CancellationToken::new(),
-            RequestBudgets::new(64, 4096, 16).unwrap(),
+            context.binding.cancellation.clone(),
+            context.binding.budgets,
         );
         assert_eq!(
             wrong_grant.validate_context(&context),
             Err(SessionAuthorizationError::WrongContext)
         );
+    }
+
+    #[test]
+    fn binding_rejects_cancellation_or_budget_substitution() {
+        let context = context();
+        let fresh_cancellation = CancellationToken::for_application_request(
+            &RequestId::new(context.request_id().as_str()).unwrap(),
+        );
+        let wrong_cancellation = SessionRequestBinding::new(
+            context.identity().clone(),
+            context.capability_digest(),
+            context.policy_digest(),
+            context.configuration_digest(),
+            fresh_cancellation,
+            context.binding.budgets,
+        );
+        assert_eq!(
+            wrong_cancellation.validate_context(&context),
+            Err(SessionAuthorizationError::WrongContext)
+        );
+
+        let widened_budgets = SessionRequestBinding::new(
+            context.identity().clone(),
+            context.capability_digest(),
+            context.policy_digest(),
+            context.configuration_digest(),
+            context.binding.cancellation.clone(),
+            RequestBudgets::new(65, 4097, 17).unwrap(),
+        );
+        assert_eq!(
+            widened_budgets.validate_context(&context),
+            Err(SessionAuthorizationError::WrongContext)
+        );
+        assert!(matches!(
+            AllowAuthorizer.authorize(
+                &context,
+                &widened_budgets,
+                &exact_authorization_request(context.identity().clone()),
+            ),
+            Err(SessionAuthorizationError::WrongContext)
+        ));
     }
 
     #[test]

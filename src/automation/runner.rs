@@ -38,7 +38,7 @@ use super::skill_writer::{
 use crate::application::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    application_grant_digest,
+    session_application_grant_digest,
 };
 use crate::application::memory::MemoryApplication;
 #[cfg(test)]
@@ -1034,10 +1034,19 @@ mod tests {
         let capability = CapabilityDigest::new([0x11; 32]);
         let policy = PolicyDigest::new([0x22; 32]);
         let configuration = ConfigurationDigest::new([0x33; 32]);
+        let cancellation = CancellationToken::for_application_request(&request_id);
+        let budgets = RequestBudgets::new(128, AUTOMATION_SESSION_MAX_BYTES, 10_000).unwrap();
         let grant = CapabilityGrantSnapshot::new(
             CapabilityGrantId::new("grant.automation.session-evidence.test").unwrap(),
             1,
-            application_grant_digest(capability, policy, configuration).unwrap(),
+            session_application_grant_digest(
+                capability,
+                policy,
+                configuration,
+                &cancellation,
+                budgets,
+            )
+            .unwrap(),
             actor.clone(),
             UtcMicros(1),
             UtcMicros(i64::MAX - 1),
@@ -1053,7 +1062,7 @@ mod tests {
             grant,
             request_id.clone(),
             Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
-            CancellationContext::active(format!("cancellation.{}", request_id.as_str())).unwrap(),
+            CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
         )
         .unwrap();
         let binding = SessionRequestBinding::new(
@@ -1061,8 +1070,8 @@ mod tests {
             capability,
             policy,
             configuration,
-            CancellationToken::new(),
-            RequestBudgets::new(128, AUTOMATION_SESSION_MAX_BYTES, 10_000).unwrap(),
+            cancellation,
+            budgets,
         );
         (context, binding)
     }

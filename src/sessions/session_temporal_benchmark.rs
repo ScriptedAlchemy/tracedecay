@@ -35,7 +35,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use crate::application::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    application_grant_digest, application_observed_at,
+    application_observed_at, session_application_grant_digest,
 };
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
@@ -957,12 +957,15 @@ fn request_context(
     let capability = CapabilityDigest::new(DIGEST);
     let policy = PolicyDigest::new(DIGEST);
     let configuration = ConfigurationDigest::new(DIGEST);
+    let cancellation = CancellationToken::for_application_request(&request_id);
+    let budgets = RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap();
     let observed_at = application_observed_at();
     let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.pr8.benchmark.application").unwrap(),
         1,
-        application_grant_digest(capability, policy, configuration).unwrap(),
+        session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
+            .unwrap(),
         actor.clone(),
         observed_at,
         expires_at,
@@ -978,7 +981,7 @@ fn request_context(
         grant,
         request_id.clone(),
         Deadline::new(expires_at).unwrap(),
-        CancellationContext::active(format!("cancellation.{}", request_id.as_str())).unwrap(),
+        CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
     )
     .unwrap();
     let binding = SessionRequestBinding::new(
@@ -986,8 +989,8 @@ fn request_context(
         capability,
         policy,
         configuration,
-        CancellationToken::new(),
-        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+        cancellation,
+        budgets,
     );
     (context, binding)
 }

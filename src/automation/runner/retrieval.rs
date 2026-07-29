@@ -26,7 +26,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use crate::application::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    application_grant_digest, application_observed_at,
+    application_observed_at, session_application_grant_digest,
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
@@ -212,7 +212,21 @@ impl ProductionAutomationSessionRetrieval {
             &self.identity,
             None,
         ));
-        let grant_digest = application_grant_digest(capability, policy, configuration).ok()?;
+        let cancellation = CancellationToken::for_application_request(&request_id);
+        let budgets = RequestBudgets::new(
+            AUTOMATION_SESSION_MAX_RESULTS,
+            AUTOMATION_SESSION_MAX_BYTES,
+            AUTOMATION_SESSION_MAX_WORK_UNITS,
+        )
+        .ok()?;
+        let grant_digest = session_application_grant_digest(
+            capability,
+            policy,
+            configuration,
+            &cancellation,
+            budgets,
+        )
+        .ok()?;
         let observed_at = application_observed_at();
         let timeout_micros =
             i64::try_from(AUTOMATION_SESSION_TIMEOUT.as_micros()).unwrap_or(i64::MAX);
@@ -230,14 +244,13 @@ impl ProductionAutomationSessionRetrieval {
             DisclosureClass::Evidence,
         )
         .ok()?;
-        let cancellation = CancellationToken::new();
         let context = RequestContext::new(
             actor,
             scope,
             grant,
             request_id.clone(),
             Deadline::new(expires_at).ok()?,
-            CancellationContext::active(format!("cancellation.{}", request_id.as_str())).ok()?,
+            CancellationContext::active(cancellation.application_token_id()?).ok()?,
         )
         .ok()?;
         let binding = SessionRequestBinding::new(
@@ -246,12 +259,7 @@ impl ProductionAutomationSessionRetrieval {
             policy,
             configuration,
             cancellation,
-            RequestBudgets::new(
-                AUTOMATION_SESSION_MAX_RESULTS,
-                AUTOMATION_SESSION_MAX_BYTES,
-                AUTOMATION_SESSION_MAX_WORK_UNITS,
-            )
-            .ok()?,
+            budgets,
         );
         Some((context, binding))
     }

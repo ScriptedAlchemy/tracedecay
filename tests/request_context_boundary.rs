@@ -23,15 +23,27 @@ fn imports_root_request_context(source: &str) -> bool {
         return true;
     }
     let mut remaining = source;
-    while let Some(start) = remaining.find("use crate::application::context") {
+    while let Some(start) = remaining.find("use crate::application") {
         remaining = &remaining[start..];
         let Some(end) = remaining.find(';') else {
             return true;
         };
         let statement = &remaining[..=end];
-        if statement
+        let tokens = statement
             .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .any(|token| token == "RequestContext")
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        let names_context = tokens.iter().any(|token| *token == "context");
+        if names_context
+            && (tokens.iter().any(|token| *token == "RequestContext") || statement.contains('*'))
+        {
+            return true;
+        }
+        if names_context
+            && let Some(alias) = tokens
+                .windows(2)
+                .find_map(|tokens| (tokens[0] == "as").then_some(tokens[1]))
+            && source.contains(&format!("{alias}::RequestContext"))
         {
             return true;
         }
@@ -77,12 +89,24 @@ fn assigned_production_callers_use_application_request_context() {
 }
 
 #[test]
-fn guard_detects_grouped_and_qualified_root_imports() {
+fn guard_detects_direct_aliased_qualified_and_glob_imports() {
     assert!(imports_root_request_context(
         "use crate::application::context::{CancellationToken, RequestContext};"
     ));
     assert!(imports_root_request_context(
         "fn legacy(_: crate::application::context::RequestContext) {}"
+    ));
+    assert!(imports_root_request_context(
+        "use crate::application::context::RequestContext as LegacyContext;"
+    ));
+    assert!(imports_root_request_context(
+        "use crate::application::context::*;"
+    ));
+    assert!(imports_root_request_context(
+        "use crate::application::context as legacy;\nfn legacy(_: legacy::RequestContext) {}"
+    ));
+    assert!(imports_root_request_context(
+        "use crate::application::{context as legacy};\nfn legacy(_: legacy::RequestContext) {}"
     ));
     assert!(!imports_root_request_context(
         "use crate::application::context::CancellationToken;\nuse tracedecay_application::RequestContext;"
