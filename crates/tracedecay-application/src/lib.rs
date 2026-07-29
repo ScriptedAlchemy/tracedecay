@@ -23,6 +23,7 @@ pub mod lsp_context_catalog;
 pub mod memory;
 pub mod observability;
 pub mod policy;
+pub mod remote;
 pub mod result;
 pub mod retained_surfaces;
 pub mod retrieval;
