@@ -1765,7 +1765,10 @@ async fn session_correlation_health_json(
     session_db: Option<&crate::global_db::RegisteredGlobalDb>,
 ) -> Value {
     let health = match session_db {
-        Some(db) => db.git_correlation_index_health().await.ok(),
+        Some(db) => crate::store::GlobalDbGitCorrelationStore::new(db)
+            .correlation_index_health()
+            .await
+            .ok(),
         None => None,
     };
     match health {

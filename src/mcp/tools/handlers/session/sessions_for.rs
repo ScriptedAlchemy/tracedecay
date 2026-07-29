@@ -393,9 +393,10 @@ pub(in super::super) async fn handle_sessions_for(
         // Read the correlation-index health from the same open so an empty
         // index (never populated) can be reported distinctly from a populated
         // index that simply had no rows matching this git ref.
-        let health = db.git_correlation_index_health().await.ok();
-        let results = db
-            .git_sessions_for_with_relation(&query, relation)
+        let correlation = crate::store::GlobalDbGitCorrelationStore::new(db);
+        let health = correlation.correlation_index_health().await.ok();
+        let results = correlation
+            .sessions_for_with_relation(&query, relation)
             .await
             .map_err(|err| TraceDecayError::Config {
                 message: err.to_string(),
@@ -408,7 +409,8 @@ pub(in super::super) async fn handle_sessions_for(
             && matches!(query.git_ref, GitRefFilter::Commit(_))
             && relation == CommitRelationFilter::Produced
         {
-            db.git_sessions_for_with_relation(&query, CommitRelationFilter::Observed)
+            correlation
+                .sessions_for_with_relation(&query, CommitRelationFilter::Observed)
                 .await
                 .ok()
                 .filter(|hits| !hits.is_empty())

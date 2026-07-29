@@ -3647,8 +3647,8 @@ impl HostAdmissionTestRuntimeV1 {
         observation: &crate::sessions::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> crate::errors::Result<i64> {
-        self.session_database_for_test(scope)?
-            .git_record_span_observation(observation, merge_gap_secs)
+        crate::store::GlobalDbGitCorrelationStore::new(self.session_database_for_test(scope)?)
+            .record_span_observation(observation, merge_gap_secs)
             .await
             .map_err(|error| crate::errors::TraceDecayError::Database {
                 operation: "record registered session span".to_string(),
@@ -5132,8 +5132,8 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self.project_database_for_test().map_err(|error| {
             crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
         })?;
-        database
-            .git_run_backfill(analytics_events, git, options)
+        crate::store::GlobalDbGitCorrelationStore::new(database)
+            .run_backfill(analytics_events, git, options)
             .await
     }
 
@@ -5146,11 +5146,11 @@ impl HostAdmissionTestRuntimeV1 {
         crate::sessions::git_correlation::BackfillStats,
         crate::sessions::git_correlation::GitCorrelationError,
     > {
-        self.project_database_for_test()
-            .map_err(|error| {
-                crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-            })?
-            .git_run_incremental_backfill(git, limit_sessions)
+        let database = self.project_database_for_test().map_err(|error| {
+            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
+        })?;
+        crate::store::GlobalDbGitCorrelationStore::new(database)
+            .run_incremental_backfill(git, limit_sessions)
             .await
     }
 
@@ -5187,11 +5187,11 @@ impl HostAdmissionTestRuntimeV1 {
         Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
         crate::sessions::git_correlation::GitCorrelationError,
     > {
-        self.project_database_for_test()
-            .map_err(|error| {
-                crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-            })?
-            .git_sessions_for_with_relation(query, relation)
+        let database = self.project_database_for_test().map_err(|error| {
+            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
+        })?;
+        crate::store::GlobalDbGitCorrelationStore::new(database)
+            .sessions_for_with_relation(query, relation)
             .await
     }
 
