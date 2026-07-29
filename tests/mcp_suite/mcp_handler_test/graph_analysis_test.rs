@@ -2130,7 +2130,7 @@ pub fn compute_b(input: i32) -> i32 {
     );
 }
 
-/// Regression: PR8's resolver kind-compatibility filter must apply to
+/// Regression: the resolver's kind-compatibility filter must apply to
 /// the same-file blocklist branches too. Without it, common names like
 /// `new`/`default`/`clone` can still bind a `Calls` reference to a
 /// non-callable same-file symbol — e.g. a const literally named
