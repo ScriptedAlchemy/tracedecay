@@ -244,6 +244,12 @@ name = "storage_runtime_suite"
 path = "tests/storage_runtime_suite/main.rs"
 required-features = ["rusqlite-parity-helper"]
 
+# Plan 36 portability: symlink-alias snapshot capture (test-transport only).
+[[test]]
+name = "git_index_snapshot_root_canonicalization"
+path = "tests/git_index_snapshot_root_canonicalization.rs"
+required-features = ["test-transport"]
+
 [dependencies]
 axum = "0.8"
 tower = "0.5"
