@@ -1,13 +1,22 @@
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(test)]
-use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(test)]
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::FactOwnerV1;
 #[cfg(test)]
-use tracedecay_domain::{ActorId, SessionId, TemporalCoverageCountsV1};
+use tracedecay_domain::{
+    ActorId, ProjectId, RepositoryId, SessionId, TemporalCoverageCountsV1, UtcMicros, WorktreeId,
+};
+#[cfg(test)]
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
@@ -27,16 +36,16 @@ use super::skill_writer::{
 };
 #[cfg(test)]
 use crate::application::context::{
-    CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline, PolicyDigest,
-    ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedSessionIdentity, SessionRootId,
-    SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_grant_digest,
 };
 use crate::application::memory::MemoryApplication;
 #[cfg(test)]
 use crate::application::session::{
-    SessionAuthorizationError, SessionAuthorizationGrant, SessionRetrievalConfiguration,
-    SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer, SessionTemporalExecutionPort,
+    SessionAuthorizationError, SessionAuthorizationGrant, SessionRequestBinding,
+    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionPort,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
@@ -985,6 +994,7 @@ mod tests {
         fn authorize(
             &self,
             _context: &RequestContext,
+            _binding: &SessionRequestBinding,
             _request: &SessionScopeAuthorizationRequest,
         ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
             Err(SessionAuthorizationError::Denied)
@@ -1006,22 +1016,55 @@ mod tests {
         }
     }
 
-    fn authorized_retrieval_context() -> RequestContext {
-        RequestContext::new(
-            ActorId::new("automation.session-evidence").unwrap(),
-            RequestId::new("request.automation.session-evidence.test").unwrap(),
-            ResolvedSessionIdentity::for_profile(
-                ProfileId::new("profile.test").unwrap(),
-                SessionStoreId::new("store.profile.test").unwrap(),
-                SessionRootId::new("root.profile.test").unwrap(),
+    fn authorized_retrieval_context() -> (RequestContext, SessionRequestBinding) {
+        let actor = ActorId::new("automation.session-evidence").unwrap();
+        let request_id = RequestId::new("request.automation.session-evidence.test").unwrap();
+        let identity = ResolvedSessionIdentity::for_project(
+            ProfileId::new("profile.test").unwrap(),
+            ProjectId::new("project.test").unwrap(),
+            SessionStoreId::new("store.project.test").unwrap(),
+            SessionRootId::new("root.project.test").unwrap(),
+            ResolvedGitRoute::new(
+                RepositoryId::new("repository.test").unwrap(),
+                WorktreeId::new("worktree.test").unwrap(),
+                BranchId::new("main").unwrap(),
             ),
-            CapabilityDigest::new([0x11; 32]),
-            PolicyDigest::new([0x22; 32]),
-            ConfigurationDigest::new([0x33; 32]),
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+        );
+        let scope = identity.application_scope().unwrap();
+        let capability = CapabilityDigest::new([0x11; 32]);
+        let policy = PolicyDigest::new([0x22; 32]);
+        let configuration = ConfigurationDigest::new([0x33; 32]);
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.automation.session-evidence.test").unwrap(),
+            1,
+            application_grant_digest(capability, policy, configuration).unwrap(),
+            actor.clone(),
+            UtcMicros(1),
+            UtcMicros(i64::MAX - 1),
+            scope.clone(),
+            BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").unwrap()]),
+            BTreeSet::from([UseCaseId::new("use-case.automation.session-evidence").unwrap()]),
+            DisclosureClass::Evidence,
+        )
+        .unwrap();
+        let context = RequestContext::new(
+            actor,
+            scope,
+            grant,
+            request_id.clone(),
+            Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
+            CancellationContext::active(format!("cancellation.{}", request_id.as_str())).unwrap(),
+        )
+        .unwrap();
+        let binding = SessionRequestBinding::new(
+            identity,
+            capability,
+            policy,
+            configuration,
             CancellationToken::new(),
             RequestBudgets::new(128, AUTOMATION_SESSION_MAX_BYTES, 10_000).unwrap(),
-        )
+        );
+        (context, binding)
     }
 
     #[tokio::test]
@@ -1032,10 +1075,11 @@ mod tests {
             AutomationWordEstimator,
             SessionRetrievalConfiguration::new(1, 1).unwrap(),
         );
-        let context = authorized_retrieval_context();
+        let (context, binding) = authorized_retrieval_context();
         let adapter = AuthorizedAutomationSessionRetrieval::new(
             &service,
             &context,
+            &binding,
             SessionId::new("session.authorized.test").unwrap(),
         );
         let outcome = retrieve_automation_session_evidence(

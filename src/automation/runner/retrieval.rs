@@ -8,26 +8,32 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::{
     ActorId, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
-    TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
+    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
 };
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_grant_digest, application_observed_at,
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionFreshnessPolicy, SessionRetrievalConfiguration, SessionRetrievalOutcome,
-    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer, SessionTemporalExecutionPort, SessionTemporalQuery,
+    SessionFreshnessPolicy, SessionRequestBinding, SessionRetrievalConfiguration,
+    SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionPort,
+    SessionTemporalQuery,
 };
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
@@ -72,11 +78,13 @@ impl<'a, A, P, E> AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
     pub fn new(
         service: &'a SessionRetrievalService<A, P, E>,
         context: &'a RequestContext,
+        binding: &'a SessionRequestBinding,
         anchor_session_id: SessionId,
     ) -> Self {
         Self {
             service,
             context,
+            binding,
             anchor_session_id,
         }
     }
@@ -94,7 +102,11 @@ where
 
     fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
         Box::pin(async move {
-            accept_automation_temporal_outcome(self.service.retrieve(self.context, query).await)
+            accept_automation_temporal_outcome(
+                self.service
+                    .retrieve(self.context, self.binding, query)
+                    .await,
+            )
         })
     }
 }
@@ -103,6 +115,7 @@ where
 pub struct AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
     service: &'a SessionRetrievalService<A, P, E>,
     context: &'a RequestContext,
+    binding: &'a SessionRequestBinding,
     anchor_session_id: SessionId,
 }
 
@@ -149,11 +162,12 @@ impl SessionScopeAuthorizer for ProductionAutomationSessionAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
-        if context.actor_id().as_str() != AUTOMATION_SESSION_ACTOR_ID
-            || request.actor_id() != context.actor_id()
-            || context.identity() != &self.identity
+        if context.actor().as_str() != AUTOMATION_SESSION_ACTOR_ID
+            || request.actor_id() != context.actor()
+            || binding.identity() != &self.identity
             || request.identity() != &self.identity
         {
             return Err(SessionAuthorizationError::WrongContext);
@@ -171,39 +185,75 @@ impl SessionScopeAuthorizer for ProductionAutomationSessionAuthorizer {
             AuthorizationGrantId::new(self.grant_id)?,
             1,
             context,
+            binding,
             request,
         )
     }
 }
 
 impl ProductionAutomationSessionRetrieval {
-    fn request_context(&self, provider: Option<&str>) -> Option<RequestContext> {
+    fn request_context(
+        &self,
+        provider: Option<&str>,
+    ) -> Option<(RequestContext, SessionRequestBinding)> {
         let request_id =
             mint_global_request_id(GlobalRequestSurface::AutomationSessionRetrieval).ok()?;
-        Some(RequestContext::new(
-            ActorId::new(AUTOMATION_SESSION_ACTOR_ID).ok()?,
-            RequestId::new(request_id.as_str()).ok()?,
+        let actor = ActorId::new(AUTOMATION_SESSION_ACTOR_ID).ok()?;
+        let request_id = RequestId::new(request_id.as_str()).ok()?;
+        let scope = self.identity.application_scope().ok()?;
+        let capability = CapabilityDigest::new(automation_session_digest(
+            b"tracedecay.automation.session.capability.v1\0",
+            &self.identity,
+            provider,
+        ));
+        let policy = PolicyDigest::new(automation_session_policy_digest()?);
+        let configuration = ConfigurationDigest::new(automation_session_digest(
+            b"tracedecay.automation.session.configuration.v1\0",
+            &self.identity,
+            None,
+        ));
+        let grant_digest = application_grant_digest(capability, policy, configuration).ok()?;
+        let observed_at = application_observed_at();
+        let timeout_micros =
+            i64::try_from(AUTOMATION_SESSION_TIMEOUT.as_micros()).unwrap_or(i64::MAX);
+        let expires_at = UtcMicros(observed_at.0.saturating_add(timeout_micros));
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.automation.session-evidence.application").ok()?,
+            1,
+            grant_digest,
+            actor.clone(),
+            observed_at,
+            expires_at,
+            scope.clone(),
+            BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").ok()?]),
+            BTreeSet::from([UseCaseId::new("use-case.automation.session-evidence").ok()?]),
+            DisclosureClass::Evidence,
+        )
+        .ok()?;
+        let cancellation = CancellationToken::new();
+        let context = RequestContext::new(
+            actor,
+            scope,
+            grant,
+            request_id.clone(),
+            Deadline::new(expires_at).ok()?,
+            CancellationContext::active(format!("cancellation.{}", request_id.as_str())).ok()?,
+        )
+        .ok()?;
+        let binding = SessionRequestBinding::new(
             self.identity.clone(),
-            CapabilityDigest::new(automation_session_digest(
-                b"tracedecay.automation.session.capability.v1\0",
-                &self.identity,
-                provider,
-            )),
-            PolicyDigest::new(automation_session_policy_digest()?),
-            ConfigurationDigest::new(automation_session_digest(
-                b"tracedecay.automation.session.configuration.v1\0",
-                &self.identity,
-                None,
-            )),
-            MonotonicDeadline::at(Instant::now() + AUTOMATION_SESSION_TIMEOUT),
-            CancellationToken::new(),
+            capability,
+            policy,
+            configuration,
+            cancellation,
             RequestBudgets::new(
                 AUTOMATION_SESSION_MAX_RESULTS,
                 AUTOMATION_SESSION_MAX_BYTES,
                 AUTOMATION_SESSION_MAX_WORK_UNITS,
             )
             .ok()?,
-        ))
+        );
+        Some((context, binding))
     }
 }
 
@@ -214,7 +264,7 @@ impl AutomationSessionRetrieval for ProductionAutomationSessionRetrieval {
 
     fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
         Box::pin(async move {
-            let Some(context) = self.request_context(query.provider()) else {
+            let Some((context, binding)) = self.request_context(query.provider()) else {
                 return AutomationTemporalRetrieval::Rejected("session_evidence_unavailable");
             };
             let Ok(configuration) = SessionRetrievalConfiguration::new(
@@ -243,7 +293,7 @@ impl AutomationSessionRetrieval for ProductionAutomationSessionRetrieval {
                 AutomationWordEstimator,
                 configuration,
             );
-            accept_automation_temporal_outcome(service.retrieve(&context, query).await)
+            accept_automation_temporal_outcome(service.retrieve(&context, &binding, query).await)
         })
     }
 }

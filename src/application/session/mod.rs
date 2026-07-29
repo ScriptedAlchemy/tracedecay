@@ -20,7 +20,7 @@ pub use retrieval::{
 };
 pub use types::{
     AuthorizationGrantId, AuthorizedSessionScope, SessionAccess, SessionAuthorizationError,
-    SessionAuthorizationGrant, SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalError,
-    SessionRetrievalOutcome, SessionRetrievalRequest, SessionRetrievalScope,
+    SessionAuthorizationGrant, SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
+    SessionRetrievalError, SessionRetrievalOutcome, SessionRetrievalRequest, SessionRetrievalScope,
     SessionRetrievalTarget, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
