@@ -1,7 +1,6 @@
 //! Compatibility curation apply, relations, entity merges, and fact merges.
 //!
-//! Split into submodules; every path previously reachable via this module
-//! is re-exported here so no external consumer changes.
+//! Re-exports below preserve every path used outside this module.
 
 mod apply;
 mod entities;

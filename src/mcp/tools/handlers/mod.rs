@@ -2359,7 +2359,7 @@ mod tests {
             None,
         )
         .await
-        .expect_err("PR9 single-root search must reject project selectors");
+        .expect_err("single-root search must reject project selectors");
 
         cg.close();
         assert!(

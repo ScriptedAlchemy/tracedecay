@@ -24,8 +24,8 @@ use crate::sessions::lcm::{
     LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
     LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmSourceRef,
 };
-use crate::query::temporal::context::ContextBudget;
-use crate::query::temporal::ranking::DiversityLimits;
+use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 fn lcm_status_payload<T: Serialize>(
     provider: &str,
@@ -929,7 +929,7 @@ fn expand_query_response_from_sources(
     });
     let source_count = sources.len();
     let mut context =
-        crate::query::temporal::context::OrderedTextContextAssembler::new(context_max_tokens);
+        tracedecay_temporal_query::context::OrderedTextContextAssembler::new(context_max_tokens);
     let mut context_truncated = false;
     let mut matches = Vec::new();
     let mut context_blocks = Vec::new();

@@ -7,8 +7,8 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::TranscriptSource;
-use crate::sessions::{SessionProvider, claude_observation, git_correlation, vibe};
-use crate::store::{GlobalDbTranscriptStore, GlobalDbWorkflowStore};
+use crate::sessions::{SessionProvider, claude_observation, git_correlation};
+use crate::store::{GlobalDbGitCorrelationStore, GlobalDbTranscriptStore, GlobalDbWorkflowStore};
 use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
 
@@ -21,7 +21,7 @@ use super::scheduler::{
 use super::startup::TranscriptIngestOutcome;
 use super::user::provider_selected;
 
-const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[SessionProvider::Vibe];
+const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[];
 
 tokio::task_local! {
     static TRANSCRIPT_SOURCE_HOME: PathBuf;
@@ -331,25 +331,9 @@ pub(crate) async fn finalize_project_ingest(
 /// and attributes overlapping commits to their sessions. Fail-open.
 async fn attribute_commits_after_ingest(db: &RegisteredGlobalDb) {
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let result = async {
-        let transaction = db.begin_write_transaction().await?;
-        git_correlation::run_commit_attribution_sweep(&transaction, gap, |target| {
-            git_scan_commits(target, gap)
-        })
-        .await
-        .map_err(|error| crate::errors::TraceDecayError::Database {
-            operation: "run registered commit attribution sweep".to_string(),
-            message: error.to_string(),
-        })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "commit registered commit attribution sweep".to_string(),
-                message: error.to_string(),
-            })
-    }
-    .await;
+    let result = GlobalDbGitCorrelationStore::new(db)
+        .run_commit_attribution_sweep(gap, |target| git_scan_commits(target, gap))
+        .await;
     if let Err(error) = result {
         tracing::debug!(%error, "commit attribution sweep skipped");
     }
@@ -415,12 +399,12 @@ pub(super) fn parse_git_log_commits(stdout: &str) -> Vec<git_correlation::Scanne
 }
 
 pub(super) fn push_file_source(
-    sources: &mut Vec<Box<dyn TranscriptSource>>,
+    _sources: &mut Vec<Box<dyn TranscriptSource>>,
     provider: SessionProvider,
 ) {
     match provider {
-        SessionProvider::Vibe => push_source(sources, vibe::VibeSource::new()),
-        SessionProvider::Claude
+        SessionProvider::Vibe
+        | SessionProvider::Claude
         | SessionProvider::Codex
         | SessionProvider::Cursor
         | SessionProvider::Hermes
@@ -428,14 +412,5 @@ pub(super) fn push_file_source(
         | SessionProvider::RooCode
         | SessionProvider::Kilo
         | SessionProvider::Kiro => {}
-    }
-}
-
-fn push_source<T>(sources: &mut Vec<Box<dyn TranscriptSource>>, source: Option<T>)
-where
-    T: TranscriptSource + 'static,
-{
-    if let Some(source) = source {
-        sources.push(Box::new(source));
     }
 }

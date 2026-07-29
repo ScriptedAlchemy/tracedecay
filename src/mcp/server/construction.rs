@@ -25,9 +25,6 @@ pub(crate) type DatabaseOwnerReconciler = Arc<
 >;
 
 /// Cohesive dependencies used to construct an MCP server.
-///
-/// Keeping these values together makes explicit that all of them describe one
-/// server instance, rather than independent configuration parameters.
 pub(crate) struct McpServerConstructionContext {
     pub(crate) cg: Arc<TraceDecay>,
     pub(crate) scope_prefix: Option<String>,

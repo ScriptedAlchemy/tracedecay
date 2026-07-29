@@ -1,7 +1,6 @@
 //! Compatibility fact CRUD, canonical commit path, mirror writes, feedback, and proposal promotion.
 //!
-//! Split into focused submodules; every path previously reachable as `crud::*`
-//! is preserved here via re-exports so no consumer outside this module changes.
+//! Re-exports below preserve every `crud::*` path used outside this module.
 
 pub(super) const PROMOTE_OPERATION: &str = "promote canonical memory proposal";
 

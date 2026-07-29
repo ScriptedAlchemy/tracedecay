@@ -1,8 +1,5 @@
 //! V23 compatibility-bank projection writers (dirty marking, upsert, delete,
 //! and dirty clearing) plus their owner-key helper.
-//!
-//! Split out of the former single-file `writers` module as a pure mechanical
-//! move; contents are unchanged.
 
 use tracedecay_domain::{FactOwnerV1, SourceStoreId, UtcMicros};
 

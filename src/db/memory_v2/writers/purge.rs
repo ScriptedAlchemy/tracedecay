@@ -1,7 +1,4 @@
 //! Payload/FTS/vector purge, quarantine, and legacy-fact cleanup writers.
-//!
-//! Split out of the former single-file `writers` module as a pure mechanical
-//! move; contents are unchanged.
 
 use serde::Serialize;
 use tracedecay_domain::{

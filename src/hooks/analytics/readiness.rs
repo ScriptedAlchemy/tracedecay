@@ -249,18 +249,12 @@ struct MutableHostSeries {
     host_ipc_rtt_us: MutableNumericSummary,
 }
 
-impl MutableHostSeries {
-    fn new() -> Self {
+impl Default for MutableHostSeries {
+    fn default() -> Self {
         Self {
             wall_time_us: MutableNumericSummary::with_buckets(LATENCY_BUCKET_UPPER_US.len()),
             host_ipc_rtt_us: MutableNumericSummary::with_buckets(LATENCY_BUCKET_UPPER_US.len()),
         }
-    }
-}
-
-impl Default for MutableHostSeries {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -269,18 +263,12 @@ struct MutablePayloadSeries {
     daemon_ipc_payload_bytes: MutableNumericSummary,
 }
 
-impl MutablePayloadSeries {
-    fn new() -> Self {
+impl Default for MutablePayloadSeries {
+    fn default() -> Self {
         Self {
             host_event_payload_bytes: MutableNumericSummary::with_buckets(BYTES_BUCKET_UPPER.len()),
             daemon_ipc_payload_bytes: MutableNumericSummary::with_buckets(BYTES_BUCKET_UPPER.len()),
         }
-    }
-}
-
-impl Default for MutablePayloadSeries {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
