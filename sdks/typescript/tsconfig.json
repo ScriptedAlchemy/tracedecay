@@ -8,11 +8,7 @@
     "noUncheckedIndexedAccess": false,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": [],
-    "baseUrl": ".",
-    "paths": {
-      "vitest": ["../../dashboard/node_modules/vitest"]
-    }
+    "types": []
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }
