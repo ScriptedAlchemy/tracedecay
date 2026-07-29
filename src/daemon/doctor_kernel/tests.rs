@@ -365,6 +365,37 @@ fn synchronous_table_growth_is_bounded_by_observed_store_size() {
     ));
 }
 
+#[test]
+fn synchronous_exhaustive_scans_are_bounded_before_work_starts() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let small = tmp.path().join("small");
+    std::fs::create_dir(&small).unwrap();
+    std::fs::write(small.join("payload"), b"small").unwrap();
+    assert!(permits_synchronous_exhaustive_scan(&small));
+
+    let large = tmp.path().join("large");
+    std::fs::create_dir(&large).unwrap();
+    std::fs::File::create(large.join("payload"))
+        .unwrap()
+        .set_len(MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES + 1)
+        .unwrap();
+    assert!(!permits_synchronous_exhaustive_scan(&large));
+}
+
+#[test]
+fn synchronous_session_retention_includes_sqlite_sidecars() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let database = tmp.path().join("sessions.db");
+    std::fs::write(&database, b"small").unwrap();
+    assert!(permits_synchronous_session_retention_backlog(&database));
+
+    std::fs::File::create(tmp.path().join("sessions.db-wal"))
+        .unwrap()
+        .set_len(MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES + 1)
+        .unwrap();
+    assert!(!permits_synchronous_session_retention_backlog(&database));
+}
+
 #[tokio::test]
 async fn code_index_adapter_returns_seeded_read() {
     let ctx = context();
