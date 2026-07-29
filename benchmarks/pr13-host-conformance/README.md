@@ -12,18 +12,9 @@ Static fixture lint:
 python3 benchmarks/pr13-host-conformance/validate_packet.py
 ```
 
-Legacy platform-status compatibility tests:
-
-```sh
-python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
-```
-
 Direct product tests require unavailable host-capture lanes to remain explicit
 and authentic host payloads to pass the production decoders. Normal
 Linux/macOS/Windows CI independently builds and tests the default-feature
 product on each supported platform; this directory does not aggregate JUnit,
-mint platform evidence, or turn CI output into PR-specific receipts.
-
-Legacy `ci_gate_status` values are compatibility input only:
-`awaiting_ci` means `pending`, `failed` means `fail`, and no checked-in value
-may claim `passed`.
+mint platform evidence, or turn CI output into PR-specific receipts. Runtime
+JUnit remains a CI artifact rather than validator-owned gate state.

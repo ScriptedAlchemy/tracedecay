@@ -13,16 +13,9 @@ Run static fixture lint:
 python3 benchmarks/pr13-advisory-milestone/validate_packet.py
 ```
 
-Direct product completion requires empty `provider_gaps` plus the named Rust
-tests and normal CI. Legacy `ci_gate_status` is compatibility input only:
-`awaiting_ci` means `pending`, `failed` means `fail`, and no checked-in value
-may claim `passed`.
-
-```sh
-python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict
-python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict \
-  --junit target/nextest/ci/junit.xml
-```
+Direct product completion requires the named Rust tests and normal CI.
+Runtime JUnit remains a CI artifact; the static fixture validator does not
+aggregate test output or derive acceptance state from checked-in packet fields.
 
 Pagination/CAS is a product journey covered by a named Rust test; no owner
 receipt or PR-specific evidence artifact is created.
