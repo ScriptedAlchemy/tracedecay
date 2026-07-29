@@ -25,3 +25,8 @@ test-helpers = []
 
 [dev-dependencies]
 static_assertions = "1.1.0"
+# Test-only: the relocated search-quality suites build lexical/exact fixtures
+# through the code-index intake/extraction pipeline, which needs the bundled
+# medium grammar tier (Rust). Normal dependents keep `default-features = false`
+# above and never pull grammars through this crate.
+tracedecay-code-index = { path = "../tracedecay-code-index", features = ["lite"] }
