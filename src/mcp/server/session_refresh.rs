@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::sync::PoisonError;
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::RequestContext;
 use tracedecay_domain::ProjectId;
 
 use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
     SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRequestBinding, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::{
@@ -36,7 +37,8 @@ struct DaemonSessionRefreshAuthorizer<'a> {
 impl SessionScopeAuthorizer for DaemonSessionRefreshAuthorizer<'_> {
     fn authorize(
         &self,
-        context: &crate::application::context::RequestContext,
+        context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         if request.identity().project_id().map(ProjectId::as_str) != self.expected_project_id {
@@ -46,6 +48,7 @@ impl SessionScopeAuthorizer for DaemonSessionRefreshAuthorizer<'_> {
             AuthorizationGrantId::new("grant.mcp.session-refresh")?,
             1,
             context,
+            binding,
             request,
         )
     }
@@ -157,7 +160,7 @@ impl DaemonSessionRefreshService {
         let outcome = match command.action {
             crate::mcp::tools::SessionRefreshAction::Begin => {
                 service
-                    .begin_or_join(&command.context, command.target)
+                    .begin_or_join(&command.context, &command.binding, command.target)
                     .await
             }
             crate::mcp::tools::SessionRefreshAction::Status => {
@@ -170,7 +173,9 @@ impl DaemonSessionRefreshService {
                         return SessionRefreshServiceOutcome::NotFound;
                     }
                 };
-                service.status(&command.context, &handle).await
+                service
+                    .status(&command.context, &command.binding, &handle)
+                    .await
             }
             crate::mcp::tools::SessionRefreshAction::Cancel => {
                 let handle = match command.handle.as_deref().map(|token| self.handle(token)) {
@@ -182,7 +187,9 @@ impl DaemonSessionRefreshService {
                         return SessionRefreshServiceOutcome::NotFound;
                     }
                 };
-                service.cancel(&command.context, &handle).await
+                service
+                    .cancel(&command.context, &command.binding, &handle)
+                    .await
             }
         };
         self.public_outcome(outcome)
