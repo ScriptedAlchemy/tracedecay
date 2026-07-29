@@ -17,7 +17,7 @@ use tracedecay_domain::{
     ProjectionReplayReasonV1, canonical_sha256,
 };
 
-use crate::code_index::projection::{
+use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, ProjectionReceiptErrorV1, build_batch_receipt,
     expected_request_digest, verify_batch_receipt,
 };

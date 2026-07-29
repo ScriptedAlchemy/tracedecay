@@ -20,8 +20,6 @@ use thiserror::Error;
 #[cfg(feature = "semantic-fastembed")]
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
 
-use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
-
 use super::artifact_store::{
     ArtifactImportErrorV1, ArtifactInventoryRecordV1, ArtifactLeaseKindV1, ArtifactLeaseV1,
     ConfiguredHttpsArtifactSourceV1, ExplicitHttpsArtifactTransportV1, GcReceiptV1,
@@ -30,6 +28,9 @@ use super::artifact_store::{
 use super::manifest::{ArtifactMemberRoleV1, ModelArtifactManifestV1};
 use super::model_catalog::{
     CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
+};
+use super::root_adapter::{
+    DEFAULT_FASTEMBED_MODEL_ID, RerankCompatibilityPinsV1, SemanticRuntimeStateV1 as Runtime,
 };
 
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
@@ -451,7 +452,7 @@ impl SemanticModelLifecycleOwnerV1 {
     /// cache participates in this mount.
     pub(crate) fn mount_reranker(
         &self,
-        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+        pins: RerankCompatibilityPinsV1,
     ) -> Result<super::rerank_adapter::ProductionCodeRerankAuthorityV1, ModelLifecycleErrorV1> {
         let digest = pins
             .artifact_manifest_digest
@@ -479,7 +480,7 @@ impl SemanticModelLifecycleOwnerV1 {
 
     pub fn import_local_reranker_artifact(
         &self,
-        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+        pins: RerankCompatibilityPinsV1,
         manifest: &ModelArtifactManifestV1,
         source: &Path,
         now_unix: u64,
@@ -494,7 +495,7 @@ impl SemanticModelLifecycleOwnerV1 {
 
     pub fn import_configured_https_reranker_artifact(
         &self,
-        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+        pins: RerankCompatibilityPinsV1,
         manifest: &ModelArtifactManifestV1,
         source: &ConfiguredHttpsArtifactSourceV1,
         transport: &dyn ExplicitHttpsArtifactTransportV1,
@@ -515,7 +516,7 @@ impl SemanticModelLifecycleOwnerV1 {
 
     fn publish_reranker_artifact(
         &self,
-        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+        pins: RerankCompatibilityPinsV1,
         record: ArtifactInventoryRecordV1,
         now_unix: u64,
     ) -> Result<RerankerArtifactLifecycleStatusV1, ModelLifecycleErrorV1> {
@@ -1597,14 +1598,11 @@ fn verify_member_file(path: &Path, length: u64, sha256: &str) -> bool {
 
 /// Resolve the lifecycle store root under the user data directory.
 pub fn default_lifecycle_root() -> Option<PathBuf> {
-    crate::config::user_data_dir().map(|root| root.join("semantic-models"))
+    super::root_adapter::default_lifecycle_root()
 }
 
 /// Map lifecycle state into the Doctor/status semantic runtime state surface.
-pub fn lifecycle_to_runtime_state(
-    state: &SemanticModelLifecycleStateV1,
-) -> crate::application::semantic_runtime::SemanticRuntimeStateV1 {
-    use crate::application::semantic_runtime::SemanticRuntimeStateV1 as Runtime;
+pub fn lifecycle_to_runtime_state(state: &SemanticModelLifecycleStateV1) -> Runtime {
     match state {
         SemanticModelLifecycleStateV1::SelectedNotDownloaded {
             model_id,
@@ -2350,12 +2348,10 @@ mod tests {
         manifest
     }
 
-    fn reranker_pins(
-        manifest: &ModelArtifactManifestV1,
-    ) -> crate::config::retrieval::RerankCompatibilityPinsV1 {
+    fn reranker_pins(manifest: &ModelArtifactManifestV1) -> RerankCompatibilityPinsV1 {
         use tracedecay_domain::{ComponentRevision, ManifestDigest, canonical_sha256};
 
-        crate::config::retrieval::RerankCompatibilityPinsV1 {
+        RerankCompatibilityPinsV1 {
             implementation_revision: ComponentRevision::new(
                 super::super::rerank_adapter::RERANK_IMPLEMENTATION_REVISION_V1,
             )
