@@ -20,5 +20,8 @@
 //! this extraction changes no caller path.
 
 pub mod durability;
+pub mod final_v2;
 pub mod inventory;
 pub mod manifest;
+
+pub use final_v2::*;

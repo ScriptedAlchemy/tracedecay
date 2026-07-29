@@ -15,6 +15,7 @@ use crate::storage::{
     read_enrollment_marker, read_store_manifest, validate_project_id, write_store_manifest,
 };
 
+pub use tracedecay_migrate::final_v2::*;
 /// The manifest plan, its forward-only checkpoint ladder, and store-artifact
 /// path safety live in `tracedecay-migrate`; they decide and record without
 /// owning a store. Re-exported so `crate::migrate::manifest::*` stays the
