@@ -548,15 +548,17 @@ pub struct McpServer {
     /// Daemon-owned route liveness. A failed post-open health check revokes
     /// every tool on retained transports before cache retirement can await.
     project_server_live: Option<Arc<AtomicBool>>,
-    /// Linearizes a tool response write with project-server revocation. A
-    /// health failure flips `project_server_live` before waiting for the write
-    /// side, so later responses fail closed while an already-authorized write
-    /// is allowed to finish before revocation completes.
+    /// Linearizes full tool-request execution and its response write with
+    /// project-server retirement. Revocation stops new read leases, then the
+    /// write side waits for every already-admitted request to finish.
     project_server_response_gate: tokio::sync::RwLock<()>,
     /// Cancels a pending notification/response transport write when retained
     /// project health fails. Unlike a one-shot notification, cancellation is
     /// remembered if revocation wins before the write future is polled.
     project_server_response_revoked: crate::application::context::CancellationToken,
+    /// Backstop for a retired server whose admitted request does not drain
+    /// within its normal operation deadline.
+    project_server_request_abort: crate::application::context::CancellationToken,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -1104,6 +1106,7 @@ impl McpServer {
             project_server_live,
             project_server_response_gate: tokio::sync::RwLock::new(()),
             project_server_response_revoked: crate::application::context::CancellationToken::new(),
+            project_server_request_abort: crate::application::context::CancellationToken::new(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 

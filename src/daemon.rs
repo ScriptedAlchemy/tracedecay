@@ -3789,6 +3789,7 @@ async fn cancel_project_server_startup_ingests(store_administration: &StoreAdmin
 }
 
 async fn shutdown_project_servers(store_administration: &StoreAdministration) {
+    store_administration.join_project_server_retirements().await;
     let servers = detach_project_servers(store_administration).await;
     shutdown_detached_project_servers(servers).await;
 }
@@ -3824,6 +3825,68 @@ async fn shutdown_detached_project_servers(servers: Vec<Arc<crate::mcp::McpServe
         drop(graph);
         server.shutdown().await;
     }
+}
+
+const PROJECT_SERVER_REQUEST_DRAIN_DEADLINE: Duration = Duration::from_secs(35);
+const PROJECT_SERVER_ABORT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
+
+async fn wait_for_project_server_request_drains(servers: &[Arc<crate::mcp::McpServer>]) {
+    for server in servers {
+        server.wait_for_project_server_request_drain().await;
+    }
+}
+
+async fn retire_project_servers(
+    servers: Vec<Arc<crate::mcp::McpServer>>,
+    route_registered: Option<Arc<AtomicBool>>,
+) {
+    if tokio::time::timeout(
+        PROJECT_SERVER_REQUEST_DRAIN_DEADLINE,
+        wait_for_project_server_request_drains(&servers),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            deadline_secs = PROJECT_SERVER_REQUEST_DRAIN_DEADLINE.as_secs(),
+            server_count = servers.len(),
+            "retired project requests exceeded their drain deadline; cancelling them"
+        );
+        for server in &servers {
+            server.abort_project_server_requests();
+        }
+        if tokio::time::timeout(
+            PROJECT_SERVER_ABORT_DRAIN_DEADLINE,
+            wait_for_project_server_request_drains(&servers),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                deadline_secs = PROJECT_SERVER_ABORT_DRAIN_DEADLINE.as_secs(),
+                server_count = servers.len(),
+                "cancelled project requests have not yielded; retaining safe shutdown ownership"
+            );
+            wait_for_project_server_request_drains(&servers).await;
+        }
+    }
+    if let Some(route_registered) = route_registered {
+        route_registered.store(false, Ordering::Release);
+    }
+    for server in servers {
+        server.shutdown().await;
+    }
+}
+
+async fn schedule_project_server_retirement(
+    store_administration: &StoreAdministration,
+    servers: Vec<Arc<crate::mcp::McpServer>>,
+    route_registered: Option<Arc<AtomicBool>>,
+) {
+    let retirement = tokio::spawn(retire_project_servers(servers, route_registered));
+    store_administration
+        .track_project_server_retirement(retirement)
+        .await;
 }
 
 /// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).
@@ -4898,6 +4961,7 @@ async fn production_project_server(
             ],
         );
         let quarantine_on_upgrade_failure = AtomicBool::new(false);
+        let session_capabilities_published = AtomicBool::new(false);
         let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
             if let Some(database) = deferred_post_open_health
                 && let Err(error) = database.repair_fts_after_open().await
@@ -5054,6 +5118,39 @@ async fn production_project_server(
                     ),
                 ],
             );
+            if *current_key.lock().await != key {
+                full_candidate.cancel_startup_transcript_ingest();
+                full_candidate.shutdown().await;
+                return Err(TraceDecayError::Config {
+                    message: "project changed branch during full capability admission".to_owned(),
+                });
+            }
+            let upgraded = store_administration
+                .project_servers()
+                .lock()
+                .await
+                .replace_ready_if(&key, Arc::clone(&full_candidate), |current| {
+                    Arc::ptr_eq(current, &resolved)
+                });
+            if !upgraded {
+                full_candidate.cancel_startup_transcript_ingest();
+                full_candidate.shutdown().await;
+                return Err(TraceDecayError::Config {
+                    message: "project server changed during session capability upgrade".to_owned(),
+                });
+            }
+            session_capabilities_published.store(true, Ordering::Release);
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", canonical_project_path.display().to_string()),
+                    ("phase", "session_capabilities_published".to_owned()),
+                    (
+                        "elapsed_ms",
+                        project_open_started.elapsed().as_millis().to_string(),
+                    ),
+                ],
+            );
             let full_setup: Result<()> = async {
                 let full_setup_started = Instant::now();
                 let log_full_setup_phase = |phase: &'static str| {
@@ -5136,31 +5233,24 @@ async fn production_project_server(
             }
             .await;
             if let Err(error) = full_setup {
-                full_candidate.cancel_startup_transcript_ingest();
-                full_candidate.shutdown().await;
                 return Err(error);
             }
             if *current_key.lock().await != key {
-                full_candidate.cancel_startup_transcript_ingest();
-                full_candidate.shutdown().await;
                 return Err(TraceDecayError::Config {
                     message: "project changed branch during full capability admission".to_owned(),
                 });
             }
-            let upgraded = store_administration
-                .project_servers()
-                .lock()
-                .await
-                .replace_ready_if(&key, Arc::clone(&full_candidate), |current| {
-                    Arc::ptr_eq(current, &resolved)
-                });
-            if !upgraded {
-                full_candidate.cancel_startup_transcript_ingest();
-                full_candidate.shutdown().await;
-                return Err(TraceDecayError::Config {
-                    message: "project server changed during full capability upgrade".to_owned(),
-                });
-            }
+            // The registry cutover prevents new core leases. Existing core
+            // requests may finish while dependent owners warm, then the
+            // displaced server is drained without closing the shared graph.
+            resolved.revoke_project_server_responses();
+            resolved.cancel_startup_transcript_ingest();
+            schedule_project_server_retirement(
+                store_administration,
+                vec![Arc::clone(&resolved)],
+                None,
+            )
+            .await;
             log_daemon_event(
                 "project_open_phase",
                 &[
@@ -5178,9 +5268,8 @@ async fn production_project_server(
         match full_upgrade {
             Ok(full_server) => resolved = full_server,
             Err(error) => {
-                route_registered.store(false, Ordering::Release);
                 let failed_key = current_key.lock().await.clone();
-                let removed = {
+                let mut removed = {
                     let mut servers = store_administration.project_servers().lock().await;
                     if quarantine_on_upgrade_failure.load(Ordering::Acquire) {
                         servers.quarantine_and_remove_owner(&failed_key.owner)
@@ -5188,17 +5277,28 @@ async fn production_project_server(
                         servers.remove_owner(&failed_key.owner)
                     }
                 };
-                for server in &removed {
-                    server.revoke_project_server();
-                    server.cancel_startup_transcript_ingest();
+                if session_capabilities_published.load(Ordering::Acquire)
+                    && removed.iter().all(|server| !Arc::ptr_eq(server, &resolved))
+                {
+                    removed.push(Arc::clone(&resolved));
                 }
                 for server in &removed {
-                    server.wait_for_project_server_response_drain().await;
+                    server.revoke_project_server_responses();
+                    server.cancel_startup_transcript_ingest();
                 }
                 debug_assert!(
                     !removed.is_empty(),
                     "failed core upgrade must retire its published owner"
                 );
+                // Request execution may itself need the owner writer held by
+                // this open attempt. The tracked retirement starts draining
+                // after this closure returns and releases that writer.
+                schedule_project_server_retirement(
+                    store_administration,
+                    removed,
+                    Some(Arc::clone(&route_registered)),
+                )
+                .await;
                 return Err(error);
             }
         }
@@ -5602,6 +5702,10 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 
 #[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
+    resources
+        .store_administration
+        .join_project_server_retirements()
+        .await;
     let servers = detach_project_servers(&resources.store_administration).await;
     resources.servers.clear();
     for server in &servers {
