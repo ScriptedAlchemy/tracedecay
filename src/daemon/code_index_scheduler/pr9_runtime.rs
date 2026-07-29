@@ -20,16 +20,16 @@ use tracedecay_domain::{
 };
 
 use super::CodeIndexSchedulerRegistryV1;
-use crate::query::retrieval::exact::{
+use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
     ExactLaneRetriever,
 };
-use crate::query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
-use crate::query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
-use crate::query::retrieval::lexical::{
+use tracedecay_query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
+use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
-use crate::query::retrieval::{
+use tracedecay_query::retrieval::{
     AuthorizedPr9FallbackV1, Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1, RawRetrievalRequestV1,
     RetrievalPortError, SanitizedRetrievalRequestV1,
 };
@@ -425,22 +425,23 @@ fn validate_search_policy(
 fn graph_seeds_from_outcomes(
     exact: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<ExactLaneEvidence>>,
     lexical: &RetrieverOutcome<tracedecay_domain::RetrieverBatch<LexicalLaneEvidence>>,
-) -> Vec<crate::query::retrieval::ports::CodeCandidateBindingV1> {
+) -> Vec<tracedecay_query::retrieval::ports::CodeCandidateBindingV1> {
     let mut seeds = Vec::new();
     let mut seen_occurrences = BTreeSet::new();
     let mut seen_symbols = BTreeSet::new();
-    let mut add_batch = |bindings: Vec<&crate::query::retrieval::ports::CodeCandidateBindingV1>| {
-        for binding in bindings {
-            let Some(symbol) = binding.occurrence.symbol.as_ref() else {
-                continue;
-            };
-            if seen_occurrences.insert(binding.source_occurrence.clone())
-                && seen_symbols.insert(symbol.clone())
-            {
-                seeds.push(binding.clone());
+    let mut add_batch =
+        |bindings: Vec<&tracedecay_query::retrieval::ports::CodeCandidateBindingV1>| {
+            for binding in bindings {
+                let Some(symbol) = binding.occurrence.symbol.as_ref() else {
+                    continue;
+                };
+                if seen_occurrences.insert(binding.source_occurrence.clone())
+                    && seen_symbols.insert(symbol.clone())
+                {
+                    seeds.push(binding.clone());
+                }
             }
-        }
-    };
+        };
     match exact {
         RetrieverOutcome::Complete(batch) | RetrieverOutcome::Partial { value: batch, .. } => {
             add_batch(
@@ -484,7 +485,7 @@ mod tests {
         AcceptedPr9EvaluationV1, Pr9AuthorityMaterialV1, Pr9AuthorityProviderErrorV1,
         Pr9AuthorityProviderV1, Pr9RuntimeMountErrorV1, prepare_pr9_query_authority,
     };
-    use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
+    use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 
     struct OneShotProvider {
         candidates: Mutex<Option<Vec<Pr9AuthorityMaterialV1>>>,

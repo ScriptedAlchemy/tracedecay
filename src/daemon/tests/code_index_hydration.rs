@@ -17,7 +17,7 @@ use tracedecay_domain::{
 use super::super::code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1};
 use super::super::{code_index_search_display_binding, code_index_search_hydration_budget};
 use crate::mcp::server::CodeIndexSearchDisplayV1;
-use crate::query::retrieval::hydrate::{
+use tracedecay_query::retrieval::hydrate::{
     DeterministicLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
     HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationUnavailableV1,
     HydrationWorkPermitV1, LateHydrationSource,
@@ -333,7 +333,7 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
         .expect("semantic chunk anchor");
     let source_occurrence = SourceOccurrenceId::new(format!("code-chunk:{}", chunk_id.as_str()))
         .expect("semantic source occurrence");
-    let freshness = crate::query::retrieval::graph::production_code_index_freshness(
+    let freshness = tracedecay_query::retrieval::graph::production_code_index_freshness(
         generation.manifest().seal.sealed_at,
         ComponentRevision::new("policy.semantic.daemon.v1").expect("policy revision"),
     )
