@@ -370,10 +370,11 @@ export function lanePending(read: ExplorerLaneReadModel): boolean {
 /**
  * The chip for a lane condition.
  *
- * `unavailable` and `offline` both land on `offline` because the sixteen-state
- * `DomainStateKind` taxonomy has no source-level unavailability member. They
- * stay tellable apart on screen through `laneStateDetail`, which says which of
- * the two happened; the read model keeps them separate regardless.
+ * `unavailable` and `offline` are different chips: a source the coordinator
+ * reported as unable to serve is not a browser that never reached the daemon,
+ * and the indicator has to say which one happened without help from the prose
+ * beside it. Because the chip carries that distinction, `laneStateDetail`
+ * spends its clause on the reason rather than repeating the state.
  */
 export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
   switch (read.state) {
@@ -382,7 +383,7 @@ export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
     case 'ready':
       return 'ready';
     case 'unavailable':
-      return 'offline';
+      return 'unavailable';
     case 'offline':
       return 'offline';
     case 'cancelled':
@@ -434,7 +435,7 @@ export function sourceOutcomeStateKind(outcome: ExplorerSourceOutcomeV1): Domain
     case 'ready':
       return 'ready';
     case 'unavailable':
-      return 'offline';
+      return 'unavailable';
     case 'error':
       return 'error';
     case 'cancelled':
@@ -446,7 +447,15 @@ export function sourceOutcomeStateKind(outcome: ExplorerSourceOutcomeV1): Domain
   }
 }
 
-/** The clause that names which condition a shared chip is standing for. */
+/**
+ * The clause a lane's chip carries beside it.
+ *
+ * The chip already names the condition, so this adds only what the chip cannot:
+ * an unavailable source spends the clause on the reason the source itself
+ * reported, because printing "source unavailable" next to a chip reading
+ * exactly that is noise. `offline` keeps naming the daemon, which is the
+ * subject of the failure rather than a second word for it.
+ */
 export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined {
   switch (read.state) {
     case 'pending':
@@ -454,7 +463,7 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
     case 'ready':
       return undefined;
     case 'unavailable':
-      return 'source unavailable';
+      return read.errorCode ?? read.detail ?? undefined;
     case 'offline':
       return 'daemon unreachable';
     case 'cancelled':

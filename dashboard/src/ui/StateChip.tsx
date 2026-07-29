@@ -14,11 +14,12 @@ import {
   ShieldAlert,
   ShieldX,
   Split,
+  Unplug,
   XCircle,
 } from 'lucide-react';
 import { cn } from './cn';
 
-/** The sixteen-state domain taxonomy (plan 11). Token + icon + label —
+/** The eighteen-state domain taxonomy (plan 11). Token + icon + label —
  * never color alone. */
 export type DomainStateKind =
   | 'loading'
@@ -31,6 +32,12 @@ export type DomainStateKind =
   | 'unauthorized'
   | 'redacted'
   | 'conflicting'
+  /** A reachable authority said this one source cannot answer. The near
+   * neighbour of `offline`, where nothing was reached at all, and paired with
+   * it the way `unsupported` is paired with `unsupported_schema`: one shared
+   * hue, told apart by icon and label so a source-level refusal never reads as
+   * a dashboard that lost its connection. */
+  | 'unavailable'
   | 'offline'
   | 'unknown'
   | 'cancelled'
@@ -57,6 +64,11 @@ const STATE: Record<
   unauthorized: { label: 'Unauthorized', icon: ShieldAlert, tokenClass: 'text-state-unauthorized' },
   redacted: { label: 'Redacted', icon: EyeOff, tokenClass: 'text-state-redacted' },
   conflicting: { label: 'Conflicting', icon: Split, tokenClass: 'text-state-conflicting' },
+  unavailable: {
+    label: 'Source unavailable',
+    icon: Unplug,
+    tokenClass: 'text-state-offline',
+  },
   offline: { label: 'Offline', icon: CloudOff, tokenClass: 'text-state-offline' },
   unknown: { label: 'Unknown', icon: HelpCircle, tokenClass: 'text-state-unknown' },
   cancelled: { label: 'Cancelled', icon: CircleSlash, tokenClass: 'text-state-cancelled' },
@@ -88,6 +100,7 @@ const LAMP: Record<DomainStateKind, string> = {
   unauthorized: 'bg-state-unauthorized',
   redacted: 'bg-state-redacted',
   conflicting: 'bg-state-conflicting',
+  unavailable: 'bg-state-offline',
   offline: 'bg-state-offline',
   unknown: 'bg-state-unknown',
   cancelled: 'bg-state-cancelled',

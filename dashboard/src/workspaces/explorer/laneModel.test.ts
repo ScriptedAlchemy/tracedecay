@@ -269,19 +269,58 @@ describe('searchLane', () => {
     const clientOffline = searchLane('code', { outcome: 'transport', state: 'offline' }, 'graph', []);
     const sourceUnavailable = searchLane(
       'code',
-      answered(run({ sources: [progress({ outcome: 'unavailable', page: null })] })),
+      answered(
+        run({
+          sources: [
+            progress({
+              outcome: 'unavailable',
+              page: null,
+              error_code: 'graph_index_unavailable',
+              message: 'the code graph is not mounted',
+            }),
+          ],
+        }),
+      ),
       'graph',
       [],
     );
 
     expect(clientOffline).toEqual({ state: 'offline', lane: 'code' });
     expect(sourceUnavailable.state).toBe('unavailable');
-    // Same chip, because the sixteen-state taxonomy has no source-level
-    // unavailability member — so the detail is what tells them apart on screen.
+    // Different chips, not merely different sentences: the taxonomy carries a
+    // source-level unavailability state, so a reachable daemon reporting that
+    // one source cannot serve is never drawn as a lost connection.
     expect(laneStateKind(clientOffline)).toBe('offline');
-    expect(laneStateKind(sourceUnavailable)).toBe('offline');
+    expect(laneStateKind(sourceUnavailable)).toBe('unavailable');
+    expect(laneStateKind(clientOffline)).not.toBe(laneStateKind(sourceUnavailable));
+    // With the chip carrying the condition, the clause carries what the chip
+    // cannot — the reason the source reported — and never repeats the state.
     expect(laneStateDetail(clientOffline)).toBe('daemon unreachable');
-    expect(laneStateDetail(sourceUnavailable)).toBe('source unavailable');
+    expect(laneStateDetail(sourceUnavailable)).toBe('graph_index_unavailable');
+  });
+
+  it('falls back to the source message, then to no clause, for an unavailable lane', () => {
+    const withMessageOnly = laneFromSourceProgress(
+      'code',
+      progress({
+        outcome: 'unavailable',
+        page: null,
+        error_code: null,
+        message: 'the code graph is not mounted',
+      }),
+      [],
+    );
+    const withNeither = laneFromSourceProgress(
+      'code',
+      progress({ outcome: 'unavailable', page: null, error_code: null, message: null }),
+      [],
+    );
+
+    expect(laneStateDetail(withMessageOnly)).toBe('the code graph is not mounted');
+    // A source that reported no reason gets no invented one; the chip alone
+    // states the condition.
+    expect(laneStateDetail(withNeither)).toBeUndefined();
+    expect(laneStateKind(withNeither)).toBe('unavailable');
   });
 
   it('says a terminal run never named a source instead of showing it as reading', () => {
