@@ -106,7 +106,11 @@ suite.
 - `cargo dogfood` still does not exit successfully. Doctor currently reports
   `authority_audit_unavailable`, and Cursor Core has a component-ownership
   conflict. Plan 09 owns Doctor composition; Plan 27 and the PR12/PR13
-  integration slice own host lifecycle/ownership repair.
+  integration slice own host lifecycle/ownership repair. The Plan 27 host
+  capability/lifecycle reachability guards closed on 2026-07-29 (recorded in
+  [`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) and
+  [Plan 27](27-cross-host-agent-plugin-bundles.md)) do not close this Cursor
+  Core ownership conflict, which remains open.
 - Semantic search is disabled by an invalid configuration snapshot. Plan 20
   owns snapshot validity and forward repair; Plan 31 owns semantic activation.
   Exact, lexical, and graph retrieval remain the required available fallback.

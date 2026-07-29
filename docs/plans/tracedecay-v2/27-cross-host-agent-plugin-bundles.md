@@ -9,23 +9,87 @@ verified Kimi Code and OpenCode capabilities and turns that foundation into
 installable, repairable host integrations that deliver the working feedback
 journey. It does not add a second catalog or a generic connector framework.
 
-**PR13 reachability correction (2026-07-26).** The PR6 observation foundation
-above is not a completion statement for the PR13 lifecycle guards below:
+**PR13 reachability correction (2026-07-26); guards closed 2026-07-29.** The PR6
+observation foundation above was not a completion statement for the PR13
+lifecycle guards below. Four reachability gaps were recorded on 2026-07-26, and
+all four are now production-reached on `codex/v2-root-breakup`:
 
-- official component-set dry run passes an empty competing-extension claim
-  slice, so conflict discovery never supplies the guard;
+- the official component-set dry run passed an empty competing-extension claim
+  slice, so conflict discovery never supplied the guard. `356353fbf` runs
+  discovery before preflight, carries its claims on the preview and the
+  confirmed plan digest, makes a claim that appears after confirmation stale,
+  refuses an unreadable host document instead of reporting a clear surface, and
+  stops a full default install for an explicit `--yes` rather than resolving
+  ambiguous ownership on the operator's behalf. The stricter OpenCode refusal of
+  an ambiguous TraceDecay-aliasing analyzer is retained. `ec9a5b68c` keeps an
+  explicitly requested component on an unsupported host a refusal carrying that
+  host's exact typed reason, instead of short-circuiting to a silent skip;
 - `cline_family_evidence`, `require_capability`, and
-  `native_host_edit_stop_conformance_evidence` have no production callers
-  (`require_capability` is exercised only by tests);
-- the native-fixture helper reads repository-relative paths at runtime and
-  names `crates/tracedecay-hooks/fixtures/host_events/opencode.json`, which is
-  absent; and
-- `CursorCloud` falls through to an empty default component set.
+  `native_host_edit_stop_conformance_evidence` had no production caller.
+  `c45170fcf` reads each Cline-family provider's recorded admission and verbatim
+  reason from the checked-in evidence packet
+  (`crates/tracedecay-hooks/fixtures/host_events/cline-family.json`, embedded
+  and digest-bound) rather than inferring a route from the existence of an
+  adapter source file, and gives the native edit/stop conformance matrix a
+  consumer on `HostBundleDoctorReportV1::native_edit_stop_conformance`, which
+  `doctor` prints even when nothing is installed, so an empty install never
+  reads as an absence of host evidence. `require_capability` and
+  `cline_family_evidence` were already reached in production through
+  `require_component_capabilities` (`src/agents/host_bundle_registry.rs`); that
+  path was verified rather than given a second caller;
+- the native-fixture helper no longer reads repository-relative paths at
+  runtime. `stock_host_native_fixture_evidence` embeds every fixture with
+  `include_bytes!` and digests the embedded bytes, and OpenCode resolves to the
+  present `opencode/baseline.json` reported as
+  `Degraded(NativeFixtureLimited)` rather than supported; and
+- `CursorCloud` no longer falls through to an empty default component set.
+  `0dfb5bef0` makes the arm exhaustive and returns
+  `HostComponentSetUnavailable { host, reason }` from the default, explicit, and
+  project-local set builders — `HostRegistrationUnsupported` for `CursorCloud`,
+  `NativeFixtureLimited` for Kiro, and `CheckedInEvidenceMissing` for the
+  Cline family — so "no installable components" is distinguishable from
+  "nothing to install".
 
-These are active PR13 delivery gaps, not delivered guards and not PR14
-dashboard work. `CursorCloud` must remain typed unavailable unless an
-installable component set is delivered; its presence in an enum or capability
-catalog is not host-support evidence.
+Both standing constraints survive the closure and are not reopened by it.
+`CursorCloud` must remain typed unavailable unless an installable component set
+is delivered; its presence in an enum or capability catalog is not host-support
+evidence. Family resemblance, a shared configuration shape, or extension
+ancestry still never establishes a Cline-family route.
+
+**Observed evidence for the closure (focused and local only).** `9824ce6c4`
+covers the guards directly: a dry run that reports a competing analyzer, demands
+confirmation, changes the plan digest, leaves the artifact plan alone, and makes
+an earlier confirmation stale once another claim appears; an unparseable host
+document that refuses instead of reporting a clear surface; every Cline-family
+provider mirroring the packet's exact admission and reason; the Doctor report
+carrying native edit/stop conformance with nothing installed; and unsupported
+hosts asserting their exact unavailable reason instead of a bare
+incompatibility. The `pr13_host_bundle_acceptance` target reported 27 passed,
+the `agents::host_bundle_registry` unit tests 20 passed, and the
+`agent_cmd::tests` binary filter 18 of 19 passed. No full suite and no CI run
+supports this slice.
+
+**What this closure does not claim.** It closes four named reachability gaps,
+not PR13 acceptance. The Direct acceptance items below remain unrun: the
+official lifecycle dogfood across supported hosts, the cross-platform host runs,
+host-by-host competing-extension/interruption rollback, the feedback rollback
+switch, Kimi Code and OpenCode conformance including duplicate-analyzer
+prevention, and an end-to-end Cline-family route proof. The Cursor Core
+component-ownership conflict observed under `cargo dogfood` is also still open
+and is not addressed here.
+
+Two test caveats travel with this slice and must not be read as closed. The
+`agent_cmd` binary test
+`explicit_core_component_lifecycle_preserves_opencode_companions` fails only
+under parallel execution and passes in isolation: `which_tracedecay()`
+reads `PATH` and `CARGO_TARGET_DIR` while sibling tests mutate the environment
+under a `HOST_ENV_LOCK` this test does not take. That isolation flake is
+pre-existing, is not caused by this slice, and remains open until it is fixed
+separately by giving the test the same environment lease its siblings hold —
+never by relaxing the assertion or ignoring the test. Separately,
+`deferred_kimi_refresh_does_not_block_maintenance` and a daemonless-init
+bootstrap test fail in untouched peer territory; they are outside this slice and
+are not evidence about these guards.
 
 PR6 bundle names, generated matrices, packet gates, exact file inventories,
 and intermediate registration scaffolding are historical evidence, not
