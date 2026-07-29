@@ -20,6 +20,12 @@ extraction in [Plan 12](12-root-compatibility-migration.md) must use ordinary
 source moves, narrow typed ports, and explicit compatibility façades; it must
 not depend on this planner/apply journey.
 
+The canonical
+[`docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`](../../superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md)
+therefore keeps Plan 34 planner/apply in the PR12 product journey while query,
+code-index, projector, port, and route extraction proceed independently under
+Plan 12.
+
 The canonical apply mechanism is Plan 09's journaled application edit
 transaction, fed by graph-backed preview evidence and followed by the owning
 formatter, diagnostics, verification, and optional Plan 36 Git operations.

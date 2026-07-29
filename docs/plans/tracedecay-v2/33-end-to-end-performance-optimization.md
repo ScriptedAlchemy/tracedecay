@@ -17,6 +17,14 @@ published performance profiles retain compatibility obligations; completion
 otherwise follows Linux developer measurements, direct semantic/regression
 tests, and normal cross-platform CI.
 
+The canonical
+[`docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`](../../superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md)
+applies these rules to the Phase 0 no-op, query-private, code-index-private,
+MCP-handler, focused-test, root-leaf, and domain-leaf baselines and to Gate A/B
+retention decisions. Its child plans must record identical host, toolchain,
+features, warmth, edit class, rebuilt units, and semantic oracle; package count
+or line movement is never a performance claim.
+
 ## User outcome
 
 TraceDecay's shipped workflows become materially faster or less
