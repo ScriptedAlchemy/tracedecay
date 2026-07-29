@@ -364,6 +364,8 @@ pub fn assert_codex_plugin_bundle(
     assert_eq!(server["type"], "stdio");
     assert_command_eq(&server["command"], expected_command);
     assert_eq!(server["args"], expected_args);
+    assert_eq!(server["startup_timeout_sec"], 120);
+    assert_eq!(server["tool_timeout_sec"], 900);
     if expected_global_bundle {
         assert_eq!(server["env"]["TRACEDECAY_ENABLE_GLOBAL_DB"], "1");
     } else {
