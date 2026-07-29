@@ -190,6 +190,34 @@ fn domain_contracts_are_runtime_and_store_free() {
 }
 
 #[test]
+fn domain_imports_neither_root_query_nor_root_code_index_modules() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-domain/src")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve domain contract sources");
+    assert!(!sources.is_empty(), "domain contract sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay", "query"],
+        &["tracedecay", "code_index"],
+        &["tracedecay", "extraction"],
+        &["tracedecay", "semantic_code"],
+        &["tracedecay_code_index"],
+        &["crate", "query"],
+        &["crate", "code_index"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect domain sources for root query/code-index edges");
+    assert!(
+        violations.is_empty(),
+        "tracedecay-domain must import neither root query nor root code-index modules:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
 fn application_contracts_are_store_runtime_and_transport_free() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let roots = [PathBuf::from("crates/tracedecay-application/src")]
