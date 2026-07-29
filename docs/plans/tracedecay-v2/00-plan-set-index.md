@@ -10,6 +10,14 @@ This file owns delivery order. The master and numbered plans define product
 requirements and component boundaries; they are not independent queues and do
 not require one crate-first pull request per document.
 
+The canonical execution plan is
+[`docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`](../../superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md).
+It records the approved sequencing override: core Work and the minimal Plan
+24/32 runtime ship in PR14; PR17 retains residual advanced workflow capability.
+Dashboard acceptance is desktop-first, not desktop-only: desktop visual
+baselines lead review while responsive, zoom, keyboard, forced-colors, and
+accessibility function remain mandatory.
+
 ## Product outcome
 
 TraceDecay V2 converges capture, sessions, memory, code intelligence, search,
@@ -500,12 +508,12 @@ authorized configuration or remediation commands back through the daemon.
 
 - Ship exactly the original twelve dashboard workspaces — Brain, Explorer,
   Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory,
-  Costs, and Settings — with renderer-neutral semantics, a permissive default
+  Costs, and Settings — plus Work as the thirteenth PR14 workspace, with
+  renderer-neutral semantics, a permissive default
   renderer, keyboard/accessibility parity, typed SLOs, and denominator-safe
   measurements with provenance, coverage, cohort, temporal delta, uncertainty,
-  and calibration validity. By current plan authority Work is allocated to
-  PR17; the user did not enumerate the twelve or accept that deferral, so the
-  timing remains the open owner question recorded above.
+  and calibration validity. Work renders the PR14 core Plan 24 graph and
+  minimal Plan 32 runtime; advanced workflow capability remains PR17.
 - Plan 09 remains the sole Doctor use-case implementation/composition
   authority, Plan 14 its historical regression/behavior contract, and Plan 26
   the measurement authority; the Plan 11 UI renders supplied results and never
@@ -582,8 +590,10 @@ accessibility, cancellation, restart, denied-action, partial-data, and
 unavailable-provider behavior. Run those direct tests and normal repository CI;
 do not create a separate dashboard/Doctor acceptance gate.
 
-**Not in this PR.** Multi-root operation belongs to PR15 and Work/task views to
-PR17.
+**Not in this PR.** Multi-root operation belongs to PR15. Workflow definition
+lifecycle, advanced placement, fan-out/synthesis/recovery, expertise and
+calibration, automation execution controls, and host/LSP task handoff belong
+to PR17.
 
 ## PR15 — authorized multi-root local work
 
@@ -679,11 +689,13 @@ gate.
 **Not in this PR.** Multi-primary mutation and automatic conflict convergence
 are not product paths. Executable work orchestration belongs to PR17.
 
-## PR17 — task graph and executable workflows
+## PR17 — residual advanced workflows
 
-**User outcome.** A user can create host-neutral work, inspect exact evidence,
-review an explained task/model proposal, admit a real provider step, follow
-progress and outcomes, and accept or reject a proposed replan.
+**User outcome.** Building on PR14's canonical work graph, core projections,
+and minimal real provider runtime, a user can define and activate advanced
+workflows, execute bounded fan-out/review/synthesis/recovery, inspect advanced
+placement and calibration, control execution from Automations, and hand tasks
+off through supported hosts and LSP without creating a second authority.
 
 **End-to-end production path.** A typed task request becomes daemon-owned,
 deterministically replayable versioned task/ticket DAG state and `TaskId`-rooted
@@ -912,8 +924,13 @@ benchmarks do not ship.
 - PR13: [Plans 07](07-hooks-crate.md), [22](22-incremental-context-scout-and-suggestion-envelopes.md),
   [27](27-cross-host-agent-plugin-bundles.md), [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   and [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR14: [Plans 11](11-dashboard-frontend.md), [14](14-historical-failure-regression-matrix.md),
-  [26](26-observability-accounting-and-usage.md), and [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
+- PR14: [Plans 11](11-dashboard-frontend.md),
+  [11c](11c-work-workspace-design.md),
+  [14](14-historical-failure-regression-matrix.md),
+  [24](24-canonical-task-plan-graph-and-multi-agent-executor.md),
+  [26](26-observability-accounting-and-usage.md),
+  [32](32-dynamic-workflow-runtime-and-sdk.md), and
+  [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
 - PR15: [Plans 05](05-query-crate.md), [16](16-cross-project-repository-worktree-scope.md),
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   [36](36-git-aware-change-context-and-index-transactions.md), and
@@ -921,7 +938,7 @@ benchmarks do not ship.
 - PR16: [Plans 28](28-remote-multi-machine-shared-brain.md),
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR17: [Plans 01](01-domain-crate.md), [02](02-store-crate.md),
+- PR17 residual capability: [Plans 01](01-domain-crate.md), [02](02-store-crate.md),
   [03](03-capture-crate.md), [04](04-projectors-crate.md),
   [05](05-query-crate.md), [06](06-policy-crate.md),
   [09](09-application-crate.md),

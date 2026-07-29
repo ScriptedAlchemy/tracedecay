@@ -1,12 +1,16 @@
-# PR17: daemon-owned typed workflow runtime
+# PR14 core / PR17 residual daemon-owned typed workflow runtime
 
-**Status:** implementation authority for PR17 runtime behavior. PR18 publishes
-SDK names for the same callable operations; it does not add a second runtime or
-defer missing lifecycle semantics.
+**Status:** implementation authority for PR14's minimal real-provider runtime
+and PR17's residual advanced workflow behavior. PR18 publishes SDK names for
+the same callable operations; it does not add a second runtime or defer missing
+lifecycle semantics.
 
-**Active-band disposition (2026-07-26): SCOPE-OUT.** This plan is exclusively
-PR17 runtime work under `00-plan-set-index.md`. Its unimplemented requirements
-must not be filed as unmet PR8–PR14 or PR14-dashboard work.
+**Approved delivery split (2026-07-28).** PR14 owns one supported native
+provider path, leases/attempts, bounded artifacts/progress, cancel/resume,
+restart fencing, sealed terminal evidence, and projection into Work. PR17 owns
+workflow definitions, multi-step/fan-out/synthesis/recovery, advanced
+placement, expertise/calibration, automation controls, and host/LSP handoff.
+Both use one runtime authority.
 
 Earlier runtime type/file inventories, operation registries, fixture corpora,
 phase names, and packet gates are historical evidence, not prerequisites or
@@ -33,7 +37,7 @@ PR17 adds no JavaScript/TypeScript workflow runtime, generated workflow source,
 Markdown parser, shell command tape, developer-plan executor, or recursive
 generic execution.
 
-## PR17 implementation defaults
+## PR14/PR17 implementation defaults
 
 - Use `petgraph` for task/workflow DAG traversal, topological order, and SCC
   rejection; `tokio-util` for cancellation; Serde plus `schemars` and
@@ -53,7 +57,7 @@ generic execution.
   Add no workflow platform, PTY layer, `statig`, or outbox framework; retain
   the existing atomic outbox publication semantics in the owner transaction.
 
-## PR17 user outcome
+## PR14 core and PR17 residual user outcome
 
 After reviewing an evidence-backed Plan 24 proposal, a user can explicitly
 admit one real provider-backed step, see the exact provider/model and fallback
@@ -373,11 +377,12 @@ acceptance, or provider-dispatch authority from workflow composition.
    evidence.
 3. Project the result into every retained Plan 24 Work view and feed it into
    non-auto-applied replanning.
-4. Exercise bounded fan-out, independent review, optional synthesis, capacity,
+   These first three slices are PR14 core.
+4. In PR17, exercise bounded fan-out, independent review, optional synthesis, capacity,
    pause/resume, restart/failover, and backup/restore through the same journey.
-5. Exercise each retained placement, stack, review, and safe integration mode
+5. In PR17, exercise each retained placement, stack, review, and safe integration mode
    through the same TaskId and explicit effect path.
-6. Bind all retained lifecycle and SDK-facing operations across the selected
+6. In PR17, bind residual lifecycle and SDK-facing operations across the selected
    surfaces and emit production observations.
 
 Each slice includes its minimal contracts, persistence, configuration/policy
@@ -399,13 +404,14 @@ shadow gate counts as delivery.
 
 ## Direct acceptance
 
-One aggregate PR17 journey must create work, retrieve exact evidence, receive
+The PR14 core journey must create work, retrieve exact evidence, receive
 and explicitly accept an explained proposal, separately admit a supported real
 native provider step, watch and resume progress, inspect requested/actual route,
 artifacts and truthful outcome, and review an unapplied replan across CLI, MCP,
 HTTP, dashboard, and host/application bindings.
 
-The same journey expands to prove:
+PR17 expands the same journey for the residual capabilities below. Together
+the journeys prove:
 
 - one deadline, cancellation generation, authority epoch, budget ledger,
   history, scheduler, lease/attempt/effect authority, and idempotent receipt
@@ -439,7 +445,7 @@ production. A skipped native run is diagnostic coverage, not certification.
 Compact direct regressions replace giant declarative fixture catalogs and
 contract-only gates.
 
-## Not in PR17
+## Not in PR14/PR17
 
 - PR18 publishes and freezes the public Rust, TypeScript, and Python SDKs and
   compatibility policy for these already complete operations.

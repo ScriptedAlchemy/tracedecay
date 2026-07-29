@@ -1,7 +1,8 @@
-# 11c — Work workspace design (PR17): projections, navigation, and the bigger picture
+# 11c — Work workspace design: PR14 core and PR17 advanced controls
 
-Status: design contract for the Work workspace, currently allocated to PR17 by
-plan authority and written 2026-07-25 after the PR14 grammar library landed.
+Status: design contract for the Work workspace, allocated to PR14 core delivery
+with residual advanced workflow controls in PR17 by the approved 2026-07-28
+sequencing decision. It was written 2026-07-25 after the PR14 grammar library landed.
 Semantics are owned by
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md); this doc
 owns how those semantics look, move, and connect. Normative like 11a/11b: every
@@ -10,11 +11,11 @@ distributions are said rather than drawn, caps are captioned.
 
 The user explicitly requires a first-class TraceDecay task graph/Kanban
 inspired by Hermes but more powerful; it is a product feature, not roadmap
-plumbing and does not require GitHub. He asked "ahat about kanban/task graph
-etc" while PR14 was active and never recorded acceptance of deferral to PR17.
-Therefore Plan 24 remains the semantic authority and PR17 remains the current
-binding plan allocation, but delivery timing is an **open owner question**, not
-a user-stated decision.
+plumbing and does not require GitHub. PR14 ships Kanban, DAG, timeline, causal,
+workload, basic topology read, TaskId selection, `task_activity` SSE, and deep
+links over the canonical graph. PR17 adds advanced topology, placement,
+automation execution, expertise/calibration, fan-out/synthesis/recovery, and
+host/LSP handoff controls over those same authorities.
 
 Beauty and function are simultaneous acceptance criteria here too. Generic,
 clinical, simple, or non-magnificent workflow UI; a bland vertical list that
@@ -26,7 +27,8 @@ from Plans 11a/11b are design-owner/agent decisions, not user preferences.
 
 ## Inheritance — one grammar, new nouns
 
-PR14 proved five visual grammars on real data. PR17 does not invent a sixth;
+PR14's Work slice reuses the five visual grammars already proved on real data;
+PR17's advanced controls do not invent a sixth.
 it maps each Plan 24 projection onto the grammar that already carries that
 shape of meaning:
 
@@ -126,6 +128,8 @@ evidence manifest.
 2. commit↔session correlation + span refresh fix — blocking for the weave
    projection (chip filed 2026-07-25).
 3. `task_activity` SSE family — thin, after Plan 24 lands events.
-4. Build order inside PR17: Kanban + DAG first (pure projections over the
-   store), weave/causal second (need correlation fix), cortex workload last
+4. Build order inside PR14: Kanban + DAG first (pure projections over the
+   store), weave/causal second (need correlation fix), cortex workload last.
+   PR17 then layers advanced workflow controls without replacing projections
+   or canonical selection.
    (needs volume to be worth aggregating).

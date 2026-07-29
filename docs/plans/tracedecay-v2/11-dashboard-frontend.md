@@ -854,14 +854,12 @@ filters, selection, evidence, temporal frame, or legal actions.
 
 ## Responsive, accessibility, performance, and usability gates
 
-**Open owner question — desktop-only versus responsive.** On 2026-07-06 the
-user said "desktop resolution only please." On 2026-07-25 he filed the
-Code-workspace bug in which symbol search disappeared below `lg` (1024px) and
-required checks at 320/768 widths with axe violations at zero. These are
-genuinely contradictory and neither is treated as superseded. Pending the
-user/product owner's decision, use the brief's provisional working reading:
-capture review screenshots at desktop resolution, but never hide functionality
-or ship a broken layout below `lg`.
+**Approved acceptance — desktop-first, not desktop-only (2026-07-28).**
+Desktop visual review and golden baselines use 1280×720 and 1440×900. Narrow
+viewports are functional/accessibility acceptance surfaces rather than a
+second mobile visual-design program: no capability, truth state, provenance,
+or action may disappear below `lg`. The Code-workspace 320/768 regression and
+zero-axe requirement remain binding.
 
 WCAG 2.2 AA is mandatory. Automated tests cover 320×568, 390×844, 768×1024,
 1024×768, 1280×720, and 1440×900 CSS pixels, 200% and 400% zoom,
