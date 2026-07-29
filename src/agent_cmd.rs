@@ -83,11 +83,12 @@ pub(crate) async fn handle_host_bundle_component_command(
         let Some(component_set) = component_set else {
             if explicitly_scoped {
                 return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "agent {agent_id:?} has no canonical first-party host component set"
-                    ),
+                    message: unsupported_host_component_set_message(agent_id),
                 });
             }
+            // A skipped host is a reported unavailable result, never a silent
+            // success for the sweep that contained it.
+            eprintln!("skipped: {}", unsupported_host_component_set_message(agent_id));
             continue;
         };
         if options.dry_run {
@@ -125,6 +126,19 @@ pub(crate) async fn handle_host_bundle_component_command(
     Ok(())
 }
 
+/// Truthful reason a host component set is unavailable, so a skipped or
+/// refused agent never reads as an empty success.
+fn unsupported_host_component_set_message(agent: &str) -> String {
+    match host_kind_for_agent(agent).ok().and_then(
+        tracedecay::agents::host_bundle_registry::unsupported_host_component_set_reason,
+    ) {
+        Some(reason) => format!(
+            "agent {agent:?} has no installable first-party host component set: {reason:?}"
+        ),
+        None => format!("agent {agent:?} has no canonical first-party host component set"),
+    }
+}
+
 fn canonical_host_component_set(
     agent: &str,
     component: Option<crate::cli::HostBundleComponentArg>,
@@ -136,6 +150,13 @@ fn canonical_host_component_set(
         Ok(host) => host,
         Err(_) => return Ok(None),
     };
+    // An unsupported host has no set to install; it stays on its compatibility
+    // migration path rather than receiving a fabricated empty transaction.
+    if tracedecay::agents::host_bundle_registry::unsupported_host_component_set_reason(host)
+        .is_some()
+    {
+        return Ok(None);
+    }
     let requested = component.map(host_bundle_component).map_or_else(
         || tracedecay::agents::host_bundle_registry::default_components(host),
         |component| vec![component],
@@ -227,7 +248,7 @@ fn apply_host_bundle_artifact_action_at(
     };
     let component_set = canonical_host_component_set(agent_id, Some(component), now_unix)?
         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: format!("agent {agent_id:?} has no canonical first-party host component set"),
+            message: unsupported_host_component_set_message(agent_id),
         })?;
     ensure_artifact_only_restore_boundary(agent_id, &component_set, home, lifecycle_root)?;
     let [entry] = component_set.component_set.components.as_slice() else {
@@ -386,6 +407,14 @@ fn dry_run_canonical_component_set(
         hex::encode(preview.artifact_state_revision),
         preview.confirmation_required
     );
+    for claim in &preview.competing_extension_claims {
+        eprintln!(
+            "  competing {:?} claim by {:?} (evidence {})",
+            claim.capability,
+            claim.extension_id,
+            hex::encode(claim.evidence_digest)
+        );
+    }
     for plan in preview.component_plans {
         eprintln!(
             "  {:?}: {} mutation(s), rollback={}",
@@ -463,6 +492,25 @@ fn apply_canonical_component_set(
             &mut registration,
         )
         .map_err(host_bundle_error)?;
+    // A full default install is otherwise treated as confirmed. A competing
+    // third-party claim is exactly the ambiguity that must not be resolved on
+    // the operator's behalf, so it demands an explicit `--yes`.
+    if !preview.competing_extension_claims.is_empty() && !options.yes {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "agent {agent_id:?} already has {} third-party extension claim(s) on a surface \
+                 this component set registers ({}); review `--dry-run` and re-run with `--yes` to \
+                 confirm this exact plan",
+                preview.competing_extension_claims.len(),
+                preview
+                    .competing_extension_claims
+                    .iter()
+                    .map(|claim| claim.extension_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
     let receipt = transaction
         .execute_confirmed(
             &component_set.component_set,
@@ -3114,6 +3162,7 @@ mod tests {
             current_registration_revision: revision,
             artifact_state_revision: [8; 32],
             component_plans: Vec::new(),
+            competing_extension_claims: Vec::new(),
             confirmation_required: false,
         };
         registration
