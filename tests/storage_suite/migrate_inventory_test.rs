@@ -17,40 +17,93 @@ use tracedecay::migrate::manifest::{
     StoreArtifactPathValidationError, build_plan_manifest, load_manifest, save_manifest,
 };
 
-fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+use crate::common::EnvVarGuard;
+use crate::common::fixture::TestProfile;
+
+/// One throwaway profile per test, taken from the shared fixture authority: it
+/// pins `HOME`, the profile data directory, and the global-DB path inside a
+/// private temporary directory.
+///
+/// Inventory takes an *exclusive* lifecycle lease on the profile it is about to
+/// inspect, so two tests that resolve the same profile root can never both run:
+/// the loser fails with "another lifecycle operation is already active". These
+/// tests used to inspect whichever profile the ambient environment named — one
+/// shared root per checkout — and leaned on an in-process mutex, which a
+/// process-per-test runner leaves uncontended. Owning a profile per test gives
+/// every process its own lease regardless of runner, and keeps Hermes discovery
+/// (which resolves from `HOME`) off the operator's real profile.
+struct InventoryProfile {
+    // Declared before the profile so `HERMES_HOME` is restored while the
+    // profile still holds the process-wide environment lock.
+    _hermes_home: EnvVarGuard,
+    profile: TestProfile,
 }
 
-fn with_env_vars<T>(vars: &[(&str, Option<&Path>)], f: impl FnOnce() -> T) -> T {
-    // Shares the suite-wide lock because HOME/HERMES_HOME mutations here can
-    // race with the HomeEnvGuard-based modules under plain `cargo test`.
-    let _guard = crate::support::HOME_ENV_LOCK.blocking_lock();
-    let previous = vars
-        .iter()
-        .map(|(name, _)| (*name, std::env::var_os(name)))
-        .collect::<Vec<_>>();
-    unsafe {
-        for (name, value) in vars {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
+impl InventoryProfile {
+    async fn acquire() -> Self {
+        Self::isolate_hermes_home(TestProfile::acquire().await)
+    }
+
+    /// Counterpart of [`Self::acquire`] for plain `#[test]` fns; call it outside
+    /// any runtime the test later builds.
+    fn acquire_blocking() -> Self {
+        Self::isolate_hermes_home(TestProfile::acquire_blocking())
+    }
+
+    /// Removes `HERMES_HOME` so a Hermes profile home is discovered from this
+    /// fixture's `HOME` rather than an operator-configured agent host.
+    fn isolate_hermes_home(profile: TestProfile) -> Self {
+        Self {
+            _hermes_home: EnvVarGuard::unset("HERMES_HOME"),
+            profile,
         }
     }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    unsafe {
-        for (name, value) in previous {
-            if let Some(value) = value {
-                std::env::set_var(name, value);
-            } else {
-                std::env::remove_var(name);
-            }
-        }
+
+    fn home(&self) -> &Path {
+        self.profile.home()
     }
-    match result {
-        Ok(value) => value,
-        Err(payload) => std::panic::resume_unwind(payload),
+
+    /// This profile's root, which is what inventory leases when a test does not
+    /// name a global DB of its own.
+    fn root(&self) -> &Path {
+        self.profile.root()
     }
+
+    /// Creates `<scratch>/<name>`: a fixture tree beside this profile rather
+    /// than inside it, so scanning it never walks the profile's own store.
+    fn path(&self, name: impl AsRef<Path>) -> PathBuf {
+        self.profile.path(name)
+    }
+}
+
+/// Inventories `options` after proving the profile it will lease belongs to this
+/// test.
+///
+/// Taking the profile by reference is the point: a test cannot ask for an
+/// inventory without first owning an isolated profile, and the assertion turns a
+/// silent regression — inventory resolving some shared ambient profile again —
+/// into a named failure instead of a lease-contention flake.
+async fn build_inventory_in(
+    profile: &InventoryProfile,
+    options: MigrationInventoryOptions,
+) -> tracedecay::errors::Result<MigrationInventory> {
+    prepare_inventory_profile(profile, &options);
+    build_inventory(options).await
+}
+
+/// [`build_inventory_in`] for plain `#[test]` fns.
+fn block_on_inventory_in(
+    profile: &InventoryProfile,
+    options: MigrationInventoryOptions,
+) -> tracedecay::errors::Result<MigrationInventory> {
+    prepare_inventory_profile(profile, &options);
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(build_inventory(options))
+}
+
+fn canonical_temp_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn inventory_path(path: &Path) -> PathBuf {
@@ -61,40 +114,28 @@ fn same_path(left: &Path, right: &Path) -> bool {
     inventory_path(left) == inventory_path(right)
 }
 
-fn block_on_inventory(
-    options: MigrationInventoryOptions,
-) -> tracedecay::errors::Result<tracedecay::migrate::inventory::MigrationInventory> {
-    prepare_inventory_profile(&options);
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(build_inventory(options))
-}
-
-fn prepare_inventory_profile(options: &MigrationInventoryOptions) {
+fn prepare_inventory_profile(profile: &InventoryProfile, options: &MigrationInventoryOptions) {
+    // The same resolution inventory performs, so the directory it leases exists
+    // and is owner-only before it gets there.
     let profile_root = options
         .global_db_path
         .as_deref()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| tracedecay::storage::default_profile_root().unwrap());
+    if options.global_db_path.is_none() {
+        assert_eq!(
+            profile_root,
+            profile.root(),
+            "inventory must lease this test's own profile, not a shared one"
+        );
+    }
     fs::create_dir_all(&profile_root).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(profile_root, fs::Permissions::from_mode(0o700)).unwrap();
     }
-}
-
-async fn build_inventory_with_env_lock(
-    options: MigrationInventoryOptions,
-) -> tracedecay::errors::Result<MigrationInventory> {
-    // Inventory resolves its maintenance profile through process-global env.
-    // Serialize it with every HOME/HERMES_HOME-mutating storage test so
-    // parallel tests neither contend on one lifecycle lease nor scan another
-    // test's transient profile.
-    let _guard = crate::support::HOME_ENV_LOCK.lock().await;
-    prepare_inventory_profile(&options);
-    build_inventory(options).await
 }
 
 fn make_project_store(root: &Path) {
@@ -326,6 +367,7 @@ fn store_artifact_path_rejects_symlinks() {
 
 #[tokio::test]
 async fn inventory_does_not_open_or_recover_dirty_project_db() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -334,10 +376,13 @@ async fn inventory_does_not_open_or_recover_dirty_project_db() {
     let db_path = root.join(".tracedecay/tracedecay.db");
     let before = fs::read(&db_path).unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -363,6 +408,7 @@ async fn inventory_does_not_open_or_recover_dirty_project_db() {
 
 #[tokio::test]
 async fn inventory_records_project_store_sidecar_artifacts() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     let data_dir = root.join(".tracedecay");
@@ -377,10 +423,13 @@ async fn inventory_records_project_store_sidecar_artifacts() {
     fs::write(data_dir.join("config.json"), b"{}").unwrap();
     fs::write(data_dir.join("store_manifest.json"), b"{}").unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -412,6 +461,7 @@ async fn inventory_records_project_store_sidecar_artifacts() {
 
 #[tokio::test]
 async fn damaged_stale_branch_is_attributed_without_condemning_authoritative_store() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     let branches_dir = root.join(".tracedecay/branches");
@@ -423,10 +473,13 @@ async fn damaged_stale_branch_is_attributed_without_condemning_authoritative_sto
     fs::write(branches_dir.join("feature.db-wal"), b"wal").unwrap();
     fs::write(branches_dir.join("feature.db-shm"), b"shm").unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -481,6 +534,7 @@ async fn damaged_stale_branch_is_attributed_without_condemning_authoritative_sto
 
 #[tokio::test]
 async fn metadata_only_inventory_marks_existing_databases_unchecked() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     let branches_dir = root.join(".tracedecay/branches");
@@ -488,11 +542,14 @@ async fn metadata_only_inventory_marks_existing_databases_unchecked() {
     fs::write(root.join(".tracedecay/tracedecay.db"), b"not sqlite").unwrap();
     fs::write(branches_dir.join("feature.db"), b"not sqlite").unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        integrity: InventoryIntegrityMode::MetadataOnly,
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            integrity: InventoryIntegrityMode::MetadataOnly,
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
     let store = report
@@ -512,6 +569,7 @@ async fn metadata_only_inventory_marks_existing_databases_unchecked() {
 
 #[tokio::test]
 async fn inventory_reports_only_actively_held_sync_locks_as_locked() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -519,10 +577,13 @@ async fn inventory_reports_only_actively_held_sync_locks_as_locked() {
     let lock_path = root.join(".tracedecay/sync.lock");
     fs::write(&lock_path, b"").unwrap();
 
-    let idle = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        ..MigrationInventoryOptions::default()
-    })
+    let idle = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
     let idle_store = idle
@@ -544,10 +605,13 @@ async fn inventory_reports_only_actively_held_sync_locks_as_locked() {
         .open(&lock_path)
         .unwrap();
     held.try_lock_exclusive().unwrap();
-    let locked = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        ..MigrationInventoryOptions::default()
-    })
+    let locked = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
     let locked_store = locked
@@ -561,6 +625,7 @@ async fn inventory_reports_only_actively_held_sync_locks_as_locked() {
 #[cfg(unix)]
 #[tokio::test]
 async fn inventory_skips_symlinked_branches_dir_by_default() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     let real_branches = dir.path().join("outside_branches");
@@ -571,11 +636,14 @@ async fn inventory_skips_symlinked_branches_dir_by_default() {
     fs::write(&branch_db, b"not sqlite").unwrap();
     symlink(&real_branches, root.join(".tracedecay/branches")).unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        follow_symlinks: false,
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            follow_symlinks: false,
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -599,6 +667,7 @@ async fn inventory_skips_symlinked_branches_dir_by_default() {
 
 #[tokio::test]
 async fn inventory_reports_global_db_metadata() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let db_path = root.join("global.db");
@@ -609,12 +678,15 @@ async fn inventory_reports_global_db_metadata() {
     drop(db);
     assert!(!sqlite_table_exists(&db_path, "dashboard_token_counts"));
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: Vec::new(),
-        global_db_path: Some(db_path.clone()),
-        integrity: InventoryIntegrityMode::MetadataOnly,
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: Vec::new(),
+            global_db_path: Some(db_path.clone()),
+            integrity: InventoryIntegrityMode::MetadataOnly,
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -637,6 +709,7 @@ async fn inventory_reports_global_db_metadata() {
 
 #[tokio::test]
 async fn inventory_discovers_registered_project_outside_scan_roots() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let db_path = root.join("global.db");
@@ -647,11 +720,14 @@ async fn inventory_discovers_registered_project_outside_scan_roots() {
     db.upsert(&registered, 42).await;
     drop(db);
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: Vec::new(),
-        global_db_path: Some(db_path),
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: Vec::new(),
+            global_db_path: Some(db_path),
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -665,6 +741,7 @@ async fn inventory_discovers_registered_project_outside_scan_roots() {
 
 #[test]
 fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
+    let profile = InventoryProfile::acquire_blocking();
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let db_path = root.join("global.db");
@@ -681,14 +758,15 @@ fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
         db.upsert(&unrelated, 99).await;
     });
 
-    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(&root))], || {
-        block_on_inventory(MigrationInventoryOptions {
+    let report = block_on_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
             roots: vec![scan_root],
             global_db_path: Some(db_path),
             ..MigrationInventoryOptions::default()
-        })
-        .unwrap()
-    });
+        },
+    )
+    .unwrap();
 
     assert_eq!(
         report.stores.len(),
@@ -716,6 +794,7 @@ fn explicit_roots_do_not_inventory_unrelated_registered_projects_by_default() {
 
 #[test]
 fn explicit_roots_can_include_all_registered_projects_when_requested() {
+    let profile = InventoryProfile::acquire_blocking();
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let db_path = root.join("global.db");
@@ -732,15 +811,16 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
         db.upsert(&unrelated, 99).await;
     });
 
-    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(&root))], || {
-        block_on_inventory(MigrationInventoryOptions {
+    let report = block_on_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
             roots: vec![scan_root],
             global_db_path: Some(db_path),
             include_all_registered: true,
             ..MigrationInventoryOptions::default()
-        })
-        .unwrap()
-    });
+        },
+    )
+    .unwrap();
 
     assert!(
         report
@@ -760,6 +840,7 @@ fn explicit_roots_can_include_all_registered_projects_when_requested() {
 
 #[tokio::test]
 async fn inventory_reports_registered_project_with_missing_local_store() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
     let db_path = root.join("global.db");
@@ -769,11 +850,14 @@ async fn inventory_reports_registered_project_with_missing_local_store() {
     db.upsert(&registered, 42).await;
     drop(db);
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: Vec::new(),
-        global_db_path: Some(db_path),
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: Vec::new(),
+            global_db_path: Some(db_path),
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -788,15 +872,19 @@ async fn inventory_reports_registered_project_with_missing_local_store() {
 
 #[tokio::test]
 async fn inventory_reports_non_sqlite_global_db_as_damaged() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     fs::write(&db_path, b"not sqlite").unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: Vec::new(),
-        global_db_path: Some(db_path),
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: Vec::new(),
+            global_db_path: Some(db_path),
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -813,16 +901,20 @@ async fn inventory_reports_non_sqlite_global_db_as_damaged() {
 
 #[tokio::test]
 async fn inventory_flags_leftover_config_tmp_for_manual_review() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     fs::create_dir_all(&root).unwrap();
     make_project_store(&root);
     fs::write(root.join(".tracedecay/config.json.tmp"), b"partial config").unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -843,6 +935,7 @@ async fn inventory_flags_leftover_config_tmp_for_manual_review() {
 #[cfg(unix)]
 #[tokio::test]
 async fn inventory_reports_skipped_symlink_directories() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let real = dir.path().join("real_project");
     fs::create_dir_all(&real).unwrap();
@@ -850,11 +943,14 @@ async fn inventory_reports_skipped_symlink_directories() {
     let alias = dir.path().join("alias_project");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        follow_symlinks: false,
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            follow_symlinks: false,
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -869,6 +965,7 @@ async fn inventory_reports_skipped_symlink_directories() {
 #[cfg(unix)]
 #[tokio::test]
 async fn inventory_skips_symlinked_data_dir_by_default() {
+    let profile = InventoryProfile::acquire().await;
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("repo");
     let real_data = dir.path().join("real_data");
@@ -877,11 +974,14 @@ async fn inventory_skips_symlinked_data_dir_by_default() {
     fs::write(real_data.join("tracedecay.db"), b"not sqlite").unwrap();
     std::os::unix::fs::symlink(&real_data, root.join(".tracedecay")).unwrap();
 
-    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
-        roots: vec![dir.path().to_path_buf()],
-        follow_symlinks: false,
-        ..MigrationInventoryOptions::default()
-    })
+    let report = build_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
+            roots: vec![dir.path().to_path_buf()],
+            follow_symlinks: false,
+            ..MigrationInventoryOptions::default()
+        },
+    )
     .await
     .unwrap();
 
@@ -893,8 +993,9 @@ async fn inventory_skips_symlinked_data_dir_by_default() {
 
 #[test]
 fn inventory_discovers_hermes_home_profiles_and_state_dbs() {
-    let dir = TempDir::new().unwrap();
-    let hermes_home = dir.path().join(".hermes");
+    // A Hermes profile home is discovered from `HOME`, which this fixture owns.
+    let profile = InventoryProfile::acquire_blocking();
+    let hermes_home = profile.home().join(".hermes");
     let default_store = hermes_home.join(".tracedecay");
     let work_profile = hermes_home.join("profiles/work");
     let work_store = work_profile.join(".tracedecay");
@@ -905,13 +1006,14 @@ fn inventory_discovers_hermes_home_profiles_and_state_dbs() {
     fs::write(work_store.join("tracedecay.db"), b"not sqlite").unwrap();
     fs::write(work_profile.join("state.db"), b"not sqlite").unwrap();
 
-    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(dir.path()))], || {
-        block_on_inventory(MigrationInventoryOptions {
+    let report = block_on_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
             roots: Vec::new(),
             ..MigrationInventoryOptions::default()
-        })
-        .unwrap()
-    });
+        },
+    )
+    .unwrap();
 
     let default = report
         .stores
@@ -943,20 +1045,22 @@ fn inventory_discovers_hermes_home_profiles_and_state_dbs() {
 
 #[test]
 fn inventory_does_not_treat_scan_root_dot_hermes_as_a_profile_home() {
-    let dir = TempDir::new().unwrap();
-    let user_home = dir.path().join("home");
-    let scan_root = dir.path().join("project");
+    // The scan root deliberately sits beside this fixture's `HOME`, so a
+    // `.hermes` directory inside it is not the user's Hermes profile home.
+    let profile = InventoryProfile::acquire_blocking();
+    let scan_root = profile.path("project");
     let redirected = scan_root.join(".hermes");
     fs::create_dir_all(&redirected).unwrap();
     fs::write(redirected.join("state.db"), b"not sqlite").unwrap();
 
-    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(&user_home))], || {
-        block_on_inventory(MigrationInventoryOptions {
+    let report = block_on_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
             roots: vec![scan_root],
             ..MigrationInventoryOptions::default()
-        })
-        .unwrap()
-    });
+        },
+    )
+    .unwrap();
 
     assert!(
         report
@@ -969,11 +1073,10 @@ fn inventory_does_not_treat_scan_root_dot_hermes_as_a_profile_home() {
 
 #[test]
 fn inventory_discovers_default_home_hermes_project_pin() {
-    let dir = TempDir::new().unwrap();
-    let hermes_home = dir.path().join(".hermes");
-    let pinned_project = dir.path().join("pinned-project");
+    let profile = InventoryProfile::acquire_blocking();
+    let hermes_home = profile.home().join(".hermes");
+    let pinned_project = profile.path("pinned-project");
     fs::create_dir_all(&hermes_home).unwrap();
-    fs::create_dir_all(&pinned_project).unwrap();
     fs::write(
         hermes_home.join("config.yaml"),
         format!(
@@ -984,13 +1087,14 @@ fn inventory_discovers_default_home_hermes_project_pin() {
     .unwrap();
     make_project_store(&pinned_project);
 
-    let report = with_env_vars(&[("HERMES_HOME", None), ("HOME", Some(dir.path()))], || {
-        block_on_inventory(MigrationInventoryOptions {
+    let report = block_on_inventory_in(
+        &profile,
+        MigrationInventoryOptions {
             roots: Vec::new(),
             ..MigrationInventoryOptions::default()
-        })
-        .unwrap()
-    });
+        },
+    )
+    .unwrap();
 
     let store = report
         .stores
