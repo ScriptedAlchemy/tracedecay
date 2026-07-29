@@ -9,7 +9,7 @@
 //! constructs are preserved as evidence; extraction never invents successful
 //! structure.
 
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use serde::Serialize;
 use tracedecay_domain::{
