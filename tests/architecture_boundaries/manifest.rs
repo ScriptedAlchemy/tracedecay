@@ -1099,6 +1099,45 @@ fn manifest_classification(path: &Path) -> ManifestClassification {
     }
 }
 
+/// The workspace manifest contract, reported under its own name: driver-neutral
+/// physical manifests, the fail-closed dependency allowlists, the `crates/`
+/// layout rule, and the Cargo target boundary.
+///
+/// These rules used to be asserted only as preconditions of
+/// `query_kernel::temporal_kernel_sources_respect_dependency_boundary`. A
+/// manifest regression therefore aborted that test before its query-source scan
+/// ran, so an unregistered crate reported as a query-kernel failure and hid a
+/// real source violation until the manifest side was repaired. Owning the
+/// assertion here keeps each contract answerable for itself.
+#[test]
+fn workspace_manifest_contract_is_reported_independently() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let physical =
+        physical_manifest_layout(&repository).expect("inspect tracked physical Cargo manifests");
+    assert!(
+        physical.violations.is_empty(),
+        "workspace manifests violate driver-neutral dependency boundaries:\n{}",
+        physical
+            .violations
+            .iter()
+            .map(|violation| format!("  - {violation}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let layout = cargo_source_layout(&repository).expect("inspect Cargo workspace membership");
+    assert!(
+        layout.boundary_violations.is_empty(),
+        "workspace dependencies or targets violate query/runtime boundaries:\n{}",
+        layout
+            .boundary_violations
+            .iter()
+            .map(|violation| format!("  - {violation}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 #[test]
 fn git_tracked_rust_sources_are_reachable_from_cargo_targets() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
