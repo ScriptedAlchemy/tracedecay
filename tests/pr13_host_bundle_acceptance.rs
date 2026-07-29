@@ -6,17 +6,19 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay::agents::host_bundle_registry::{
-    HostBundleRegistryError, default_components, verified_embedded_default_host_component_set,
-    verified_embedded_host_bundle, verified_embedded_host_component_set,
+    HostBundleRegistryError, default_components, unsupported_host_component_set_reason,
+    verified_embedded_default_host_component_set, verified_embedded_host_bundle,
+    verified_embedded_host_component_set,
 };
 use tracedecay::agents::host_bundle_v2::{
-    HostBundleComponentDoctorStateV1, HostBundleComponentV1, HostBundleError,
-    HostBundleExecutionRequestV1, HostBundleInstallReceiptV1, HostBundleLifecycleOpV1,
-    HostBundleLifecycleRequestV1, HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1,
-    HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1, HostBundleWriterV1,
-    HostCapabilityStateV1, HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
+    ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
+    HostBundleComponentV1, HostBundleError, HostBundleExecutionRequestV1,
+    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1,
+    HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1,
+    HostBundleRollbackBoundaryV1, HostBundleWriterV1, HostCapabilityStateV1, HostCapabilityV1,
+    HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
     HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostKindV1,
-    dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
+    cline_family_evidence, dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
 };
@@ -494,10 +496,17 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
             default_components(host).is_empty(),
             "{host:?} must stay typed unavailable until its safety evidence is sufficient"
         );
+        let reason = unsupported_host_component_set_reason(host)
+            .unwrap_or_else(|| panic!("{host:?} must carry an exact unavailable reason"));
         assert_eq!(
             verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
-            Err(HostBundleRegistryError::Incompatible),
-            "{host:?} must refuse an explicit component request too"
+            Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason }),
+            "{host:?} must refuse an explicit component request with its exact reason"
+        );
+        assert_eq!(
+            verified_embedded_default_host_component_set(host, 0),
+            Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason }),
+            "{host:?} must report a typed unavailable default set, never an empty one"
         );
     }
 }
@@ -528,6 +537,250 @@ fn cursor_cloud_is_recognized_but_never_advertised_as_supported() {
         stock_host_registration_evidence(HostKindV1::CursorCloud)
             .iter()
             .all(|record| matches!(record.state, HostCapabilityStateV1::Unavailable(_)))
+    );
+}
+
+/// The official component-set dry run must supply conflict discovery to its
+/// own guard: a third-party analyzer already serving a language TraceDecay
+/// projects is reported, demands confirmation, and binds into the plan digest
+/// so it cannot appear between preview and apply.
+#[test]
+fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
+    let home = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    let component_set =
+        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+    let request = HostComponentSetExecutionRequestV1 {
+        lifecycle: HostComponentSetLifecycleRequestV1 {
+            operation: HostBundleLifecycleOpV1::Repair,
+            expected_host: HostKindV1::OpenCode,
+            expected_components: default_components(HostKindV1::OpenCode),
+            explicit_confirmation: true,
+            hermes_profile_bindings: 0,
+        },
+        operation_id: [43; 16],
+    };
+    let preview_now = |home: &Path| {
+        let mut registration = HostComponentRegistrationDelegate::new(
+            "opencode",
+            home,
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+            home,
+            lifecycle.path(),
+            &component_set.component_set,
+            &request,
+            &component_set,
+            &mut registration,
+        )
+    };
+
+    let clean = preview_now(home.path()).expect("a clean profile previews");
+    assert!(clean.competing_extension_claims.is_empty());
+    assert!(!clean.confirmation_required);
+
+    let config_path = home.path().join(".config/opencode/opencode.json");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "lsp": {
+                "rust-analyzer": { "command": ["rust-analyzer"], "extensions": [".rs"] },
+                "elm-language-server": { "command": ["elm-ls"], "extensions": [".elm"] }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let contested = preview_now(home.path()).expect("a competing analyzer is reported, not refused");
+    let claims = &contested.competing_extension_claims;
+    assert_eq!(
+        claims
+            .iter()
+            .map(|claim| claim.extension_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rust-analyzer"],
+        "only an analyzer claiming a language TraceDecay projects is a competing claim"
+    );
+    assert_eq!(claims[0].capability, HostCapabilityV1::Lsp);
+    assert_ne!(claims[0].evidence_digest, [0; 32]);
+    assert!(
+        contested.confirmation_required,
+        "ambiguous ownership must demand explicit confirmation"
+    );
+    assert_ne!(
+        contested.plan_digest, clean.plan_digest,
+        "a competing claim must change the confirmed plan identity"
+    );
+    assert_eq!(
+        contested.component_plans, clean.component_plans,
+        "discovery reports a conflict; it never rewrites the artifact plan"
+    );
+
+    // A claim appearing after the operator confirmed invalidates that plan.
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "lsp": {
+                "rust-analyzer": { "command": ["rust-analyzer"], "extensions": [".rs"] },
+                "pyright": { "command": ["pyright-langserver"], "extensions": [".py"] }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let widened = preview_now(home.path()).expect("a second competing analyzer previews");
+    assert_eq!(widened.competing_extension_claims.len(), 2);
+    assert_ne!(widened.plan_digest, contested.plan_digest);
+
+    let mut writer =
+        HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
+    let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
+    let mut registration = HostComponentRegistrationDelegate::new(
+        "opencode",
+        home.path(),
+        lifecycle.path(),
+        request.lifecycle.operation,
+    )
+    .unwrap();
+    assert_eq!(
+        transaction.execute_confirmed(
+            &component_set.component_set,
+            &request,
+            &contested,
+            &component_set,
+            &mut registration,
+        ),
+        Err(HostBundleError::StalePreview),
+        "apply must refuse a preview confirmed before the newest competing claim"
+    );
+}
+
+/// Discovery that cannot read the host's registration surface must refuse
+/// rather than report a clear one.
+#[test]
+fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
+    let home = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    let config_path = home.path().join(".config/opencode/opencode.json");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fs::write(&config_path, b"{ this is not json").unwrap();
+
+    let component_set =
+        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+    let request = HostComponentSetExecutionRequestV1 {
+        lifecycle: HostComponentSetLifecycleRequestV1 {
+            operation: HostBundleLifecycleOpV1::Repair,
+            expected_host: HostKindV1::OpenCode,
+            expected_components: default_components(HostKindV1::OpenCode),
+            explicit_confirmation: true,
+            hermes_profile_bindings: 0,
+        },
+        operation_id: [44; 16],
+    };
+    let mut registration = HostComponentRegistrationDelegate::new(
+        "opencode",
+        home.path(),
+        lifecycle.path(),
+        request.lifecycle.operation,
+    )
+    .unwrap();
+    assert_eq!(
+        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+            home.path(),
+            lifecycle.path(),
+            &component_set.component_set,
+            &request,
+            &component_set,
+            &mut registration,
+        ),
+        Err(HostBundleError::InvalidObservedState)
+    );
+}
+
+/// Cline-family support is whatever the checked-in evidence packet admits for
+/// that exact provider — never a source file, a shared configuration shape, or
+/// family branding.
+#[test]
+fn cline_family_routes_come_only_from_the_checked_in_evidence_packet() {
+    let packet: Value = serde_json::from_str(include_str!(
+        "../crates/tracedecay-hooks/fixtures/host_events/cline-family.json"
+    ))
+    .expect("the checked-in Cline evidence packet parses");
+
+    for (provider, packet_id) in [
+        (ClineFamilyProviderV1::Cline, "cline"),
+        (ClineFamilyProviderV1::RooCode, "roo-code"),
+        (ClineFamilyProviderV1::Kilo, "kilo"),
+    ] {
+        let evidence = cline_family_evidence(provider)
+            .unwrap_or_else(|| panic!("{provider:?} is described by the packet"));
+        let entry = packet["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["provider"] == packet_id)
+            .unwrap_or_else(|| panic!("{packet_id} is listed in the packet"));
+
+        assert_ne!(evidence.evidence_packet_digest, [0; 32]);
+        assert_eq!(
+            evidence.evidence_packet_path,
+            "crates/tracedecay-hooks/fixtures/host_events/cline-family.json"
+        );
+        assert_eq!(
+            evidence.registration.evidence_ref, evidence.evidence_packet_path,
+            "the packet, not an adapter source file, is the registration evidence"
+        );
+        assert_ne!(
+            evidence.admission,
+            ClineFamilyAdmissionV1::Verified,
+            "{packet_id} is not captured natively, so it must not claim a verified route"
+        );
+        assert_eq!(
+            evidence.unavailable_reason.as_deref(),
+            entry["reason"].as_str(),
+            "{packet_id} must report the packet's exact reason"
+        );
+        for state in [
+            evidence.registration.state,
+            evidence.edit,
+            evidence.stop,
+        ] {
+            assert!(
+                matches!(state, HostCapabilityStateV1::Unavailable(_)),
+                "{packet_id} must stay typed unavailable on every surface"
+            );
+        }
+    }
+}
+
+/// The Doctor report is the production consumer of the native conformance
+/// matrix, and reports it even when nothing is installed.
+#[test]
+fn doctor_reports_native_edit_stop_conformance_without_any_install() {
+    let lifecycle = tempfile::tempdir().unwrap();
+    let report = inspect_installed_host_bundle_components_at(
+        lifecycle.path(),
+        &lifecycle.path().join("absent"),
+        &CurrentRegistration,
+    )
+    .expect("an absent lifecycle root still reports host evidence");
+
+    assert!(report.components.is_empty());
+    assert_eq!(
+        report.native_edit_stop_conformance,
+        native_host_edit_stop_conformance_evidence(),
+        "an empty install must not read as an absence of host conformance evidence"
+    );
+    assert!(
+        report
+            .native_edit_stop_conformance
+            .iter()
+            .any(|evidence| evidence.host == HostKindV1::ClaudeCode)
     );
 }
 
