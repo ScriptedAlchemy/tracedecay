@@ -344,7 +344,6 @@ pub(crate) async fn call_tool_with_liveness_poll(
             .await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
-        writer.shutdown().await?;
         Ok(())
     };
     match client_deadline {

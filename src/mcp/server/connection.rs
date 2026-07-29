@@ -96,11 +96,6 @@ impl McpServer {
             pre_cancelled,
         ));
         tokio::pin!(handling);
-        // One-shot clients (the CLI and the stdio proxy) shut down their write
-        // half once the request is on the wire, so end-of-input means "no more
-        // requests", not "peer is gone". Stop watching for cancellations and
-        // keep serving the in-flight response.
-        let mut peer_input_closed = false;
         loop {
             tokio::select! {
                 response = &mut handling => return Ok((response, false)),
@@ -110,12 +105,14 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = transport.read_line(), if !peer_input_closed => {
+                incoming = transport.read_line() => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
-                            peer_input_closed = true;
-                            continue;
+                            if let Some(id) = request.id.as_ref() {
+                                let _ = self.cancel_application_surface_request(id, &connection_scope);
+                            }
+                            return Ok((None, true));
                         }
                         Err(error) => return Err(error.into()),
                     };
@@ -389,14 +386,14 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        let cancellable_tool_call = request.method == "tools/call"
+                        let monitored_tool_call = request.method == "tools/call"
                             && request
                                 .params
                                 .as_ref()
                                 .and_then(|params| params.get("name"))
                                 .and_then(Value::as_str)
-                                .is_some_and(super::requests::tool_supports_live_cancellation);
-                        if cancellable_tool_call {
+                                .is_some();
+                        if monitored_tool_call {
                             let shutdown_requested = async {
                                 if listen_for_process_signals {
                                     #[cfg(unix)]
