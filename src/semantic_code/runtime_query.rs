@@ -21,7 +21,7 @@ use super::session_pool::SessionAcquireError;
 /// Owned factory for request-scoped query embedders.
 pub(super) struct PooledSemanticQueryEmbedderFactory<R: EmbeddingRuntime> {
     runtime: Arc<SemanticRuntimeService<R>>,
-    query_in_flight: AtomicBool,
+    query_in_flight: Arc<AtomicBool>,
 }
 
 impl<R> PooledSemanticQueryEmbedderFactory<R>
@@ -29,9 +29,16 @@ where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
     pub(super) fn new(runtime: Arc<SemanticRuntimeService<R>>) -> Arc<Self> {
+        Self::new_with_admission(runtime, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(super) fn new_with_admission(
+        runtime: Arc<SemanticRuntimeService<R>>,
+        query_in_flight: Arc<AtomicBool>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             runtime,
-            query_in_flight: AtomicBool::new(false),
+            query_in_flight,
         })
     }
 
@@ -86,9 +93,20 @@ where
         pointer: SemanticGenerationPointerV1,
         runtime: Arc<SemanticRuntimeService<R>>,
     ) -> Self {
+        Self::new_with_admission(pointer, runtime, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(super) fn new_with_admission(
+        pointer: SemanticGenerationPointerV1,
+        runtime: Arc<SemanticRuntimeService<R>>,
+        query_in_flight: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             pointer,
-            factory: PooledSemanticQueryEmbedderFactory::new(runtime),
+            factory: PooledSemanticQueryEmbedderFactory::new_with_admission(
+                runtime,
+                query_in_flight,
+            ),
         }
     }
 
@@ -311,21 +329,35 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_query_abstains_without_opening_another_session() {
+    fn concurrent_query_abstains_across_runtime_factory_rotation() {
         let authority = Arc::new(authority());
         let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
             Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
-        let service = SemanticRuntimeService::new_owned(
+        let first_service = SemanticRuntimeService::new_owned(
+            Arc::clone(&authority),
+            Arc::clone(&factory),
+            config(2, std::time::Duration::from_mins(1), 1 << 20),
+        )
+        .expect("runtime service");
+        let second_service = SemanticRuntimeService::new_owned(
             Arc::clone(&authority),
             factory,
             config(2, std::time::Duration::from_mins(1), 1 << 20),
         )
-        .expect("runtime service");
-        let embedder_factory = PooledSemanticQueryEmbedderFactory::new(Arc::clone(&service));
-        let held = embedder_factory
+        .expect("replacement runtime service");
+        let admission = Arc::new(AtomicBool::new(false));
+        let first_factory = PooledSemanticQueryEmbedderFactory::new_with_admission(
+            first_service,
+            Arc::clone(&admission),
+        );
+        let second_factory = PooledSemanticQueryEmbedderFactory::new_with_admission(
+            Arc::clone(&second_service),
+            admission,
+        );
+        let held = first_factory
             .try_query_permit()
             .expect("first query permit");
-        let embedder = embedder_factory.create(Arc::new(ManualCancellation::new()));
+        let embedder = second_factory.create(Arc::new(ManualCancellation::new()));
         let query_view = EphemeralSanitizedQueryViewV1::sanitize(
             "do not multiply model sessions",
             domain_id::<SanitizerRevision>("sanitizer.v1"),
@@ -349,16 +381,16 @@ mod tests {
                 if message == "semantic query already in flight"
         ));
         assert_eq!(
-            service.stats().sessions_opened,
+            second_service.stats().sessions_opened,
             0,
-            "a concurrent query cannot open another model session"
+            "a rotated factory cannot open another model session"
         );
 
         drop(held);
         embedder
             .embed_query(request)
             .expect("the permit is released after the active query");
-        assert_eq!(service.stats().sessions_opened, 1);
+        assert_eq!(second_service.stats().sessions_opened, 1);
     }
 
     #[test]
