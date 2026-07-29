@@ -49,7 +49,7 @@ impl SemanticLaneRetriever for NeverCalledSemanticLane {
 }
 
 #[test]
-fn asynchronous_non_ready_states_preserve_pr9_fallback_bytes() {
+fn semantic_warmup_preserves_foreground_fallback_bytes() {
     let fallback = fallback();
     let fallback_bytes = serde_json::to_vec(fallback.as_ref()).expect("serialize fallback");
     let service = CalibratedSemanticQueryService::new(&NeverCalledSemanticLane);
@@ -86,9 +86,9 @@ fn asynchronous_non_ready_states_preserve_pr9_fallback_bytes() {
                 SemanticQueryModeV1::FallbackAllowed,
                 Arc::clone(&fallback),
             )
-            .expect("ordinary PR9 retrieval remains available");
+            .expect("foreground retrieval remains available");
         let SemanticQueryServiceOutcomeV1::Fallback { abstention, .. } = &outcome else {
-            panic!("non-ready semantic state must use the unchanged PR9 fallback");
+            panic!("non-ready semantic state must use the unchanged foreground fallback");
         };
         assert_eq!(abstention, &expected);
         assert_eq!(

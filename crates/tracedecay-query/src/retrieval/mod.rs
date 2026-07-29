@@ -1,5 +1,4 @@
-//! PR9 retrieval query port contracts (Plan 05 query crate, Plan 15
-//! federated retrieval, Plan 25 code-intelligence lanes).
+//! Code retrieval query port contracts.
 //!
 //! This module tree composes the generic retrieval kernel owned by
 //! `tracedecay_domain::retrieval`. It contains typed port traits and
@@ -9,10 +8,9 @@
 //! composition stages implement fusion, dedupe, diversity, and late
 //! hydration.
 //!
-//! PR9 is explicitly single-root. The exact lane is independent of the
-//! fielded lexical/BM25 lane. Semantic is an optional independently admitted
-//! lane; temporal, task/session, and diagnostic lanes remain unavailable
-//! until their delivery PRs.
+//! Foreground retrieval is explicitly single-root. The exact lane is
+//! independent of the fielded lexical/BM25 lane. Semantic is an optional,
+//! independently admitted augmentation.
 
 pub mod dedupe;
 pub mod diversity;
@@ -27,7 +25,6 @@ pub mod prepared_query;
 pub mod request;
 pub mod rerank;
 pub mod semantic;
-pub mod unavailable;
 
 pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
@@ -41,7 +38,6 @@ pub use self::prepared_query::{
     PreparedQueryPageV1, PreparedQueryV1, inspect_prepared_query_cursor,
 };
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
-pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};
 
 pub const PR9_EXACT_RETRIEVER_REVISION_V1: &str = "retriever.exact.daemon.v1";
 pub const PR9_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.v1";

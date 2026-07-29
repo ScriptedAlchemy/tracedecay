@@ -12,7 +12,7 @@ use super::{
 };
 use crate::retrieval::fusion::{CompositionKernel, FusionStageInput};
 use crate::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationExecutionControlV1,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationExecutionControlV1,
     HydrationOutcomeV1, HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
     HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
 };
@@ -593,7 +593,7 @@ fn hydration_reauthorizes_after_ranking_and_denial_never_reads_payload() {
     source
         .authorization
         .insert("anchor.denied".to_owned(), HydrationAuthorizationV1::Denied);
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate(&request(), &ranked, &budget())
         .unwrap();
 
@@ -610,7 +610,7 @@ fn hydration_reauthorizes_after_ranking_and_denial_never_reads_payload() {
         "anchor.denied".to_owned(),
         HydrationAuthorizationV1::Unavailable(HydrationUnavailableV1::AuthorityUnavailable),
     );
-    let unavailable_page = DeterministicLateHydration::new(&mut unavailable_source)
+    let unavailable_page = CanonicalLateHydration::new(&mut unavailable_source)
         .hydrate(&request(), &ranked, &budget())
         .unwrap();
     assert_eq!(page, unavailable_page);
@@ -709,7 +709,7 @@ fn hydration_preserves_partial_outcomes_and_stops_at_the_ranked_prefix_bound() {
     bounded_budget.max_hydrated_results = 2;
     bounded_budget.max_hydration_bytes = 8;
     let mut source = PartialHydrationSource::default();
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate(&request(), &ranked, &bounded_budget)
         .unwrap();
 
@@ -851,7 +851,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
         mismatched_receipt: false,
         remaining_deadlines: Vec::new(),
     };
-    let byte_page = DeterministicLateHydration::new(&mut byte_source)
+    let byte_page = CanonicalLateHydration::new(&mut byte_source)
         .hydrate_with_control(&request, &ranked, &byte_budget, &active)
         .expect("preflight byte rejection is a positional result");
     assert_eq!(byte_source.authorizations, 1);
@@ -875,7 +875,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
         mismatched_receipt: false,
         remaining_deadlines: Vec::new(),
     };
-    let cancelled_page = DeterministicLateHydration::new(&mut cancelled_source)
+    let cancelled_page = CanonicalLateHydration::new(&mut cancelled_source)
         .hydrate_with_control(&request, &ranked, &budget(), &cancelled)
         .expect("cancellation is a positional result");
     assert_eq!(
@@ -905,7 +905,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
         mismatched_receipt: false,
         remaining_deadlines: Vec::new(),
     };
-    let deadline_page = DeterministicLateHydration::new(&mut deadline_source)
+    let deadline_page = CanonicalLateHydration::new(&mut deadline_source)
         .hydrate_with_control(&request, &ranked, &deadline_budget, &expired)
         .expect("expired deadline is a positional result");
     assert_eq!(
@@ -942,7 +942,7 @@ fn hydration_deadline_is_request_relative_for_older_generation_and_still_cancell
         remaining_deadlines: Vec::new(),
     };
 
-    let active_page = DeterministicLateHydration::new(&mut active_source)
+    let active_page = CanonicalLateHydration::new(&mut active_source)
         .hydrate_with_control(&request, &ranked, &deadline_budget, &active)
         .expect("an older generation does not consume the request deadline");
 
@@ -972,7 +972,7 @@ fn hydration_deadline_is_request_relative_for_older_generation_and_still_cancell
         mismatched_receipt: false,
         remaining_deadlines: Vec::new(),
     };
-    let cancelled_page = DeterministicLateHydration::new(&mut cancelled_source)
+    let cancelled_page = CanonicalLateHydration::new(&mut cancelled_source)
         .hydrate_with_control(&request, &ranked, &deadline_budget, &cancelled)
         .expect("cancellation remains a positional result");
 
@@ -1006,7 +1006,7 @@ fn default_hydration_control_does_not_charge_generation_age_to_request_deadline(
         remaining_deadlines: Vec::new(),
     };
 
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate(&request, &ranked, &deadline_budget)
         .expect("an older generation does not consume the request deadline");
 
@@ -1038,7 +1038,7 @@ fn hydration_rejects_receipts_outside_the_issued_work_permit() {
     };
 
     assert!(matches!(
-        DeterministicLateHydration::new(&mut source).hydrate_with_control(
+        CanonicalLateHydration::new(&mut source).hydrate_with_control(
             &request,
             &ranked,
             &budget(),
@@ -1114,7 +1114,7 @@ fn hydration_rechecks_cancellation_after_source_work_before_publishing_payload()
     };
     let mut source = CancellingHydrationSource { cancelled };
 
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate_with_control(&request, &ranked, &budget(), &control)
         .expect("cancellation is a positional result");
 
