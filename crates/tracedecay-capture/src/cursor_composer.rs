@@ -1,18 +1,18 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    CanonicalWorkflowSemanticKindV1, ObservationId, ObservationOrderingDomainV1, ProviderId,
-    SessionId,
+    CanonicalWorkflowSemanticKindV1, ObservationId, ObservationOrderingDomainV1,
+    ObservationSourceIdentityV1, ProviderId, SessionId,
 };
 
-use crate::privacy::ObservationRecordParseErrorV1;
+use crate::ObservationRecordParseErrorV1;
 
-use super::{PROVIDER, bubble_epoch, epoch_ms_to_secs};
+const PROVIDER: &str = "cursor";
 
-#[cfg(test)]
-pub(crate) fn normalize_cursor_composer_observation(
+pub fn normalize_cursor_composer_observation(
     native: &Value,
     composer_id: &str,
     stable_record_id: ObservationId,
@@ -29,8 +29,7 @@ pub(crate) fn normalize_cursor_composer_observation(
     )
 }
 
-#[cfg(test)]
-pub(crate) fn normalize_cursor_composer_observation_with_projected_message_id(
+pub fn normalize_cursor_composer_observation_with_projected_message_id(
     native: &Value,
     composer_id: &str,
     stable_record_id: ObservationId,
@@ -48,7 +47,7 @@ pub(crate) fn normalize_cursor_composer_observation_with_projected_message_id(
     )
 }
 
-pub(super) fn normalize_cursor_composer_observation_with_message_id(
+pub fn normalize_cursor_composer_observation_with_message_id(
     native: &Value,
     composer_id: &str,
     stable_record_id: ObservationId,
@@ -327,7 +326,7 @@ fn append_composer_todo_lifecycle_facts(
     }
 }
 
-pub(super) fn composer_todos_have_admittable_items(native: &Value) -> bool {
+pub fn composer_todos_have_admittable_items(native: &Value) -> bool {
     native
         .get("todos")
         .and_then(Value::as_array)
@@ -344,7 +343,7 @@ pub(super) fn composer_todos_have_admittable_items(native: &Value) -> bool {
         })
 }
 
-pub(super) fn normalize_cursor_composer_envelope_observation(
+pub fn normalize_cursor_composer_envelope_observation(
     native: &Value,
     composer_id: &str,
     project_path: Option<&str>,
@@ -424,4 +423,138 @@ fn composer_tool_result_success(status: &str) -> Option<bool> {
         "completed" | "success" | "succeeded" => Some(true),
         _ => None,
     }
+}
+
+pub fn composer_observation_with_session(
+    bubble: &Value,
+    project_path: Option<&str>,
+    envelope: Option<&Value>,
+) -> Value {
+    let mut native = bubble.clone();
+    if let Some(object) = native.as_object_mut() {
+        if let Some(project_path) = project_path {
+            object.insert(
+                "tracedecayProjectPath".to_string(),
+                Value::String(project_path.to_string()),
+            );
+        }
+        if let Some(envelope) = envelope {
+            for (key, value) in [
+                ("tracedecaySessionTitle", envelope.get("name")),
+                (
+                    "tracedecaySessionModel",
+                    envelope.pointer("/modelConfig/modelName"),
+                ),
+                ("tracedecaySessionStartedAt", envelope.get("createdAt")),
+                ("tracedecaySessionEndedAt", envelope.get("lastUpdatedAt")),
+            ] {
+                if let Some(value) = value.filter(|value| !value.is_null()) {
+                    object.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+    native
+}
+
+pub fn cursor_composer_native_record_id(
+    composer_id: &str,
+    bubble_id: &str,
+) -> Result<ObservationId, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.cursor-composer-native-record.v1\0");
+    hasher.update(composer_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(bubble_id.as_bytes());
+    ObservationId::new(format!(
+        "cursor.composer.sha256:{}",
+        hex::encode(hasher.finalize())
+    ))
+    .map_err(|error| format!("invalid Cursor composer native identity: {error}"))
+}
+
+pub fn cursor_composer_envelope_source(
+    composer_id: &str,
+) -> Result<ObservationSourceIdentityV1, String> {
+    let source_key = SessionId::new(format!("{composer_id}:composerData"))
+        .map_err(|error| format!("invalid Cursor composer envelope source key: {error}"))?;
+    ObservationSourceIdentityV1::for_provider_source(
+        ProviderId::new(PROVIDER)
+            .map_err(|error| format!("invalid Cursor provider id: {error}"))?,
+        SessionId::new(composer_id)
+            .map_err(|error| format!("invalid Cursor composer id: {error}"))?,
+        source_key,
+    )
+    .map_err(|error| format!("invalid Cursor composer envelope source: {error}"))
+}
+
+pub fn composer_envelope_todo_checkpoint(native: &Value) -> Option<u64> {
+    let todos = native.get("todos")?.as_array()?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.cursor-composer-todo-checkpoint.v1\0");
+    let mut any = false;
+    for (index, todo) in todos.iter().enumerate() {
+        let Some(item_id) = todo
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(content) = todo
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.trim().is_empty())
+        else {
+            continue;
+        };
+        any = true;
+        hasher.update(u64::try_from(index).ok()?.to_le_bytes());
+        hasher.update(u64::try_from(item_id.len()).ok()?.to_le_bytes());
+        hasher.update(item_id.as_bytes());
+        hasher.update(u64::try_from(content.len()).ok()?.to_le_bytes());
+        hasher.update(content.as_bytes());
+        if let Some(status) = todo
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| !status.trim().is_empty())
+        {
+            hasher.update([1]);
+            hasher.update(u64::try_from(status.len()).ok()?.to_le_bytes());
+            hasher.update(status.as_bytes());
+        } else {
+            hasher.update([0]);
+        }
+    }
+    if !any {
+        return None;
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    Some(u64::from_le_bytes(bytes).max(1))
+}
+
+pub fn cursor_composer_envelope_native_record_id(
+    composer_id: &str,
+    checkpoint: u64,
+) -> Result<ObservationId, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.cursor-composer-envelope.v1\0");
+    hasher.update(composer_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(checkpoint.to_le_bytes());
+    ObservationId::new(format!(
+        "cursor.composer.envelope.sha256:{}",
+        hex::encode(hasher.finalize())
+    ))
+    .map_err(|error| format!("invalid Cursor composer envelope native identity: {error}"))
+}
+
+fn bubble_epoch(bubble: &Value, key: &str) -> Option<i64> {
+    epoch_ms_to_secs(bubble.get(key).and_then(Value::as_i64))
+}
+
+fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
+    ms.filter(|value| *value > 0).map(|value| value / 1_000)
 }

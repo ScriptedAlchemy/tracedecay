@@ -72,6 +72,93 @@ pub fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
     (timestamp >= 0).then_some(timestamp)
 }
 
+pub fn parse_cursor_human_timestamp(value: &str) -> Option<i64> {
+    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+    let (month_day, year_part, time_part) = match parts.as_slice() {
+        [_, month_day, year, time] | [month_day, year, time] => (*month_day, *year, *time),
+        _ => return None,
+    };
+    let mut month_day = month_day.split_whitespace();
+    let month = month_number(month_day.next()?)?;
+    let day: u32 = month_day.next()?.parse().ok()?;
+    if month_day.next().is_some() {
+        return None;
+    }
+    let year: i32 = year_part.parse().ok()?;
+    if day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    let mut clock = time_part.split_whitespace();
+    let (hour, minute) = clock.next()?.split_once(':')?;
+    let mut hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok()?;
+    let mut zone = clock.next();
+    match zone.map(str::to_ascii_uppercase).as_deref() {
+        Some("AM") => {
+            if !(1..=12).contains(&hour) {
+                return None;
+            }
+            hour %= 12;
+            zone = clock.next();
+        }
+        Some("PM") => {
+            if !(1..=12).contains(&hour) {
+                return None;
+            }
+            hour = hour % 12 + 12;
+            zone = clock.next();
+        }
+        _ => {}
+    }
+    if hour > 23 || minute > 59 || clock.next().is_some() {
+        return None;
+    }
+    let offset_seconds = zone.map_or(Some(0), parse_utc_offset)?;
+    let local_seconds = days_from_civil(year, month, day) * 86_400
+        + i64::from(hour) * 3_600
+        + i64::from(minute) * 60;
+    let timestamp = local_seconds - offset_seconds;
+    (timestamp >= 0).then_some(timestamp)
+}
+
+fn month_number(name: &str) -> Option<u32> {
+    Some(match name.get(..3)?.to_ascii_lowercase().as_str() {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => return None,
+    })
+}
+
+fn parse_utc_offset(zone: &str) -> Option<i64> {
+    let inner = zone.strip_prefix("(UTC")?.strip_suffix(')')?;
+    if inner.is_empty() {
+        return Some(0);
+    }
+    let (sign, magnitude) = match inner.as_bytes().first()? {
+        b'+' => (1, &inner[1..]),
+        b'-' => (-1, &inner[1..]),
+        _ => return None,
+    };
+    let (hours, minutes) = magnitude.split_once(':').unwrap_or((magnitude, "0"));
+    let hours: i64 = hours.parse().ok()?;
+    let minutes: i64 = minutes.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
 fn parse_fixed_i32(value: &str, start: usize, end: usize) -> Option<i32> {
     value.get(start..end)?.parse().ok()
 }

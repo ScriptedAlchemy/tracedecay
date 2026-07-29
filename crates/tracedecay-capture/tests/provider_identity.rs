@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use tracedecay_capture::{claude, codex};
+use tracedecay_capture::{claude, codex, cursor, cursor_composer};
 use tracedecay_domain::ObservationSourceRangeV1;
 
 #[test]
@@ -69,4 +69,82 @@ fn codex_checked_in_fixture_preserves_canonical_envelope() {
     .unwrap();
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn cursor_checked_in_tool_fixture_preserves_projection() {
+    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/provider_normalization/cursor");
+    let native: Value = serde_json::from_str(
+        &fs::read_to_string(fixture_root.join("tool_use.input.json")).unwrap(),
+    )
+    .unwrap();
+    let expected: Value = serde_json::from_str(
+        &fs::read_to_string(fixture_root.join("tool_use.expected_envelope.json")).unwrap(),
+    )
+    .unwrap();
+    let record_id =
+        cursor::observation_native_record_id("cursor", "cursor-tool-fixture", &native).unwrap();
+    let actual = serde_json::to_value(
+        cursor::normalize_cursor_observation(
+            &native,
+            "cursor-tool-fixture",
+            record_id.clone(),
+            ObservationSourceRangeV1::new(0, 64).unwrap(),
+            None,
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(actual["version"], expected["version"]);
+    assert_eq!(actual["evidence"], expected["evidence"]);
+    assert_eq!(actual["relations"]["message_id"], record_id.as_str());
+    assert!(actual["facts"].as_array().unwrap().iter().any(|fact| {
+        fact["kind"] == "tool_invocation"
+            && fact["arguments"] == native["message"]["content"][1]["input"]
+    }));
+}
+
+#[test]
+fn cursor_composer_checked_in_bubble_preserves_projection() {
+    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/provider_normalization/cursor_composer");
+    let native: Value = serde_json::from_str(
+        &fs::read_to_string(fixture_root.join("assistant_bubble.input.json")).unwrap(),
+    )
+    .unwrap();
+    let expected: Value = serde_json::from_str(
+        &fs::read_to_string(fixture_root.join("assistant_bubble.expected_envelope.json")).unwrap(),
+    )
+    .unwrap();
+    let record_id = cursor_composer::cursor_composer_native_record_id("comp-1", "b-asst").unwrap();
+    let actual = serde_json::to_value(
+        cursor_composer::normalize_cursor_composer_observation(
+            &native,
+            "comp-1",
+            record_id.clone(),
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
+            1,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let actual_kinds = actual["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|fact| fact["kind"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let expected_kinds = expected["fact_kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kind| kind.as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(actual["evidence"], expected["evidence"]);
+    assert_eq!(actual["relations"]["message_id"], record_id.as_str());
+    assert_eq!(actual_kinds, expected_kinds);
 }
