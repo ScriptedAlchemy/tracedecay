@@ -170,21 +170,64 @@ pub struct EnrollmentGrantV1 {
     pub scope: RemoteRepositoryScopeV1,
 }
 
-impl EnrollmentGrantV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.grant_id.validate()?;
-        self.brain_id.validate()?;
-        self.node_id.validate()?;
+#[derive(Clone, Copy)]
+enum CredentialRecordKind {
+    Grant,
+    Enrollment,
+}
+
+impl CredentialRecordKind {
+    const fn revision_field(self) -> &'static str {
+        match self {
+            Self::Grant => "enrollment grant revision",
+            Self::Enrollment => "enrollment credential revision",
+        }
+    }
+
+    const fn validity_field(self) -> &'static str {
+        match self {
+            Self::Grant => "enrollment grant validity",
+            Self::Enrollment => "enrollment credential validity",
+        }
+    }
+
+    const fn revocation_field(self) -> &'static str {
+        match self {
+            Self::Grant => "enrollment grant revocation time",
+            Self::Enrollment => "enrollment credential revocation time",
+        }
+    }
+
+    const fn capabilities_field(self) -> &'static str {
+        match self {
+            Self::Grant => "enrollment grant capabilities",
+            Self::Enrollment => "enrollment capabilities",
+        }
+    }
+}
+
+struct CredentialValidity<'a> {
+    fingerprint: &'a RemoteCredentialFingerprintV1,
+    revision: u64,
+    issued_at: UtcMicros,
+    expires_at: UtcMicros,
+    revoked_at: Option<UtcMicros>,
+    capabilities: &'a BTreeSet<RemoteCapabilityV1>,
+    scope: &'a RemoteRepositoryScopeV1,
+}
+
+impl CredentialValidity<'_> {
+    fn validate(&self, kind: CredentialRecordKind) -> Result<(), DomainError> {
         self.fingerprint.validate()?;
         self.scope.validate()?;
         if self.revision == 0 {
             return Err(DomainError::NonCanonical {
-                field: "enrollment grant revision",
+                field: kind.revision_field(),
             });
         }
         if self.expires_at <= self.issued_at {
             return Err(DomainError::NonCanonical {
-                field: "enrollment grant validity",
+                field: kind.validity_field(),
             });
         }
         if self
@@ -192,18 +235,18 @@ impl EnrollmentGrantV1 {
             .is_some_and(|revoked_at| revoked_at < self.issued_at)
         {
             return Err(DomainError::NonCanonical {
-                field: "enrollment grant revocation time",
+                field: kind.revocation_field(),
             });
         }
         if self.capabilities.is_empty() {
             return Err(DomainError::Empty {
-                field: "enrollment grant capabilities",
+                field: kind.capabilities_field(),
             });
         }
         Ok(())
     }
 
-    pub fn state_at(&self, observed_at: UtcMicros) -> EnrollmentCredentialStateV1 {
+    fn state_at(&self, observed_at: UtcMicros) -> EnrollmentCredentialStateV1 {
         if self
             .revoked_at
             .is_some_and(|revoked_at| observed_at >= revoked_at)
@@ -217,50 +260,53 @@ impl EnrollmentGrantV1 {
     }
 }
 
+impl EnrollmentGrantV1 {
+    fn validity(&self) -> CredentialValidity<'_> {
+        CredentialValidity {
+            fingerprint: &self.fingerprint,
+            revision: self.revision,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            revoked_at: self.revoked_at,
+            capabilities: &self.capabilities,
+            scope: &self.scope,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.grant_id.validate()?;
+        self.brain_id.validate()?;
+        self.node_id.validate()?;
+        self.validity().validate(CredentialRecordKind::Grant)
+    }
+
+    pub fn state_at(&self, observed_at: UtcMicros) -> EnrollmentCredentialStateV1 {
+        self.validity().state_at(observed_at)
+    }
+}
+
 impl EnrollmentCredentialRecordV1 {
+    fn validity(&self) -> CredentialValidity<'_> {
+        CredentialValidity {
+            fingerprint: &self.fingerprint,
+            revision: self.revision,
+            issued_at: self.issued_at,
+            expires_at: self.expires_at,
+            revoked_at: self.revoked_at,
+            capabilities: &self.capabilities,
+            scope: &self.scope,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), DomainError> {
         self.enrollment_id.validate()?;
         self.brain_id.validate()?;
         self.node_id.validate()?;
-        self.fingerprint.validate()?;
-        self.scope.validate()?;
-        if self.revision == 0 {
-            return Err(DomainError::NonCanonical {
-                field: "enrollment credential revision",
-            });
-        }
-        if self.expires_at <= self.issued_at {
-            return Err(DomainError::NonCanonical {
-                field: "enrollment credential validity",
-            });
-        }
-        if self
-            .revoked_at
-            .is_some_and(|revoked_at| revoked_at < self.issued_at)
-        {
-            return Err(DomainError::NonCanonical {
-                field: "enrollment credential revocation time",
-            });
-        }
-        if self.capabilities.is_empty() {
-            return Err(DomainError::Empty {
-                field: "enrollment capabilities",
-            });
-        }
-        Ok(())
+        self.validity().validate(CredentialRecordKind::Enrollment)
     }
 
     pub fn state_at(&self, observed_at: UtcMicros) -> EnrollmentCredentialStateV1 {
-        if self
-            .revoked_at
-            .is_some_and(|revoked_at| observed_at >= revoked_at)
-        {
-            EnrollmentCredentialStateV1::Revoked
-        } else if observed_at >= self.expires_at {
-            EnrollmentCredentialStateV1::Expired
-        } else {
-            EnrollmentCredentialStateV1::Active
-        }
+        self.validity().state_at(observed_at)
     }
 
     pub fn permits(
@@ -417,12 +463,64 @@ mod tests {
         }
     }
 
+    fn grant(secret: &[u8]) -> EnrollmentGrantV1 {
+        EnrollmentGrantV1 {
+            grant_id: id(EntityId::new, "grant.remote"),
+            brain_id: id(BrainId::new, "brain.remote"),
+            node_id: id(BrainNodeId::new, "node.remote"),
+            fingerprint: RemoteCredentialFingerprintV1::from_secret(secret).unwrap(),
+            revision: 1,
+            issued_at: UtcMicros(10),
+            expires_at: UtcMicros(100),
+            revoked_at: None,
+            capabilities: BTreeSet::from([RemoteCapabilityV1::Query]),
+            scope: scope(),
+        }
+    }
+
     #[test]
     fn retained_enrollment_serialization_contains_no_plaintext_secret() {
         let secret = b"0123456789abcdef0123456789abcdef";
         let value = serde_json::to_string(&record(secret)).unwrap();
         assert!(!value.contains("0123456789abcdef"));
         assert!(value.contains("sha256:"));
+    }
+
+    #[test]
+    fn credential_record_and_grant_wire_shapes_are_byte_exact() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let record = record(secret);
+        let grant = grant(secret);
+        let fingerprint = record.fingerprint.digest().as_str();
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            format!(
+                r#"{{"enrollment_id":"enrollment.remote","brain_id":"brain.remote","node_id":"node.remote","fingerprint":"{fingerprint}","revision":1,"issued_at":10,"expires_at":100,"revoked_at":null,"capabilities":["query"],"scope":{{"repository_id":"repository.remote","worktree_id":"worktree.remote","reference":"refs/heads/main","snapshot_id":"repository.state.remote"}}}}"#
+            )
+        );
+        assert_eq!(
+            serde_json::to_string(&grant).unwrap(),
+            format!(
+                r#"{{"grant_id":"grant.remote","brain_id":"brain.remote","node_id":"node.remote","fingerprint":"{fingerprint}","revision":1,"issued_at":10,"expires_at":100,"revoked_at":null,"capabilities":["query"],"scope":{{"repository_id":"repository.remote","worktree_id":"worktree.remote","reference":"refs/heads/main","snapshot_id":"repository.state.remote"}}}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn credential_record_and_grant_share_state_transitions() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        let mut record = record(secret);
+        let mut grant = grant(secret);
+
+        for observed_at in [UtcMicros(9), UtcMicros(10), UtcMicros(99), UtcMicros(100)] {
+            assert_eq!(record.state_at(observed_at), grant.state_at(observed_at));
+        }
+
+        record.revoked_at = Some(UtcMicros(50));
+        grant.revoked_at = Some(UtcMicros(50));
+        for observed_at in [UtcMicros(49), UtcMicros(50), UtcMicros(100)] {
+            assert_eq!(record.state_at(observed_at), grant.state_at(observed_at));
+        }
     }
 
     #[test]

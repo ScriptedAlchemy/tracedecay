@@ -178,6 +178,15 @@ impl ObservabilityEnvelopeV1 {
             return Err("quantity");
         }
         match &self.payload {
+            ObservabilityPayloadV1::OperationResource(resource) => {
+                resource.validate(self.terminal_result)?;
+                if resource
+                    .absolute_deadline_micros
+                    .is_some_and(|deadline| deadline < self.event_time_micros)
+                {
+                    return Err("absolute_deadline");
+                }
+            }
             ObservabilityPayloadV1::Activity(activity) => {
                 if activity.units == 0
                     || !matches!(
@@ -330,6 +339,206 @@ pub struct OperationResourceObservedV1 {
     pub cost_amount: Option<f64>,
     pub cost_currency: Option<String>,
     pub pricing_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_timings: Vec<OperationStageTimingV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_timings: Vec<OperationPhaseTimingV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_deadline_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "OperationAvailabilityV1::is_unknown")]
+    pub availability: OperationAvailabilityV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_outcome: Option<OperationActivationOutcomeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationStageV1 {
+    Scheduled,
+    Admitted,
+    Started,
+    FirstProgress,
+    FirstUsefulResult,
+    Terminal,
+}
+
+impl OperationStageV1 {
+    const fn order(self) -> u8 {
+        match self {
+            Self::Scheduled => 0,
+            Self::Admitted => 1,
+            Self::Started => 2,
+            Self::FirstProgress => 3,
+            Self::FirstUsefulResult => 4,
+            Self::Terminal => 5,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OperationStageTimingV1 {
+    pub stage: OperationStageV1,
+    pub elapsed_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationPhaseV1 {
+    ProcessSpawn,
+    ProcessReady,
+    InputRead,
+    InputValidation,
+    Dispatch,
+    OutputSerialization,
+    OutputWrite,
+}
+
+impl OperationPhaseV1 {
+    const fn order(self) -> u8 {
+        match self {
+            Self::ProcessSpawn => 0,
+            Self::ProcessReady => 1,
+            Self::InputRead => 2,
+            Self::InputValidation => 3,
+            Self::Dispatch => 4,
+            Self::OutputSerialization => 5,
+            Self::OutputWrite => 6,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OperationPhaseTimingV1 {
+    pub phase: OperationPhaseV1,
+    pub duration_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationAvailabilityV1 {
+    #[default]
+    Unknown,
+    Available,
+    InvalidHttpResponse,
+    EmptyResponse,
+}
+
+impl OperationAvailabilityV1 {
+    fn is_unknown(&self) -> bool {
+        *self == Self::Unknown
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationActivationOutcomeV1 {
+    Admitted,
+    Committed,
+    Deferred,
+    Unavailable,
+    RestartRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationReadinessV1 {
+    pub foreground_ready_micros: Option<u64>,
+    pub background_complete_micros: Option<u64>,
+}
+
+impl OperationResourceObservedV1 {
+    pub fn validate(
+        &self,
+        terminal_result: Option<ObservabilityTerminalResultV1>,
+    ) -> Result<(), &'static str> {
+        if !self.stage_timings.is_empty() {
+            let mut previous_order = None;
+            let mut previous_elapsed = None;
+            for timing in &self.stage_timings {
+                let order = timing.stage.order();
+                if previous_order.is_some_and(|previous| order <= previous)
+                    || previous_elapsed.is_some_and(|previous| timing.elapsed_micros < previous)
+                {
+                    return Err("stage_timings");
+                }
+                previous_order = Some(order);
+                previous_elapsed = Some(timing.elapsed_micros);
+            }
+            if self.stage_timings.first().map(|timing| timing.stage)
+                != Some(OperationStageV1::Scheduled)
+                || self.stage_timings.get(1).map(|timing| timing.stage)
+                    != Some(OperationStageV1::Admitted)
+                || self.stage_timings.get(2).map(|timing| timing.stage)
+                    != Some(OperationStageV1::Started)
+            {
+                return Err("stage_timings");
+            }
+            let has_terminal = self
+                .stage_timings
+                .last()
+                .is_some_and(|timing| timing.stage == OperationStageV1::Terminal);
+            if has_terminal != terminal_result.is_some() {
+                return Err("terminal_result");
+            }
+        }
+
+        let mut previous_phase = None;
+        for timing in &self.phase_timings {
+            let order = timing.phase.order();
+            if previous_phase.is_some_and(|previous| order <= previous) {
+                return Err("phase_timings");
+            }
+            previous_phase = Some(order);
+        }
+
+        match self.activation_outcome {
+            Some(OperationActivationOutcomeV1::Committed)
+                if self.availability != OperationAvailabilityV1::Available
+                    || terminal_result.is_some_and(|result| {
+                        result != ObservabilityTerminalResultV1::Succeeded
+                    }) =>
+            {
+                return Err("availability");
+            }
+            Some(OperationActivationOutcomeV1::Deferred)
+                if terminal_result
+                    .is_some_and(|result| result != ObservabilityTerminalResultV1::Partial) =>
+            {
+                return Err("activation_outcome");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.availability == OperationAvailabilityV1::Available
+            && self.activation_outcome == Some(OperationActivationOutcomeV1::Committed)
+    }
+
+    pub fn readiness(&self) -> OperationReadinessV1 {
+        let foreground_allowed = self.activation_outcome.is_none() || self.is_current();
+        OperationReadinessV1 {
+            foreground_ready_micros: foreground_allowed
+                .then(|| {
+                    self.stage_timings
+                        .iter()
+                        .find(|timing| timing.stage == OperationStageV1::FirstUsefulResult)
+                        .map(|timing| timing.elapsed_micros)
+                })
+                .flatten(),
+            background_complete_micros: self
+                .stage_timings
+                .iter()
+                .find(|timing| timing.stage == OperationStageV1::Terminal)
+                .map(|timing| timing.elapsed_micros),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -409,6 +618,433 @@ pub enum PerformanceDispositionV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stage(stage: OperationStageV1, elapsed_micros: u64) -> OperationStageTimingV1 {
+        OperationStageTimingV1 {
+            stage,
+            elapsed_micros,
+        }
+    }
+
+    fn phase(phase: OperationPhaseV1, duration_micros: u64) -> OperationPhaseTimingV1 {
+        OperationPhaseTimingV1 {
+            phase,
+            duration_micros,
+        }
+    }
+
+    fn operation_resource(
+        stage_timings: Vec<OperationStageTimingV1>,
+    ) -> OperationResourceObservedV1 {
+        OperationResourceObservedV1 {
+            scheduled_latency_micros: 5,
+            service_latency_micros: 34,
+            process_rss_bytes: None,
+            process_pss_bytes: None,
+            cpu_user_micros: None,
+            cpu_system_micros: None,
+            read_bytes: None,
+            write_bytes: None,
+            input_tokens: None,
+            output_tokens: None,
+            cost_amount: None,
+            cost_currency: None,
+            pricing_revision: None,
+            stage_timings,
+            phase_timings: Vec::new(),
+            absolute_deadline_micros: None,
+            availability: OperationAvailabilityV1::Unknown,
+            activation_outcome: None,
+            process_count: None,
+            input_bytes: None,
+            output_bytes: None,
+        }
+    }
+
+    fn operation_envelope(
+        stage_timings: Vec<OperationStageTimingV1>,
+        terminal_result: Option<ObservabilityTerminalResultV1>,
+    ) -> ObservabilityEnvelopeV1 {
+        ObservabilityEnvelopeV1 {
+            event_id: "event:operation:1".into(),
+            event_kind: "operation.resource.observed.v1".into(),
+            schema_revision: 1,
+            idempotency_key: "idempotency:operation:1".into(),
+            trace_id: "trace:operation:1".into(),
+            scope_ref: "scope:1".into(),
+            capability: "runtime".into(),
+            operation: "background_refresh".into(),
+            event_time_micros: 1,
+            observation_time_micros: 1,
+            valid_from_micros: None,
+            valid_until_micros: None,
+            quantity: None,
+            unit: None,
+            terminal_result,
+            producer_revision: "producer.v1".into(),
+            configuration_revision: "config.v1".into(),
+            policy_revision: "policy.v1".into(),
+            watermark: "watermark:1".into(),
+            coverage: CoverageStateV1::Known,
+            sampling_probability: None,
+            retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+            emitted_count: 1,
+            delayed_count: 0,
+            dropped_count: 0,
+            process_boot_id: "boot:1".into(),
+            producer_sequence: 1,
+            payload: ObservabilityPayloadV1::OperationResource(operation_resource(stage_timings)),
+        }
+    }
+
+    #[test]
+    fn operation_stage_wire_values_are_closed_and_stable() {
+        let values = [
+            (OperationStageV1::Scheduled, "\"scheduled\""),
+            (OperationStageV1::Admitted, "\"admitted\""),
+            (OperationStageV1::Started, "\"started\""),
+            (OperationStageV1::FirstProgress, "\"first_progress\""),
+            (
+                OperationStageV1::FirstUsefulResult,
+                "\"first_useful_result\"",
+            ),
+            (OperationStageV1::Terminal, "\"terminal\""),
+        ];
+
+        for (value, expected) in values {
+            assert_eq!(serde_json::to_string(&value).unwrap(), expected);
+        }
+        assert!(serde_json::from_str::<OperationStageV1>("\"unknown\"").is_err());
+    }
+
+    #[test]
+    fn foreground_readiness_can_precede_background_completion() {
+        let envelope = operation_envelope(
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+                stage(OperationStageV1::FirstUsefulResult, 21),
+            ],
+            None,
+        );
+        let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
+            unreachable!();
+        };
+
+        assert_eq!(
+            resource.readiness(),
+            OperationReadinessV1 {
+                foreground_ready_micros: Some(21),
+                background_complete_micros: None,
+            }
+        );
+        assert_eq!(envelope.validate(), Ok(()));
+    }
+
+    #[test]
+    fn successful_terminal_records_both_readiness_milestones() {
+        let envelope = operation_envelope(
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+                stage(OperationStageV1::FirstProgress, 13),
+                stage(OperationStageV1::FirstUsefulResult, 21),
+                stage(OperationStageV1::Terminal, 34),
+            ],
+            Some(ObservabilityTerminalResultV1::Succeeded),
+        );
+        let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
+            unreachable!();
+        };
+
+        assert_eq!(
+            resource.readiness(),
+            OperationReadinessV1 {
+                foreground_ready_micros: Some(21),
+                background_complete_micros: Some(34),
+            }
+        );
+        assert_eq!(envelope.validate(), Ok(()));
+    }
+
+    #[test]
+    fn failed_terminal_does_not_fabricate_foreground_readiness() {
+        let envelope = operation_envelope(
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+                stage(OperationStageV1::Terminal, 34),
+            ],
+            Some(ObservabilityTerminalResultV1::Failed),
+        );
+        let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
+            unreachable!();
+        };
+
+        assert_eq!(
+            resource.readiness(),
+            OperationReadinessV1 {
+                foreground_ready_micros: None,
+                background_complete_micros: Some(34),
+            }
+        );
+        assert_eq!(envelope.validate(), Ok(()));
+    }
+
+    #[test]
+    fn stage_validation_rejects_order_duplicates_and_missing_prefix() {
+        let invalid = [
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Started, 8),
+            ],
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Admitted, 8),
+            ],
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 8),
+                stage(OperationStageV1::Started, 5),
+            ],
+        ];
+
+        for stage_timings in invalid {
+            assert_eq!(
+                operation_resource(stage_timings).validate(None),
+                Err("stage_timings")
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_rejects_terminal_stage_and_outcome_mismatch() {
+        let terminal_without_outcome = operation_envelope(
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+                stage(OperationStageV1::Terminal, 34),
+            ],
+            None,
+        );
+        let outcome_without_terminal = operation_envelope(
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+                stage(OperationStageV1::FirstUsefulResult, 21),
+            ],
+            Some(ObservabilityTerminalResultV1::Succeeded),
+        );
+
+        assert_eq!(terminal_without_outcome.validate(), Err("terminal_result"));
+        assert_eq!(outcome_without_terminal.validate(), Err("terminal_result"));
+    }
+
+    #[test]
+    fn host_runtime_vocabulary_is_closed_and_content_free() {
+        let phases = [
+            (OperationPhaseV1::ProcessSpawn, "\"process_spawn\""),
+            (OperationPhaseV1::ProcessReady, "\"process_ready\""),
+            (OperationPhaseV1::InputRead, "\"input_read\""),
+            (OperationPhaseV1::InputValidation, "\"input_validation\""),
+            (OperationPhaseV1::Dispatch, "\"dispatch\""),
+            (
+                OperationPhaseV1::OutputSerialization,
+                "\"output_serialization\"",
+            ),
+            (OperationPhaseV1::OutputWrite, "\"output_write\""),
+        ];
+        for (value, expected) in phases {
+            assert_eq!(serde_json::to_string(&value).unwrap(), expected);
+        }
+        let outcomes = [
+            (OperationActivationOutcomeV1::Admitted, "\"admitted\""),
+            (OperationActivationOutcomeV1::Committed, "\"committed\""),
+            (OperationActivationOutcomeV1::Deferred, "\"deferred\""),
+            (OperationActivationOutcomeV1::Unavailable, "\"unavailable\""),
+            (
+                OperationActivationOutcomeV1::RestartRequired,
+                "\"restart_required\"",
+            ),
+        ];
+        for (value, expected) in outcomes {
+            assert_eq!(serde_json::to_string(&value).unwrap(), expected);
+        }
+        assert_eq!(
+            serde_json::to_string(&OperationAvailabilityV1::Unknown).unwrap(),
+            "\"unknown\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationAvailabilityV1::Available).unwrap(),
+            "\"available\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationAvailabilityV1::InvalidHttpResponse).unwrap(),
+            "\"invalid_http_response\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationAvailabilityV1::EmptyResponse).unwrap(),
+            "\"empty_response\""
+        );
+    }
+
+    #[test]
+    fn valid_host_activation_reuses_operation_observability() {
+        let mut envelope = operation_envelope(
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+                stage(OperationStageV1::FirstProgress, 13),
+                stage(OperationStageV1::FirstUsefulResult, 21),
+                stage(OperationStageV1::Terminal, 34),
+            ],
+            Some(ObservabilityTerminalResultV1::Succeeded),
+        );
+        {
+            let ObservabilityPayloadV1::OperationResource(resource) = &mut envelope.payload else {
+                unreachable!();
+            };
+            resource.absolute_deadline_micros = Some(50);
+            resource.availability = OperationAvailabilityV1::Available;
+            resource.activation_outcome = Some(OperationActivationOutcomeV1::Committed);
+            resource.process_count = Some(2);
+            resource.input_bytes = Some(128);
+            resource.output_bytes = Some(64);
+            resource.phase_timings = vec![
+                phase(OperationPhaseV1::ProcessSpawn, 3),
+                phase(OperationPhaseV1::ProcessReady, 4),
+                phase(OperationPhaseV1::InputRead, 2),
+                phase(OperationPhaseV1::InputValidation, 1),
+                phase(OperationPhaseV1::Dispatch, 8),
+                phase(OperationPhaseV1::OutputSerialization, 2),
+                phase(OperationPhaseV1::OutputWrite, 1),
+            ];
+        }
+
+        assert_eq!(envelope.validate(), Ok(()));
+        let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
+            unreachable!();
+        };
+        assert!(resource.is_current());
+        assert_eq!(
+            resource.readiness(),
+            OperationReadinessV1 {
+                foreground_ready_micros: Some(21),
+                background_complete_micros: Some(34),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_empty_and_default_responses_cannot_become_ready() {
+        for availability in [
+            OperationAvailabilityV1::InvalidHttpResponse,
+            OperationAvailabilityV1::EmptyResponse,
+            OperationAvailabilityV1::Unknown,
+        ] {
+            let mut resource = operation_resource(vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+                stage(OperationStageV1::FirstUsefulResult, 21),
+                stage(OperationStageV1::Terminal, 34),
+            ]);
+            resource.availability = availability;
+            resource.activation_outcome = Some(OperationActivationOutcomeV1::Committed);
+
+            assert_eq!(
+                resource.validate(Some(ObservabilityTerminalResultV1::Succeeded)),
+                Err("availability")
+            );
+            assert!(!resource.is_current());
+            assert_eq!(resource.readiness().foreground_ready_micros, None);
+        }
+    }
+
+    #[test]
+    fn deferred_activation_never_becomes_current() {
+        let mut resource = operation_resource(vec![
+            stage(OperationStageV1::Scheduled, 0),
+            stage(OperationStageV1::Admitted, 5),
+            stage(OperationStageV1::Started, 8),
+            stage(OperationStageV1::Terminal, 34),
+        ]);
+        resource.availability = OperationAvailabilityV1::Available;
+        resource.activation_outcome = Some(OperationActivationOutcomeV1::Deferred);
+
+        assert_eq!(
+            resource.validate(Some(ObservabilityTerminalResultV1::Partial)),
+            Ok(())
+        );
+        assert!(!resource.is_current());
+        assert_eq!(
+            resource.readiness(),
+            OperationReadinessV1 {
+                foreground_ready_micros: None,
+                background_complete_micros: Some(34),
+            }
+        );
+    }
+
+    #[test]
+    fn host_phase_order_and_absolute_deadline_are_validated() {
+        let mut envelope = operation_envelope(
+            vec![
+                stage(OperationStageV1::Scheduled, 0),
+                stage(OperationStageV1::Admitted, 5),
+                stage(OperationStageV1::Started, 8),
+            ],
+            None,
+        );
+        if let ObservabilityPayloadV1::OperationResource(resource) = &mut envelope.payload {
+            resource.phase_timings = vec![
+                phase(OperationPhaseV1::OutputWrite, 1),
+                phase(OperationPhaseV1::ProcessSpawn, 3),
+            ];
+        }
+        assert_eq!(envelope.validate(), Err("phase_timings"));
+
+        if let ObservabilityPayloadV1::OperationResource(resource) = &mut envelope.payload {
+            resource.phase_timings.clear();
+            resource.absolute_deadline_micros = Some(envelope.event_time_micros - 1);
+        }
+        assert_eq!(envelope.validate(), Err("absolute_deadline"));
+    }
+
+    #[test]
+    fn legacy_resource_json_without_stage_timings_round_trips_and_validates() {
+        let legacy_json = r#"{
+            "scheduled_latency_micros": 5,
+            "service_latency_micros": 34,
+            "process_rss_bytes": null,
+            "process_pss_bytes": null,
+            "cpu_user_micros": null,
+            "cpu_system_micros": null,
+            "read_bytes": null,
+            "write_bytes": null,
+            "input_tokens": null,
+            "output_tokens": null,
+            "cost_amount": null,
+            "cost_currency": null,
+            "pricing_revision": null
+        }"#;
+        let expected: serde_json::Value = serde_json::from_str(legacy_json).unwrap();
+        let resource: OperationResourceObservedV1 = serde_json::from_str(legacy_json).unwrap();
+
+        assert!(resource.stage_timings.is_empty());
+        assert_eq!(
+            resource.validate(Some(ObservabilityTerminalResultV1::Succeeded)),
+            Ok(())
+        );
+        assert_eq!(serde_json::to_value(resource).unwrap(), expected);
+    }
 
     #[test]
     fn coverage_wire_values_are_closed_and_stable() {
