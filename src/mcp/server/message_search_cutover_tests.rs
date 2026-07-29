@@ -67,7 +67,10 @@ async fn indexed_project() -> (
     .await
     .expect("registered message-search runtime");
     let cg = runtime
-        .initialize_project_graph_for_test(dir.path(), Default::default())
+        .initialize_project_graph_for_test(
+            dir.path(),
+            crate::tracedecay::TraceDecayOpenOptions::default(),
+        )
         .await
         .expect("daemon-owned project init");
     (cg, runtime, dir, pin)
@@ -734,7 +737,10 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
 
     let runtime = registered_runtime(dir.path()).await;
     let cg = runtime
-        .open_project_graph_for_test(dir.path(), Default::default())
+        .open_project_graph_for_test(
+            dir.path(),
+            crate::tracedecay::TraceDecayOpenOptions::default(),
+        )
         .await
         .expect("reopen project through daemon authority");
     let context = runtime

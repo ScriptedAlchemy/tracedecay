@@ -105,7 +105,6 @@ async fn legacy_completed_backfills_resume_from_the_premerge_frontier() {
         )
         .await
         .unwrap();
-    drop(writer);
     assert_eq!(
         observation_backfill_watermark(
             target.database(),
@@ -813,7 +812,6 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
     crate::global_db::schema_stages::finish_observation_authority_canonical_repair(&writer)
         .await
         .unwrap();
-    drop(writer);
 
     let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
         .await

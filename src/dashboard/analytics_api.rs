@@ -1603,7 +1603,7 @@ mod tests {
                 }
             })],
             sources: Vec::new(),
-            window: Default::default(),
+            window: HookAnalyticsWindow::default(),
         };
 
         let summary = diagnostics_summary_from_parts(0, &hook_analytics, None);

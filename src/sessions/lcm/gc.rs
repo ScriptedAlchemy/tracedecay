@@ -747,7 +747,7 @@ async fn preview_dangling_placeholders(
     let referenced = referenced_payload_refs(conn, provider, session_id).await?;
     for payload_ref in referenced.difference(metadata_refs) {
         match payload_file_present(dir, payload_ref) {
-            Ok(true) => continue,
+            Ok(true) => {}
             Ok(false) => report.dangling.add(payload_ref, 0),
             Err(error) => {
                 report.add_error(

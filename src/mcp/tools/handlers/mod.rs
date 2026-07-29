@@ -1061,8 +1061,8 @@ fn retained_mcp_composition() -> Result<&'static ApplicationCatalogComposition<(
         .map_err(retained_catalog_error)
 }
 
-async fn invoke_retained_mcp_request<'call, 'authority>(
-    context: RetainedMcpExecutionContext<'call, 'authority>,
+async fn invoke_retained_mcp_request(
+    context: RetainedMcpExecutionContext<'_, '_>,
     operation: RetainedSurfaceOperation,
     arguments: Value,
 ) -> Result<ToolResult> {

@@ -177,7 +177,6 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
     assert_eq!(omitted, 1);
     let first_anchor = items[0].ranked[0].anchor_id.to_string();
     let cursor = items[0].next_cursor.clone().expect("root continuation");
-    drop(service);
 
     let restarted_execution =
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());

@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn operation_requires_durable_authority_and_plan20_runtime() {
-        let _constructor = ProductionSemanticConfigurationOperationV1::new;
+        std::hint::black_box(ProductionSemanticConfigurationOperationV1::new);
     }
 
     #[test]

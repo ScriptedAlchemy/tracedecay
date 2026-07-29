@@ -797,7 +797,7 @@ async fn test_v11_create_schema_has_holographic_memory_schema() {
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     assert_eq!(row.get::<String>(0).unwrap(), "[]");
-    assert_eq!(row.get::<f64>(1).unwrap(), 0.5);
+    assert!((row.get::<f64>(1).unwrap() - 0.5).abs() <= f64::EPSILON);
     assert_eq!(row.get::<i64>(2).unwrap(), 0);
     assert_eq!(row.get::<i64>(3).unwrap(), 0);
     assert_eq!(row.get::<i64>(4).unwrap(), 0);
