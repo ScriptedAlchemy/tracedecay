@@ -28,12 +28,6 @@ use tracedecay::application::advisory::{
     GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1, GitHubReviewAnchorSeedV1,
     GitHubReviewProviderIdentityV1,
 };
-use tracedecay::application::configuration::{
-    AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
-    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationError,
-    ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationOperationFuture,
-    ConfigurationRollbackRequest, DirectConfigurationMutation, ScopeRevalidationEvidenceV1,
-};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_application::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
@@ -44,13 +38,10 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };
-use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationRevisionId, ProtectedApplyRequest, ProtectedChange,
-    ProtectedChangePlan,
-};
 use tracedecay_domain::feedback::{
-    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCurrentBranchRemapV1,
-    GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
+    FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1,
+    GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
+    ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     ActorId, CanonicalObservationIdV1, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
@@ -357,85 +348,6 @@ async fn corrupt_provider_identity_fails_production_decoder() {
             .await
             .is_none()
     );
-}
-
-struct ProximityConfiguration {
-    current: ConfigurationCurrentStateV1,
-}
-
-impl ConfigurationControlStore for ProximityConfiguration {
-    fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
-        let current = self.current.clone();
-        Box::pin(async move { Ok(current) })
-    }
-
-    fn save_plan(
-        &self,
-        _plan: &ProtectedChangePlan,
-        _operation: &ProtectedChange,
-    ) -> ConfigurationOperationFuture<'_, ()> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn load_plan(
-        &self,
-        _plan_id: &ChangePlanId,
-    ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn commit_direct(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _mutation: &DirectConfigurationMutation,
-        _expected_revision: &ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn commit_protected(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _request: &ProtectedApplyRequest,
-        _plan: &ProtectedChangePlan,
-        _evidence: &ScopeRevalidationEvidenceV1,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn dry_run_rollback(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _rollback: &ConfigurationRollbackRequest,
-        _now: UtcMicros,
-    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn apply_rollback(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _request: &ProtectedApplyRequest,
-        _plan: &ProtectedChangePlan,
-        _evidence: &ScopeRevalidationEvidenceV1,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn audit(
-        &self,
-        _actor: &AuthorizedActor,
-        _query: &ConfigurationAuditQuery,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn observed_state(
-        &self,
-        _actor: &AuthorizedActor,
-    ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
 }
 
 fn now_micros() -> UtcMicros {
@@ -893,23 +805,80 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         String::from_utf8_lossy(&advisory.stderr)
     );
     let advisory: Value = serde_json::from_slice(&advisory.stdout).unwrap();
-    let advisory = advisory.to_string();
-    for required in [
-        "request_handle",
-        "diagnostics",
-        "github_review_ingest",
-        "ci_failure_localize",
-        "feedback_proximity",
-        // The four-pillar terminal state must stay visible, so a cycle whose
-        // remote pillars are unavailable can never read as clean and empty.
-        "termination",
-        "provider_states",
-        "published",
-    ] {
+
+    // `producer_contributions` is a fixed list in the daemon payload, so
+    // searching the serialized response for pillar names proves nothing. The
+    // terminal cycle object is the only place the four pillars report real
+    // state, so assert against that object's typed contents instead.
+    let cycle = find_advisory_cycle(&advisory).unwrap_or_else(|| {
+        panic!("advisory result carried no four-pillar terminal cycle object: {advisory}")
+    });
+
+    // Decoding through the domain enums keeps this gate bound to the real
+    // closed state sets instead of a copy that can silently go stale.
+    let termination: FeedbackCycleTerminationV1 =
+        serde_json::from_value(cycle["termination"].clone()).unwrap_or_else(|error| {
+            panic!("cycle termination is not a typed terminal state ({error}): {cycle}")
+        });
+    let provider_states: Vec<ProviderEvaluationStateV1> =
+        serde_json::from_value(cycle["provider_states"].clone()).unwrap_or_else(|error| {
+            panic!("cycle provider_states are not typed provider states ({error}): {cycle}")
+        });
+    assert!(
+        !provider_states.is_empty(),
+        "a terminated cycle always reports the state of every evaluated provider: {cycle}"
+    );
+
+    // This project has no GitHub or CI provider access, so those pillars are
+    // genuinely unavailable. Plan 37 requires that to stay visible per pillar
+    // rather than collapsing into one clean, empty answer.
+    let incomplete = provider_states
+        .iter()
+        .filter(|state| **state != ProviderEvaluationStateV1::SupportedCompletedComplete)
+        .count();
+    assert!(
+        incomplete > 0,
+        "unreachable GitHub and CI pillars must report their own state, not complete coverage: {cycle}"
+    );
+    assert_ne!(
+        termination,
+        FeedbackCycleTerminationV1::Clean,
+        "a cycle with {incomplete} non-complete provider states can never terminate clean: {cycle}"
+    );
+
+    let published = cycle["published"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("cycle published is not a boolean: {cycle}"));
+    if termination == FeedbackCycleTerminationV1::IncompleteCoverage {
         assert!(
-            advisory.contains(required),
-            "advisory result omitted {required}: {advisory}"
+            !published,
+            "an incomplete-coverage cycle is not publishable: {cycle}"
         );
+    }
+}
+
+/// The advisory payload is wrapped by the MCP envelope and the application
+/// evidence contract, so locate the terminal cycle by its exact typed shape
+/// rather than pinning a transport path that neither plan owns. MCP tool
+/// content arrives as a JSON document inside a string field, so nested text is
+/// parsed and searched too.
+fn find_advisory_cycle(value: &Value) -> Option<Value> {
+    match value {
+        Value::Object(fields) => {
+            if fields.contains_key("termination")
+                && fields.contains_key("provider_states")
+                && fields.contains_key("published")
+            {
+                return Some(value.clone());
+            }
+            fields.values().find_map(find_advisory_cycle)
+        }
+        Value::Array(items) => items.iter().find_map(find_advisory_cycle),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .as_ref()
+            .and_then(find_advisory_cycle),
+        _ => None,
     }
 }
 
