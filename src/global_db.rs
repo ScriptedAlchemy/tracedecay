@@ -868,11 +868,10 @@ fn analytics_scope_query(
 const SESSION_MESSAGE_SEARCH_MAX_FETCH: usize = 200;
 
 /// Stable inventory downrank for a BM25 result page: transcript inventory/
-/// listing messages and prose branch/worktree rosters (per the shared
-/// [`crate::sessions::message_noise`] classifier) are moved below substantive
-/// hits while preserving the relative BM25 order within each group. Applied
-/// before truncation so a downranked hit still surfaces when it is the only
-/// match. Mirrors the lcm/grep re-rank (`sessions::lcm::query::rerank_grep_hits`).
+/// listing messages and prose branch/worktree rosters are moved below
+/// substantive hits while preserving the relative BM25 order within each
+/// group. Applied before truncation so a downranked hit still surfaces when it
+/// is the only match. Mirrors the lcm/grep re-rank.
 fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
     if results.len() < 2 {
         return;
@@ -880,7 +879,7 @@ fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
     let mut substantive = Vec::with_capacity(results.len());
     let mut inventory = Vec::new();
     for result in results.drain(..) {
-        if crate::sessions::message_noise::is_inventory_text(&result.message.text) {
+        if crate::application::session::compatibility::is_inventory_text(&result.message.text) {
             inventory.push(result);
         } else {
             substantive.push(result);
