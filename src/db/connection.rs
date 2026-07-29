@@ -1132,8 +1132,10 @@ impl Database {
     /// Executes one autocommit-style mutation through the canonical writer
     /// broker. Primarily useful for fixtures and maintenance adapters that do
     /// not need to retain a raw writable connection.
+    // Visible outside the crate: integration suites in `tests/` are external
+    // crates and exercise this fixture path directly.
     #[doc(hidden)]
-    pub(crate) async fn execute_write<P>(
+    pub async fn execute_write<P>(
         &self,
         operation: &str,
         sql: &str,
