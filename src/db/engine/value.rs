@@ -1,7 +1,10 @@
 use super::{Error, Result};
 
+// Visible outside the crate: it appears in the signature of the
+// fixture-facing `IntoParams` chain used by integration suites.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Value {
+pub enum Value {
     Null,
     Integer(i64),
     Real(f64),
