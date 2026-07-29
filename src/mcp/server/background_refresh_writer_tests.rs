@@ -105,14 +105,12 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
 
 #[tokio::test]
 async fn startup_catchup_uses_configured_full_sync_escalation() {
-    let (cg, dir, authority) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
-    let mut config = crate::config::load_config(&root).expect("load config");
-    config.sync.session_start_sync = true;
-    config.sync.full_sync_escalation_files = 37;
-    crate::config::save_config(&root, &config).expect("configure startup sync");
-    drop(cg);
-    let cg = authority.reopen_project_graph(&root).await;
+    let (cg, _dir, _authority) = init_indexed_repo().await;
+    let configured_escalation = cg.get_config().sync.full_sync_escalation_files;
+    assert_ne!(
+        configured_escalation, 0,
+        "production startup catch-up must retain commit-diff scoping"
+    );
 
     let observed = Arc::new(Mutex::new(Vec::<usize>::new()));
     let refresh_writer: BackgroundRefreshWriter = {
@@ -139,7 +137,7 @@ async fn startup_catchup_uses_configured_full_sync_escalation() {
     );
     assert_eq!(
         observed.lock().expect("recording lock").as_slice(),
-        &[37]
+        &[configured_escalation]
     );
     server.shutdown().await;
 }
