@@ -4,139 +4,53 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use tempfile::TempDir;
+use std::path::PathBuf;
+
+use crate::common::fixture::{ClosedRegisteredProject, GitFixture, TestProfile};
 use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
-use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
-use crate::support::HOME_ENV_LOCK;
-
-struct HomeEnvGuard {
-    previous_home: Option<OsString>,
-    previous_userprofile: Option<OsString>,
-    previous_data_dir: Option<OsString>,
+/// An indexed git project on `main`, enrolled in one fixture profile, with its
+/// retained graph closed so a later reopen can pin the serving branch.
+struct BranchDriftProject {
+    repo: GitFixture,
+    project: ClosedRegisteredProject,
 }
 
-impl HomeEnvGuard {
-    fn set(home: &Path) -> Self {
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_data_dir = std::env::var_os(USER_DATA_DIR_ENV);
-        let home = canonical_temp_path(home);
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("USERPROFILE", &home);
-            std::env::set_var(USER_DATA_DIR_ENV, home.join(".tracedecay"));
-        }
-        Self {
-            previous_home,
-            previous_userprofile,
-            previous_data_dir,
-        }
+impl BranchDriftProject {
+    async fn indexed() -> Self {
+        let profile = TestProfile::acquire().await;
+        let repo = GitFixture::primary(profile.path("project"));
+        fs::create_dir_all(repo.root().join("src")).unwrap();
+        fs::write(repo.root().join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+        repo.commit_all("initial");
+        let project = profile.enroll_indexed(repo.root()).await.close().await;
+        Self { repo, project }
     }
-}
 
-impl Drop for HomeEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous_home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.previous_userprofile.take() {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match self.previous_data_dir.take() {
-                Some(value) => std::env::set_var(USER_DATA_DIR_ENV, value),
-                None => std::env::remove_var(USER_DATA_DIR_ENV),
-            }
-        }
+    async fn indexed_tracking_main() -> Self {
+        let fixture = Self::indexed().await;
+        let meta = BranchMeta::new("main");
+        save_branch_meta(fixture.project.data_root(), &meta).unwrap();
+        fixture
     }
-}
 
-fn canonical_temp_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn git_output(project: &Path, args: &[&str]) -> Output {
-    Command::new("git")
-        .args(["-c", "core.hooksPath=.git/no-hooks"])
-        .args(args)
-        .current_dir(project)
-        .output()
-        .expect("git command failed to spawn")
-}
-
-fn git(project: &Path, args: &[&str]) {
-    let status = git_output(project, args);
-    assert!(
-        status.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-}
-
-fn git_init_dash_b_unsupported(output: &Output) -> bool {
-    let message = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stderr),
-        String::from_utf8_lossy(&output.stdout)
-    )
-    .to_lowercase();
-    (message.contains("unknown switch") || message.contains("unknown option"))
-        && (message.contains("`b'") || message.contains("'b'") || message.contains("-b"))
-}
-
-fn init_git_on_main(project: &Path) {
-    let output = git_output(project, &["init", "-b", "main"]);
-    if output.status.success() {
-        return;
+    fn root(&self) -> &std::path::Path {
+        self.project.root()
     }
-    assert!(
-        git_init_dash_b_unsupported(&output),
-        "git {:?} failed: {}",
-        ["init", "-b", "main"],
-        String::from_utf8_lossy(&output.stderr)
-    );
 
-    git(project, &["init"]);
-    git(project, &["branch", "-M", "main"]);
-}
+    fn data_root(&self) -> &std::path::Path {
+        self.project.data_root()
+    }
 
-fn commit_all(project: &Path, message: &str) {
-    git(project, &["add", "."]);
-    git(
-        project,
-        &[
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay-test@example.com",
-            "commit",
-            "-m",
-            message,
-        ],
-    );
-}
+    fn open_options(&self) -> tracedecay::tracedecay::TraceDecayOpenOptions {
+        self.project.open_options()
+    }
 
-/// Initialize a git repo on branch `main` with one committed source file.
-fn init_repo_on_main(project: &Path) {
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
-    init_git_on_main(project);
-    commit_all(project, "initial");
-}
-
-fn project_data_dir(project: &Path) -> PathBuf {
-    resolve_layout_for_current_profile(project)
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .data_root
+    async fn reopen(&self) -> TraceDecay {
+        self.project.reopen().await
+    }
 }
 
 async fn close_graph(cg: TraceDecay) {
@@ -146,23 +60,10 @@ async fn close_graph(cg: TraceDecay) {
 
 #[tokio::test]
 async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
-    let _home_env = HomeEnvGuard::set(home.path());
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    init_repo_on_main(project);
-
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
-
-    // Track `main` so the project is in branch-aware mode (serving_branch=Some).
-    let meta = BranchMeta::new("main");
-    save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    close_graph(cg).await;
+    let fixture = BranchDriftProject::indexed_tracking_main().await;
 
     // Reopen so the instance resolves and pins `main`.
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = fixture.reopen().await;
     assert!(
         !cg.branch_drifted(),
         "no drift expected while still on the branch we opened"
@@ -170,7 +71,7 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
     assert_eq!(cg.serving_branch(), Some("main"));
 
     // Mid-session checkout to a different branch.
-    git(project, &["checkout", "-b", "feature"]);
+    fixture.repo.run(&["checkout", "-b", "feature"]);
 
     assert!(
         cg.branch_drifted(),
@@ -196,22 +97,13 @@ async fn sync_refuses_to_write_after_mid_session_branch_checkout() {
 
 #[tokio::test]
 async fn no_drift_and_sync_allowed_while_on_opened_branch() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
-    let _home_env = HomeEnvGuard::set(home.path());
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    init_repo_on_main(project);
+    let fixture = BranchDriftProject::indexed().await;
 
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
-    close_graph(cg).await;
-
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = fixture.reopen().await;
 
     // Still on the branch we opened: no drift, writes proceed normally.
     assert!(!cg.branch_drifted());
-    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+    fs::write(fixture.root().join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
     cg.sync()
         .await
         .expect("sync on the opened branch must not be blocked");
@@ -220,25 +112,20 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
 
 #[tokio::test]
 async fn sync_allowed_in_single_db_mode_without_git() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
-    let _home_env = HomeEnvGuard::set(home.path());
     // No git repo => no default branch detected => no branch metadata =>
     // single-DB mode (serving_branch == None), exempt from the drift guard.
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    // Deliberately not a GitFixture: the scenario is the absent repository.
+    let profile = TestProfile::acquire().await;
+    let project_root = profile.path("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(project_root.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    let project = profile.enroll_indexed(&project_root).await.close().await;
 
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
-    close_graph(cg).await;
-
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = project.reopen().await;
     assert_eq!(cg.serving_branch(), None);
     assert!(!cg.branch_drifted());
 
-    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 9 }\n").unwrap();
+    fs::write(project.root().join("src/lib.rs"), "pub fn f() -> u32 { 9 }\n").unwrap();
     cg.sync()
         .await
         .expect("single-DB mode sync must never be blocked by the drift guard");
@@ -247,22 +134,10 @@ async fn sync_allowed_in_single_db_mode_without_git() {
 
 #[tokio::test]
 async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
-    let _home_env = HomeEnvGuard::set(home.path());
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    init_repo_on_main(project);
+    let fixture = BranchDriftProject::indexed_tracking_main().await;
 
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
-
-    let meta = BranchMeta::new("main");
-    save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    close_graph(cg).await;
-
-    let cg = TraceDecay::open(project).await.unwrap();
-    git(project, &["checkout", "-b", "feature"]);
+    let cg = fixture.reopen().await;
+    fixture.repo.run(&["checkout", "-b", "feature"]);
 
     let diagnostics = cg.branch_diagnostics();
     assert_eq!(diagnostics.open_active_branch.as_deref(), Some("main"));
@@ -283,23 +158,11 @@ async fn branch_diagnostics_reports_stale_open_and_serving_state_after_checkout(
 
 #[tokio::test]
 async fn branch_diagnostics_reports_auto_tracked_live_branch() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
-    let _home_env = HomeEnvGuard::set(home.path());
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    init_repo_on_main(project);
+    let fixture = BranchDriftProject::indexed_tracking_main().await;
 
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
+    fixture.repo.run(&["checkout", "-b", "feature/untracked"]);
 
-    let meta = BranchMeta::new("main");
-    save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    close_graph(cg).await;
-
-    git(project, &["checkout", "-b", "feature/untracked"]);
-
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = fixture.reopen().await;
     let diagnostics = cg.branch_diagnostics();
     assert!(!diagnostics.is_fallback);
     assert_eq!(diagnostics.branch_resolution, "exact");
@@ -320,48 +183,36 @@ async fn branch_diagnostics_reports_auto_tracked_live_branch() {
 
 #[tokio::test]
 async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
-    let _home_env = HomeEnvGuard::set(home.path());
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    init_repo_on_main(project);
+    let fixture = BranchDriftProject::indexed_tracking_main().await;
 
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
-
-    let meta = BranchMeta::new("main");
-    save_branch_meta(&project_data_dir(project), &meta).unwrap();
-    close_graph(cg).await;
-
-    git(project, &["checkout", "-b", "feature/tracked"]);
-    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+    fixture.repo.run(&["checkout", "-b", "feature/tracked"]);
+    fs::write(fixture.root().join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
     fs::write(
-        project.join("src/tracked_only.rs"),
+        fixture.root().join("src/tracked_only.rs"),
         "pub fn tracked_only() {}\n",
     )
     .unwrap();
-    commit_all(project, "feature");
+    fixture.repo.commit_all("feature");
 
     // Track the branch by writing its metadata entry directly instead of
     // going through TraceDecay::add_branch_tracking, which would build and
     // sync a branch DB only for the test to delete it again. The repair
     // under test keys purely off "tracked in metadata, DB file missing", so
     // the state is identical and the fixture skips a whole DB build.
-    let tracedecay_dir = project_data_dir(project);
-    let mut meta = tracedecay::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    let tracedecay_dir = fixture.data_root();
+    let mut meta = tracedecay::branch_meta::load_branch_meta(tracedecay_dir).unwrap();
     let stem = tracedecay::branch::sanitize_branch_name("feature/tracked");
     meta.add_branch("feature/tracked", &format!("branches/{stem}.db"), "main");
-    save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    save_branch_meta(tracedecay_dir, &meta).unwrap();
     let feature_db =
-        tracedecay::branch::resolve_branch_db_path(&tracedecay_dir, "feature/tracked", &meta)
+        tracedecay::branch::resolve_branch_db_path(tracedecay_dir, "feature/tracked", &meta)
             .unwrap();
     assert!(
         !feature_db.exists(),
         "tracked branch DB must be missing before the repair-on-open under test"
     );
 
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = fixture.reopen().await;
     let diagnostics = cg.branch_diagnostics();
     assert!(diagnostics.live_branch_tracked);
     assert_eq!(diagnostics.live_branch_db_exists, Some(true));
@@ -385,24 +236,15 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
 
 #[tokio::test]
 async fn branch_serving_instance_writes_facts_to_the_project_wide_store() {
-    let _env_lock = HOME_ENV_LOCK.lock().await;
-    let home = TempDir::new().unwrap();
-    let _home_env = HomeEnvGuard::set(home.path());
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    init_repo_on_main(project);
-
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
-    close_graph(cg).await;
+    let fixture = BranchDriftProject::indexed().await;
     // A tracked non-default branch resolves to its own shard database; the
     // default branch serves the project store directly.
-    git(project, &["checkout", "-b", "feature"]);
-    TraceDecay::add_branch_tracking(project, "feature")
+    fixture.repo.run(&["checkout", "-b", "feature"]);
+    TraceDecay::add_branch_tracking_with_options(fixture.root(), "feature", fixture.open_options())
         .await
         .unwrap();
 
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = fixture.reopen().await;
     assert_eq!(cg.serving_branch(), Some("feature"));
     let branch_db_path = cg.db_path();
     let project_db_path = cg.store_layout().graph_db_path.clone();

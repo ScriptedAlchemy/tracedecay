@@ -327,6 +327,15 @@ impl RegisteredProject {
         &self.registry
     }
 
+    /// The open options this project's graph was created with.
+    ///
+    /// Every reopen, branch open, and `*_with_options` call against this
+    /// checkout must use these so the fixture cannot drift onto a second
+    /// synthesized standalone profile.
+    pub fn open_options(&self) -> TraceDecayOpenOptions {
+        self.open_options.clone()
+    }
+
     /// Reopens the project graph in the same profile.
     pub async fn reopen(&self) -> TraceDecay {
         TraceDecay::open_with_options(&self.root, self.open_options.clone())
@@ -351,6 +360,47 @@ impl RegisteredProject {
             })
     }
 
+    /// Checkpoints and closes the retained graph while keeping profile
+    /// isolation, enrollment, and the store layout for a later reopen.
+    ///
+    /// Branch-drift and recovery fixtures need an exclusive close before they
+    /// reopen and pin a serving branch; consuming `self` is deliberate so the
+    /// closed handle cannot keep serving through a graph that is gone.
+    pub async fn close(self) -> ClosedRegisteredProject {
+        let Self {
+            profile,
+            root,
+            project_id,
+            layout,
+            open_options,
+            graph,
+            registry,
+        } = self;
+        match Arc::try_unwrap(graph) {
+            Ok(graph) => {
+                graph.checkpoint().await.unwrap_or_else(|err| {
+                    panic!(
+                        "failed to checkpoint fixture graph '{}': {err}",
+                        root.display()
+                    )
+                });
+                graph.close();
+            }
+            Err(_) => panic!(
+                "fixture graph for '{}' still has external Arc clones; drop those before close",
+                root.display()
+            ),
+        }
+        ClosedRegisteredProject {
+            profile,
+            root,
+            project_id,
+            layout,
+            open_options,
+            _registry: registry,
+        }
+    }
+
     /// Drops this project's enrollment marker while keeping its registry row
     /// and its store, for tests that exercise the legacy split-identity scan.
     ///
@@ -372,6 +422,74 @@ impl RegisteredProject {
             data_root: self.layout.data_root,
             _registry: self.registry,
         }
+    }
+}
+
+/// An enrolled project whose retained graph has been closed.
+///
+/// Keeps the isolated profile and the layout snapshot so a later
+/// [`Self::reopen`] cannot resolve a different shard than the one that was
+/// indexed.
+pub struct ClosedRegisteredProject {
+    profile: TestProfile,
+    root: PathBuf,
+    project_id: String,
+    layout: StoreLayout,
+    open_options: TraceDecayOpenOptions,
+    _registry: Arc<HostAdmissionTestRuntimeV1>,
+}
+
+impl ClosedRegisteredProject {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn profile(&self) -> &TestProfile {
+        &self.profile
+    }
+
+    pub fn store_layout(&self) -> &StoreLayout {
+        &self.layout
+    }
+
+    pub fn data_root(&self) -> &Path {
+        &self.layout.data_root
+    }
+
+    pub fn graph_db_path(&self) -> &Path {
+        &self.layout.graph_db_path
+    }
+
+    pub fn open_options(&self) -> TraceDecayOpenOptions {
+        self.open_options.clone()
+    }
+
+    /// Reopens the project graph in the same profile.
+    pub async fn reopen(&self) -> TraceDecay {
+        TraceDecay::open_with_options(&self.root, self.open_options.clone())
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to reopen fixture graph '{}': {err}",
+                    self.root.display()
+                )
+            })
+    }
+
+    /// Opens one tracked branch's graph in the same profile.
+    pub async fn open_branch(&self, branch_name: &str) -> TraceDecay {
+        TraceDecay::open_branch_with_options(&self.root, branch_name, self.open_options.clone())
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to open fixture branch '{branch_name}' of '{}': {err}",
+                    self.root.display()
+                )
+            })
     }
 }
 
