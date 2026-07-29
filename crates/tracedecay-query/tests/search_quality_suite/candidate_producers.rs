@@ -1,27 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs;
-use std::path::Path;
 
-use sha2::{Digest, Sha256};
-use tracedecay::code_index::chunks::{
+use tracedecay_code_index::chunks::{
     DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
 };
-use tracedecay::code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
-use tracedecay::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
-use tracedecay::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use tracedecay::query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
-};
-use tracedecay::query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1,
-    LexicalFieldV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
-};
-use tracedecay::search_eval::{
-    compute_workload_digest, load_candidate_workload, validate_direct_workload,
-};
+use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
+use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ContentDigest,
@@ -34,6 +19,15 @@ use tracedecay_domain::{
     SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness,
     SourceInstanceKey, SourceNamespace, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
     ValidatedCodeFileV1, VectorWatermark,
+};
+use tracedecay_query::retrieval::exact::{
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
+    ExactLaneRetriever,
+};
+use tracedecay_query::retrieval::lexical::{
+    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1,
+    LexicalFieldV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
 };
 
 pub(crate) fn id<T>(value: &str) -> T
@@ -285,7 +279,7 @@ fn admitted_rust_chunk(
         sanitizer_revision,
         id("policy.fixture.v1"),
         id("chunker.v1"),
-        tracedecay::extraction::LanguageRegistry::new(),
+        tracedecay_code_index::extraction::LanguageRegistry::new(),
     );
     let (artifacts, authority) = chunker
         .index_file_with_authority_from_extraction(
@@ -729,61 +723,5 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
     assert_ne!(
         first.candidates[0].source_occurrence_id, second.candidates[0].source_occurrence_id,
         "the logical chunk is stable but each generation has a distinct occurrence"
-    );
-}
-
-#[test]
-fn pr10_workload_and_incremental_fixture_are_byte_exact() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workload_path =
-        repo_root.join("tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json");
-    let workload = load_candidate_workload(&workload_path).expect("checked-in workload parses");
-    let summary =
-        validate_direct_workload(repo_root, None).expect("checked-in workload is authoritative");
-
-    assert_eq!(
-        compute_workload_digest(&workload).expect("workload digest"),
-        "sha256:9c793070efc601a13e145c233dbc6fb859764ce9d24d64c636552c9e020db1ce"
-    );
-    assert_eq!(
-        summary.workload_digest,
-        compute_workload_digest(&workload).expect("summary workload digest")
-    );
-    assert_eq!(workload.execution_contract.exact_file_count, 13);
-    assert_eq!(workload.execution_contract.exact_corpus_bytes, 147_447);
-    assert_eq!(
-        workload.execution_contract.exact_eligible_chunks_current,
-        1_960
-    );
-    assert_eq!(
-        workload.execution_contract.exact_eligible_chunks_10x,
-        workload
-            .execution_contract
-            .exact_eligible_chunks_current
-            .checked_mul(10)
-            .expect("exact 10x chunk count")
-    );
-
-    let source = workload
-        .corpus
-        .iter()
-        .find(|document| document.document_id == workload.incremental_fixture.document_id)
-        .expect("incremental source belongs to the corpus");
-    let before = fs::read_to_string(repo_root.join(&source.path)).expect("read before fixture");
-    let after_path = repo_root.join(&workload.incremental_fixture.after_path);
-    let after = fs::read_to_string(&after_path).expect("read after fixture");
-    assert_eq!(
-        hex::encode(Sha256::digest(after.as_bytes())),
-        workload.incremental_fixture.after_sha256
-    );
-    assert_eq!(
-        before.matches("pub fn validate(&self)").count(),
-        1,
-        "incremental edit must have one authentic source target"
-    );
-    assert_eq!(
-        after,
-        before.replacen("pub fn validate(&self)", "pub fn validate_bounds(&self)", 1),
-        "incremental fixture must contain only the declared one-symbol edit"
     );
 }

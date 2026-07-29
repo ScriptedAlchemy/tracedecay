@@ -1,26 +1,5 @@
 use std::collections::BTreeMap;
 
-use tracedecay::query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
-};
-use tracedecay::query::retrieval::fusion::{
-    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
-    RetrievalCursorKeyringV1,
-};
-use tracedecay::query::retrieval::graph::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
-};
-use tracedecay::query::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
-    HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
-};
-use tracedecay::query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
-};
-use tracedecay::query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
-};
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CodeSearchChunkGrainV1, CompactCandidate,
     ComponentRevision, DiversityPolicy, EdgeAuthorityV1, EphemeralSanitizedQueryViewV1,
@@ -29,6 +8,27 @@ use tracedecay_domain::{
     RankedCandidate, RelationEdgeKindV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
     ScoreDomainCalibrationV1, SourceSpan, SymbolOccurrenceId, UtcMicros,
+};
+use tracedecay_query::retrieval::exact::{
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
+    ExactLaneRetriever,
+};
+use tracedecay_query::retrieval::fusion::{
+    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
+    RetrievalCursorKeyringV1,
+};
+use tracedecay_query::retrieval::graph::{
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
+};
+use tracedecay_query::retrieval::hydrate::{
+    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
+};
+use tracedecay_query::retrieval::lexical::{
+    CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
+};
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
 };
 
 use crate::candidate_producers::{
