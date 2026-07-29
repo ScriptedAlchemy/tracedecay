@@ -21,11 +21,11 @@ use crate::application::session::{
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
-use tracedecay_query::temporal::context::ContextBudget;
-use tracedecay_query::temporal::ports::{
+use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ports::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
-use tracedecay_query::temporal::ranking::DiversityLimits;
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 pub(super) struct MessageSearchRequest<'a> {
     pub(super) query: &'a str,
@@ -1202,7 +1202,7 @@ mod cutover_tests {
     use crate::application::session::{
         SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
     };
-    use tracedecay_query::temporal::ports::{
+    use tracedecay_temporal_query::ports::{
         TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
     };
 
