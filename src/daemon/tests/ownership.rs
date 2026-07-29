@@ -801,14 +801,19 @@ fn failed_deferred_health_quarantines_only_the_exact_store_owner() {
     let mut other = key.clone();
     other.owner.profile_root = PathBuf::from("/profile-b");
     other.owner.global_db_path = PathBuf::from("/profile-b/global.db");
+    let mut sibling_scope = key.clone();
+    sibling_scope.scope_prefix = Some("src".to_owned());
     let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
     registry.insert(key.clone(), Arc::new(1));
+    registry.insert(sibling_scope.clone(), Arc::new(2));
 
-    assert!(registry.quarantine_and_remove(&key).is_some());
-    assert!(registry.requires_synchronous_health(&key));
-    assert!(!registry.requires_synchronous_health(&other));
-    registry.clear_synchronous_health(&key);
-    assert!(!registry.requires_synchronous_health(&key));
+    assert_eq!(registry.quarantine_and_remove_owner(&key.owner).len(), 2);
+    assert!(registry.get(&key).is_none());
+    assert!(registry.get(&sibling_scope).is_none());
+    assert!(registry.requires_synchronous_health(&key.owner));
+    assert!(!registry.requires_synchronous_health(&other.owner));
+    registry.clear_synchronous_health(&key.owner);
+    assert!(!registry.requires_synchronous_health(&key.owner));
 }
 
 #[cfg(unix)]

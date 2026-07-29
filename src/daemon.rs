@@ -2565,7 +2565,7 @@ struct DatabaseOwnerEntry<Server> {
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
     servers: HashMap<ProjectServerKey, DatabaseOwnerEntry<Server>>,
     aliases: HashMap<ProjectRouteKey, ProjectServerKey>,
-    synchronous_health: HashSet<ProjectServerKey>,
+    synchronous_health: HashSet<StoreOwnerKey>,
 }
 
 impl<Server> Default for DatabaseOwnerRegistry<Server> {
@@ -2639,17 +2639,30 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Some(entry.server)
     }
 
-    fn quarantine_and_remove(&mut self, key: &ProjectServerKey) -> Option<Server> {
-        self.synchronous_health.insert(key.clone());
-        self.remove(key)
+    fn quarantine_and_remove_owner(&mut self, owner: &StoreOwnerKey) -> Vec<Server> {
+        self.synchronous_health.insert(owner.clone());
+        let keys = self
+            .servers
+            .keys()
+            .filter(|key| &key.owner == owner)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut removed = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(entry) = self.servers.remove(&key) {
+                removed.push(entry.server);
+            }
+        }
+        self.aliases.retain(|_, key| &key.owner != owner);
+        removed
     }
 
-    fn requires_synchronous_health(&self, key: &ProjectServerKey) -> bool {
-        self.synchronous_health.contains(key)
+    fn requires_synchronous_health(&self, owner: &StoreOwnerKey) -> bool {
+        self.synchronous_health.contains(owner)
     }
 
-    fn clear_synchronous_health(&mut self, key: &ProjectServerKey) {
-        self.synchronous_health.remove(key);
+    fn clear_synchronous_health(&mut self, owner: &StoreOwnerKey) {
+        self.synchronous_health.remove(owner);
     }
 
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
@@ -4494,7 +4507,7 @@ async fn production_project_server(
         .project_servers()
         .lock()
         .await
-        .requires_synchronous_health(&initial_key);
+        .requires_synchronous_health(&initial_key.owner);
     let (cg, deferred_post_open_health, key) = if synchronous_post_open_health {
         drop(initial_deferred_post_open_health);
         initial_cg.close();
@@ -4507,10 +4520,12 @@ async fn production_project_server(
             ))
             .await?;
         let validated_key = ProjectServerKey::from_open_project(&validated_cg, handshake)?;
-        {
-            let mut servers = store_administration.project_servers().lock().await;
-            servers.clear_synchronous_health(&initial_key);
-            servers.clear_synchronous_health(&validated_key);
+        if validated_key.owner == initial_key.owner {
+            store_administration
+                .project_servers()
+                .lock()
+                .await
+                .clear_synchronous_health(&validated_key.owner);
         }
         (
             validated_cg,
@@ -4859,17 +4874,27 @@ async fn production_project_server(
         if let Some(database) = deferred_post_open_health
             && let Err(error) = database.repair_fts_after_open().await
         {
-            route_registered.store(false, Ordering::Release);
+            resolved.revoke_project_server();
             resolved.cancel_startup_transcript_ingest();
             let project_servers = Arc::clone(store_administration.project_servers());
-            let unhealthy_key = key.clone();
-            tokio::spawn(async move {
+            let unhealthy_owner = key.owner.clone();
+            let cleanup = tokio::spawn(async move {
                 let removed = project_servers
                     .lock()
                     .await
-                    .quarantine_and_remove(&unhealthy_key);
-                debug_assert!(removed.is_some());
+                    .quarantine_and_remove_owner(&unhealthy_owner);
+                for server in &removed {
+                    server.revoke_project_server();
+                    server.cancel_startup_transcript_ingest();
+                }
+                removed.len()
             });
+            let removed = cleanup.await.map_err(|join_error| TraceDecayError::Config {
+                message: format!(
+                    "failed to retire unhealthy project server owner after health validation: {join_error}"
+                ),
+            })?;
+            debug_assert!(removed > 0);
             return Err(error);
         }
         ensure_git_index_transactions_for_mutation_owners(

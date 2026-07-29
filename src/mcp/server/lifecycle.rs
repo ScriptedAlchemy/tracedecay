@@ -153,6 +153,12 @@ async fn run_startup_session_catch_up_with_home(
 }
 
 impl McpServer {
+    pub(crate) fn revoke_project_server(&self) {
+        if let Some(live) = &self.project_server_live {
+            live.store(false, Ordering::Release);
+        }
+    }
+
     pub(crate) fn cancel_startup_transcript_ingest(&self) {
         self.startup_transcript_ingest_cancellation.cancel();
     }
