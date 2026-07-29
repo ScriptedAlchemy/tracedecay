@@ -5189,6 +5189,22 @@ async fn production_project_server(
                 )
                 .await?;
                 log_full_setup_phase("git_transactions_ready");
+                let dependent_owners = if project_database_is_read_only {
+                    None
+                } else {
+                    let state = project_open_owners::register_project_open_production_owners(
+                        invocation,
+                        store_administration.git_index_transaction_services(),
+                        canonical_project_path,
+                        &project_id,
+                        full_candidate.as_ref(),
+                        source_edit_mutation_ready
+                            .expect("writable projects install source edit preview authority"),
+                    )
+                    .await?;
+                    log_full_setup_phase("independent_owners_registered");
+                    Some(state)
+                };
                 invocation
                     .mount_code_index(
                         canonical_project_path,
@@ -5209,15 +5225,11 @@ async fn production_project_server(
                     Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
                 }
                 log_full_setup_phase("semantic_runtime_registered");
-                if !project_database_is_read_only {
-                    project_open_owners::register_project_open_production_owners(
+                if let Some(dependent_owners) = dependent_owners {
+                    project_open_owners::register_project_open_dependent_owners(
                         invocation,
-                        store_administration.git_index_transaction_services(),
                         canonical_project_path,
-                        &project_id,
-                        full_candidate.as_ref(),
-                        source_edit_mutation_ready
-                            .expect("writable projects install source edit preview authority"),
+                        dependent_owners,
                     )
                     .await?;
                     log_full_setup_phase("production_owners_registered");
