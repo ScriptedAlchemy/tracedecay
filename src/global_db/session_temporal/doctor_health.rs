@@ -21,6 +21,7 @@ const MAX_FINDING_COUNT: u64 = 1_000_000;
 const SQLITE_CORRUPT_VTAB: i32 = 267;
 const SESSION_TEMPORAL_HEALTH_CACHE_TTL: Duration = Duration::from_secs(2);
 const MAX_CACHED_SESSION_TEMPORAL_STORES: usize = 64;
+const MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionTemporalStoreFileFingerprint {
@@ -100,6 +101,27 @@ fn session_temporal_store_fingerprint(
         database,
         wal: store_file_fingerprint(&PathBuf::from(wal_path))?,
     })
+}
+
+fn session_temporal_store_family_bytes(database_path: &Path) -> std::io::Result<u64> {
+    let database = std::fs::metadata(database_path)?.len();
+    let mut wal_path = database_path.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    match std::fs::metadata(PathBuf::from(wal_path)) {
+        Ok(wal) => database.checked_add(wal.len()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session temporal store size overflowed",
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(database),
+        Err(error) => Err(error),
+    }
+}
+
+fn permits_synchronous_session_temporal_health(database_path: &Path) -> bool {
+    session_temporal_store_family_bytes(database_path)
+        .is_ok_and(|bytes| bytes <= MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
 }
 
 const OCCURRENCE_FTS_CHECK_SQL: &str = "SELECT
@@ -732,6 +754,12 @@ pub(crate) async fn session_temporal_doctor_health_at(
             Some("session_store_uninitialized"),
         );
     }
+    if !permits_synchronous_session_temporal_health(db_path) {
+        return unavailable_report_with_reason(
+            SessionTemporalHealthStatus::Unavailable,
+            Some("synchronous_diagnosis_size_budget_exceeded"),
+        );
+    }
     if non_empty_wal_sidecar(db_path) {
         return unavailable_report_with_reason(
             SessionTemporalHealthStatus::Unavailable,
@@ -757,6 +785,12 @@ impl RegisteredGlobalDb {
     /// database/WAL fingerprint remains unchanged.
     pub(crate) async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
         let database_path = self.db_path();
+        if !permits_synchronous_session_temporal_health(database_path) {
+            return unavailable_report_with_reason(
+                SessionTemporalHealthStatus::Unavailable,
+                Some("synchronous_diagnosis_size_budget_exceeded"),
+            );
+        }
         let cache = session_temporal_health_cache_cell(database_path);
         let mut cached = cache.lock().await;
         let before = session_temporal_store_fingerprint(database_path).ok();
@@ -1518,5 +1552,20 @@ mod cache_tests {
         std::fs::write(&wal, b"wal-expanded").expect("expanded wal");
         let expanded = session_temporal_store_fingerprint(&database).expect("expanded fingerprint");
         assert_ne!(with_wal, expanded);
+    }
+
+    #[test]
+    fn session_temporal_size_budget_includes_wal_bytes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let database = tmp.path().join("sessions.db");
+        std::fs::write(&database, b"database").expect("database");
+        assert!(permits_synchronous_session_temporal_health(&database));
+
+        let wal = tmp.path().join("sessions.db-wal");
+        std::fs::File::create(wal)
+            .expect("wal")
+            .set_len(MAX_SYNCHRONOUS_SESSION_TEMPORAL_HEALTH_BYTES)
+            .expect("wal size");
+        assert!(!permits_synchronous_session_temporal_health(&database));
     }
 }
