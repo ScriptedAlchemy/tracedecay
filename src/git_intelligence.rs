@@ -30,7 +30,11 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde::Serialize;
-use thiserror::Error;
+pub use tracedecay_application::git::{
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
+    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
+    GitIntelligenceError, GitReadPort, is_canonical_repository_relative_path,
+};
 use tracedecay_domain::git::{
     GitBlameAvailabilityV1, GitBlameLineV1, GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1,
     GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitDegradationV1,
@@ -61,137 +65,8 @@ const READ_ONLY_SUBCOMMANDS: &[&str] = &[
     "check-attr",
 ];
 
-/// Upper bound for bounded history requests.
-pub const GIT_HISTORY_MAX_COUNT_LIMIT: u32 = 1_000;
-
-/// Hard ceiling for one historical blob materialized by the native adapter.
-pub const GIT_HISTORICAL_BLOB_MAX_BYTES: u64 = 8 * 1024 * 1024;
-
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
-
-/// Errors from the read-only Git intelligence adapter.
-#[derive(Debug, Error)]
-pub enum GitIntelligenceError {
-    /// The `git` executable could not be spawned.
-    #[error("git executable unavailable: {0}")]
-    GitUnavailable(String),
-    /// The working directory is not inside a Git repository.
-    #[error("not a git repository: {0}")]
-    NotARepository(String),
-    /// Native Git failed a read operation.
-    #[error("git {operation} failed ({status}): {stderr}")]
-    GitFailed {
-        operation: &'static str,
-        status: String,
-        stderr: String,
-    },
-    /// Native Git output could not be parsed into the typed contract.
-    #[error("git {operation} produced malformed output: {detail}")]
-    MalformedOutput {
-        operation: &'static str,
-        detail: String,
-    },
-    /// A write-capable or unadmitted subcommand was requested. This is a
-    /// structural guarantee violation, not a repository error.
-    #[error("read-only adapter refused git {0}: not an admitted read operation")]
-    ReadOnlyViolation(String),
-    /// Commit-range diffs are read-only evidence with no index relationship;
-    /// they cannot mint an applicable `HunkRefV1`.
-    #[error("HunkRef cannot be minted for a commit-range diff")]
-    HunkRefNotMintable,
-    /// A diff entry kind has no proven read-only round-trip and therefore
-    /// cannot produce an applicable `HunkRefV1` (Plan 36 capability rule).
-    #[error("cannot mint HunkRef for {path}: {reason}")]
-    UnmintableHunkKind { path: String, reason: &'static str },
-    /// Historical reads accept only one canonical repository-relative path.
-    #[error("invalid historical repository-relative path: {0}")]
-    InvalidHistoricalPath(String),
-    /// The object exists but exceeds the caller's bounded read profile.
-    #[error("historical blob exceeds byte bound: {actual} bytes > bound {bound}")]
-    HistoricalBlobBoundExceeded { bound: u64, actual: u64 },
-    /// Domain validation failed for an assembled value.
-    #[error("domain validation failed: {0}")]
-    Domain(#[from] DomainError),
-}
-
-/// Bounded history request profile.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitHistoryRequest {
-    /// Maximum commits returned; clamped to [`GIT_HISTORY_MAX_COUNT_LIMIT`].
-    pub max_count: u32,
-    /// Optional path filter.
-    pub path: Option<String>,
-    /// Follow renames for a single path (`--follow`).
-    pub follow: bool,
-    /// First-parent traversal only.
-    pub first_parent: bool,
-}
-
-impl Default for GitHistoryRequest {
-    fn default() -> Self {
-        Self {
-            max_count: 100,
-            path: None,
-            follow: false,
-            first_parent: false,
-        }
-    }
-}
-
-/// Blame request profile for one path at the current HEAD/worktree.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitBlameRequest {
-    pub path: String,
-    /// Follow line provenance across renames/copies (`-M -C`).
-    pub follow_renames: bool,
-}
-
-/// One exact, bounded historical blob read.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitHistoricalBlobRequestV1 {
-    pub commit: GitOidV1,
-    pub path: String,
-    pub max_bytes: u64,
-    pub include_bytes: bool,
-}
-
-/// Historical blob content, or an explicit absent-path result.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct GitHistoricalBlobV1 {
-    pub repository: RepositoryId,
-    pub worktree: WorktreeId,
-    pub commit: GitOidV1,
-    pub path: String,
-    pub blob_oid: Option<GitOidV1>,
-    pub bytes: Option<Vec<u8>>,
-}
-
-/// Typed application port for Plan 36 PR9 read-only Git intelligence.
-///
-/// Implementations accept only closed request/value types. No method exposes
-/// raw Git arguments or repository mutation.
-pub trait GitReadPort {
-    fn status(&self) -> Result<GitStatusV1, GitIntelligenceError>;
-
-    fn diff(&self, scope: &GitDiffScopeV1) -> Result<GitDiffV1, GitIntelligenceError>;
-
-    fn history(&self, request: &GitHistoryRequest) -> Result<GitHistoryV1, GitIntelligenceError>;
-
-    fn blame(&self, request: &GitBlameRequest) -> Result<GitBlameV1, GitIntelligenceError>;
-
-    fn historical_blob(
-        &self,
-        request: &GitHistoricalBlobRequestV1,
-    ) -> Result<GitHistoricalBlobV1, GitIntelligenceError>;
-
-    fn hunk_refs(
-        &self,
-        scope: &GitDiffScopeV1,
-        preview_id: &str,
-        snapshot_digest: &ManifestDigest,
-    ) -> Result<Vec<HunkRefV1>, GitIntelligenceError>;
-}
 
 /// One parsed `--raw -z` record.
 #[derive(Debug)]
@@ -1278,6 +1153,15 @@ impl NativeGitIntelligence {
     }
 }
 
+impl GitHistoricalBlobReadPort for NativeGitIntelligence {
+    fn historical_blob(
+        &self,
+        request: &GitHistoricalBlobRequestV1,
+    ) -> Result<GitHistoricalBlobV1, GitIntelligenceError> {
+        NativeGitIntelligence::historical_blob(self, request)
+    }
+}
+
 impl GitReadPort for NativeGitIntelligence {
     fn status(&self) -> Result<GitStatusV1, GitIntelligenceError> {
         NativeGitIntelligence::status(self)
@@ -1293,13 +1177,6 @@ impl GitReadPort for NativeGitIntelligence {
 
     fn blame(&self, request: &GitBlameRequest) -> Result<GitBlameV1, GitIntelligenceError> {
         NativeGitIntelligence::blame(self, request)
-    }
-
-    fn historical_blob(
-        &self,
-        request: &GitHistoricalBlobRequestV1,
-    ) -> Result<GitHistoricalBlobV1, GitIntelligenceError> {
-        NativeGitIntelligence::historical_blob(self, request)
     }
 
     fn hunk_refs(
@@ -1821,16 +1698,6 @@ fn validate_historical_path(path: &str) -> Result<(), GitIntelligenceError> {
         return Err(GitIntelligenceError::InvalidHistoricalPath(path.to_owned()));
     }
     Ok(())
-}
-
-pub(crate) fn is_canonical_repository_relative_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.contains('\\')
-        && !path.chars().any(char::is_control)
-        && !Path::new(path).is_absolute()
-        && path
-            .split('/')
-            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
 }
 
 /// Worktree file mode evidence (read-only metadata).

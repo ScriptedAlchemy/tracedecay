@@ -94,12 +94,15 @@ pub use framed_log::{
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
 pub use git::{
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
+    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
-    GitIndexTransactionPortError, GitIndexTransactionService, git_index_catalog_contribution,
-    git_index_effect_class, git_index_handler_descriptors, git_surface_catalog_contribution,
-    git_surface_handler_descriptors,
+    GitIndexTransactionPortError, GitIndexTransactionService, GitIntelligenceError, GitReadPort,
+    git_index_catalog_contribution, git_index_effect_class, git_index_handler_descriptors,
+    git_surface_catalog_contribution, git_surface_handler_descriptors,
+    is_canonical_repository_relative_path,
 };
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
