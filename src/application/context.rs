@@ -543,7 +543,9 @@ fn wall_clock_micros() -> i64 {
 ///
 /// Binary-crate entry points (the CLI) cannot reach the daemon-owned identity
 /// helpers; this facade is the single public path so no caller re-implements
-/// repository/worktree/reference resolution ad hoc.
+/// repository/worktree/reference resolution ad hoc. It is the exact-root
+/// special case of [`resolve_registered_root_scope`]: the registered root and
+/// the served root are one and the same.
 #[deprecated(
     note = "V2 RequestContext convergence compatibility facade: scope resolution moves behind the application boundary; deletion is gated on zero production callers"
 )]
@@ -551,8 +553,95 @@ pub fn resolve_exact_root_scope(
     project_root: &Path,
     project_id: &ProjectId,
 ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
-    crate::daemon::project_open_owners::resolved_scope_for_project(project_root, project_id)
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+    #[allow(deprecated)] // exact-root special case of the consolidated facade
+    let scope = resolve_registered_root_scope(project_root, project_root, project_id);
+    scope
+}
+
+/// Resolves the exact transport-neutral scope for one already-authorized
+/// registered project and the root the call will actually serve.
+///
+/// This is the single scope-resolution path behind the root facade: every
+/// query-facing surface (CLI, MCP, dashboard) converges here instead of
+/// re-implementing canonicalization guards, sibling-root authorization, or
+/// digest revalidation. `registered_root` is the registry's canonical root
+/// for the authorized project; `requested_root` is the worktree root the call
+/// will serve — the registered root, a path inside it, or a linked worktree
+/// of the same repository. Repository/worktree/reference identity itself
+/// stays with the daemon-owned authority; this facade only guards the
+/// crossing and delegates.
+///
+/// Every failure is explicit and fails closed: a relative requested root
+/// (there is no CWD fallback), a root that cannot be canonicalized, an
+/// unauthorized sibling root naming a different repository, an identity the
+/// daemon-owned authority cannot resolve, or a resolved scope whose digest
+/// does not match its fields.
+#[deprecated(
+    note = "V2 RequestContext convergence compatibility facade: scope resolution moves behind the application boundary; deletion is gated on zero production callers"
+)]
+pub fn resolve_registered_root_scope(
+    registered_root: &Path,
+    requested_root: &Path,
+    project_id: &ProjectId,
+) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
+    if !requested_root.is_absolute() {
+        return Err(ApplicationScopeError::RelativeRoot {
+            requested_root: requested_root.display().to_string(),
+        });
+    }
+    if !registered_root.is_absolute() {
+        return Err(ApplicationScopeError::Resolution(format!(
+            "registered root '{}' is not absolute",
+            registered_root.display()
+        )));
+    }
+    let registered_root = registered_root.canonicalize().map_err(|error| {
+        ApplicationScopeError::Resolution(format!(
+            "registered root '{}' could not be canonicalized: {error}",
+            registered_root.display()
+        ))
+    })?;
+    let requested_root = requested_root.canonicalize().map_err(|error| {
+        ApplicationScopeError::Resolution(format!(
+            "requested root '{}' could not be canonicalized: {error}",
+            requested_root.display()
+        ))
+    })?;
+    // A requested root at or inside the registered canonical root names the
+    // registered worktree itself, so the scope anchors to the canonical root.
+    // A requested root outside it is authorized only as the same repository
+    // (a linked worktree shares the git common dir); anything else is an
+    // unauthorized sibling root and fails closed.
+    let scope_root =
+        if requested_root == registered_root || requested_root.starts_with(&registered_root) {
+            registered_root
+        } else {
+            let registered_repository = repository_id_for_root(&registered_root)?;
+            let requested_repository = repository_id_for_root(&requested_root)?;
+            if registered_repository != requested_repository {
+                return Err(ApplicationScopeError::UnauthorizedSiblingRoot {
+                    registered_root: registered_root.display().to_string(),
+                    requested_root: requested_root.display().to_string(),
+                });
+            }
+            requested_root
+        };
+    let scope =
+        crate::daemon::project_open_owners::resolved_scope_for_project(&scope_root, project_id)
+            .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
+    // A scope whose digest does not match its fields is stale or tampered and
+    // must never cross the boundary.
+    scope
+        .validate()
+        .map_err(|error| ApplicationScopeError::InconsistentScope(error.to_string()))?;
+    Ok(scope)
+}
+
+fn repository_id_for_root(
+    root: &Path,
+) -> Result<tracedecay_domain::RepositoryId, ApplicationScopeError> {
+    crate::daemon::code_index_scheduler::identity::repository_id_for(root)
+        .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))
 }
 
 /// The explicit failure states when the root orchestration context crosses
@@ -572,6 +661,27 @@ pub enum ApplicationScopeError {
     /// The application contract rejected the resolved scope, grant binding,
     /// or boundary adapter output.
     Contract(String),
+    /// The requested root is not absolute; resolving it against the process
+    /// CWD would be the CWD fallback the plan forbids.
+    RelativeRoot {
+        /// The offending requested root.
+        requested_root: String,
+    },
+    /// The requested root lives outside the registered canonical root and
+    /// belongs to a different repository (a linked worktree of the same
+    /// repository remains authorized; an unrelated sibling root is not).
+    UnauthorizedSiblingRoot {
+        /// The registered canonical root.
+        registered_root: String,
+        /// The offending requested root.
+        requested_root: String,
+    },
+    /// A root could not be canonicalized or an identity could not be derived
+    /// for it.
+    Resolution(String),
+    /// The resolved scope failed its own validation; a stale or tampered
+    /// digest must never cross the boundary.
+    InconsistentScope(String),
 }
 
 impl fmt::Display for ApplicationScopeError {
@@ -591,6 +701,24 @@ impl fmt::Display for ApplicationScopeError {
                     "application contract rejected the boundary crossing: {message}"
                 )
             }
+            Self::RelativeRoot { requested_root } => write!(
+                formatter,
+                "requested root '{requested_root}' is not absolute; scope resolution fails closed without a CWD fallback"
+            ),
+            Self::UnauthorizedSiblingRoot {
+                registered_root,
+                requested_root,
+            } => write!(
+                formatter,
+                "requested root '{requested_root}' resolves outside registered root '{registered_root}' and names a different repository; refusing to serve a sibling root implicitly"
+            ),
+            Self::Resolution(message) => {
+                write!(formatter, "application scope resolution failed: {message}")
+            }
+            Self::InconsistentScope(message) => write!(
+                formatter,
+                "resolved scope failed validation and must not cross the boundary: {message}"
+            ),
         }
     }
 }

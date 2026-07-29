@@ -8,20 +8,19 @@
 //!
 //! Query-facing tool entry points resolve their project scope ONCE, through
 //! the already-authorized registry context, into the transport-neutral
-//! `tracedecay_application::ResolvedScope`. Every failure state is explicit:
-//! a CWD-relative root, a non-canonical registry identity, an unauthorized
-//! sibling root, or an inconsistent scope digest fails closed — the MCP
-//! surface never substitutes another project.
-//!
-//! CONSOLIDATION-CANDIDATE: align with the slice-1 root-façade adapter
-//! (`crate::application::context::resolve_exact_root_scope`). This module is
-//! deliberately small and pure so it can be extracted behind the application
-//! boundary when that boundary owns scope resolution; until then it crosses
-//! through the deprecated root façade exactly like the CLI surface does.
+//! `tracedecay_application::ResolvedScope`. The resolution itself is the
+//! single consolidated path behind the root façade
+//! (`crate::application::context::resolve_registered_root_scope`); this module
+//! only adapts the registry context into that path and preserves the MCP
+//! error taxonomy. Every failure state stays explicit: a CWD-relative root, a
+//! non-canonical registry identity, an unauthorized sibling root, or an
+//! inconsistent scope digest fails closed — the MCP surface never substitutes
+//! another project.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::application::context::ApplicationScopeError;
 use crate::global_db::ProjectRegistryContext;
 use crate::mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
 
@@ -109,83 +108,54 @@ impl fmt::Display for QueryScopeError {
 
 impl std::error::Error for QueryScopeError {}
 
+impl From<ApplicationScopeError> for QueryScopeError {
+    fn from(error: ApplicationScopeError) -> Self {
+        match error {
+            ApplicationScopeError::RelativeRoot { requested_root } => {
+                Self::RelativeRoot { requested_root }
+            }
+            ApplicationScopeError::UnauthorizedSiblingRoot {
+                registered_root,
+                requested_root,
+            } => Self::UnauthorizedSiblingRoot {
+                registered_root,
+                requested_root,
+            },
+            ApplicationScopeError::InconsistentScope(message) => Self::InconsistentScope(message),
+            other => Self::Resolution(other.to_string()),
+        }
+    }
+}
+
 /// Resolves the exact application scope for one already-authorized registry
 /// context and requested root.
 ///
 /// `owner` is the registry authority's context for the selected project;
 /// `requested_root` is the worktree root the call will actually serve (the
 /// registered root, a path inside it, or a linked worktree of the same
-/// repository). The resolution fails closed rather than falling back to the
-/// CWD, another registered project, or a sibling repository.
+/// repository). The guards, the daemon-owned identity delegation, and the
+/// digest revalidation all live in the single root-façade path; the
+/// resolution fails closed rather than falling back to the CWD, another
+/// registered project, or a sibling repository.
 pub(crate) fn resolve_query_scope(
     owner: &ProjectRegistryContext,
     requested_root: &Path,
 ) -> Result<tracedecay_application::ResolvedScope, QueryScopeError> {
-    if !requested_root.is_absolute() {
-        return Err(QueryScopeError::RelativeRoot {
-            requested_root: requested_root.display().to_string(),
-        });
-    }
     let project_id =
         tracedecay_domain::ProjectId::new(owner.project.project_id.clone()).map_err(|_| {
             QueryScopeError::NonCanonicalProjectId {
                 project_id: owner.project.project_id.clone(),
             }
         })?;
-    let registered_root = PathBuf::from(&owner.project.canonical_root);
-    if !registered_root.is_absolute() {
-        return Err(QueryScopeError::Resolution(format!(
-            "registered root '{}' is not absolute",
-            registered_root.display()
-        )));
-    }
-    let registered_root = registered_root.canonicalize().map_err(|error| {
-        QueryScopeError::Resolution(format!(
-            "registered root '{}' could not be canonicalized: {error}",
-            registered_root.display()
-        ))
-    })?;
-    let requested_root = requested_root.canonicalize().map_err(|error| {
-        QueryScopeError::Resolution(format!(
-            "requested root '{}' could not be canonicalized: {error}",
-            requested_root.display()
-        ))
-    })?;
-    // A requested root at or inside the registered canonical root names the
-    // registered worktree itself, so the scope anchors to the canonical root.
-    // A requested root outside it is authorized only as the same repository
-    // (a linked worktree shares the git common dir); anything else is an
-    // unauthorized sibling root and fails closed.
-    let scope_root =
-        if requested_root == registered_root || requested_root.starts_with(&registered_root) {
-            registered_root
-        } else {
-            let registered_repository = repository_id_for_root(&registered_root)?;
-            let requested_repository = repository_id_for_root(&requested_root)?;
-            if registered_repository != requested_repository {
-                return Err(QueryScopeError::UnauthorizedSiblingRoot {
-                    registered_root: owner.project.canonical_root.clone(),
-                    requested_root: requested_root.display().to_string(),
-                });
-            }
-            requested_root
-        };
     #[allow(deprecated)]
-    // CONSOLIDATION-CANDIDATE: cross through the slice-1 root façade until the
-    // application boundary owns scope resolution.
-    let scope = crate::application::context::resolve_exact_root_scope(&scope_root, &project_id)
-        .map_err(|error| QueryScopeError::Resolution(error.to_string()))?;
-    // A scope whose digest does not match its fields is stale or tampered and
-    // must never cross the boundary.
-    scope
-        .validate()
-        .map_err(|error| QueryScopeError::InconsistentScope(error.to_string()))?;
-    Ok(scope)
-}
-
-fn repository_id_for_root(root: &Path) -> Result<tracedecay_domain::RepositoryId, QueryScopeError> {
-    crate::daemon::code_index_scheduler::identity::repository_id_for(root)
-        .map_err(|error| QueryScopeError::Resolution(error.to_string()))
+    // the MCP surface crosses through the deprecated root façade until the
+    // application boundary owns scope resolution
+    let resolved = crate::application::context::resolve_registered_root_scope(
+        Path::new(&owner.project.canonical_root),
+        requested_root,
+        &project_id,
+    );
+    resolved.map_err(QueryScopeError::from)
 }
 
 #[cfg(test)]
