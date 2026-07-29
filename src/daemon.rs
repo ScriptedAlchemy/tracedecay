@@ -4751,6 +4751,18 @@ async fn production_project_server(
             resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
         }
+        let source_edit_mutation_ready = if project_database_is_read_only {
+            None
+        } else {
+            Some(
+                project_open_owners::install_project_open_source_edit_preview_owner(
+                    resolved.as_ref(),
+                    canonical_project_path,
+                    &project_id,
+                )
+                .await?,
+            )
+        };
         // The constructed server already owns the exact graph, configuration,
         // session authorities, and fail-closed late-bound capability slots.
         // Publish that core now so lexical/graph/search reads can serve while
@@ -4796,6 +4808,8 @@ async fn production_project_server(
                 canonical_project_path,
                 &project_id,
                 resolved.as_ref(),
+                source_edit_mutation_ready
+                    .expect("writable projects install source edit preview authority"),
             )
             .await?;
             mount_http_application_router(
