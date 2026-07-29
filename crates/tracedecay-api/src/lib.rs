@@ -11,9 +11,12 @@
 //!
 #![forbid(unsafe_code)]
 
+pub mod configuration;
 pub mod doctor;
+pub mod feedback;
 mod http;
 pub mod read_model;
+pub mod remediation;
 mod sse;
 
 use serde::Serialize;

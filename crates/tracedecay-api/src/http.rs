@@ -686,12 +686,7 @@ fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation>
 }
 
 fn parse_feedback_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    match operation {
-        "get" => Some(HttpApplicationOperation::FeedbackGet),
-        "expand" => Some(HttpApplicationOperation::FeedbackExpand),
-        "list" => Some(HttpApplicationOperation::FeedbackList),
-        _ => None,
-    }
+    crate::feedback::feedback_read_operation(operation)
 }
 
 async fn feedback_read<O>(
