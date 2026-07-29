@@ -21,7 +21,9 @@
 
 pub mod durability;
 pub mod final_v2;
+pub mod final_v2_executor;
 pub mod inventory;
 pub mod manifest;
 
 pub use final_v2::*;
+pub use final_v2_executor::*;
