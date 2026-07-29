@@ -270,7 +270,7 @@ impl McpServer {
         let request = BackgroundRefreshRequest {
             graph: Arc::clone(&cg),
             project_root: cg.project_root().to_path_buf(),
-            full_sync_escalation_files: 0,
+            full_sync_escalation_files: self.sync_config.full_sync_escalation_files,
         };
         match refresh(request).await {
             Ok(Some(fresh)) => {

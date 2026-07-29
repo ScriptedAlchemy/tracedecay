@@ -114,6 +114,10 @@ pub(super) fn def_runtime() -> ToolDefinition {
                 "session_ingest_health": {
                     "type": "boolean",
                     "description": "Include Cursor transcript-ingest health from the daemon-retained project session authority (default: false)"
+                },
+                "startup_health": {
+                    "type": "boolean",
+                    "description": "Return only daemon-mounted database integrity telemetry for post-update startup validation (default: false)"
                 }
             }
         }),
