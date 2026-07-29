@@ -125,6 +125,20 @@ export function GraphCanvas({
   /** Bumped whenever a collapse killed a live renderer, so the mount effect can
    * rebuild even when the box it measures never appeared to change. */
   const [teardownGeneration, setTeardownGeneration] = useState(0);
+  /**
+   * The topology whose layout engine failed to load, if one did.
+   *
+   * An emergent field fetches ForceAtlas2 on demand, so for the first time
+   * this canvas has a way to fail that is neither "no context" nor "too
+   * large". Drawing the seed circle instead would be a lie — a ring of nodes
+   * is a composition, and the reader would read meaning into it — so the
+   * failure is stated. Held as the topology it happened to rather than a
+   * boolean, so a caller handing over different nodes gets a fresh attempt
+   * without any reset of its own.
+   */
+  const [engineFailedFor, setEngineFailedFor] = useState<readonly GraphCanvasNode[] | null>(
+    null,
+  );
 
   /**
    * Attach the observer as the container mounts rather than in an effect: an
@@ -244,6 +258,8 @@ export function GraphCanvas({
     // it loses it.
     if (!hasBox) return;
 
+    let cancelled = false;
+    let detach: (() => void) | null = null;
     const request: SceneRequest = {
       container,
       nodes,
@@ -256,20 +272,39 @@ export function GraphCanvas({
       onSelect: (id) => onSelectRef.current?.(id),
       isReduced: () => reducedRef.current,
     };
-    // The coordinates are either the caller's measurement or something the
-    // layout engine has to discover; nothing else about the two paths differs.
-    const scene = isMeasuredField(nodes)
-      ? buildMeasuredScene(request)
-      : buildEmergentScene(request);
-    sceneRef.current = scene;
-    const detach = (): void => {
-      scene.teardown();
-      if (sceneRef.current === scene) sceneRef.current = null;
-      if (teardownRef.current === detach) teardownRef.current = null;
+    const install = (scene: GraphScene): void => {
+      sceneRef.current = scene;
+      detach = () => {
+        scene.teardown();
+        if (sceneRef.current === scene) sceneRef.current = null;
+        if (teardownRef.current === detach) teardownRef.current = null;
+      };
+      teardownRef.current = detach;
     };
-    teardownRef.current = detach;
 
-    return detach;
+    if (isMeasuredField(nodes)) {
+      // Synchronous, and reaching no layout engine at all: the coordinates are
+      // already the caller's measurement.
+      install(buildMeasuredScene(request));
+    } else {
+      // Fetches a layout engine before it can compose, so the cleanup below
+      // has to be able to reach a build that is still in flight: cancelling
+      // drops the resolved module instead of installing a scene into a
+      // container this effect no longer owns.
+      void buildEmergentScene(request, () => cancelled).then(
+        (scene) => {
+          if (scene) install(scene);
+        },
+        () => {
+          if (!cancelled) setEngineFailedFor(nodes);
+        },
+      );
+    }
+
+    return () => {
+      cancelled = true;
+      detach?.();
+    };
   }, [nodes, edges, extent, hasBox, teardownGeneration]);
 
   /**
@@ -325,6 +360,15 @@ export function GraphCanvas({
         {nodes.length.toLocaleString()} symbols exceeds this renderer's tier —
         the GPU canvas (cosmos.gl adapter) owns brains this large; narrow the
         neighborhood to explore here
+      </GraphUnavailable>
+    );
+  }
+  if (engineFailedFor === nodes) {
+    return (
+      <GraphUnavailable>
+        the force layout could not be loaded, so the{' '}
+        {nodes.length.toLocaleString()}-symbol graph canvas has no positions to
+        draw — the symbol list carries the same relations
       </GraphUnavailable>
     );
   }
@@ -388,8 +432,8 @@ export function GraphCanvas({
   );
 }
 
-/** A field that could NOT be drawn — no WebGL context, or a graph past this
- * renderer's tier.
+/** A field that could NOT be drawn — no WebGL context, no layout engine, or a
+ * graph past this renderer's tier.
  *
  * Distinct from an empty field on purpose, and the distinction has to be visible
  * rather than only readable: "nothing is here" and "this could not be rendered"

@@ -112,6 +112,15 @@ function stubWebGl(available: boolean) {
   });
 }
 
+/** Give anything the canvas started asynchronously — an emergent field loads
+ * its layout engine on demand — its turn to run, so an assertion that nothing
+ * was built means never rather than not yet. */
+async function flushPendingWork(): Promise<void> {
+  for (let tick = 0; tick < 3; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 /** The measured box every element reports, mutable so a test can take it away
  * the way navigating off a workspace does. */
 const box = { width: 640, height: 320 };
@@ -168,11 +177,16 @@ describe('GraphCanvas', () => {
       for (const callback of [...observerCallbacks]) callback();
     }
 
-    it('does not build a renderer for a container that has no box', () => {
+    it('does not build a renderer for a container that has no box', async () => {
       box.width = 0;
       box.height = 0;
 
       expect(() => render(<GraphCanvas nodes={NODES} edges={[]} />)).not.toThrow();
+      expect(sigmaState.constructCount).toBe(0);
+      // An emergent field now fetches its layout engine before composing, so
+      // "no renderer" has to outlast that boundary as well: the guard is on
+      // whether a box exists, never on whether the engine has answered yet.
+      await flushPendingWork();
       expect(sigmaState.constructCount).toBe(0);
     });
 
@@ -361,7 +375,7 @@ describe('GraphCanvas', () => {
     await waitFor(() => expect(sigmaState.refreshCount).toBeGreaterThan(before));
   });
 
-  it('states the missing WebGL context instead of constructing a renderer that throws', () => {
+  it('states the missing WebGL context instead of constructing a renderer that throws', async () => {
     stubWebGl(false);
     const { getByText } = render(
       <GraphCanvas
@@ -372,6 +386,10 @@ describe('GraphCanvas', () => {
     expect(getByText(/no WebGL context/i)).toBeTruthy();
     // Never constructed: Sigma throws without a context, and that exception
     // would take the whole workspace route down through the error boundary.
+    // Held across the layout engine's async boundary too — a renderer that
+    // merely arrives late is still a renderer that must not exist.
+    expect(sigmaState.nodeReducer).toBeUndefined();
+    await flushPendingWork();
     expect(sigmaState.nodeReducer).toBeUndefined();
   });
 });

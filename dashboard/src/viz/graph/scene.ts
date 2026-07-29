@@ -1,7 +1,10 @@
-import forceAtlas2 from 'graphology-layout-forceatlas2';
 import { cssColorToRgb, type ActivationField } from './activation.ts';
 import { createActivationOverlay } from './activationOverlay.ts';
-import { frameEmergentField, settleEmergentField } from './emergentField.ts';
+import {
+  frameEmergentField,
+  loadForceAtlas2,
+  settleEmergentField,
+} from './emergentField.ts';
 import { kindColor } from './kindColor.ts';
 import { buildDendrites, prepareField, type FieldFrame, type PreparedField } from './layout.ts';
 import { frameMeasuredField } from './measuredField.ts';
@@ -15,9 +18,9 @@ import type { FieldExtent, GraphCanvasEdge, GraphCanvasNode } from './types.ts';
  *
  * The two builders below are the field's two paths, and they differ in exactly
  * one thing: whether the coordinates were measured by the caller or have to be
- * discovered. A measured field never reaches the layout engine at all, because
- * running a force pass over placed coordinates would destroy the measurement
- * they were carrying.
+ * discovered. A measured field is composed synchronously and never reaches the
+ * layout engine at all; an emergent one waits for that engine before a single
+ * pixel is drawn, so the reader never sees the seed circle it starts from.
  */
 export interface GraphScene {
   /** Repaint the current composition. Static: no loop is started. */
@@ -49,10 +52,22 @@ export function buildMeasuredScene(request: SceneRequest): GraphScene {
   return compose(request, theme, prepared, frameMeasuredField(prepared, request.extent));
 }
 
-/** Build the scene for a field whose shape is the finding: settle it under
- * ForceAtlas2, compose its components, and frame the composed result. */
-export function buildEmergentScene(request: SceneRequest): GraphScene {
+/**
+ * Build the scene for a field whose shape is the finding.
+ *
+ * The graph is constructed first, then the layout engine is loaded, and only
+ * then is anything drawn: Sigma is not constructed until the coordinates are
+ * final, so there is no frame in which the seed circle is on screen. Resolves
+ * to `null` when the caller cancelled while the engine was in flight — the
+ * resolved module is dropped rather than handed to a component that is gone.
+ */
+export async function buildEmergentScene(
+  request: SceneRequest,
+  cancelled: () => boolean,
+): Promise<GraphScene | null> {
   const { theme, prepared } = prepare(request);
+  const forceAtlas2 = await loadForceAtlas2();
+  if (cancelled()) return null;
   settleEmergentField(prepared, forceAtlas2);
   return compose(request, theme, prepared, frameEmergentField(prepared));
 }

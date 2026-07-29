@@ -5,14 +5,32 @@ import { nodeHullFrame, type FieldFrame, type PreparedField } from './layout.ts'
  * The emergent path: a field whose SHAPE is the finding, settled by
  * ForceAtlas2 and then composed so its components read as one constellation.
  *
- * Everything here is pure: the engine arrives as an argument, so the settle
- * and the composition can be exercised without a renderer, a document, or the
- * real library.
+ * The layout engine is reached through {@link loadForceAtlas2} and nowhere
+ * else, so a measured field — which never calls into this module — cannot pull
+ * it in. Everything below the loader is pure: the engine arrives as an
+ * argument, so the settle and the composition can be exercised without a
+ * renderer, a document, or the real library.
  */
 
 /** The synchronous ForceAtlas2 entry point, exactly as the package types it.
  * Written as a type-only `import()` so naming it costs nothing at runtime. */
 export type ForceAtlas2Module = typeof import('graphology-layout-forceatlas2').default;
+
+/**
+ * Load the layout engine.
+ *
+ * The repository rule is that imports belong at the top of a module; this is
+ * the documented exception, taken deliberately for code-splitting. ForceAtlas2
+ * is a large dependency that only an emergent field ever runs, and a static
+ * import would place it in the chunk of every field — including the measured
+ * ones, whose coordinates the engine must never be allowed to touch. Guarding
+ * the *call* was not enough: the cost of a static import is paid at load, not
+ * at call.
+ */
+export async function loadForceAtlas2(): Promise<ForceAtlas2Module> {
+  const engine = await import('graphology-layout-forceatlas2');
+  return engine.default;
+}
 
 /**
  * Settle the field, then compose it. The two are one step: the composure pass
