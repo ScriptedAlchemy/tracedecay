@@ -111,8 +111,9 @@ pub use handlers::{
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use memory::{
-    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1, DerivedMemoryRepairPort,
-    DerivedMemoryRepairStatsV1, converge_derived_memory,
+    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1,
+    DerivedMemoryFeedbackHistoryRepairV1, DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1,
+    converge_derived_memory,
 };
 pub use observability::*;
 pub use policy::{
