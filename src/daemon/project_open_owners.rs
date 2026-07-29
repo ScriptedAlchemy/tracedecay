@@ -871,6 +871,14 @@ pub(crate) async fn register_project_open_production_owners(
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
     let graph = server.cg().await;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "graph_snapshot_acquired",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
     let database = graph.db().clone();
     let session_db = server
         .project_session_db()
@@ -883,6 +891,14 @@ pub(crate) async fn register_project_open_production_owners(
             message: format!("project-open resolved scope denied: {error}"),
         }
     })?;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "owner_scope_resolved",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
     let configuration = graph
         .configuration_runtime()
         .client()
