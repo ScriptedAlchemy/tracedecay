@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::Value;
 
 use crate::sessions::SessionMessageRecord;
+pub use tracedecay_sessions::{NewRows, StoredCursor, TranscriptIngestStats};
 
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
@@ -52,47 +53,6 @@ impl SqliteReadConn {
 /// Generic per-transcript backlog threshold for warning that automatic
 /// session transcript catch-up may not drain recall transcripts quickly enough.
 pub const SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES: u64 = 2 * 1024 * 1024;
-
-/// Counters returned by an ingestion pass.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct TranscriptIngestStats {
-    pub sessions_upserted: u64,
-    pub messages_upserted: u64,
-}
-
-impl TranscriptIngestStats {
-    /// Accumulate another pass's counters into this one.
-    #[must_use]
-    pub fn merge(self, other: Self) -> Self {
-        Self {
-            sessions_upserted: self
-                .sessions_upserted
-                .saturating_add(other.sessions_upserted),
-            messages_upserted: self
-                .messages_upserted
-                .saturating_add(other.messages_upserted),
-        }
-    }
-}
-
-/// The incremental position persisted between ingestion runs.
-///
-/// `position` is interpreted per cursor kind: a byte offset (`ByteOffset`), a
-/// stable 64-bit content hash prefix (`ContentHash`), or a last-seen `rowid`
-/// (`RowCursor`). `mtime` is the file modification time in epoch seconds, used
-/// to detect rewrites and to skip unchanged files cheaply.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct StoredCursor {
-    pub position: u64,
-    pub mtime: u64,
-    pub file_id: u64,
-}
-
-/// Mapped rows read past the stored cursor, plus the advanced cursor.
-pub struct NewRows<T> {
-    pub items: Vec<T>,
-    pub new_cursor: StoredCursor,
-}
 
 /// **`RowCursor`** reader for SQLite-backed transcript stores (Zed, Copilot CLI
 /// `session-store.db`).

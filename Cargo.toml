@@ -11,6 +11,7 @@ members = [
     "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
     "crates/tracedecay-query",
+    "crates/tracedecay-sessions",
     "crates/tracedecay-rusqlite-parity",
     "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-sqlite-parity-protocol",
@@ -268,6 +269,7 @@ tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
+tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0" }
 tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
 tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
