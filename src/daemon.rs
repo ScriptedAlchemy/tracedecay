@@ -5265,17 +5265,47 @@ async fn production_project_server(
                     log_full_setup_phase("independent_owners_registered");
                     Some(state)
                 };
-                invocation
-                    .mount_code_index(
-                        canonical_project_path,
-                        code_index_store_root,
-                        Some(&semantic_runtime),
-                        Some(semantic_database),
-                        semantic_lifecycle,
-                        Some(*semantic_resources),
-                    )
-                    .await?;
-                log_full_setup_phase("code_index_mounted");
+                let code_index_invocation = invocation.clone();
+                let code_index_project = canonical_project_path.to_path_buf();
+                let code_index_semantic_runtime = semantic_runtime.clone();
+                let code_index_semantic_lifecycle = semantic_lifecycle.clone();
+                let code_index_semantic_resources = *semantic_resources;
+                let code_index_route_registered = Arc::clone(&route_registered);
+                let code_index_cancellation = cancellation.clone();
+                tokio::spawn(async move {
+                    if code_index_cancellation.is_cancelled()
+                        || !code_index_route_registered.load(Ordering::Acquire)
+                    {
+                        return;
+                    }
+                    let started = Instant::now();
+                    let outcome = code_index_invocation
+                        .mount_code_index(
+                            &code_index_project,
+                            code_index_store_root,
+                            Some(&code_index_semantic_runtime),
+                            Some(semantic_database),
+                            code_index_semantic_lifecycle,
+                            Some(code_index_semantic_resources),
+                        )
+                        .await;
+                    let mut fields = vec![
+                        ("project", code_index_project.display().to_string()),
+                        (
+                            "elapsed_ms",
+                            started.elapsed().as_millis().to_string(),
+                        ),
+                    ];
+                    match outcome {
+                        Ok(()) => fields.push(("phase", "code_index_mounted".to_owned())),
+                        Err(error) => {
+                            fields.push(("phase", "code_index_mount_degraded".to_owned()));
+                            fields.push(("error", error.to_string()));
+                        }
+                    }
+                    log_daemon_event("project_open_phase", &fields);
+                });
+                log_full_setup_phase("code_index_mount_scheduled");
                 project_open_cancellation_checkpoint(cancellation)?;
                 match invocation
                     .semantic_runtime_registrar()
