@@ -4,9 +4,9 @@ use std::sync::Arc;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId, RepositoryId,
-    RetrievalAnchorId, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
-    ScoreDomainId, SourceFreshness, SourceOccurrenceId,
+    ExtractionAdmittedChunkV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
+    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
 };
 
 use super::{
@@ -17,8 +17,6 @@ use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
     RetrievalPortError,
 };
-use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
-
 const BM25_K1_MILLIS: u64 = 1_200;
 const BM25_B_MILLIS: u64 = 750;
 const FUZZY_SCORE_MILLIS: u64 = 500;
@@ -237,15 +235,18 @@ impl CodeLexicalProjectionAdapterV1 {
         Self::new_inner(metadata, chunks, false)
     }
 
-    pub fn new_admitted(
+    pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
-        chunks: Vec<ExtractionAdmittedCodeSearchChunkV1>,
-    ) -> Result<Self, RetrievalPortError> {
+        chunks: Vec<C>,
+    ) -> Result<Self, RetrievalPortError>
+    where
+        C: ExtractionAdmittedChunkV1,
+    {
         Self::new_inner(
             metadata,
             chunks
                 .into_iter()
-                .map(ExtractionAdmittedCodeSearchChunkV1::into_chunk)
+                .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
             true,
         )
