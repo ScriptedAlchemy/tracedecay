@@ -316,40 +316,100 @@ pub enum ClineFamilyProviderV1 {
     Kilo,
 }
 
+/// Admission recorded by the checked-in Cline-family evidence packet for one
+/// exact provider. Only `Verified` is a packaged-route claim; a documented
+/// protocol that was never captured locally stays unverified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClineFamilyAdmissionV1 {
+    Verified,
+    DocumentedUnverified,
+    Unavailable,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ClineFamilyEvidenceV1 {
     pub provider: ClineFamilyProviderV1,
     pub registration: HostRegistrationEvidenceV1,
+    pub evidence_packet_path: &'static str,
+    pub evidence_packet_digest: [u8; 32],
     pub transcript_manifest_path: &'static str,
     pub transcript_manifest_digest: [u8; 32],
+    pub admission: ClineFamilyAdmissionV1,
+    /// Verbatim reason recorded by the packet for this exact provider. It is
+    /// `None` only for a verified route.
+    pub unavailable_reason: Option<String>,
     pub edit: HostCapabilityStateV1,
     pub stop: HostCapabilityStateV1,
 }
 
+const CLINE_FAMILY_EVIDENCE_PACKET_PATH: &str =
+    "crates/tracedecay-hooks/fixtures/host_events/cline-family.json";
+const CLINE_FAMILY_EVIDENCE_PACKET: &[u8] =
+    include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/cline-family.json");
+const CLINE_FAMILY_TRANSCRIPT_MANIFEST_PATH: &str =
+    "tests/fixtures/transcript_golden/cline_like/manifest.json";
+const CLINE_FAMILY_TRANSCRIPT_MANIFEST: &[u8] =
+    include_bytes!("../../tests/fixtures/transcript_golden/cline_like/manifest.json");
+
+#[derive(Deserialize)]
+struct ClineFamilyEvidencePacketV1 {
+    providers: Vec<ClineFamilyPacketProviderV1>,
+}
+
+#[derive(Deserialize)]
+struct ClineFamilyPacketProviderV1 {
+    provider: String,
+    host_hook_admission: ClineFamilyAdmissionV1,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Read one provider's admission straight from the checked-in evidence packet.
+/// Family resemblance, an adapter source file, or a shared configuration shape
+/// never substitutes for the packet: a provider the packet does not admit as
+/// `Verified` is reported unavailable with the packet's own exact reason.
 pub fn cline_family_evidence(provider: ClineFamilyProviderV1) -> Option<ClineFamilyEvidenceV1> {
     use HostCapabilityStateV1::{Supported, Unavailable};
     use HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing;
 
-    let evidence_ref = match provider {
-        ClineFamilyProviderV1::Cline => "src/agents/cline.rs",
-        ClineFamilyProviderV1::RooCode => "src/agents/roo_code.rs",
-        ClineFamilyProviderV1::Kilo => "src/agents/kilo.rs",
+    let packet_provider = match provider {
+        ClineFamilyProviderV1::Cline => "cline",
+        ClineFamilyProviderV1::RooCode => "roo-code",
+        ClineFamilyProviderV1::Kilo => "kilo",
     };
-    let transcript_manifest_path = "tests/fixtures/transcript_golden/cline_like/manifest.json";
-    let manifest =
-        include_bytes!("../../tests/fixtures/transcript_golden/cline_like/manifest.json");
+    let packet =
+        serde_json::from_slice::<ClineFamilyEvidencePacketV1>(CLINE_FAMILY_EVIDENCE_PACKET).ok()?;
+    let entry = packet
+        .providers
+        .into_iter()
+        .find(|entry| entry.provider == packet_provider)?;
+    let verified = entry.host_hook_admission == ClineFamilyAdmissionV1::Verified;
+    let route_state = if verified {
+        Supported
+    } else {
+        Unavailable(CheckedInEvidenceMissing)
+    };
     Some(ClineFamilyEvidenceV1 {
         provider,
         registration: HostRegistrationEvidenceV1 {
             route: HostRegistrationRouteV1::Mcp,
-            state: Supported,
-            evidence_ref,
+            state: route_state,
+            evidence_ref: CLINE_FAMILY_EVIDENCE_PACKET_PATH,
             starts_analyzer: false,
         },
-        transcript_manifest_path,
-        transcript_manifest_digest: Sha256::digest(manifest).into(),
-        edit: Unavailable(CheckedInEvidenceMissing),
-        stop: Unavailable(CheckedInEvidenceMissing),
+        evidence_packet_path: CLINE_FAMILY_EVIDENCE_PACKET_PATH,
+        evidence_packet_digest: Sha256::digest(CLINE_FAMILY_EVIDENCE_PACKET).into(),
+        transcript_manifest_path: CLINE_FAMILY_TRANSCRIPT_MANIFEST_PATH,
+        transcript_manifest_digest: Sha256::digest(CLINE_FAMILY_TRANSCRIPT_MANIFEST).into(),
+        admission: entry.host_hook_admission,
+        unavailable_reason: (!verified).then(|| {
+            entry
+                .reason
+                .unwrap_or_else(|| "no_reason_recorded_by_evidence_packet".to_string())
+        }),
+        edit: route_state,
+        stop: route_state,
     })
 }
 
@@ -1136,13 +1196,16 @@ pub struct HostComponentSetLifecyclePreviewV1 {
     pub current_registration_revision: [u8; 32],
     pub artifact_state_revision: [u8; 32],
     pub component_plans: Vec<HostBundleMutationPlanV1>,
+    /// Third-party extensions the registration adapter found already claiming
+    /// a surface this component set would register, ordered by extension id.
+    pub competing_extension_claims: Vec<CompetingHostExtensionClaimV1>,
     pub confirmation_required: bool,
 }
 
 /// A third-party host extension claiming a surface `TraceDecay` would register.
 /// The digest points to bounded discovery evidence; raw host config is never
 /// retained in lifecycle requests or receipts.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CompetingHostExtensionClaimV1 {
     pub extension_id: String,
     pub capability: HostCapabilityV1,
@@ -1308,9 +1371,22 @@ pub struct HostBundleComponentDoctorResultV1 {
     pub repair_action: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HostBundleDoctorReportV1 {
     pub components: Vec<HostBundleComponentDoctorResultV1>,
+    /// Checked-in native edit/stop conformance behind every packaged host.
+    /// It is reported even when nothing is installed, so an empty component
+    /// list never reads as "there was no host evidence to check".
+    pub native_edit_stop_conformance: Vec<HostNativeFixtureEvidenceV1>,
+}
+
+impl Default for HostBundleDoctorReportV1 {
+    fn default() -> Self {
+        Self {
+            components: Vec::new(),
+            native_edit_stop_conformance: native_host_edit_stop_conformance_evidence(),
+        }
+    }
 }
 
 /// Injected lifecycle storage boundary. The concrete no-follow writer below
@@ -1342,6 +1418,19 @@ pub trait HostComponentSetRegistrationV1 {
         _request: &HostComponentSetExecutionRequestV1,
     ) -> Result<[u8; 32], HostBundleError> {
         Ok(Sha256::digest(b"tracedecay.host-registration.none.v1").into())
+    }
+
+    /// Bounded read-only discovery of third-party extensions that already
+    /// claim a surface this component set would register. Discovery reports;
+    /// it never grants authority to disable, replace, or adopt the competing
+    /// extension. Adapters that cannot observe a host's registration surface
+    /// must refuse rather than report an empty slice.
+    fn discover_competing_extension_claims(
+        &self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+    ) -> Result<Vec<CompetingHostExtensionClaimV1>, HostBundleError> {
+        Ok(Vec::new())
     }
 
     /// Bind the adapter to the confirmed preview immediately before staging.
@@ -1522,6 +1611,7 @@ impl<'a> HostComponentSetTransactionV1<'a> {
             || current.current_registration_revision != preview.current_registration_revision
             || current.artifact_state_revision != preview.artifact_state_revision
             || current.component_plans != preview.component_plans
+            || current.competing_extension_claims != preview.competing_extension_claims
         {
             return Err(HostBundleError::StalePreview);
         }
@@ -1564,6 +1654,7 @@ struct HostComponentSetPlanDigestPayloadV1 {
     current_registration_revision: [u8; 32],
     artifact_state_revision: [u8; 32],
     component_plans: Vec<HostBundleMutationPlanV1>,
+    competing_extension_claims: Vec<CompetingHostExtensionClaimV1>,
 }
 
 #[derive(Serialize)]
@@ -1658,6 +1749,7 @@ fn component_set_plan_digest(
     current_registration_revision: [u8; 32],
     artifact_state_revision: [u8; 32],
     component_plans: &[HostBundleMutationPlanV1],
+    competing_extension_claims: &[CompetingHostExtensionClaimV1],
 ) -> Result<[u8; 32], HostBundleError> {
     let mut expected_components = request.lifecycle.expected_components.clone();
     expected_components.sort_unstable();
@@ -1679,6 +1771,7 @@ fn component_set_plan_digest(
         current_registration_revision,
         artifact_state_revision,
         component_plans,
+        competing_extension_claims: competing_extension_claims.to_vec(),
     };
     canonical_json_bytes(&payload)
         .map(|bytes| Sha256::digest(bytes).into())
@@ -1939,6 +2032,8 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
     if base_registration_revision == [0; 32] {
         return Err(HostBundleError::InvalidObservedState);
     }
+    let competing_extension_claims =
+        discovered_competing_extension_claims(component_set, &planning_request, registration)?;
     registration.preflight(component_set, &planning_request)?;
     let base_artifact_state_revision =
         component_set_artifact_state_revision(artifact_root, lifecycle_root, component_set)?;
@@ -1966,7 +2061,7 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
                 &component.manifest,
                 &component_request,
                 verifier,
-                &[],
+                &competing_extension_claims,
             )?
             .plan,
         );
@@ -1974,6 +2069,11 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
     let current_registration_revision =
         registration.current_revision(component_set, &planning_request)?;
     if current_registration_revision != base_registration_revision {
+        return Err(HostBundleError::StalePreview);
+    }
+    if discovered_competing_extension_claims(component_set, &planning_request, registration)?
+        != competing_extension_claims
+    {
         return Err(HostBundleError::StalePreview);
     }
     let current_artifact_state_revision =
@@ -1988,6 +2088,7 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
         current_registration_revision,
         artifact_state_revision,
         &component_plans,
+        &competing_extension_claims,
     )?;
     Ok(HostComponentSetLifecyclePreviewV1 {
         operation_id: request.operation_id,
@@ -1996,8 +2097,25 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
         current_registration_revision,
         artifact_state_revision,
         component_plans,
-        confirmation_required: !request.lifecycle.explicit_confirmation,
+        // A competing claim is ambiguous ownership: the operator confirms this
+        // exact plan or nothing is mutated.
+        confirmation_required: !request.lifecycle.explicit_confirmation
+            || !competing_extension_claims.is_empty(),
+        competing_extension_claims,
     })
+}
+
+/// Collect and normalise the adapter's claim discovery so preview, plan
+/// digest, and apply all compare the same canonical ordering.
+fn discovered_competing_extension_claims<R: HostComponentSetRegistrationV1>(
+    component_set: &HostComponentSetV1,
+    request: &HostComponentSetExecutionRequestV1,
+    registration: &R,
+) -> Result<Vec<CompetingHostExtensionClaimV1>, HostBundleError> {
+    let mut claims = registration.discover_competing_extension_claims(component_set, request)?;
+    claims.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
+    validate_competing_extension_claims(&claims)?;
+    Ok(claims)
 }
 
 pub fn inspect_installed_host_bundle_components_at(
@@ -2334,7 +2452,10 @@ pub fn inspect_installed_host_bundle_components_at(
             });
         }
     }
-    Ok(HostBundleDoctorReportV1 { components })
+    Ok(HostBundleDoctorReportV1 {
+        components,
+        ..HostBundleDoctorReportV1::default()
+    })
 }
 
 /// Load the newest durable aggregate receipt for one host. This is used by
