@@ -44,7 +44,6 @@
 
 mod capture;
 mod ingest;
-mod observation;
 mod sqlite;
 mod store;
 #[cfg(test)]
@@ -55,12 +54,12 @@ pub use capture::{
     capture_cursor_composer_observation,
 };
 pub use ingest::{CursorComposerSource, CursorComposerSweepOutcome, DEFAULT_COMPOSER_ENVELOPE_CAP};
+pub(crate) use sqlite::{bubble_epoch, epoch_ms_to_secs};
 #[cfg(test)]
-pub(crate) use observation::{
+pub(crate) use tracedecay_capture::cursor_composer::{
     normalize_cursor_composer_observation,
     normalize_cursor_composer_observation_with_projected_message_id,
 };
-pub(crate) use sqlite::{bubble_epoch, epoch_ms_to_secs};
 
 /// Provider id shared with the JSONL Cursor source so both land in the same
 /// per-project `sessions.db` namespace and dedupe by `(provider, message_id)`.
