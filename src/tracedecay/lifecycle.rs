@@ -912,6 +912,28 @@ impl TraceDecay {
             profile_database,
             runtime_registry,
             true,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_with_registered_configuration_deferred_post_open_health(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        store_layout: StoreLayout,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    ) -> Result<Self> {
+        Self::open_with_registered_configuration_inner(
+            project_root,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+            true,
+            true,
         )
         .await
     }
@@ -924,6 +946,7 @@ impl TraceDecay {
         profile_database: Arc<RegisteredGlobalDb>,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
         allow_corrupt_branch_repair: bool,
+        defer_post_open_health: bool,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
         let graph_scope = active_branch
@@ -1213,7 +1236,7 @@ impl TraceDecay {
         // doubles peak SQLite scratch memory without adding evidence. Ordinary
         // opens still run this retained-handle check so live-writer FTS damage
         // without a dirty marker remains detectable.
-        if !crash_preflight_healthy {
+        if !crash_preflight_healthy && !defer_post_open_health {
             match db.repair_fts_after_open().await {
                 Ok(Some(problem)) => {
                     eprintln!(
@@ -1438,6 +1461,7 @@ impl TraceDecay {
                         configuration_database,
                         profile_database,
                         runtime_registry,
+                        false,
                         false,
                     ))
                     .await;

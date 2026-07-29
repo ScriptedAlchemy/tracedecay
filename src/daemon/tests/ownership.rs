@@ -759,6 +759,58 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
     );
 }
 
+#[test]
+fn database_owner_registry_removal_retires_every_route_alias() {
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_id: Some("unhealthy".to_owned()),
+            store_root: PathBuf::from("/store/unhealthy"),
+            graph_db_path: PathBuf::from("/store/unhealthy/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    let route = |project_path: &str| ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from(project_path),
+        scope_prefix: None,
+    };
+    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
+    registry.insert_route(route("/project"), key.clone(), Arc::new(1));
+    registry.bind_route(route("/project-alias"), key.clone());
+
+    assert!(registry.remove(&key).is_some());
+    assert!(registry.get_route(&route("/project")).is_none());
+    assert!(registry.get_route(&route("/project-alias")).is_none());
+}
+
+#[test]
+fn failed_deferred_health_quarantines_only_the_exact_store_owner() {
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profile-a"),
+            global_db_path: PathBuf::from("/profile-a/global.db"),
+            project_id: Some("unhealthy".to_owned()),
+            store_root: PathBuf::from("/store/unhealthy"),
+            graph_db_path: PathBuf::from("/store/unhealthy/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    let mut other = key.clone();
+    other.owner.profile_root = PathBuf::from("/profile-b");
+    other.owner.global_db_path = PathBuf::from("/profile-b/global.db");
+    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
+    registry.insert(key.clone(), Arc::new(1));
+
+    assert!(registry.quarantine_and_remove(&key).is_some());
+    assert!(registry.requires_synchronous_health(&key));
+    assert!(!registry.requires_synchronous_health(&other));
+    registry.clear_synchronous_health(&key);
+    assert!(!registry.requires_synchronous_health(&key));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn project_rekey_cancels_stale_repair_owner_and_acquires_new_owner_once() {

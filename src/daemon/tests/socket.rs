@@ -1,5 +1,36 @@
 use super::*;
 
+#[tokio::test]
+async fn project_owner_wait_stops_when_the_client_disconnects() {
+    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let (mut transport, input, _output) = crate::mcp::transport::ChannelTransport::new();
+    drop(input);
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = DropProbe(Arc::clone(&dropped));
+    let open = async move {
+        let _probe = probe;
+        std::future::pending::<crate::errors::Result<()>>().await
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::super::await_project_owner_or_disconnect(&mut transport, open),
+    )
+    .await
+    .expect("disconnect detection must be bounded")
+    .expect("disconnect detection");
+
+    assert!(result.is_none());
+    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+}
+
 fn closed_feedback_list_request(
     request_id: &str,
     request_handle: &str,

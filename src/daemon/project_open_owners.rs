@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -616,16 +617,25 @@ fn install_project_open_source_edit_owners(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
+    mutation_ready: Arc<AtomicBool>,
 ) -> Result<()> {
     let source_edit_graph = Arc::clone(&graph);
     let source_edit_reconciliation_authorization = authorization.clone();
+    let source_edit_mutation_ready = Arc::clone(&mutation_ready);
     server
         .install_source_edit_executor(Arc::new(move |request| {
             let graph = Arc::clone(&source_edit_graph);
             let authorization = authorization.clone();
-            Box::pin(
-                async move { invoke_project_open_source_edit(graph, authorization, request).await },
-            )
+            let mutation_ready = Arc::clone(&source_edit_mutation_ready);
+            Box::pin(async move {
+                if !request.edit.dry_run() && !mutation_ready.load(Ordering::Acquire) {
+                    return Err(TraceDecayError::Config {
+                        message: "daemon-owned source edit mutation authority is warming"
+                            .to_owned(),
+                    });
+                }
+                invoke_project_open_source_edit(graph, authorization, request).await
+            })
         }))
         .map_err(|_| TraceDecayError::Config {
             message: "project-open source edit authority was already installed".to_owned(),
@@ -634,7 +644,14 @@ fn install_project_open_source_edit_owners(
         .install_source_edit_reconciliation_executor(Arc::new(move |request| {
             let graph = Arc::clone(&graph);
             let authorization = source_edit_reconciliation_authorization.clone();
+            let mutation_ready = Arc::clone(&mutation_ready);
             Box::pin(async move {
+                if !mutation_ready.load(Ordering::Acquire) {
+                    return Err(TraceDecayError::Config {
+                        message: "daemon-owned source edit reconciliation authority is warming"
+                            .to_owned(),
+                    });
+                }
                 invoke_project_open_source_edit_reconciliation(graph, authorization, request).await
             })
         }))
@@ -643,6 +660,37 @@ fn install_project_open_source_edit_owners(
                 .to_owned(),
         })?;
     Ok(())
+}
+
+pub(crate) async fn install_project_open_source_edit_preview_owner(
+    server: &McpServer,
+    project_root: &Path,
+    project_id: &str,
+) -> Result<Arc<AtomicBool>> {
+    let graph = server.cg().await;
+    let project_id =
+        ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
+            message: "project-open source edit preview requires authoritative project identity"
+                .to_owned(),
+        })?;
+    let scope = resolved_scope_for_project(project_root, &project_id).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("project-open source edit preview scope denied: {error}"),
+        }
+    })?;
+    let authorization = ProjectOpenSourceEditAuthorizationV1 {
+        project_root: project_root.to_path_buf(),
+        scope,
+        configuration: Arc::clone(graph.configuration_runtime()),
+    };
+    let mutation_ready = Arc::new(AtomicBool::new(false));
+    install_project_open_source_edit_owners(
+        server,
+        graph,
+        authorization,
+        Arc::clone(&mutation_ready),
+    )?;
+    Ok(mutation_ready)
 }
 
 #[cfg(feature = "test-transport")]
@@ -666,7 +714,12 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         scope,
         configuration: Arc::clone(graph.configuration_runtime()),
     };
-    install_project_open_source_edit_owners(server, graph, authorization)
+    install_project_open_source_edit_owners(
+        server,
+        graph,
+        authorization,
+        Arc::new(AtomicBool::new(true)),
+    )
 }
 
 fn source_edit_request_context(
@@ -809,6 +862,7 @@ pub(crate) async fn register_project_open_production_owners(
     project_root: &Path,
     project_id: &str,
     server: &McpServer,
+    source_edit_mutation_ready: Arc<AtomicBool>,
 ) -> Result<()> {
     let project_id =
         ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
@@ -863,11 +917,6 @@ pub(crate) async fn register_project_open_production_owners(
             .map_err(|error| TraceDecayError::Config {
             message: format!("project-open source access denied: {error}"),
         })?;
-    let source_edit_authorization = ProjectOpenSourceEditAuthorizationV1 {
-        project_root: project_root.to_path_buf(),
-        scope: scope.clone(),
-        configuration: Arc::clone(graph.configuration_runtime()),
-    };
     let configuration_digest = access.configuration_digest.clone();
     let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
@@ -884,10 +933,9 @@ pub(crate) async fn register_project_open_production_owners(
                 message: format!("project-open Git authority registration failed: {error}"),
             })?;
     }
-    // The server may already be serving read-only core tools. Publish mutation
-    // executors only after the exact Git transaction authority is installed,
-    // so apply requests remain fail-closed throughout capability warm-up.
-    install_project_open_source_edit_owners(server, Arc::clone(&graph), source_edit_authorization)?;
+    // Preview executors were published with the read-only core. Open their
+    // mutation lane only after the exact Git transaction authority exists.
+    source_edit_mutation_ready.store(true, Ordering::Release);
     let configuration_policy_digest = canonical_sha256(&(
         "tracedecay.daemon.configuration-policy.v1",
         &scope.scope_digest,

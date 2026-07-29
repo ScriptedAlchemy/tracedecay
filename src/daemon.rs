@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1536,108 +1536,125 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         });
     }
     engine.lifecycle.begin_draining();
-    cancel_project_server_startup_ingests(&engine.store_administration).await;
-    let _ = timeout(
-        DAEMON_TASK_ABORT_DEADLINE,
-        http_application_service.shutdown(),
-    )
-    .await;
-    engine.shutdown_project_open_tasks().await;
-    cancel_project_server_startup_ingests(&engine.store_administration).await;
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
     // via `connect_with_restart_grace`) instead of a queued connection that
     // will never be served.
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    // Keep auxiliary process creation blocked until every scheduler and client
-    // task is drained or abandoned. A killed app-server call may retry before
-    // unwinding, so a shorter guard leaves a shutdown-time respawn race.
-    let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
-    // Stop automation before announcing shutdown or waiting for clients.
-    // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
-    // shutdown also terminates their tracked process trees before joining.
-    let (automation_stopped, memory_repair_stopped) = tokio::join!(
-        timeout(
+    let shutdown_completed = timeout(DAEMON_SHUTDOWN_DEADLINE, async {
+        cancel_project_server_startup_ingests(&engine.store_administration).await;
+        let _ = timeout(
             DAEMON_TASK_ABORT_DEADLINE,
-            engine.shutdown_automation_schedulers(),
-        ),
-        timeout(
-            DAEMON_TASK_ABORT_DEADLINE,
-            engine.shutdown_memory_repair_schedulers(),
+            http_application_service.shutdown(),
         )
-    );
-    let automation_stopped = automation_stopped.is_ok();
-    let memory_repair_stopped = memory_repair_stopped.is_ok();
-    if !automation_stopped || !memory_repair_stopped {
+        .await;
+        engine.shutdown_project_open_tasks().await;
+        cancel_project_server_startup_ingests(&engine.store_administration).await;
+        // Keep auxiliary process creation blocked until every scheduler and client
+        // task is drained or abandoned. A killed app-server call may retry before
+        // unwinding, so a shorter guard leaves a shutdown-time respawn race.
+        let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
+        // Stop automation before announcing shutdown or waiting for clients.
+        // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
+        // shutdown also terminates their tracked process trees before joining.
+        let (automation_stopped, memory_repair_stopped) = tokio::join!(
+            timeout(
+                DAEMON_TASK_ABORT_DEADLINE,
+                engine.shutdown_automation_schedulers(),
+            ),
+            timeout(
+                DAEMON_TASK_ABORT_DEADLINE,
+                engine.shutdown_memory_repair_schedulers(),
+            )
+        );
+        let automation_stopped = automation_stopped.is_ok();
+        let memory_repair_stopped = memory_repair_stopped.is_ok();
+        if !automation_stopped || !memory_repair_stopped {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[("outcome", "scheduler_lock_timeout".to_string())],
+            );
+        }
         log_daemon_event(
             "daemon_shutdown",
-            &[("outcome", "scheduler_lock_timeout".to_string())],
+            &[("socket", socket_path.display().to_string())],
         );
-    }
-    log_daemon_event(
-        "daemon_shutdown",
-        &[("socket", socket_path.display().to_string())],
-    );
-    let in_flight_drained = timeout(
-        DAEMON_CLIENT_DRAIN_DEADLINE,
-        engine.lifecycle.wait_for_idle(),
-    )
-    .await
-    .is_ok();
-    // Once admitted requests are finished (or their bound elapsed), every
-    // remaining client task is an idle socket reader or already-cancelled
-    // request wrapper. Abort those immediately instead of making shutdown wait
-    // for clients to close persistent connections themselves.
-    client_tasks.abort_all();
-    let clients_drained = drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
-    // Client setup and in-flight requests may create schedulers or project
-    // servers. Sweep owned background tasks only after all client work drains.
-    let background_drained = timeout(
-        DAEMON_TASK_ABORT_DEADLINE,
-        engine.shutdown_background_tasks(),
-    )
-    .await
-    .is_ok();
-    if !in_flight_drained || !clients_drained {
-        log_daemon_event(
-            "daemon_shutdown",
-            &[
-                ("outcome", "client_drain_timeout".to_string()),
-                (
-                    "deadline_secs",
-                    DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
-                ),
-                (
-                    "checkpoint",
-                    "skipped_active_clients_were_aborted".to_string(),
-                ),
-            ],
-        );
-    }
-    if !background_drained {
-        log_daemon_event(
-            "daemon_shutdown",
-            &[("outcome", "background_task_timeout".to_string())],
-        );
-    }
-    // Graceful shutdown persists tokens-saved counters and checkpoints WALs
-    // for every live project server sequentially; with many servers or large
-    // WALs that can exceed systemd's stop timeout, which then sends `SIGKILL`
-    // to the daemon. On timeout the shutdown future is dropped and we proceed
-    // to exit: the remaining persistence is best-effort and the database WAL
-    // keeps state crash-safe.
-    let completed = timeout(DAEMON_SERVER_SHUTDOWN_DEADLINE, engine.shutdown_servers())
+        let in_flight_drained = timeout(
+            DAEMON_CLIENT_DRAIN_DEADLINE,
+            engine.lifecycle.wait_for_idle(),
+        )
         .await
         .is_ok();
-    if !completed {
+        // Once admitted requests are finished (or their bound elapsed), every
+        // remaining client task is an idle socket reader or already-cancelled
+        // request wrapper. Abort those immediately instead of making shutdown wait
+        // for clients to close persistent connections themselves.
+        client_tasks.abort_all();
+        let clients_drained =
+            drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
+        // Client setup and in-flight requests may create schedulers or project
+        // servers. Sweep owned background tasks only after all client work drains.
+        let background_drained = timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            engine.shutdown_background_tasks(),
+        )
+        .await
+        .is_ok();
+        if !in_flight_drained || !clients_drained {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "client_drain_timeout".to_string()),
+                    (
+                        "deadline_secs",
+                        DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
+                    ),
+                    (
+                        "checkpoint",
+                        "skipped_active_clients_were_aborted".to_string(),
+                    ),
+                ],
+            );
+        }
+        if !background_drained {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[("outcome", "background_task_timeout".to_string())],
+            );
+        }
+        // Graceful shutdown persists tokens-saved counters and checkpoints WALs
+        // for every live project server sequentially; with many servers or large
+        // WALs that can exceed systemd's stop timeout, which then sends `SIGKILL`
+        // to the daemon. On timeout the shutdown future is dropped and we proceed
+        // to exit: the remaining persistence is best-effort and the database WAL
+        // keeps state crash-safe.
+        let completed = timeout(DAEMON_SERVER_SHUTDOWN_DEADLINE, engine.shutdown_servers())
+            .await
+            .is_ok();
+        if !completed {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "timeout".to_string()),
+                    (
+                        "deadline_secs",
+                        DAEMON_SERVER_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                    ),
+                ],
+            );
+        }
+    })
+    .await
+    .is_ok();
+    if !shutdown_completed {
         log_daemon_event(
             "daemon_shutdown",
             &[
-                ("outcome", "timeout".to_string()),
+                ("outcome", "hard_backstop_timeout".to_string()),
                 (
                     "deadline_secs",
-                    DAEMON_SERVER_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                    DAEMON_SHUTDOWN_DEADLINE.as_secs().to_string(),
                 ),
             ],
         );
@@ -2127,10 +2144,11 @@ struct DaemonEngine {
 }
 
 /// Retain one daemon-owned Git index transaction service for the project store
-/// and reconcile any durable records before the project server can advertise
-/// tools. The service owns the store actor; constructing a second service for
-/// the same database is rejected by the registry.
-async fn ensure_git_index_transactions_before_advertising(
+/// and reconcile any durable records before mutation owners become available.
+/// Read-only core tools and edit previews do not depend on this service. The
+/// service owns the store actor; constructing a second service for the same
+/// database is rejected by the registry.
+async fn ensure_git_index_transactions_for_mutation_owners(
     store_administration: &StoreAdministration,
     session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     project_root: &Path,
@@ -2469,11 +2487,15 @@ impl ProjectOpenTasks {
     }
 
     async fn shutdown(&self) -> bool {
-        self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE)
+        self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)
             .await
     }
 
-    async fn shutdown_with_deadline(&self, cooperative_deadline: Duration) -> bool {
+    async fn shutdown_with_deadline(
+        &self,
+        cooperative_deadline: Duration,
+        post_abort_deadline: Duration,
+    ) -> bool {
         let mut entries = {
             let mut registry = self.registry.lock().await;
             std::mem::take(&mut registry.routes)
@@ -2483,16 +2505,24 @@ impl ProjectOpenTasks {
         for entry in &entries {
             entry.cancellation.cancel();
         }
-        let deadline = tokio::time::Instant::now() + cooperative_deadline;
+        let cooperative_deadline = tokio::time::Instant::now() + cooperative_deadline;
         let mut drained = true;
         for entry in &mut entries {
-            if tokio::time::timeout_at(deadline, &mut entry.task)
+            if tokio::time::timeout_at(cooperative_deadline, &mut entry.task)
                 .await
                 .is_err()
             {
                 drained = false;
                 entry.task.abort();
-                let _ = (&mut entry.task).await;
+            }
+        }
+        if !drained {
+            let post_abort_deadline = tokio::time::Instant::now() + post_abort_deadline;
+            for entry in &mut entries {
+                if entry.task.is_finished() {
+                    continue;
+                }
+                let _ = tokio::time::timeout_at(post_abort_deadline, &mut entry.task).await;
             }
         }
         if !drained {
@@ -2535,6 +2565,7 @@ struct DatabaseOwnerEntry<Server> {
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
     servers: HashMap<ProjectServerKey, DatabaseOwnerEntry<Server>>,
     aliases: HashMap<ProjectRouteKey, ProjectServerKey>,
+    synchronous_health: HashSet<ProjectServerKey>,
 }
 
 impl<Server> Default for DatabaseOwnerRegistry<Server> {
@@ -2542,6 +2573,7 @@ impl<Server> Default for DatabaseOwnerRegistry<Server> {
         Self {
             servers: HashMap::new(),
             aliases: HashMap::new(),
+            synchronous_health: HashSet::new(),
         }
     }
 }
@@ -2599,6 +2631,25 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         entry.ready = true;
         entry.last_used = Instant::now();
         true
+    }
+
+    fn remove(&mut self, key: &ProjectServerKey) -> Option<Server> {
+        let entry = self.servers.remove(key)?;
+        self.aliases.retain(|_, alias| alias != key);
+        Some(entry.server)
+    }
+
+    fn quarantine_and_remove(&mut self, key: &ProjectServerKey) -> Option<Server> {
+        self.synchronous_health.insert(key.clone());
+        self.remove(key)
+    }
+
+    fn requires_synchronous_health(&self, key: &ProjectServerKey) -> bool {
+        self.synchronous_health.contains(key)
+    }
+
+    fn clear_synchronous_health(&mut self, key: &ProjectServerKey) {
+        self.synchronous_health.remove(key);
     }
 
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
@@ -4430,16 +4481,48 @@ async fn production_project_server(
     if let Some(attempts) = project_open_attempts {
         attempts.fetch_add(1, Ordering::Relaxed);
     }
-    let cg = Box::pin(open_project_for_handshake(
-        canonical_project_path,
-        handshake,
-        store_administration,
-    ))
-    .await?;
+    let (initial_cg, initial_deferred_post_open_health) =
+        Box::pin(open_project_for_handshake_with_health_mode(
+            canonical_project_path,
+            handshake,
+            store_administration,
+            true,
+        ))
+        .await?;
+    let initial_key = ProjectServerKey::from_open_project(&initial_cg, handshake)?;
+    let synchronous_post_open_health = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .requires_synchronous_health(&initial_key);
+    let (cg, deferred_post_open_health, key) = if synchronous_post_open_health {
+        drop(initial_deferred_post_open_health);
+        initial_cg.close();
+        let (validated_cg, validated_deferred_post_open_health) =
+            Box::pin(open_project_for_handshake_with_health_mode(
+                canonical_project_path,
+                handshake,
+                store_administration,
+                false,
+            ))
+            .await?;
+        let validated_key = ProjectServerKey::from_open_project(&validated_cg, handshake)?;
+        {
+            let mut servers = store_administration.project_servers().lock().await;
+            servers.clear_synchronous_health(&initial_key);
+            servers.clear_synchronous_health(&validated_key);
+        }
+        (
+            validated_cg,
+            validated_deferred_post_open_health,
+            validated_key,
+        )
+    } else {
+        (initial_cg, initial_deferred_post_open_health, initial_key)
+    };
     project_open_cancellation_checkpoint(cancellation)?;
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await?;
-    let key = ProjectServerKey::from_open_project(&cg, handshake)?;
     let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
     let runtime_configuration = cg
         .configuration_runtime()
@@ -4516,13 +4599,6 @@ async fn production_project_server(
     let registered_project_session_db = store_administration
         .registered_project_session_database(cg.project_root(), cg.store_layout())
         .await?;
-    ensure_git_index_transactions_before_advertising(
-        store_administration,
-        Arc::clone(&registered_project_session_db),
-        cg.project_root(),
-        key.owner.project_id.as_deref(),
-    )
-    .await?;
     let registered_user_session_db = store_administration
         .registered_profile_session_database()
         .await?;
@@ -4683,7 +4759,7 @@ async fn production_project_server(
                 registry: registry_db,
                 project_sessions: session_db,
                 user_sessions: user_session_db,
-                registered_project_sessions: registered_project_session_db,
+                registered_project_sessions: Arc::clone(&registered_project_session_db),
                 registered_user_sessions: registered_user_session_db,
             },
             host_admission_broker,
@@ -4707,6 +4783,7 @@ async fn production_project_server(
     .with_code_index_publication_identity(code_index_publication_identity)
     .with_code_index_search_executor(code_index_search_executor)
     .with_code_index_search_authority(code_search_authority)
+    .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(application_invocation_executor)
     .with_startup_catch_up_enabled(runtime.startup_catch_up())
     .with_retained_project_graph_resolver(retained_project_graph_resolver(
@@ -4751,6 +4828,18 @@ async fn production_project_server(
             resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
         }
+        let source_edit_mutation_ready = if project_database_is_read_only {
+            None
+        } else {
+            Some(
+                project_open_owners::install_project_open_source_edit_preview_owner(
+                    resolved.as_ref(),
+                    canonical_project_path,
+                    &project_id,
+                )
+                .await?,
+            )
+        };
         // The constructed server already owns the exact graph, configuration,
         // session authorities, and fail-closed late-bound capability slots.
         // Publish that core now so lexical/graph/search reads can serve while
@@ -4764,10 +4853,32 @@ async fn production_project_server(
             .mark_ready(&key);
         if !marked_core_ready {
             return Err(TraceDecayError::Config {
-                message: "project server disappeared before core publication completed"
-                    .to_owned(),
+                message: "project server disappeared before core publication completed".to_owned(),
             });
         }
+        if let Some(database) = deferred_post_open_health
+            && let Err(error) = database.repair_fts_after_open().await
+        {
+            route_registered.store(false, Ordering::Release);
+            resolved.cancel_startup_transcript_ingest();
+            let project_servers = Arc::clone(store_administration.project_servers());
+            let unhealthy_key = key.clone();
+            tokio::spawn(async move {
+                let removed = project_servers
+                    .lock()
+                    .await
+                    .quarantine_and_remove(&unhealthy_key);
+                debug_assert!(removed.is_some());
+            });
+            return Err(error);
+        }
+        ensure_git_index_transactions_for_mutation_owners(
+            store_administration,
+            registered_project_session_db,
+            canonical_project_path,
+            key.owner.project_id.as_deref(),
+        )
+        .await?;
         invocation
             .mount_code_index(
                 canonical_project_path,
@@ -4796,6 +4907,8 @@ async fn production_project_server(
                 canonical_project_path,
                 &project_id,
                 resolved.as_ref(),
+                source_edit_mutation_ready
+                    .expect("writable projects install source edit preview authority"),
             )
             .await?;
             mount_http_application_router(
@@ -5248,6 +5361,33 @@ async fn write_routed_initialize_response(
     Ok(true)
 }
 
+const MAX_PENDING_PROJECT_OPEN_LINES: usize = 64;
+
+async fn await_project_owner_or_disconnect<T>(
+    transport: &mut impl McpTransport,
+    open: impl std::future::Future<Output = Result<T>>,
+) -> Result<Option<(T, VecDeque<String>)>> {
+    tokio::pin!(open);
+    let mut pending_lines = VecDeque::new();
+    loop {
+        tokio::select! {
+            result = &mut open => return result.map(|owner| Some((owner, pending_lines))),
+            incoming = transport.read_line() => {
+                let Some(line) = incoming? else {
+                    return Ok(None);
+                };
+                if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
+                    return Err(TraceDecayError::Config {
+                        message: "daemon client pipelined too many requests while the project owner was opening"
+                            .to_owned(),
+                    });
+                }
+                pending_lines.push_back(line);
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
@@ -5357,8 +5497,16 @@ async fn serve_broker_socket_client(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match Box::pin(engine.project_server_for_request(&handshake)).await {
-            Ok(_) => branch_add_response(&engine.store_administration, &handshake, &request).await,
+        let response = match await_project_owner_or_disconnect(
+            &mut transport,
+            engine.project_server_for_request(&handshake),
+        )
+        .await
+        {
+            Ok(Some(_)) => {
+                branch_add_response(&engine.store_administration, &handshake, &request).await
+            }
+            Ok(None) => return Ok(()),
             Err(error) => JsonRpcResponse::error(
                 request.id.clone(),
                 ErrorCode::InternalError,
@@ -5469,9 +5617,22 @@ async fn serve_broker_socket_client(
         }
     }
     let user_session_request = projectless_user_session_request(&first_request_line);
+    let mut pending_project_open_lines = VecDeque::new();
     let server = if handshake.project_path.is_some() && !user_session_request {
-        match Box::pin(engine.project_server_for_request(&handshake)).await {
-            Ok(server) => Some(server),
+        match await_project_owner_or_disconnect(
+            &mut transport,
+            engine.project_server_for_request(&handshake),
+        )
+        .await
+        {
+            Ok(Some((server, pending_lines))) => {
+                pending_project_open_lines = pending_lines;
+                Some(server)
+            }
+            Ok(None) => {
+                drop(setup_activity);
+                return Ok(());
+            }
             Err(error) => {
                 drop(setup_activity);
                 write_project_open_error(&mut transport, &first_request_line, &error).await?;
@@ -5511,6 +5672,9 @@ async fn serve_broker_socket_client(
     let mut transport = ReplayTransport::new(transport);
     if !initialize_handled {
         transport.push_replay(first_request_line)?;
+    }
+    for line in pending_project_open_lines {
+        transport.push_replay(line)?;
     }
 
     if let Some(server) = server {
@@ -5675,19 +5839,23 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match Box::pin(portable_project_server_for_request(
-            lifecycle.clone(),
-            store_administration.clone(),
-            Arc::clone(&project_open_gates),
-            invocation.clone(),
-            http_application_registry.clone(),
-            &handshake,
-            #[cfg(test)]
-            project_open_attempts.clone(),
-        ))
+        let response = match await_project_owner_or_disconnect(
+            &mut transport,
+            portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry.clone(),
+                &handshake,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ),
+        )
         .await
         {
-            Ok(_) => branch_add_response(&store_administration, &handshake, &request).await,
+            Ok(Some(_)) => branch_add_response(&store_administration, &handshake, &request).await,
+            Ok(None) => return Ok(()),
             Err(error) => JsonRpcResponse::error(
                 request.id.clone(),
                 ErrorCode::InternalError,
@@ -5811,19 +5979,26 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     }
     let user_session_request = projectless_user_session_request(&first_request_line);
     if handshake.project_path.is_some() && !user_session_request {
-        let server = match Box::pin(portable_project_server_for_request(
-            lifecycle.clone(),
-            store_administration.clone(),
-            Arc::clone(&project_open_gates),
-            invocation.clone(),
-            http_application_registry,
-            &handshake,
-            #[cfg(test)]
-            project_open_attempts.clone(),
-        ))
+        let server = match await_project_owner_or_disconnect(
+            &mut transport,
+            portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry,
+                &handshake,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ),
+        )
         .await
         {
-            Ok(server) => server,
+            Ok(Some(server)) => server,
+            Ok(None) => {
+                drop(setup_activity);
+                return Ok(());
+            }
             Err(error) => {
                 drop(setup_activity);
                 write_project_open_error(&mut transport, &first_request_line, &error).await?;
@@ -5832,7 +6007,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         };
         drop(setup_activity);
         let initialize_handled = write_routed_initialize_response(
-            &server,
+            &server.0,
             &mut transport,
             &first_request_line,
             initialize_route.as_ref(),
@@ -5842,7 +6017,10 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         if !initialize_handled {
             transport.push_replay(first_request_line)?;
         }
-        Box::pin(server.run_daemon_connection_with_timings(
+        for line in server.1 {
+            transport.push_replay(line)?;
+        }
+        Box::pin(server.0.run_daemon_connection_with_timings(
             &mut transport,
             handshake.timings,
             lifecycle,
@@ -5947,11 +6125,28 @@ async fn write_tool_list_changed_notification(transport: &mut impl McpTransport)
     Ok(())
 }
 
+#[cfg(test)]
 async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
 ) -> Result<crate::tracedecay::TraceDecay> {
+    let (cg, _) = open_project_for_handshake_with_health_mode(
+        project_path,
+        handshake,
+        store_administration,
+        false,
+    )
+    .await?;
+    Ok(cg)
+}
+
+async fn open_project_for_handshake_with_health_mode(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+    store_administration: &StoreAdministration,
+    defer_post_open_health: bool,
+) -> Result<(crate::tracedecay::TraceDecay, Option<crate::db::Database>)> {
     let open_options = handshake.open_options();
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) =
@@ -6022,18 +6217,33 @@ async fn open_project_for_handshake(
         .registered_project_session_database(project_path, &store_layout)
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
-    match crate::tracedecay::TraceDecay::open_with_registered_configuration(
-        project_path,
-        open_options.clone(),
-        store_layout.clone(),
-        Arc::clone(&configuration_database),
-        Arc::clone(&registry_database),
-        Arc::clone(&runtime_registry),
-    )
-    .await
-    {
-        Ok(cg) => Ok(cg),
-        Err(open_err) if is_readonly_database_error(&open_err) => {
+    let open_result = if defer_post_open_health {
+        crate::tracedecay::TraceDecay::open_with_registered_configuration_deferred_post_open_health(
+            project_path,
+            open_options.clone(),
+            store_layout.clone(),
+            Arc::clone(&configuration_database),
+            Arc::clone(&registry_database),
+            Arc::clone(&runtime_registry),
+        )
+        .await
+    } else {
+        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            project_path,
+            open_options.clone(),
+            store_layout.clone(),
+            Arc::clone(&configuration_database),
+            Arc::clone(&registry_database),
+            Arc::clone(&runtime_registry),
+        )
+        .await
+    };
+    match open_result {
+        Ok(cg) => {
+            let deferred_post_open_health = defer_post_open_health.then(|| cg.db().clone());
+            Ok((cg, deferred_post_open_health))
+        }
+        Err(open_err) if defer_post_open_health && is_readonly_database_error(&open_err) => {
             match crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
                 project_path,
                 open_options,
@@ -6046,7 +6256,7 @@ async fn open_project_for_handshake(
             {
                 Ok(cg) => {
                     cg.ensure_schema_current().await?;
-                    Ok(cg)
+                    Ok((cg, None))
                 }
                 Err(_) => Err(open_err),
             }
@@ -6066,6 +6276,7 @@ async fn open_project_for_handshake(
                 runtime_registry,
             )
             .await
+            .map(|cg| (cg, None))
         }
         Err(open_err) => Err(open_err),
     }
