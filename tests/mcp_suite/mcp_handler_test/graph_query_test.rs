@@ -1,5 +1,3 @@
-//! `graph_query_test` domain tests, split mechanically from `mcp_handler_test.rs`.
-
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;

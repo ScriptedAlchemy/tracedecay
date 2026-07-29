@@ -1,5 +1,4 @@
-//! Store layout resolution, config path, and path-safety guard tests (split from
-//! `storage_resolver_test.rs`).
+//! Store layout resolution, config path, and path-safety guard tests.
 
 use super::*;
 

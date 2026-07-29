@@ -59,19 +59,19 @@ pub(crate) struct WorkflowRunDetailView {
 
 /// Why the workflow index could not answer. Each variant is a distinct state
 /// that a caller must be able to tell apart from a built index that holds
-/// nothing, so none of them may render as a successful empty result.
+/// nothing, so neither may render as a successful empty result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkflowIndexUnavailableReason {
     /// The daemon retained no project-session authority for this request, so
     /// there is no index to consult. Another mount is required, not a retry.
     AuthorityNotRetained,
-    /// The store opened, but the workflow index has never been built here.
-    /// Background ingest builds it, so this resolves on its own.
+    /// The store opened without workflow-index tables.
+    ///
+    /// One reason covers git-scope reads too. Admission installs the
+    /// git-correlation and workflow-index DDL in the same transaction, so a
+    /// store cannot hold one set and lack the other; there is no separate
+    /// "correlation not built" state to report.
     WorkflowIndexNotBuilt,
-    /// The workflow index is built, but git correlation is not, so a git-scope
-    /// query has nothing to resolve refs against. Only git-scope reads can
-    /// reach this: session and run reads do not consult correlation tables.
-    GitCorrelationNotBuilt,
 }
 
 impl WorkflowIndexUnavailableReason {
@@ -79,17 +79,14 @@ impl WorkflowIndexUnavailableReason {
         match self {
             Self::AuthorityNotRetained => "authority_not_retained",
             Self::WorkflowIndexNotBuilt => "workflow_index_not_built",
-            Self::GitCorrelationNotBuilt => "git_correlation_not_built",
         }
     }
 
-    /// Whether waiting can change the answer. Both not-built states are filled
-    /// in by background ingest; a missing authority is not.
+    /// Whether the same request can succeed later without the caller changing
+    /// anything. Admission reinstalls the workflow DDL on the next mount, so an
+    /// absent index resolves on its own; an unretained authority does not.
     pub(crate) const fn is_retryable(self) -> bool {
-        matches!(
-            self,
-            Self::WorkflowIndexNotBuilt | Self::GitCorrelationNotBuilt
-        )
+        matches!(self, Self::WorkflowIndexNotBuilt)
     }
 
     pub(crate) const fn message(self) -> &'static str {
@@ -97,10 +94,6 @@ impl WorkflowIndexUnavailableReason {
             Self::AuthorityNotRetained => "registered project session database is unavailable",
             Self::WorkflowIndexNotBuilt => {
                 "the workflow index has not been built for this project yet"
-            }
-            Self::GitCorrelationNotBuilt => {
-                "git correlation has not been built for this project yet, so workflow runs \
-                 cannot be resolved by branch, worktree, or commit"
             }
         }
     }
@@ -243,30 +236,23 @@ mod tests {
         ));
     }
 
-    /// The three unavailable states stay distinguishable on the wire, and only
-    /// the ones background ingest fills in invite a retry. Collapsing any pair
-    /// would tell a caller to wait for something that will never arrive, or to
-    /// give up on something that is still being built.
+    /// The two unavailable states stay distinguishable on the wire. A caller
+    /// that cannot tell a missing authority from a store without the schema
+    /// cannot tell which one to route around.
     #[test]
-    fn unavailable_reasons_are_distinct_and_classify_retryability() {
+    fn unavailable_reasons_are_distinct_on_the_wire() {
         let reasons = [
             WorkflowIndexUnavailableReason::AuthorityNotRetained,
             WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
-            WorkflowIndexUnavailableReason::GitCorrelationNotBuilt,
         ];
         let wire = reasons.map(WorkflowIndexUnavailableReason::as_str);
-        assert_eq!(
-            wire,
-            [
-                "authority_not_retained",
-                "workflow_index_not_built",
-                "git_correlation_not_built"
-            ]
-        );
-
+        assert_eq!(wire, ["authority_not_retained", "workflow_index_not_built"]);
         assert!(!WorkflowIndexUnavailableReason::AuthorityNotRetained.is_retryable());
         assert!(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.is_retryable());
-        assert!(WorkflowIndexUnavailableReason::GitCorrelationNotBuilt.is_retryable());
+        assert_ne!(
+            WorkflowIndexUnavailableReason::AuthorityNotRetained.message(),
+            WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message()
+        );
     }
 
     /// The validated selector and the caller's bounds cross the boundary

@@ -1,5 +1,3 @@
-//! `lcm_test` domain tests, split mechanically from `mcp_handler_test.rs`.
-
 #[cfg(unix)]
 use crate::common;
 use crate::support::*;

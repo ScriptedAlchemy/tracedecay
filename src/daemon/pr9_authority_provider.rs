@@ -29,7 +29,7 @@ use crate::application::semantic_runtime::{
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
 };
-use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
+use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 
 const PR9_KEY_BYTES: usize = 32;
 const PR9_KEY_ID_BYTES: usize = 16;
@@ -112,7 +112,7 @@ impl ProcessLocalPr9KeyV1 {
             self.key_id.clone(),
             PR9_KEY_EPOCH,
             self.secret.to_vec(),
-            crate::query::retrieval::PR9_CURSOR_TTL_MICROS_V1,
+            tracedecay_query::retrieval::PR9_CURSOR_TTL_MICROS_V1,
         )
         .ok()
     }
@@ -378,7 +378,7 @@ impl DaemonPr9AuthorityProviderV1 {
         }
         let pr9 = exact_pr9_profile(&activated.state)?;
         let ranking_revision =
-            ComponentRevision::new(crate::query::retrieval::PR9_RANKING_REVISION_V1)
+            ComponentRevision::new(tracedecay_query::retrieval::PR9_RANKING_REVISION_V1)
                 .map_err(|_| Pr9AuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
         let keyring = self
             .key
@@ -513,7 +513,6 @@ pub(crate) mod tests {
         RetrievalProfileStateSnapshotV1, RetrievalRuntimeCompatibilityV1,
         SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
     };
-    use crate::query::retrieval::semantic::SemanticCalibrationProfileV1;
     use crate::search_eval::{
         DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
         DirectQualityMetricsV1, DirectRatioMetricV1, OptionalStageMeasurementV1,
@@ -529,6 +528,7 @@ pub(crate) mod tests {
         ManifestDigest, ProjectId, RetrievalBudget, UtcMicros, VectorGenerationIdV1,
         canonical_sha256,
     };
+    use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 
     fn id<T>(value: &str) -> T
     where

@@ -53,7 +53,7 @@ afterEach(() => {
 describe('setSchedulerPaused', () => {
   it('POSTs and returns the reading the server took after the change', async () => {
     respond(status({ paused: true, status: 'paused' }));
-    const result = await setSchedulerPaused(true, '/api/automation/scheduler/pause');
+    const result = await setSchedulerPaused('/api/automation/scheduler/pause');
     expect(result.outcome).toBe('ok');
     if (result.outcome !== 'ok') throw new Error('unreachable');
     expect(result.data.paused).toBe(true);
@@ -65,7 +65,7 @@ describe('setSchedulerPaused', () => {
 
   it('reports a refused control instead of implying it took effect', async () => {
     respond({}, { ok: false, statusCode: 409 });
-    const result = await setSchedulerPaused(true, '/api/automation/scheduler/pause');
+    const result = await setSchedulerPaused('/api/automation/scheduler/pause');
     expect(result.outcome).toBe('error');
     // The important negative: no `data` to read, so a caller physically cannot
     // paint the scheduler paused off the back of a rejected request.
@@ -76,7 +76,7 @@ describe('setSchedulerPaused', () => {
     // A handler "simplified" to reply `{"ok":true}` would silently return the
     // dashboard to assuming state. The contract refuses it.
     respond({ ok: true });
-    const result = await setSchedulerPaused(false, '/api/automation/scheduler/resume');
+    const result = await setSchedulerPaused('/api/automation/scheduler/resume');
     expect(result.outcome).toBe('unsupported_schema');
   });
 });

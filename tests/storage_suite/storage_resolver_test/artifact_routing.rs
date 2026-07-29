@@ -1,5 +1,4 @@
-//! Session/response-handle artifact routing tests (split from
-//! `storage_resolver_test.rs`).
+//! Session/response-handle artifact routing tests.
 
 use super::*;
 

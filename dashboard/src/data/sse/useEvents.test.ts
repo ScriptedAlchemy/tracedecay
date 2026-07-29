@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { SseBatch, SseEventEnvelope } from "./types.ts";
+import type { SseEventEnvelope } from "./types.ts";
+import { invalidationKeysForBatch } from "./useEvents.tsx";
 
 function event(family: string): SseEventEnvelope<Record<string, unknown>> {
   return {
@@ -16,16 +17,7 @@ function event(family: string): SseEventEnvelope<Record<string, unknown>> {
 }
 
 describe("SSE query invalidation", () => {
-  it("maps typed invalidations to canonical query roots", async () => {
-    const module = await import("./useEvents.tsx");
-    const invalidationKeysForBatch = (
-      module as unknown as {
-        invalidationKeysForBatch: (
-          batch: SseBatch<Record<string, unknown>>,
-        ) => ReadonlyArray<ReadonlyArray<string>>;
-      }
-    ).invalidationKeysForBatch;
-
+  it("maps typed invalidations to canonical query roots", () => {
     expect(typeof invalidationKeysForBatch).toBe("function");
     expect(
       invalidationKeysForBatch({
@@ -43,16 +35,7 @@ describe("SSE query invalidation", () => {
     ]);
   });
 
-  it("invalidates all canonical queries after a revision gap", async () => {
-    const module = await import("./useEvents.tsx");
-    const invalidationKeysForBatch = (
-      module as unknown as {
-        invalidationKeysForBatch: (
-          batch: SseBatch<Record<string, unknown>>,
-        ) => ReadonlyArray<ReadonlyArray<string>>;
-      }
-    ).invalidationKeysForBatch;
-
+  it("invalidates all canonical queries after a revision gap", () => {
     expect(typeof invalidationKeysForBatch).toBe("function");
     expect(
       invalidationKeysForBatch({

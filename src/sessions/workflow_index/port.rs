@@ -21,9 +21,7 @@ pub(crate) trait WorkflowIngestWriteTxn: QueryExecutor + Executor + Sized + Send
 pub(crate) trait WorkflowIndexPort: Send + Sync {
     fn open_workflow_index_snapshot(
         &self,
-    ) -> impl Future<
-        Output = Result<super::RegisteredWorkflowIndexSnapshot, WorkflowIndexError>,
-    > + Send;
+    ) -> impl Future<Output = Result<super::RegisteredWorkflowIndexSnapshot, WorkflowIndexError>> + Send;
 }
 
 /// Fail-open ingest sink for discovered workflow runs.

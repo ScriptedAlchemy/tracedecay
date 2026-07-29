@@ -1,5 +1,5 @@
-//! Edge traversal query tests (internal edges, incoming-edge bulk, unresolved refs) (split from
-//! `db_query_test.rs`).
+//! Edge traversal query tests (internal edges, incoming-edge bulk, unresolved
+//! refs).
 
 use super::*;
 

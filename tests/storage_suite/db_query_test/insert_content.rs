@@ -1,5 +1,4 @@
-//! Node/file bulk insert, upsert, and payload-fidelity tests (split from
-//! `db_query_test.rs`).
+//! Node/file bulk insert, upsert, and payload-fidelity tests.
 
 use super::*;
 

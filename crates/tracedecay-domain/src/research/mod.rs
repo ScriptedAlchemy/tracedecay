@@ -5,6 +5,7 @@
 //! `tracedecay_domain::research::Type` imports continue to resolve.
 
 pub mod anchor;
+pub mod branch_stack;
 pub mod canonical;
 pub mod coverage;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod time;
 pub mod watermark;
 
 pub use anchor::*;
+pub use branch_stack::*;
 pub use canonical::*;
 pub use coverage::*;
 pub use error::*;

@@ -28,18 +28,18 @@ use crate::application::semantic_runtime::{
 };
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityPinsV1};
-use crate::query::retrieval::AuthorizedPr9FallbackV1;
-use crate::query::retrieval::Pr9QueryAuthorityV1;
-use crate::query::retrieval::fusion::{
+use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
+use tracedecay_query::retrieval::AuthorizedPr9FallbackV1;
+use tracedecay_query::retrieval::Pr9QueryAuthorityV1;
+use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionOutputV1, FusionStageInput, digest_candidate_set,
 };
-use crate::query::retrieval::rerank::{BoundedRerankOutcomeV1, RerankExecutionControlV1};
-use crate::query::retrieval::semantic::{
+use tracedecay_query::retrieval::rerank::{BoundedRerankOutcomeV1, RerankExecutionControlV1};
+use tracedecay_query::retrieval::semantic::{
     SemanticAbstentionV1, SemanticCalibrationEvidenceV1, SemanticExecutionControl,
     SemanticQueryModeV1, SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
     SemanticRetrievalRequestV1,
 };
-use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
 
 #[derive(Clone)]
 pub(in crate::daemon) struct SemanticQueryAuthorityV1 {
@@ -791,7 +791,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
+    use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 
     fn id<T>(value: &str) -> T
     where
@@ -1606,7 +1606,7 @@ mod tests {
             BoundedRerankOutcomeV1 {
                 ordered_candidates: reranked.clone(),
                 public_status: OptionalStagePublicStatus::Complete,
-                usage: crate::query::retrieval::rerank::RerankUsageV1::default(),
+                usage: tracedecay_query::retrieval::rerank::RerankUsageV1::default(),
             },
             &mut composition,
         )
@@ -1630,7 +1630,7 @@ mod tests {
                 public_status: OptionalStagePublicStatus::Unavailable(
                     SanitizedStageFailure::Internal,
                 ),
-                usage: crate::query::retrieval::rerank::RerankUsageV1::default(),
+                usage: tracedecay_query::retrieval::rerank::RerankUsageV1::default(),
             },
             &mut composition,
         )
@@ -1660,7 +1660,7 @@ mod tests {
                 public_status: OptionalStagePublicStatus::Unavailable(
                     SanitizedStageFailure::AuthorityUnavailable,
                 ),
-                usage: crate::query::retrieval::rerank::RerankUsageV1::default(),
+                usage: tracedecay_query::retrieval::rerank::RerankUsageV1::default(),
             },
             &mut composition,
         )
