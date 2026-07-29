@@ -157,6 +157,7 @@ impl McpServer {
     pub(crate) fn revoke_project_server(&self) {
         if let Some(live) = &self.project_server_live {
             live.store(false, Ordering::Release);
+            self.project_server_response_revoked.cancel();
         }
     }
 
