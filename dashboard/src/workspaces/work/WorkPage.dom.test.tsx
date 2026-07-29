@@ -1,42 +1,66 @@
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WITHHELD_WORK, withheldPresentation } from './authority.ts';
 import { WorkPage } from './WorkPage.tsx';
 
-const CONTRACT_GATE_EXPLANATION =
+const GATE_SENTENCE =
   'No generated Work read model is available in this build. Kanban, DAG, timeline, causal, workload, runtime, and control state are withheld rather than inferred.';
+
+const SURFACES = WITHHELD_WORK.flatMap((group) => group.surfaces);
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe('WorkPage contract gate', () => {
-  it('names the workspace and unavailable contract boundary', () => {
+  it('names the workspace and its unavailable contract boundary', () => {
     const { container } = render(<WorkPage />);
 
     expect(screen.getByRole('heading', { level: 1, name: 'Work' })).toBeTruthy();
-    expect(screen.getByRole('region', { name: 'Work contract gate' })).toBeTruthy();
+    expect(container.querySelector('[data-work-authority="uncontracted"]')).not.toBeNull();
     expect(
-      container.querySelector('[data-state="unsupported_schema"], [data-state="unknown"]'),
+      container.querySelector('[data-state="unsupported_schema"], [data-state="unsupported"]'),
     ).not.toBeNull();
     expect(screen.queryByText('Ready')).toBeNull();
     expect(screen.queryByText('Complete · zero findings')).toBeNull();
+    expect(screen.queryByText('Partial')).toBeNull();
   });
 
   it('explains exactly which state is withheld', () => {
     render(<WorkPage />);
 
-    expect(screen.getByText(CONTRACT_GATE_EXPLANATION)).toBeTruthy();
+    expect(screen.getByText(GATE_SENTENCE)).toBeTruthy();
   });
 
-  it('renders no fabricated zeroes or unavailable commands', () => {
+  it('accounts for every withheld projection, command and stream', () => {
     const { container } = render(<WorkPage />);
 
-    expect(container.textContent).not.toMatch(/\b0(?:\.0+)?\b/);
+    for (const surface of SURFACES) {
+      const row = container.querySelector(`[data-work-surface="${surface.id}"]`);
+      expect(row, `${surface.id} has no row`).not.toBeNull();
+      // The contract the row waits on is the actionable part, so it is printed
+      // rather than summarised, and the row's state is the one its reason maps
+      // to — a command row must not borrow the read side's schema state.
+      expect(row?.textContent).toContain(surface.requires);
+      expect(row?.querySelector('[data-state]')?.getAttribute('data-state')).toBe(
+        withheldPresentation(surface.reason).state,
+      );
+    }
+
+    expect(container.querySelectorAll('[data-work-surface]')).toHaveLength(SURFACES.length);
+  });
+
+  it('renders no measurement, no fabricated zero, and no unavailable command', () => {
+    const { container } = render(<WorkPage />);
+    const main = container.querySelector('main');
+
+    // The channel number in the header is a real reading; the data plane below
+    // it must carry no figure at all, because there is nothing to measure.
+    expect(main?.querySelectorAll('[data-cell="numeric"]')).toHaveLength(0);
+    expect(main?.textContent).not.toMatch(/\b0(?:\.0+)?\b/);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
     expect(screen.queryAllByRole('link')).toHaveLength(0);
-    expect(
-      screen.queryByRole('button', { name: /create|admit|accept|cancel/i }),
-    ).toBeNull();
+    expect(screen.queryByRole('button', { name: /create|admit|accept|cancel/i })).toBeNull();
   });
 
   it('does not fetch without a generated Work contract', () => {
@@ -46,5 +70,21 @@ describe('WorkPage contract gate', () => {
     render(<WorkPage />);
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('gives each ledger table a caption and column headers', () => {
+    const { container } = render(<WorkPage />);
+    const tables = container.querySelectorAll('table');
+
+    expect(tables).toHaveLength(WITHHELD_WORK.length);
+    for (const table of Array.from(tables)) {
+      expect(table.querySelector('caption')?.textContent ?? '').not.toBe('');
+      expect(table.querySelectorAll('thead th[scope="col"]').length).toBeGreaterThan(0);
+      // Every row is titled by its surface name, so a screen reader announces
+      // which surface a state belongs to.
+      expect(table.querySelectorAll('tbody th[scope="row"]').length).toBe(
+        table.querySelectorAll('tbody tr').length,
+      );
+    }
   });
 });
