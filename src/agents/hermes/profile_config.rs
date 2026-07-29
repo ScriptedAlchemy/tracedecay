@@ -467,7 +467,6 @@ fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> 
     }
     let after = remove_map_entry(text, &tracedecay, "project_root")?;
 
-    // Collapse an emptied `tracedecay:` mapping unless it carries comments/anchors.
     let document = parse_profile(&after)?;
     let root = document
         .as_mapping()
@@ -599,7 +598,6 @@ fn disable_scalar(text: &str, container: &str, key: &str) -> std::result::Result
     }
     let after = remove_map_entry(text, &mapping, key)?;
 
-    // Drop an emptied container unless it carries comments/anchors.
     let document = parse_profile(&after)?;
     let root = document
         .as_mapping()
