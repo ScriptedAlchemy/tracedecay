@@ -27,6 +27,14 @@
  * every note is a restatement of a key the payload actually carries.
  */
 
+import { z } from 'zod';
+import {
+  SettingsPayloadV1Schema,
+  type ProjectSettingsPatch,
+  type SettingsPayloadV1,
+  type UserSettingsPatch,
+} from '../../contracts/generated.ts';
+
 export type ConfigRowKind =
   | 'group'
   | 'boolean'
@@ -110,6 +118,9 @@ export interface SettingsModel {
   readonly activeOverrides: number;
 }
 
+/** The two settings resources, each with its own authority and revision. */
+export type SettingsScope = 'project' | 'user';
+
 export interface ProjectSettingsValues {
   readonly include: readonly string[];
   readonly exclude: readonly string[];
@@ -170,6 +181,30 @@ export interface UserSettingsChangeSet {
   watcher_debounce?: string;
   extraction_timeout_secs?: number;
 }
+
+/**
+ * The change sets carry omission semantics the generated patch types cannot
+ * express — schemars renders every `Option<T>` field as required-and-nullable,
+ * so `ProjectSettingsPatch` has no way to say "this field was not edited",
+ * which is precisely what the daemon's `#[serde(default)]` reads. The field
+ * NAMES are still the contract's, and these assertions fail the build if the
+ * two ever drift apart, so a field renamed or added in Rust cannot silently
+ * keep being sent under its old name.
+ */
+type Assert<T extends true> = T;
+type WritableFieldsOf<TPatch> = Exclude<keyof TPatch, 'expected_revision_id'>;
+type SameKeys<TLeft, TRight> = [keyof TLeft] extends [TRight]
+  ? [TRight] extends [keyof TLeft]
+    ? true
+    : false
+  : false;
+
+type _ProjectChangeSetNamesTheContractsFields = Assert<
+  SameKeys<ProjectSettingsChangeSet, WritableFieldsOf<ProjectSettingsPatch>>
+>;
+type _UserChangeSetNamesTheContractsFields = Assert<
+  SameKeys<UserSettingsChangeSet, WritableFieldsOf<UserSettingsPatch>>
+>;
 
 export type SettingsChangePlan<T> =
   | {
@@ -246,7 +281,22 @@ const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
 };
 
 /**
- * The settings payload inside a `DashboardEnvelopeV1`.
+ * What reading a settings body produced. The two failures are different
+ * accusations against different authorities, so they stay apart: a body that
+ * is not an envelope at all, and an envelope whose payload the generated
+ * contract refuses.
+ */
+export type SettingsPayloadRead =
+  | { readonly outcome: 'settings'; readonly payload: SettingsPayloadV1 }
+  | { readonly outcome: 'not_an_envelope' }
+  | { readonly outcome: 'unsupported_payload' };
+
+/** An envelope with *some* object under `payload`; the contract judges the rest. */
+const SettingsEnvelopeMemberSchema = z.object({ payload: z.record(z.string(), z.unknown()) });
+
+/**
+ * The settings payload inside a `DashboardEnvelopeV1`, parsed by the generated
+ * schema.
  *
  * `/api/settings` and both PATCH routes answer with the envelope, so the
  * groups this file models live under `payload` and never at the top level.
@@ -254,10 +304,23 @@ const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
  * `coverage`, and `freshness` as configuration and, worse, find no revision
  * identity — which the editor would report as an omitted required field.
  */
-export function settingsPayload(body: unknown): unknown {
-  return isRecord(body) ? body['payload'] : undefined;
+export function readSettingsEnvelope(body: unknown): SettingsPayloadRead {
+  const envelope = SettingsEnvelopeMemberSchema.safeParse(body);
+  if (!envelope.success) return { outcome: 'not_an_envelope' };
+  const payload = SettingsPayloadV1Schema.safeParse(envelope.data.payload);
+  return payload.success
+    ? { outcome: 'settings', payload: payload.data }
+    : { outcome: 'unsupported_payload' };
 }
 
+/**
+ * The read model walks whatever groups the payload carries, so its parameter
+ * stays `unknown` on purpose: a group the daemon starts reporting before the
+ * contract is regenerated must still appear here rather than vanish, and every
+ * row it emits is a literal it found — it never claims a named field. The
+ * editable slice, which does name fields, goes through `buildSettingsEditor`
+ * against a contract-parsed payload instead.
+ */
 export function buildSettingsModel(payload: unknown): SettingsModel {
   if (!isRecord(payload)) {
     return { sections: [], settingCount: 0, stamps: [], overrides: [], activeOverrides: 0 };
@@ -284,73 +347,84 @@ export function buildSettingsModel(payload: unknown): SettingsModel {
   };
 }
 
-export function buildSettingsEditor(payload: unknown): SettingsEditor | null {
-  if (!isRecord(payload)) return null;
-  const project = payload['project'];
-  const user = payload['user'];
-  if (!isRecord(project) || !isRecord(user)) return null;
-  const config = project['config'];
-  if (!isRecord(config)) return null;
-  const telemetry = config['telemetry'];
-  const sync = config['sync'];
-  const projectExpectedRevisionId = project['configuration_revision_id'];
-  const userExpectedRevisionId = user['user_settings_revision_id'];
-  const include = stringArray(config['include']);
-  const exclude = stringArray(config['exclude']);
-  const maxFileSize = unsignedIntegerString(config['max_file_size']);
-  const pollSecs = isRecord(sync)
-    ? unsignedIntegerString(sync['auto_track_pr_poll_secs'])
-    : null;
-  const extractionTimeout = unsignedIntegerString(user['extraction_timeout_secs']);
+/**
+ * The editable slice of a payload the generated contract already vouched for.
+ *
+ * Only two things remain to check, and neither is a shape: a revision id the
+ * contract admits as a string but that names no revision, and a count the
+ * contract admits as a signed integer but that the editor's unsigned fields
+ * cannot round-trip. Both make the resource uneditable rather than partially
+ * editable, so they answer `null` and the surface says so.
+ */
+export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor | null {
+  const { config, configuration_revision_id: projectRevision } = payload.project;
+  const { user_settings_revision_id: userRevision } = payload.user;
+  const maxFileSize = unsignedIntegerString(config.max_file_size);
+  const pollSecs = unsignedIntegerString(config.sync.auto_track_pr_poll_secs);
+  const extractionTimeout = unsignedIntegerString(payload.user.extraction_timeout_secs);
   if (
-    typeof projectExpectedRevisionId !== 'string' ||
-    projectExpectedRevisionId.length === 0 ||
-    typeof userExpectedRevisionId !== 'string' ||
-    userExpectedRevisionId.length === 0 ||
-    include == null ||
-    exclude == null ||
+    projectRevision.length === 0 ||
+    userRevision.length === 0 ||
     maxFileSize == null ||
     pollSecs == null ||
-    extractionTimeout == null ||
-    !isRecord(telemetry) ||
-    !isRecord(sync) ||
-    typeof config['extract_docstrings'] !== 'boolean' ||
-    typeof config['track_call_sites'] !== 'boolean' ||
-    typeof config['git_ignore'] !== 'boolean' ||
-    typeof telemetry['timings'] !== 'boolean' ||
-    typeof sync['auto_track_pr_branches'] !== 'boolean' ||
-    typeof user['upload_enabled'] !== 'boolean' ||
-    typeof user['watcher_debounce'] !== 'string'
+    extractionTimeout == null
   ) {
     return null;
   }
   return {
-    projectExpectedRevisionId,
-    userExpectedRevisionId,
+    projectExpectedRevisionId: projectRevision,
+    userExpectedRevisionId: userRevision,
     project: {
-      include,
-      exclude,
+      include: [...config.include],
+      exclude: [...config.exclude],
       max_file_size: maxFileSize,
-      extract_docstrings: config['extract_docstrings'],
-      track_call_sites: config['track_call_sites'],
-      git_ignore: config['git_ignore'],
-      telemetry_timings: telemetry['timings'],
-      auto_track_pr_branches: sync['auto_track_pr_branches'],
+      extract_docstrings: config.extract_docstrings,
+      track_call_sites: config.track_call_sites,
+      git_ignore: config.git_ignore,
+      telemetry_timings: config.telemetry.timings,
+      auto_track_pr_branches: config.sync.auto_track_pr_branches,
       auto_track_pr_poll_secs: pollSecs,
     },
     user: {
-      upload_enabled: user['upload_enabled'],
-      watcher_debounce: user['watcher_debounce'],
+      upload_enabled: payload.user.upload_enabled,
+      watcher_debounce: payload.user.watcher_debounce,
       extraction_timeout_secs: extractionTimeout,
     },
   };
 }
 
+/** The revision a write to `scope` must be held against. */
+export function settingsRevisionId(current: SettingsEditor, scope: SettingsScope): string {
+  switch (scope) {
+    case 'project':
+      return current.projectExpectedRevisionId;
+    case 'user':
+      return current.userExpectedRevisionId;
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
+}
+
 export function planProjectSettingsChange(
-  payload: unknown,
+  payload: SettingsPayloadV1,
   values: ProjectSettingsValues,
 ): SettingsChangePlan<ProjectSettingsChangeSet> {
-  const current = buildSettingsEditor(payload);
+  return planProjectChangeAgainst(buildSettingsEditor(payload), values);
+}
+
+/**
+ * The project change a draft represents against a known-current snapshot.
+ *
+ * Split from the payload-level entry point so the state machine can replan
+ * without re-parsing: replanning is how a confirmation is checked against the
+ * review it was given for.
+ */
+export function planProjectChangeAgainst(
+  current: SettingsEditor | null,
+  values: ProjectSettingsValues,
+): SettingsChangePlan<ProjectSettingsChangeSet> {
   if (!current) {
     return {
       outcome: 'invalid',
@@ -398,10 +472,17 @@ export function planProjectSettingsChange(
 }
 
 export function planUserSettingsChange(
-  payload: unknown,
+  payload: SettingsPayloadV1,
   values: UserSettingsValues,
 ): SettingsChangePlan<UserSettingsChangeSet> {
-  const current = buildSettingsEditor(payload);
+  return planUserChangeAgainst(buildSettingsEditor(payload), values);
+}
+
+/** The user-scope counterpart of `planProjectChangeAgainst`. */
+export function planUserChangeAgainst(
+  current: SettingsEditor | null,
+  values: UserSettingsValues,
+): SettingsChangePlan<UserSettingsChangeSet> {
   if (!current) {
     return {
       outcome: 'invalid',
@@ -433,15 +514,12 @@ export function planUserSettingsChange(
 }
 
 export function settingsRevisionConflict(
-  scope: 'project' | 'user',
+  scope: SettingsScope,
   expectedRevisionId: string,
-  payload: unknown,
+  payload: SettingsPayloadV1,
 ): SettingsRevisionConflict | null {
   const editor = buildSettingsEditor(payload);
-  const actualRevisionId =
-    scope === 'project'
-      ? (editor?.projectExpectedRevisionId ?? null)
-      : (editor?.userExpectedRevisionId ?? null);
+  const actualRevisionId = editor ? settingsRevisionId(editor, scope) : null;
   return actualRevisionId === expectedRevisionId
     ? null
     : { expectedRevisionId, actualRevisionId };
@@ -547,16 +625,10 @@ function unsignedInteger(value: string): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
-function unsignedIntegerString(value: unknown): string | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? String(value)
-    : null;
-}
-
-function stringArray(value: unknown): string[] | null {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
-    ? [...value]
-    : null;
+/** The contract admits any `i64` here; the editor's field can only hold an
+ * unsigned one, so a negative or unrepresentable count is not editable. */
+function unsignedIntegerString(value: number): string | null {
+  return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

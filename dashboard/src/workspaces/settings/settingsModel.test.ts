@@ -7,13 +7,20 @@ import {
   filterOverrides,
   filterRows,
   isPathLike,
-  settingsPayload,
+  readSettingsEnvelope,
   splitPath,
 } from './settingsModel.ts';
 
 // `/api/settings` answers a DashboardEnvelopeV1; the read model addresses the
-// settings groups inside its payload.
-const payload = settingsPayload(FIXTURES['/api/settings']);
+// settings groups inside its payload. Reading it through the generated
+// contract also holds the fixture to the schema the daemon is generated from.
+const settingsRead = readSettingsEnvelope(FIXTURES['/api/settings']);
+if (settingsRead.outcome !== 'settings') {
+  throw new Error(
+    `the /api/settings fixture does not satisfy SettingsPayloadV1: ${settingsRead.outcome}`,
+  );
+}
+const payload = settingsRead.payload;
 
 describe('Settings read model', () => {
   it('reads every top-level group the payload carries', () => {
