@@ -5055,6 +5055,20 @@ async fn production_project_server(
                 ],
             );
             let full_setup: Result<()> = async {
+                let full_setup_started = Instant::now();
+                let log_full_setup_phase = |phase: &'static str| {
+                    log_daemon_event(
+                        "project_open_phase",
+                        &[
+                            ("project", canonical_project_path.display().to_string()),
+                            ("phase", phase.to_owned()),
+                            (
+                                "elapsed_ms",
+                                full_setup_started.elapsed().as_millis().to_string(),
+                            ),
+                        ],
+                    );
+                };
                 project_open_cancellation_checkpoint(cancellation)?;
                 let source_edit_mutation_ready = if project_database_is_read_only {
                     None
@@ -5069,6 +5083,7 @@ async fn production_project_server(
                         .await?,
                     )
                 };
+                log_full_setup_phase("source_edit_preview_ready");
                 ensure_git_index_transactions_for_mutation_owners(
                     store_administration,
                     Arc::clone(&registered_project_session_db),
@@ -5076,6 +5091,7 @@ async fn production_project_server(
                     key.owner.project_id.as_deref(),
                 )
                 .await?;
+                log_full_setup_phase("git_transactions_ready");
                 invocation
                     .mount_code_index(
                         canonical_project_path,
@@ -5086,6 +5102,7 @@ async fn production_project_server(
                         Some(*semantic_resources),
                     )
                     .await?;
+                log_full_setup_phase("code_index_mounted");
                 project_open_cancellation_checkpoint(cancellation)?;
                 match invocation
                     .semantic_runtime_registrar()
@@ -5094,6 +5111,7 @@ async fn production_project_server(
                 {
                     Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
                 }
+                log_full_setup_phase("semantic_runtime_registered");
                 if !project_database_is_read_only {
                     project_open_owners::register_project_open_production_owners(
                         invocation,
@@ -5105,12 +5123,14 @@ async fn production_project_server(
                             .expect("writable projects install source edit preview authority"),
                     )
                     .await?;
+                    log_full_setup_phase("production_owners_registered");
                     mount_http_application_router(
                         http_application_registry,
                         &project_id,
                         canonical_project_path,
                     )
                     .await?;
+                    log_full_setup_phase("http_application_mounted");
                 }
                 Ok(())
             }
