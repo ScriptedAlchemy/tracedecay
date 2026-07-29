@@ -7,7 +7,8 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    TraceDecayProfileBindingV1, canonical_json_bytes, host_integration_catalog_v1,
+    HostCapabilityUnavailableReasonV1, TraceDecayProfileBindingV1, canonical_json_bytes,
+    host_integration_catalog_v1,
 };
 
 use super::host_bundle_v2::{
@@ -75,18 +76,51 @@ impl HostBundleVerificationAdapterV1 for VerifiedEmbeddedHostComponentSetV1 {
 pub enum HostBundleRegistryError {
     #[error("first-party host component is incompatible")]
     Incompatible,
+    #[error("{host:?} has no installable first-party component set: {reason:?}")]
+    HostComponentSetUnavailable {
+        host: HostKindV1,
+        reason: HostCapabilityUnavailableReasonV1,
+    },
+}
+
+/// Why a stock host has no installable first-party component set. Returning
+/// `None` is the only claim of host support: an empty component list is a
+/// typed unavailable result, never a successfully empty install.
+pub fn unsupported_host_component_set_reason(
+    host: HostKindV1,
+) -> Option<HostCapabilityUnavailableReasonV1> {
+    match host {
+        HostKindV1::ClaudeCode
+        | HostKindV1::Codex
+        | HostKindV1::CursorDesktop
+        | HostKindV1::Hermes
+        | HostKindV1::KimiCode
+        | HostKindV1::OpenCode => None,
+        // Cursor cloud exposes no host registration API to install into. Its
+        // presence in the host enum and capability catalog is not support
+        // evidence, so it stays typed unavailable until a real component set
+        // is packaged.
+        HostKindV1::CursorCloud => Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported),
+        // Kiro's hook route is degraded by its own native fixture, and the
+        // Cline family has no checked-in evidence admitting a packaged route.
+        HostKindV1::Kiro => Some(HostCapabilityUnavailableReasonV1::NativeFixtureLimited),
+        HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
+            Some(HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing)
+        }
+    }
 }
 
 /// Canonical default install set. Each native MCP registration has one
 /// component owner. Kimi's plugin manifest carries its MCP route inside Core;
-/// hosts with a separable route use Context MCP.
+/// hosts with a separable route use Context MCP. The match is exhaustive so a
+/// newly admitted host cannot fall through to a silently empty set.
 pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
     match host {
         HostKindV1::ClaudeCode | HostKindV1::Codex => vec![
             HostBundleComponentV1::Core,
             HostBundleComponentV1::ContextMcp,
         ],
-        HostKindV1::CursorDesktop => vec![
+        HostKindV1::CursorDesktop | HostKindV1::OpenCode => vec![
             HostBundleComponentV1::Core,
             HostBundleComponentV1::Agent,
             HostBundleComponentV1::ContextMcp,
@@ -94,12 +128,12 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         HostKindV1::Hermes | HostKindV1::KimiCode => {
             vec![HostBundleComponentV1::Core]
         }
-        HostKindV1::OpenCode => vec![
-            HostBundleComponentV1::Core,
-            HostBundleComponentV1::Agent,
-            HostBundleComponentV1::ContextMcp,
-        ],
-        _ => Vec::new(),
+        HostKindV1::CursorCloud
+        | HostKindV1::Kiro
+        | HostKindV1::ClineFamily
+        | HostKindV1::Cline
+        | HostKindV1::RooCode
+        | HostKindV1::Kilo => Vec::new(),
     }
 }
 
@@ -109,6 +143,9 @@ pub fn verified_embedded_default_host_component_set(
     host: HostKindV1,
     now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
+    if let Some(reason) = unsupported_host_component_set_reason(host) {
+        return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
+    }
     verified_embedded_host_component_set(host, &default_components(host), now_unix)
 }
 
@@ -129,7 +166,11 @@ pub fn verified_embedded_project_host_component_set(
         _ => default_components(host),
     };
     if project_components.is_empty() {
-        return Err(HostBundleRegistryError::Incompatible);
+        return Err(HostBundleRegistryError::HostComponentSetUnavailable {
+            host,
+            reason: unsupported_host_component_set_reason(host)
+                .unwrap_or(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported),
+        });
     }
     let catalog = host_integration_catalog_v1();
     let integration_manifest_digest = catalog
@@ -222,6 +263,9 @@ pub fn verified_embedded_host_component_set(
     requested_components: &[HostBundleComponentV1],
     now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
+    if let Some(reason) = unsupported_host_component_set_reason(host) {
+        return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
+    }
     if requested_components.is_empty() {
         return Err(HostBundleRegistryError::Incompatible);
     }
@@ -967,7 +1011,10 @@ mod tests {
             assert!(default_components(host).is_empty());
             assert_eq!(
                 verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
-                Err(HostBundleRegistryError::Incompatible)
+                Err(HostBundleRegistryError::HostComponentSetUnavailable {
+                    host,
+                    reason: HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing,
+                })
             );
         }
     }
@@ -981,8 +1028,48 @@ mod tests {
                 &[HostBundleComponentV1::Core],
                 0
             ),
-            Err(HostBundleRegistryError::Incompatible)
+            Err(HostBundleRegistryError::HostComponentSetUnavailable {
+                host: HostKindV1::Kiro,
+                reason: HostCapabilityUnavailableReasonV1::NativeFixtureLimited,
+            })
         );
+    }
+
+    #[test]
+    fn cursor_cloud_reports_a_typed_unavailable_set_instead_of_an_empty_default() {
+        assert_eq!(
+            unsupported_host_component_set_reason(HostKindV1::CursorCloud),
+            Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
+        );
+        for outcome in [
+            verified_embedded_default_host_component_set(HostKindV1::CursorCloud, 0),
+            verified_embedded_host_component_set(
+                HostKindV1::CursorCloud,
+                &[HostBundleComponentV1::Core],
+                0,
+            ),
+            verified_embedded_project_host_component_set(HostKindV1::CursorCloud, "cursor", 0),
+        ] {
+            assert_eq!(
+                outcome,
+                Err(HostBundleRegistryError::HostComponentSetUnavailable {
+                    host: HostKindV1::CursorCloud,
+                    reason: HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
+                }),
+                "cursor cloud must never fall through to an installable empty set"
+            );
+        }
+    }
+
+    #[test]
+    fn every_host_with_a_default_set_is_reported_supported() {
+        for host in HostKindV1::ALL {
+            assert_eq!(
+                default_components(host).is_empty(),
+                unsupported_host_component_set_reason(host).is_some(),
+                "{host:?} must not disagree between its default set and its typed availability"
+            );
+        }
     }
 
     #[test]
