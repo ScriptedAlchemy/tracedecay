@@ -1018,7 +1018,7 @@ async fn test_build_file_adjacency_pages_beyond_runtime_materialization_limit() 
                 source: format!("paged-{source:04}"),
                 target: format!("paged-{target:04}"),
                 kind: EdgeKind::Calls,
-                line: 1,
+                line: Some(1),
             });
         }
     }

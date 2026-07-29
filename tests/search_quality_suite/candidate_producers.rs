@@ -287,10 +287,17 @@ fn admitted_rust_chunk(
         id("chunker.v1"),
         tracedecay::extraction::LanguageRegistry::new(),
     );
-    let (chunks, authority) = chunker
-        .chunk_file_with_authority(&file, &batch, &descriptor, &NeverCancelled)
+    let (artifacts, authority) = chunker
+        .index_file_with_authority_from_extraction(
+            &file,
+            &batch,
+            &descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
         .expect("chunk with exact authority");
-    let chunk = chunks
+    let chunk = artifacts
+        .chunks
         .chunks
         .into_iter()
         .find(|chunk| {
