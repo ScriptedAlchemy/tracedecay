@@ -841,10 +841,7 @@ async fn managed_test_document_content_digests(
         validated.push((changed_path.clone(), root.join(relative)));
     }
 
-    let mut outcomes: Vec<(
-        usize,
-        Result<Option<(String, tracedecay_domain::ContentDigest)>>,
-    )> = stream::iter(validated.into_iter().enumerate())
+    let mut outcomes = stream::iter(validated.into_iter().enumerate())
         .map(|(index, (changed_path, absolute))| async move {
             let outcome = match tokio::fs::read(&absolute).await {
                 Ok(bytes) => match Url::from_file_path(&absolute) {
@@ -866,7 +863,7 @@ async fn managed_test_document_content_digests(
             (index, outcome)
         })
         .buffer_unordered(MANAGED_TEST_DIGEST_READ_CONCURRENCY)
-        .collect()
+        .collect::<Vec<_>>()
         .await;
 
     // Restore input order so the first hard error matches the serial path.
