@@ -1,0 +1,3 @@
+{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"id":"fixture-codex-session","cwd":"/home/fixture/workspace/runtime-fixture","originator":"codex","cli_version":"fixture","source":"cli"}}
+{"timestamp":"2026-07-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Trace the exact-symbol workload through the fixture catalog."}]}}
+{"timestamp":"2026-07-01T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The catalog entry point calls total_quantity across files."}]}}

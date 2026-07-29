@@ -1,6 +1,0 @@
-{
-  "fixture_id": "storage-runtime-runner-dry-run-input-v1",
-  "fixture_kind": "synthetic_runner_fixture_not_product_protocol",
-  "description": "Input bytes for the storage-runtime runner dry-run. This is a runner-owned synthetic fixture: it contains no TraceDecay store files, no product schema, and no protocol fields. Real S0 evidence runs must instead point --input at an explicit copy of released store fixtures.",
-  "payload_file": "payload.txt"
-}
