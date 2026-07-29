@@ -880,6 +880,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_remains_unavailable_until_source_edit_owner_is_installed() {
+        let project = tempdir().unwrap();
+        let (graph, _database_scope) = fixture_graph(project.path()).await;
+        let error = handle_str_replace(
+            &graph,
+            json!({
+                "path": "src/lib.rs",
+                "old_str": "old",
+                "new_str": "new",
+                "dry_run": true,
+            }),
+            invocation_context(None),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("daemon-owned source edit authority is unavailable")
+        );
+    }
+
+    #[tokio::test]
     async fn apply_requires_preview_idempotency_and_expected_state() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;

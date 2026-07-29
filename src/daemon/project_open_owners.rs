@@ -868,7 +868,6 @@ pub(crate) async fn register_project_open_production_owners(
         scope: scope.clone(),
         configuration: Arc::clone(graph.configuration_runtime()),
     };
-    install_project_open_source_edit_owners(server, Arc::clone(&graph), source_edit_authorization)?;
     let configuration_digest = access.configuration_digest.clone();
     let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
@@ -885,6 +884,10 @@ pub(crate) async fn register_project_open_production_owners(
                 message: format!("project-open Git authority registration failed: {error}"),
             })?;
     }
+    // The server may already be serving read-only core tools. Publish mutation
+    // executors only after the exact Git transaction authority is installed,
+    // so apply requests remain fail-closed throughout capability warm-up.
+    install_project_open_source_edit_owners(server, Arc::clone(&graph), source_edit_authorization)?;
     let configuration_policy_digest = canonical_sha256(&(
         "tracedecay.daemon.configuration-policy.v1",
         &scope.scope_digest,
