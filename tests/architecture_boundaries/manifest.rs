@@ -87,6 +87,7 @@ const CONTRACT_PACKAGE_ALLOWLISTS: &[(&str, &[&str])] = &[
             "ast-grep-core",
             "cc",
             "ignore",
+            "rayon",
             "serde",
             "serde_json",
             "sha2",
