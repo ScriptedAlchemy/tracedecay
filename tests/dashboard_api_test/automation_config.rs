@@ -1,6 +1,59 @@
 use crate::dashboard_api_support::*;
 
 #[test]
+fn dashboard_http_cannot_enable_job_shell_commands() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let tmp_root = tmp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+
+        let (cg, host_runtime) = setup_project(&project_root).await;
+        let agent = http_agent();
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, rejected) = patch_json_body(
+            &agent,
+            &config_url,
+            &serde_json::json!({ "allow_job_commands": true }),
+        );
+        assert_eq!(status, 400, "{rejected}");
+        assert!(
+            rejected["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("local operator configuration")),
+            "{rejected}"
+        );
+
+        let (status, config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200);
+        assert_eq!(config["effective"]["allow_job_commands"], false);
+        assert!(config["project"].is_null(), "{config}");
+
+        server.stop();
+    });
+}
+
+#[test]
 fn automation_config_is_dashboard_controllable_and_persistent() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()

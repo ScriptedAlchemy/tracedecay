@@ -84,7 +84,8 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{Method, Request, StatusCode, Uri};
+use axum::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, get, patch, post};
 use serde_json::{Value, json};
@@ -740,6 +741,7 @@ where
     .await?;
     let app = router(cg, state).await?;
     let (listener, addr) = bind_dashboard(host, port).await?;
+    let app = with_dashboard_http_admission(app, addr);
 
     let url = format!("http://{addr}/");
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
@@ -793,6 +795,72 @@ pub(crate) fn validate_dashboard_host(host: &str) -> Result<&str> {
     Err(config_error(format!(
         "dashboard host is loopback-only; use 127.0.0.1, localhost, or ::1 (got {host:?})"
     )))
+}
+
+#[derive(Clone)]
+struct DashboardHttpAdmission {
+    port: u16,
+}
+
+pub(crate) fn with_dashboard_http_admission(app: Router, addr: std::net::SocketAddr) -> Router {
+    app.layer(middleware::from_fn_with_state(
+        DashboardHttpAdmission { port: addr.port() },
+        admit_dashboard_http_request,
+    ))
+}
+
+async fn admit_dashboard_http_request(
+    State(admission): State<DashboardHttpAdmission>,
+    headers: HeaderMap,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return dashboard_request_forbidden("missing Host header");
+    };
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return dashboard_request_forbidden("invalid Host header");
+    };
+    let authority_host = authority.host().trim_matches(['[', ']']);
+    let loopback_host = authority_host.eq_ignore_ascii_case("localhost")
+        || matches!(authority_host, "127.0.0.1" | "::1");
+    if !loopback_host || authority.port_u16() != Some(admission.port) {
+        return dashboard_request_forbidden("Host must name the bound loopback dashboard");
+    }
+
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        let Ok(origin_uri) = origin.parse::<Uri>() else {
+            return dashboard_request_forbidden("invalid Origin header");
+        };
+        let same_origin = origin_uri.scheme_str() == Some("http")
+            && origin_uri.authority().is_some_and(|origin_authority| {
+                origin_authority
+                    .as_str()
+                    .eq_ignore_ascii_case(authority.as_str())
+            });
+        if !same_origin {
+            return dashboard_request_forbidden("Origin must match the dashboard");
+        }
+    }
+
+    next.run(request).await
+}
+
+fn dashboard_request_forbidden(detail: &'static str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "dashboard_request_forbidden",
+            "detail": detail,
+        })),
+    )
+        .into_response()
 }
 
 /// Canonical application routes bound to one exact project daemon.
