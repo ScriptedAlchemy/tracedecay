@@ -1488,10 +1488,7 @@ fn query_source_guard_rejects_other_cfg_forms() {
             "unrelated feature",
             r#"#[cfg(feature = "test-helpers")] fn helper() {}"#,
         ),
-        (
-            "arbitrary any",
-            r#"#[cfg(any(test, unix))] fn helper() {}"#,
-        ),
+        ("arbitrary any", r#"#[cfg(any(test, unix))] fn helper() {}"#),
         (
             "additional feature",
             r#"#[cfg(any(test, feature = "test-helpers", feature = "extra"))] fn helper() {}"#,
