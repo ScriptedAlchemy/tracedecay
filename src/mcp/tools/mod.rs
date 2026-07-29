@@ -27,9 +27,10 @@ pub use definitions::{
     internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };
 pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
+pub(crate) use handlers::handle_tool_call_with_registry;
 pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;
 pub(crate) use handlers::hook_runtime::structured_hook_error_data;
-pub use handlers::memory::handle_user_memory_tool;
+pub(crate) use handlers::memory::handle_user_memory_tool;
 pub(crate) use handlers::session::message_search::SessionRetrievalOmissionView;
 pub(crate) use handlers::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
@@ -45,7 +46,7 @@ pub(crate) use handlers::{
     handle_projectless_hook_runtime, replay_projectless_hermes_host_admission, utc_micros_value,
 };
 pub use handlers::{
-    SessionAuthorities, ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
+    SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,
     handle_tool_call_with_registry_and_implicit_project, handle_user_lcm_tool,
 };
 
