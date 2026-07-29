@@ -222,17 +222,21 @@ fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
     std::fs::metadata(PathBuf::from(path)).map_or(0, |metadata| metadata.len())
 }
 
+fn doctor_runtime_coverage(startup_health_only: bool) -> Option<serde_json::Value> {
+    startup_health_only.then(|| {
+        json!({
+            "status": "partial",
+            "reason": "startup_health_only",
+        })
+    })
+}
+
 async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
     startup_health_only: bool,
 ) -> serde_json::Value {
-    doctor_runtime_value_inner(
-        handshake,
-        Some(store_administration),
-        startup_health_only,
-    )
-    .await
+    doctor_runtime_value_inner(handshake, Some(store_administration), startup_health_only).await
 }
 
 async fn doctor_runtime_value_inner(
@@ -323,7 +327,8 @@ async fn doctor_runtime_value_inner(
             "read_only": true,
         },
     });
-    if startup_health_only {
+    if let Some(coverage) = doctor_runtime_coverage(startup_health_only) {
+        value["doctor_runtime"]["coverage"] = coverage;
         return value;
     }
 
@@ -470,12 +475,7 @@ pub(crate) async fn write_doctor_runtime_response(
     request: DoctorRuntimeRequest,
 ) -> Result<()> {
     let result = doctor_runtime_tool_result(
-        doctor_runtime_value(
-            handshake,
-            store_administration,
-            request.startup_health_only,
-        )
-        .await,
+        doctor_runtime_value(handshake, store_administration, request.startup_health_only).await,
     );
     write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
 }
@@ -642,6 +642,18 @@ mod doctor_runtime_route_tests {
         let mut wal_path = path.as_os_str().to_os_string();
         wal_path.push("-wal");
         std::fs::metadata(PathBuf::from(wal_path)).is_ok_and(|metadata| metadata.len() > 0)
+    }
+
+    #[test]
+    fn startup_health_coverage_is_explicitly_partial() {
+        assert_eq!(
+            doctor_runtime_coverage(true),
+            Some(serde_json::json!({
+                "status": "partial",
+                "reason": "startup_health_only",
+            }))
+        );
+        assert_eq!(doctor_runtime_coverage(false), None);
     }
 
     #[test]
