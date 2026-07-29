@@ -1945,6 +1945,31 @@ fn daemon_startup_health_gates_only_current_project_storage() {
 }
 
 #[test]
+fn daemon_startup_health_requires_complete_mounted_daemon_identity() {
+    let ready = serde_json::json!({
+        "storage_health": {
+            "canonical_db_path": "/profile/project.db",
+            "daemon_owner_pid": 1234,
+            "daemon_version": "0.0.67+test",
+            "quick_check_ok": true
+        }
+    });
+    assert!(super::daemon_startup_health_ready(&ready));
+
+    for required_field in ["canonical_db_path", "daemon_owner_pid", "daemon_version"] {
+        let mut incomplete = ready.clone();
+        incomplete["storage_health"]
+            .as_object_mut()
+            .expect("storage health object")
+            .remove(required_field);
+        assert!(
+            !super::daemon_startup_health_ready(&incomplete),
+            "startup health must remain pending without {required_field}"
+        );
+    }
+}
+
+#[test]
 fn daemon_startup_probe_skips_all_expensive_status_reads() {
     assert_eq!(
         super::daemon_admission_args(),
@@ -2003,7 +2028,12 @@ async fn daemon_startup_health_converges_after_runtime_telemetry_appears() {
                     }));
                 }
                 Ok(serde_json::json!({
-                    "storage_health": {"quick_check_ok": true}
+                    "storage_health": {
+                        "canonical_db_path": "/profile/project.db",
+                        "daemon_owner_pid": 1234,
+                        "daemon_version": "0.0.67+test",
+                        "quick_check_ok": true
+                    }
                 }))
             }
         },
@@ -2214,6 +2244,9 @@ async fn daemon_startup_health_retryable_progress_changes_then_converges() {
                     }),
                     _ => serde_json::json!({
                         "storage_health": {
+                            "canonical_db_path": "/profile/project.db",
+                            "daemon_owner_pid": 1234,
+                            "daemon_version": "0.0.67+test",
                             "quick_check_ok": true
                         }
                     }),
