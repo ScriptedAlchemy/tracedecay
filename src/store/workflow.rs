@@ -14,6 +14,7 @@ use crate::sessions::workflow_index::{
     read_ingest_watermark, upsert_agent, upsert_run,
 };
 use crate::sessions::workflow_ingest::{WorkflowIngestStats, ingest_workflow_runs_with_sink};
+use crate::sessions::workflow_state::{WorkflowStateItem, list_unfinished};
 
 /// Borrowed adapter over an already-open project-sessions database.
 pub struct GlobalDbWorkflowStore<'a> {
@@ -125,6 +126,19 @@ impl<'a> GlobalDbWorkflowStore<'a> {
         projects_dir: &Path,
     ) -> WorkflowIngestStats {
         ingest_workflow_runs_with_sink(self, project_id, project_root, projects_dir).await
+    }
+
+    /// Unfinished-run evidence listing, read at one pinned generation.
+    pub(crate) async fn list_unfinished_workflows(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<WorkflowStateItem>, String> {
+        let snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        list_unfinished(&snapshot, limit).await
     }
 }
 
