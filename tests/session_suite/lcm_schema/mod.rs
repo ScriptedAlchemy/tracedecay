@@ -229,7 +229,7 @@ async fn set_migration_version(db_path: &Path, version: i64) {
 }
 
 /// Rewrites the raw-message FTS objects into the pre-v3 shape (role +
-/// metadata_json indexed alongside index_text) and stamps the requested
+/// `metadata_json` indexed alongside `index_text`) and stamps the requested
 /// schema version, simulating a database written by an older tracedecay.
 async fn downgrade_raw_fts_to_v2(db_path: &Path) {
     let db = TestConnection::open(db_path);

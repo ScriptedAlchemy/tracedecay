@@ -26,6 +26,15 @@ pub(crate) enum StoreRuntimeOpenBegin {
     Rejected(StoreRuntimeRegistryFailure),
 }
 
+/// Published shard runtime plus the locator and optional write authority used to
+/// open it. Factored out so `build_runtime`'s future return stays under Clippy's
+/// type-complexity threshold without changing registry publication semantics.
+type BuiltShardRuntimePublication = (
+    PublishedShardRuntime,
+    RuntimeLocatorRecord,
+    Option<crate::db::DatabaseAuthority>,
+);
+
 impl StoreRuntimeOpenBegin {
     pub(crate) async fn wait(self) -> StoreRuntimeOpenResult {
         match self {
@@ -246,14 +255,7 @@ impl StoreRuntimeRegistry {
         mode: StoreRuntimeOpenMode,
     ) -> StoreRuntimeRegistryFuture<
         'a,
-        Result<
-            (
-                PublishedShardRuntime,
-                RuntimeLocatorRecord,
-                Option<crate::db::DatabaseAuthority>,
-            ),
-            StoreRuntimeRegistryFailure,
-        >,
+        Result<BuiltShardRuntimePublication, StoreRuntimeRegistryFailure>,
     > {
         Box::pin(async move {
             let resolved = self

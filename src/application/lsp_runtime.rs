@@ -301,7 +301,6 @@ pub trait LspFeedbackProjectionScopePort: Send + Sync {
 pub struct RegisteredProjectLspAuthority {
     feedback: Arc<Pr12FeedbackRuntime>,
     publications: ProjectFeedbackStore,
-    database: Database,
     project_root: PathBuf,
     project_dir: Arc<Dir>,
     root_uri: Url,
@@ -311,7 +310,6 @@ pub struct RegisteredProjectLspAuthority {
 impl RegisteredProjectLspAuthority {
     pub fn new(
         feedback: Arc<Pr12FeedbackRuntime>,
-        database: Database,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     ) -> Result<Self, LspRuntimeFailure> {
         let project_root = feedback
@@ -338,7 +336,6 @@ impl RegisteredProjectLspAuthority {
         Ok(Self {
             feedback,
             publications,
-            database,
             project_root,
             project_dir: Arc::new(project_dir),
             root_uri,
@@ -2220,7 +2217,6 @@ where
 {
     let project = Arc::new(RegisteredProjectLspAuthority::new(
         feedback_runtime.clone(),
-        database.clone(),
         code_index,
     )?);
     let test_runs = lsp_test_result_port(project.clone());

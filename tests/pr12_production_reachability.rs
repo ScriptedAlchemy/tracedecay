@@ -552,6 +552,69 @@ fn source_project_open_mounts_each_production_owner_once() {
     );
 }
 
+/// Durable code-index and semantic restore may be much slower than exact graph
+/// and SQLite-backed owner mounts. Independent production capabilities must be
+/// published before either capability-specific warm-up begins.
+#[test]
+fn source_project_open_publishes_independent_owners_before_semantic_restore() {
+    const INDEPENDENT: &str = "register_project_open_production_owners";
+    const DEPENDENT: &str = "register_project_open_dependent_owners";
+    let primitive = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        INDEPENDENT,
+        "open_pr12_production_primitive_runtime",
+    );
+    let lsp = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        INDEPENDENT,
+        "register_production_lsp_owner",
+    );
+    let independent = call_offsets(
+        DAEMON_SOURCE,
+        "production_project_server",
+        "register_project_open_production_owners",
+    );
+    let mount = call_offsets(
+        DAEMON_SOURCE,
+        "production_project_server",
+        "mount_code_index",
+    );
+    let dependent = call_offsets(
+        DAEMON_SOURCE,
+        "production_project_server",
+        "register_project_open_dependent_owners",
+    );
+    let feedback = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        DEPENDENT,
+        "register_production_feedback_cycle",
+    );
+    let semantic = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        DEPENDENT,
+        "register_semantic_activation_owner",
+    );
+    assert_eq!(primitive.len(), 1, "primitive runtime must open once");
+    assert_eq!(lsp.len(), 1, "LSP owner must register once");
+    assert_eq!(
+        independent.len(),
+        1,
+        "independent owners must register once"
+    );
+    assert_eq!(mount.len(), 1, "code index must mount once");
+    assert_eq!(dependent.len(), 1, "dependent owners must register once");
+    assert_eq!(feedback.len(), 1, "feedback cycle must register once");
+    assert_eq!(semantic.len(), 1, "semantic activation must register once");
+    assert!(
+        independent[0] < mount[0] && mount[0] < dependent[0],
+        "independent owners must publish before code-index and semantic restore"
+    );
+    assert!(
+        feedback[0] < semantic[0],
+        "feedback cycle must publish before semantic generation restore"
+    );
+}
+
 /// The daemon invocation protocol must not reacquire the legacy owner-injection
 /// escape hatch.
 ///

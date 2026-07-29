@@ -142,6 +142,10 @@ pub(crate) struct CodeIndexSearchRequestV1 {
     pub(crate) limit: usize,
     pub(crate) cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub(crate) mode: CodeIndexSearchModeV1,
+    /// MCP→executor admission envelope. The type-erased
+    /// [`CodeIndexSearchExecutor`] authenticates this value; keep it on the
+    /// request even when local analysis cannot see through `Arc<dyn Fn…>`.
+    #[allow(dead_code)]
     pub(crate) authority: Option<CodeIndexSearchAuthorityV1>,
     pub(crate) deadline: Option<tracedecay_application::Deadline>,
     pub(crate) cancellation: Option<tracedecay_application::CancellationSignal>,
@@ -168,6 +172,7 @@ pub(crate) enum CodeIndexSearchUnavailableReasonV1 {
     AuthorityUnavailable,
     Cancelled,
     TimedOut,
+    CapacityUnavailable,
     GenerationUnavailable,
     SemanticUnavailable,
     InvalidRequest,
@@ -181,6 +186,7 @@ impl CodeIndexSearchUnavailableReasonV1 {
             Self::AuthorityUnavailable => "authority_unavailable",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::CapacityUnavailable => "search_capacity_unavailable",
             Self::GenerationUnavailable => "generation_unavailable",
             Self::SemanticUnavailable => "semantic_unavailable",
             Self::InvalidRequest => "invalid_request",
@@ -221,6 +227,7 @@ pub(crate) struct CodeIndexSearchUnavailableV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // typed search terminal states; avoid heap on Unavailable
 pub(crate) enum CodeIndexSearchOutcomeV1 {
     Complete(CodeIndexSearchCompletedV1),
     Unavailable(CodeIndexSearchUnavailableV1),
@@ -402,6 +409,7 @@ pub struct McpServer {
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    doctor_report_published: AtomicBool,
     dashboard_doctor_remediation_dispatcher:
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     dashboard_code_index_freshness_reader:
@@ -557,21 +565,33 @@ pub struct McpServer {
     /// Daemon-owned route liveness. A failed post-open health check revokes
     /// every tool on retained transports before cache retirement can await.
     project_server_live: Option<Arc<AtomicBool>>,
-    /// Linearizes a tool response write with project-server revocation. A
-    /// health failure flips `project_server_live` before waiting for the write
-    /// side, so later responses fail closed while an already-authorized write
-    /// is allowed to finish before revocation completes.
+    /// Linearizes full tool-request execution and its response write with
+    /// project-server retirement. Revocation stops new read leases, then the
+    /// write side waits for every already-admitted request to finish.
     project_server_response_gate: tokio::sync::RwLock<()>,
     /// Cancels a pending notification/response transport write when retained
     /// project health fails. Unlike a one-shot notification, cancellation is
     /// remembered if revocation wins before the write future is polled.
     project_server_response_revoked: crate::application::context::CancellationToken,
+    /// Backstop for a retired server whose admitted request does not drain
+    /// within its normal operation deadline.
+    project_server_request_abort: crate::application::context::CancellationToken,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
 }
 
 impl McpServer {
+    pub(crate) fn doctor_report_ready(&self) -> bool {
+        self.dashboard_doctor_report_reader.is_some()
+            && self.doctor_report_published.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn publish_doctor_report(&self) {
+        debug_assert!(self.dashboard_doctor_report_reader.is_some());
+        self.doctor_report_published.store(true, Ordering::Release);
+    }
+
     /// Creates a new MCP server backed by the given code graph.
     ///
     /// Index freshness for source-editing tools is maintained by a lazy
@@ -587,7 +607,8 @@ impl McpServer {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
-    pub async fn new_with_global_db(
+    #[cfg(any(test, feature = "test-transport"))]
+    pub(crate) async fn new_with_global_db(
         cg: TraceDecay,
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
@@ -595,7 +616,8 @@ impl McpServer {
         Self::new_with_dbs(cg, scope_prefix, global_db.clone(), global_db, true).await
     }
 
-    pub async fn new_with_dbs(
+    #[cfg(any(test, feature = "test-transport"))]
+    pub(crate) async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
@@ -707,7 +729,7 @@ impl McpServer {
     /// the daemon's behaviour.
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
-    pub async fn new_with_registered_test_context(
+    pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
         retained_graphs: Vec<Arc<TraceDecay>>,
     ) -> Arc<Self> {
@@ -823,6 +845,7 @@ impl McpServer {
         Self::new_with_context(context).await
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
     async fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -1067,6 +1090,7 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
+            doctor_report_published: AtomicBool::new(false),
             dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
@@ -1118,6 +1142,7 @@ impl McpServer {
             project_server_live,
             project_server_response_gate: tokio::sync::RwLock::new(()),
             project_server_response_revoked: crate::application::context::CancellationToken::new(),
+            project_server_request_abort: crate::application::context::CancellationToken::new(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 
@@ -1285,14 +1310,8 @@ impl McpServer {
             .await
     }
 
-    pub fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
+    pub(crate) fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
         self.session_db.clone()
-    }
-
-    pub(crate) fn registered_project_session_db(
-        &self,
-    ) -> Option<Arc<crate::global_db::RegisteredGlobalDb>> {
-        self.registered_session_db.clone()
     }
 
     /// Clones out the currently served `TraceDecay` instance. The lock is

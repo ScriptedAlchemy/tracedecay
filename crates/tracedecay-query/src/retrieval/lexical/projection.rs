@@ -168,7 +168,7 @@ pub struct CodeLexicalProjectionAdapterV1 {
 
 #[derive(Clone, Debug)]
 struct LexicalCorpusStatisticsV1 {
-    vocabulary: BTreeSet<String>,
+    vocabulary_by_character_count: BTreeMap<usize, Vec<String>>,
     document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
     average_field_lengths: BTreeMap<LexicalFieldV1, usize>,
 }
@@ -202,8 +202,15 @@ impl LexicalCorpusStatisticsV1 {
             .into_iter()
             .map(|(field, total)| (field, total.div_ceil(divisor).max(1)))
             .collect();
+        let mut vocabulary_by_character_count = BTreeMap::<usize, Vec<String>>::new();
+        for term in vocabulary {
+            vocabulary_by_character_count
+                .entry(term.chars().count())
+                .or_default()
+                .push(term);
+        }
         Self {
-            vocabulary,
+            vocabulary_by_character_count,
             document_frequencies,
             average_field_lengths,
         }
@@ -392,18 +399,28 @@ impl CodeLexicalProjectionAdapterV1 {
             return FuzzyExpansionsV1::default();
         }
         let mut candidates = Vec::new();
+        let mut workspace = BoundedLevenshteinWorkspace::default();
         for (query_ordinal, query) in request.whole_terms.iter().enumerate() {
             let normalized_query = normalize_lexical(query);
-            let bound = fuzzy_distance_bound(normalized_query.chars().count());
+            let normalized_query_characters = normalized_query.chars().collect::<Vec<_>>();
+            let query_character_count = normalized_query_characters.len();
+            let bound = fuzzy_distance_bound(query_character_count);
             if bound == 0 {
                 continue;
             }
-            for term in &self.statistics.vocabulary {
-                if term == &normalized_query {
-                    continue;
-                }
-                if let Some(distance) = bounded_levenshtein(&normalized_query, term, bound) {
-                    candidates.push((distance, query_ordinal, query.clone(), term.clone()));
+            for (_, terms) in self.statistics.vocabulary_by_character_count.range(
+                query_character_count.saturating_sub(bound)
+                    ..=query_character_count.saturating_add(bound),
+            ) {
+                for term in terms {
+                    if term == &normalized_query {
+                        continue;
+                    }
+                    if let Some(distance) =
+                        workspace.distance(&normalized_query_characters, term, bound)
+                    {
+                        candidates.push((distance, query_ordinal, query.clone(), term.clone()));
+                    }
                 }
             }
         }
@@ -933,32 +950,41 @@ fn fuzzy_distance_bound(character_count: usize) -> usize {
     }
 }
 
-fn bounded_levenshtein(left: &str, right: &str, bound: usize) -> Option<usize> {
-    let left_len = left.chars().count();
-    let right_len = right.chars().count();
-    if left_len.abs_diff(right_len) > bound {
-        return None;
-    }
-    let left: Vec<char> = left.chars().collect();
-    let right: Vec<char> = right.chars().collect();
-    let mut previous: Vec<usize> = (0..=right.len()).collect();
-    for (left_index, left_char) in left.iter().enumerate() {
-        let mut current = Vec::with_capacity(right.len() + 1);
-        current.push(left_index + 1);
-        let mut row_minimum = left_index + 1;
-        for (right_index, right_char) in right.iter().enumerate() {
-            let substitution = previous[right_index] + usize::from(left_char != right_char);
-            let insertion = current[right_index] + 1;
-            let deletion = previous[right_index + 1] + 1;
-            let distance = substitution.min(insertion).min(deletion);
-            current.push(distance);
-            row_minimum = row_minimum.min(distance);
-        }
-        if row_minimum > bound {
+#[derive(Default)]
+struct BoundedLevenshteinWorkspace {
+    right: Vec<char>,
+    previous: Vec<usize>,
+    current: Vec<usize>,
+}
+
+impl BoundedLevenshteinWorkspace {
+    fn distance(&mut self, left: &[char], right: &str, bound: usize) -> Option<usize> {
+        self.right.clear();
+        self.right.extend(right.chars());
+        if left.len().abs_diff(self.right.len()) > bound {
             return None;
         }
-        previous = current;
+        self.previous.clear();
+        self.previous.extend(0..=self.right.len());
+        for (left_index, left_char) in left.iter().enumerate() {
+            self.current.clear();
+            self.current.push(left_index + 1);
+            let mut row_minimum = left_index + 1;
+            for (right_index, right_char) in self.right.iter().enumerate() {
+                let substitution =
+                    self.previous[right_index] + usize::from(left_char != right_char);
+                let insertion = self.current[right_index] + 1;
+                let deletion = self.previous[right_index + 1] + 1;
+                let distance = substitution.min(insertion).min(deletion);
+                self.current.push(distance);
+                row_minimum = row_minimum.min(distance);
+            }
+            if row_minimum > bound {
+                return None;
+            }
+            std::mem::swap(&mut self.previous, &mut self.current);
+        }
+        let distance = self.previous[self.right.len()];
+        (distance <= bound).then_some(distance)
     }
-    let distance = previous[right.len()];
-    (distance <= bound).then_some(distance)
 }

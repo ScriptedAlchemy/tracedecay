@@ -217,6 +217,7 @@ pub(super) fn def_git_hunks() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 fn feedback_surface_definition(
     name: &str,
     title: &str,
@@ -290,6 +291,7 @@ pub(super) fn def_git_apply() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_diagnostics() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_diagnostics",
@@ -299,6 +301,7 @@ pub(super) fn def_feedback_diagnostics() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_get() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_get",
@@ -308,6 +311,7 @@ pub(super) fn def_feedback_get() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_expand() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_expand",
@@ -317,6 +321,7 @@ pub(super) fn def_feedback_expand() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_list() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_list",
@@ -487,6 +492,7 @@ pub(super) fn context_scout_control_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_impact() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_impact",
@@ -496,6 +502,7 @@ pub(super) fn def_feedback_impact() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_affected_tests() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_affected_tests",
@@ -1119,6 +1126,180 @@ pub(super) fn def_code_references() -> ToolDefinition {
     callable_code_navigation_definition("code_references", "Read callable code references")
 }
 
+fn configuration_definition(
+    operation: &str,
+    title: &str,
+    description: &str,
+    properties: serde_json::Value,
+    required: &[&str],
+    writes: bool,
+) -> ToolDefinition {
+    let name = format!("tracedecay_configuration_{operation}");
+    let schema = required_object_schema(properties, required);
+    if writes {
+        def_rw(&name, title, description, schema)
+    } else {
+        def(&name, title, description, schema)
+    }
+}
+
+pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
+    let key = || string_property("Canonical typed configuration setting key.");
+    let revision = || string_property("Exact expected configuration revision for CAS.");
+    vec![
+        configuration_definition(
+            "list",
+            "List configuration settings",
+            "Invoke the daemon-retained configuration authority.",
+            json!({}),
+            &[],
+            false,
+        ),
+        configuration_definition(
+            "explain",
+            "Explain configuration setting",
+            "Resolve one effective value and its provenance through the configuration authority.",
+            json!({"key": key()}),
+            &["key"],
+            false,
+        ),
+        configuration_definition(
+            "get",
+            "Get configuration setting",
+            "Read one effective typed value through the configuration authority.",
+            json!({"key": key()}),
+            &["key"],
+            false,
+        ),
+        configuration_definition(
+            "set",
+            "Set configuration value",
+            "Apply one authorized typed value with exact revision CAS.",
+            json!({
+                "layer": {"description": "Canonical configuration layer identity."},
+                "key": key(),
+                "value": {"description": "Typed configuration value."},
+                "expected_revision": revision()
+            }),
+            &["layer", "key", "value", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "unset",
+            "Unset configuration value",
+            "Remove one authorized typed value with exact revision CAS.",
+            json!({
+                "layer": {"description": "Canonical configuration layer identity."},
+                "key": key(),
+                "expected_revision": revision()
+            }),
+            &["layer", "key", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "batch",
+            "Apply configuration batch",
+            "Apply one authorized atomic batch with exact revision CAS.",
+            json!({
+                "mutations": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                "expected_revision": revision()
+            }),
+            &["mutations", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "write_credential",
+            "Write configuration credential",
+            "Resolve one opaque write handle into redacted credential-reference metadata.",
+            json!({
+                "expected_reference_id": {"type": ["string", "null"]},
+                "kind": {"description": "Typed credential kind."},
+                "write_handle": string_property("Opaque credential write handle; never plaintext credential material."),
+                "expected_revision": revision()
+            }),
+            &["kind", "write_handle", "expected_revision"],
+            true,
+        ),
+        configuration_definition(
+            "observed_state",
+            "Read configuration activation state",
+            "Read desired-versus-observed component activation through the configuration authority.",
+            json!({}),
+            &[],
+            false,
+        ),
+        configuration_definition(
+            "protected_preview",
+            "Preview protected configuration change",
+            "Create a revalidated redacted protected-change preview.",
+            json!({
+                "change": {"type": "object"},
+                "expected_revision": revision()
+            }),
+            &["change", "expected_revision"],
+            false,
+        ),
+        configuration_definition(
+            "protected_apply",
+            "Apply protected configuration change",
+            "Apply an actor-bound protected preview with exact CAS evidence.",
+            json!({
+                "plan_id": {"type": "string"},
+                "expected_base_revision_id": revision(),
+                "operation_digest": {"type": "string"},
+                "idempotency_key": {"type": "string"}
+            }),
+            &[
+                "plan_id",
+                "expected_base_revision_id",
+                "operation_digest",
+                "idempotency_key",
+            ],
+            true,
+        ),
+        configuration_definition(
+            "rollback_preview",
+            "Preview configuration rollback",
+            "Create a forward rollback preview against one historical revision.",
+            json!({
+                "target_revision_id": {"type": "string"},
+                "mode": {"description": "Typed forward rollback mode."}
+            }),
+            &["target_revision_id", "mode"],
+            false,
+        ),
+        configuration_definition(
+            "rollback_apply",
+            "Apply configuration rollback",
+            "Apply an actor-bound forward rollback preview with exact CAS evidence.",
+            json!({
+                "plan_id": {"type": "string"},
+                "expected_base_revision_id": revision(),
+                "operation_digest": {"type": "string"},
+                "idempotency_key": {"type": "string"}
+            }),
+            &[
+                "plan_id",
+                "expected_base_revision_id",
+                "operation_digest",
+                "idempotency_key",
+            ],
+            true,
+        ),
+        configuration_definition(
+            "audit",
+            "Read configuration audit",
+            "Read reauthorized append-only redacted configuration audit events.",
+            json!({
+                "after_event_id": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000}
+            }),
+            &["limit"],
+            false,
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1393,178 +1574,4 @@ mod tests {
             json!(["node_id", "scope", "meta"])
         );
     }
-}
-
-fn configuration_definition(
-    operation: &str,
-    title: &str,
-    description: &str,
-    properties: serde_json::Value,
-    required: &[&str],
-    writes: bool,
-) -> ToolDefinition {
-    let name = format!("tracedecay_configuration_{operation}");
-    let schema = required_object_schema(properties, required);
-    if writes {
-        def_rw(&name, title, description, schema)
-    } else {
-        def(&name, title, description, schema)
-    }
-}
-
-pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
-    let key = || string_property("Canonical typed configuration setting key.");
-    let revision = || string_property("Exact expected configuration revision for CAS.");
-    vec![
-        configuration_definition(
-            "list",
-            "List configuration settings",
-            "Invoke the daemon-retained configuration authority.",
-            json!({}),
-            &[],
-            false,
-        ),
-        configuration_definition(
-            "explain",
-            "Explain configuration setting",
-            "Resolve one effective value and its provenance through the configuration authority.",
-            json!({"key": key()}),
-            &["key"],
-            false,
-        ),
-        configuration_definition(
-            "get",
-            "Get configuration setting",
-            "Read one effective typed value through the configuration authority.",
-            json!({"key": key()}),
-            &["key"],
-            false,
-        ),
-        configuration_definition(
-            "set",
-            "Set configuration value",
-            "Apply one authorized typed value with exact revision CAS.",
-            json!({
-                "layer": {"description": "Canonical configuration layer identity."},
-                "key": key(),
-                "value": {"description": "Typed configuration value."},
-                "expected_revision": revision()
-            }),
-            &["layer", "key", "value", "expected_revision"],
-            true,
-        ),
-        configuration_definition(
-            "unset",
-            "Unset configuration value",
-            "Remove one authorized typed value with exact revision CAS.",
-            json!({
-                "layer": {"description": "Canonical configuration layer identity."},
-                "key": key(),
-                "expected_revision": revision()
-            }),
-            &["layer", "key", "expected_revision"],
-            true,
-        ),
-        configuration_definition(
-            "batch",
-            "Apply configuration batch",
-            "Apply one authorized atomic batch with exact revision CAS.",
-            json!({
-                "mutations": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-                "expected_revision": revision()
-            }),
-            &["mutations", "expected_revision"],
-            true,
-        ),
-        configuration_definition(
-            "write_credential",
-            "Write configuration credential",
-            "Resolve one opaque write handle into redacted credential-reference metadata.",
-            json!({
-                "expected_reference_id": {"type": ["string", "null"]},
-                "kind": {"description": "Typed credential kind."},
-                "write_handle": string_property("Opaque credential write handle; never plaintext credential material."),
-                "expected_revision": revision()
-            }),
-            &["kind", "write_handle", "expected_revision"],
-            true,
-        ),
-        configuration_definition(
-            "observed_state",
-            "Read configuration activation state",
-            "Read desired-versus-observed component activation through the configuration authority.",
-            json!({}),
-            &[],
-            false,
-        ),
-        configuration_definition(
-            "protected_preview",
-            "Preview protected configuration change",
-            "Create a revalidated redacted protected-change preview.",
-            json!({
-                "change": {"type": "object"},
-                "expected_revision": revision()
-            }),
-            &["change", "expected_revision"],
-            false,
-        ),
-        configuration_definition(
-            "protected_apply",
-            "Apply protected configuration change",
-            "Apply an actor-bound protected preview with exact CAS evidence.",
-            json!({
-                "plan_id": {"type": "string"},
-                "expected_base_revision_id": revision(),
-                "operation_digest": {"type": "string"},
-                "idempotency_key": {"type": "string"}
-            }),
-            &[
-                "plan_id",
-                "expected_base_revision_id",
-                "operation_digest",
-                "idempotency_key",
-            ],
-            true,
-        ),
-        configuration_definition(
-            "rollback_preview",
-            "Preview configuration rollback",
-            "Create a forward rollback preview against one historical revision.",
-            json!({
-                "target_revision_id": {"type": "string"},
-                "mode": {"description": "Typed forward rollback mode."}
-            }),
-            &["target_revision_id", "mode"],
-            false,
-        ),
-        configuration_definition(
-            "rollback_apply",
-            "Apply configuration rollback",
-            "Apply an actor-bound forward rollback preview with exact CAS evidence.",
-            json!({
-                "plan_id": {"type": "string"},
-                "expected_base_revision_id": revision(),
-                "operation_digest": {"type": "string"},
-                "idempotency_key": {"type": "string"}
-            }),
-            &[
-                "plan_id",
-                "expected_base_revision_id",
-                "operation_digest",
-                "idempotency_key",
-            ],
-            true,
-        ),
-        configuration_definition(
-            "audit",
-            "Read configuration audit",
-            "Read reauthorized append-only redacted configuration audit events.",
-            json!({
-                "after_event_id": {"type": ["string", "null"]},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 1000}
-            }),
-            &["limit"],
-            false,
-        ),
-    ]
 }

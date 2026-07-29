@@ -119,17 +119,10 @@ pub struct AuthorizedAutomationSessionRetrieval<'a, A, P, E> {
     anchor_session_id: SessionId,
 }
 
-#[derive(Clone, Copy)]
-enum AutomationRetrievalStoreScope {
-    Project,
-    Profile,
-}
-
 struct ProductionAutomationSessionRetrieval {
     database: Arc<RegisteredGlobalDb>,
     identity: ResolvedSessionIdentity,
     anchor_session_id: SessionId,
-    store_scope: AutomationRetrievalStoreScope,
 }
 
 struct UnavailableAutomationSessionRetrieval {
@@ -281,21 +274,13 @@ impl AutomationSessionRetrieval for ProductionAutomationSessionRetrieval {
             ) else {
                 return AutomationTemporalRetrieval::Rejected("session_evidence_unavailable");
             };
-            let grant_id = match self.store_scope {
-                AutomationRetrievalStoreScope::Project => {
-                    "grant.automation.session-evidence.project"
-                }
-                AutomationRetrievalStoreScope::Profile => {
-                    "grant.automation.session-evidence.profile"
-                }
-            };
             let service = SessionRetrievalService::new(
                 ProductionAutomationSessionAuthorizer {
                     identity: self.identity.clone(),
                     anchor_session_id: query.session_id().clone(),
                     retrieval_scope: query.retrieval_scope().clone(),
                     provider: query.provider().map(str::to_owned),
-                    grant_id,
+                    grant_id: "grant.automation.session-evidence.project",
                 },
                 RegisteredGlobalDbSessionTemporalExecution::new(self.database.as_ref()),
                 AutomationWordEstimator,
@@ -594,21 +579,6 @@ fn session_store_id(shard: &StoreShardIdV1) -> Option<SessionStoreId> {
     SessionStoreId::new(format!("store.sessions.{}", hex::encode(&digest[..16]))).ok()
 }
 
-fn profile_automation_identity(
-    shard: &StoreShardIdV1,
-    profile_identity: &LocalProfileIdentityAuthorityV1,
-) -> Option<ResolvedSessionIdentity> {
-    Some(ResolvedSessionIdentity::for_profile(
-        profile_id(profile_identity)?,
-        session_store_id(shard)?,
-        SessionRootId::new(format!(
-            "root.sessions.profile.{}",
-            profile_identity.profile_id().as_str()
-        ))
-        .ok()?,
-    ))
-}
-
 fn project_automation_identity(
     shard: &StoreShardIdV1,
     profile_identity: &LocalProfileIdentityAuthorityV1,
@@ -657,40 +627,6 @@ pub(crate) async fn registered_project_automation_retrieval(
         database,
         identity,
         anchor_session_id,
-        store_scope: AutomationRetrievalStoreScope::Project,
-    }))
-}
-
-pub(crate) async fn registered_profile_automation_retrieval(
-    database: Arc<RegisteredGlobalDb>,
-    profile_identity: &LocalProfileIdentityAuthorityV1,
-) -> Result<Box<dyn AutomationSessionRetrieval>> {
-    let shard = &database.binding().shard_id;
-    if !registered_scope_matches(
-        shard,
-        profile_identity.brain_id(),
-        profile_identity.profile_id(),
-        None,
-    ) {
-        return Err(TraceDecayError::Config {
-            message: "registered profile session runtime authority mismatch".to_string(),
-        });
-    }
-    let Some(identity) = profile_automation_identity(shard, profile_identity) else {
-        return Err(TraceDecayError::Config {
-            message: "invalid registered profile session retrieval identity".to_string(),
-        });
-    };
-    let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
-        return Ok(unavailable_automation_retrieval(
-            "session_evidence_retrieval_unavailable",
-        ));
-    };
-    Ok(Box::new(ProductionAutomationSessionRetrieval {
-        database,
-        identity,
-        anchor_session_id,
-        store_scope: AutomationRetrievalStoreScope::Profile,
     }))
 }
 

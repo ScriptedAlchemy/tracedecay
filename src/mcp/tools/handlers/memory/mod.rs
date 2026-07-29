@@ -35,7 +35,7 @@ use registered_target::open_registered_project_memory_read_only;
 pub(super) use fact_store::handle_fact_store;
 pub(super) use feedback::handle_fact_feedback;
 pub(super) use status::handle_memory_status;
-pub use status::handle_user_memory_tool;
+pub(crate) use status::handle_user_memory_tool;
 
 #[cfg(test)]
 use serde_json::json;

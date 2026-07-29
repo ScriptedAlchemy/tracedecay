@@ -31,7 +31,10 @@ fn should_fetch_online_status_embellishments(stdout_is_terminal: bool) -> bool {
 
 fn is_truncation_envelope(value: &Value) -> bool {
     value.get("truncated").and_then(Value::as_bool) == Some(true)
-        && value.get("original_chars").and_then(Value::as_u64).is_some()
+        && value
+            .get("original_chars")
+            .and_then(Value::as_u64)
+            .is_some()
         && value.get("preview").and_then(Value::as_str).is_some()
 }
 

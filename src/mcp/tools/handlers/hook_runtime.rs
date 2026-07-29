@@ -2514,7 +2514,7 @@ mod tests {
                 tracedecay_hooks::HookHostV1::ClaudeCode,
                 now,
             ),
-            [envelope.clone()]
+            std::slice::from_ref(&envelope)
         );
         let pending_sequence = {
             let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
@@ -2554,7 +2554,7 @@ mod tests {
                 tracedecay_hooks::HookHostV1::ClaudeCode,
                 now,
             ),
-            [envelope.clone()]
+            std::slice::from_ref(&envelope)
         );
 
         assert!(complete_hook_v2_pending_work(
@@ -2723,7 +2723,7 @@ mod tests {
     fn exact_retained_claim_lookup_commits_beyond_thirty_two_entries() {
         let _guard = RETAINED_CLAIM_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project_id = [201; 16];
         for id in 1..=40 {
             assert!(
@@ -2747,7 +2747,7 @@ mod tests {
     fn retained_claims_backpressure_at_a_deterministic_bound() {
         let _guard = RETAINED_CLAIM_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for index in 0..MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS as u16 {
             let mut project_id = [202; 16];
             project_id[0] = (index >> 8) as u8;
@@ -2774,7 +2774,7 @@ mod tests {
 
         let _guard = RETAINED_CLAIM_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project_id = [204; 16];
         for (id, outcome, retryable) in [
             (1, ContextScoutDurableStoreOutcomeV1::Stored, false),

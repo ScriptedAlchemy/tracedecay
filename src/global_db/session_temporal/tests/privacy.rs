@@ -105,7 +105,7 @@ impl SessionScopeAuthorizer for RevocableAuthorizer {
 struct Words;
 
 impl VersionedTokenEstimator for Words {
-    fn version(&self) -> &str {
+    fn version(&self) -> &'static str {
         "privacy-words-v1"
     }
 
@@ -238,8 +238,6 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
     let before = service.retrieve(&context, privacy_query()).await;
-    drop(service);
-    drop(execution);
 
     let remounted = harness.remount().await;
     let reopened_execution = RegisteredGlobalDbSessionTemporalExecution::new(remounted.as_ref());
@@ -293,7 +291,6 @@ async fn registered_sanitized_temporal_state_is_stable_across_execution_replay()
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
     let first = first_service.retrieve(&context, privacy_query()).await;
-    drop(first_service);
     let replay_execution =
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let replay_service = SessionRetrievalService::new(

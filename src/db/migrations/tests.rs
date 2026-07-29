@@ -78,14 +78,14 @@ async fn publish_test_database(path: &Path, mode: TestDatabaseRuntimeMode) -> (D
         .expect("publish canonical test runtime")
 }
 
-/// Sets PRAGMA user_version on the connection.
+/// Sets PRAGMA `user_version` on the connection.
 async fn set_user_version(conn: &Connection, version: u32) {
     conn.execute(&format!("PRAGMA user_version = {version}"), ())
         .await
         .expect("failed to set user_version");
 }
 
-/// Reads PRAGMA user_version from the connection.
+/// Reads PRAGMA `user_version` from the connection.
 async fn get_user_version(conn: &Connection) -> u32 {
     let mut rows = conn
         .query("PRAGMA user_version", ())
@@ -100,7 +100,7 @@ async fn get_user_version(conn: &Connection) -> u32 {
     v as u32
 }
 
-/// Checks whether a table exists in sqlite_master.
+/// Checks whether a table exists in `sqlite_master`.
 async fn table_exists(conn: &Connection, table_name: &str) -> bool {
     let mut rows = conn
         .query(
@@ -115,7 +115,7 @@ async fn table_exists(conn: &Connection, table_name: &str) -> bool {
         .is_some()
 }
 
-/// Checks whether an index exists in sqlite_master.
+/// Checks whether an index exists in `sqlite_master`.
 async fn index_exists(conn: &Connection, index_name: &str) -> bool {
     let mut rows = conn
         .query(
@@ -130,7 +130,7 @@ async fn index_exists(conn: &Connection, index_name: &str) -> bool {
         .is_some()
 }
 
-/// Checks whether a trigger exists in sqlite_master.
+/// Checks whether a trigger exists in `sqlite_master`.
 async fn trigger_exists(conn: &Connection, trigger_name: &str) -> bool {
     let mut rows = conn
         .query(
@@ -231,7 +231,7 @@ async fn assert_backfilled_memory_has_vectors_and_banks(
     );
 }
 
-/// Checks whether a column exists on a table via PRAGMA table_info.
+/// Checks whether a column exists on a table via PRAGMA `table_info`.
 async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let mut rows = conn
         .query(&format!("PRAGMA table_info({table})"), ())
@@ -246,7 +246,7 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     false
 }
 
-/// Returns the declared SQLite type and primary-key ordinal for a column.
+/// Returns the declared `SQLite` type and primary-key ordinal for a column.
 async fn column_type_and_pk(conn: &Connection, table: &str, column: &str) -> (String, i64) {
     let mut rows = conn
         .query(&format!("PRAGMA table_info({table})"), ())
@@ -830,7 +830,7 @@ async fn create_v21_current_projection_for_v22_test(conn: &Connection) {
     set_user_version(conn, 21).await;
 }
 
-/// Reads the column names of `table` via PRAGMA table_info.
+/// Reads the column names of `table` via PRAGMA `table_info`.
 async fn column_names(conn: &Connection, table: &str) -> Vec<String> {
     let mut rows = conn
         .query(&format!("PRAGMA table_info({table})"), ())

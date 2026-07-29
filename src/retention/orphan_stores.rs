@@ -734,7 +734,7 @@ pub(crate) fn dir_size_bytes(dir: &Path) -> u64 {
 /// Build the on-disk store census from the registry. Reads manifests and sizes
 /// directories but never mutates. Only profile-sharded stores are considered;
 /// other storage modes are not laid out under the profile root here.
-pub async fn build_store_census(
+pub(crate) async fn build_store_census(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
 ) -> crate::errors::Result<Vec<StoreCensusEntry>> {
@@ -814,7 +814,7 @@ pub struct OrphanSweepReport {
 ///
 /// The caller (daemon backstop tick or Doctor pass) owns cadence and mutation
 /// authority.
-pub async fn sweep_orphan_stores(
+pub(crate) async fn sweep_orphan_stores(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     retention_secs: i64,
@@ -914,7 +914,7 @@ pub struct UnregisteredStoreFinding {
 /// name both looks like a real project id ([`crate::storage::validate_project_id`])
 /// and has no matching `code_projects` row — a stray file or a directory with
 /// an unsafe name is skipped outright rather than risking misclassification.
-pub async fn census_unregistered_project_dirs(
+pub(crate) async fn census_unregistered_project_dirs(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     now: i64,
@@ -1000,7 +1000,7 @@ pub fn plan_unregistered_collection(
 /// unchanged, no durable memory rows) through the removal, so the window
 /// between census and delete can never silently destroy a directory that was
 /// registered or written to in between.
-pub async fn execute_unregistered_collection(
+pub(crate) async fn execute_unregistered_collection(
     db: &RegisteredGlobalDb,
     plan: &UnregisteredCollectionPlan,
     profile_root: &Path,
@@ -1154,7 +1154,7 @@ pub struct UnregisteredStoreSweepReport {
 /// census → plan → optionally collect. Mirrors [`sweep_orphan_stores`]'s
 /// dry-run/apply contract exactly, over the disjoint on-disk-only finding
 /// class above.
-pub async fn sweep_unregistered_stores(
+pub(crate) async fn sweep_unregistered_stores(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     retention_secs: i64,

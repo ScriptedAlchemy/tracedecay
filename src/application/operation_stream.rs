@@ -351,6 +351,8 @@ pub(crate) enum ManagedTestRunStaleReason {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Current carries the full snapshot; boxing would ripple through reader match sites.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ManagedTestRunReadOutcome {
     Current(ManagedTestRunSnapshot),
     Stale(ManagedTestRunStaleReason),

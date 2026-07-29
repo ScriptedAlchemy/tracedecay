@@ -1145,8 +1145,8 @@ where
         result.success = false;
         result.rolled_back = true;
         result.changed_files.clear();
-        result.message =
-            "API migration verification did not pass; every changed file was restored".to_owned();
+        "API migration verification did not pass; every changed file was restored"
+            .clone_into(&mut result.message);
         committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
         if committed_state != journal.expected_state {
             let live_outcome = SourceEditOutcome::EffectUnknown {
@@ -1187,7 +1187,7 @@ where
             ..
         } = &mut journal.state
         {
-            *durable_observation = control_observation.clone();
+            durable_observation.clone_from(&control_observation);
         }
         if control_observation.is_some() {
             durability.persist_journal(&journal)?;
@@ -1462,6 +1462,7 @@ fn retained_reconciliation_journal(
     Ok(journal)
 }
 
+#[cfg(test)]
 fn reconcile_prepared_source_edit(
     durability: &SourceEditDurability,
     project_root: &Path,
@@ -2223,8 +2224,10 @@ fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Result<Vec<Stri
 fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
-        let state = crate::tracedecay::read_source_edit_candidate(root, Path::new(relative))?
-            .map(|bytes| hash_source_edit_content(&bytes));
+        let state = match crate::tracedecay::read_source_edit_candidate(root, Path::new(relative))? {
+            Some(bytes) => Some(hash_source_edit_content(&bytes)?),
+            None => None,
+        };
         states.push((relative, state));
     }
     canonical_sha256(&(SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1, states)).map_err(domain_error)
@@ -2261,15 +2264,17 @@ fn planned_source_edit_state_digest(
         };
         states.push((
             relative,
-            content.map(|content| hash_source_edit_content(content.as_bytes())),
+            content
+                .map(|content| hash_source_edit_content(content.as_bytes()))
+                .transpose()?,
         ));
     }
     canonical_sha256(&(SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1, states)).map_err(domain_error)
 }
 
-fn hash_source_edit_content(content: &[u8]) -> ManifestDigest {
+fn hash_source_edit_content(content: &[u8]) -> Result<ManifestDigest> {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(content))))
-        .expect("SHA-256 hex is a valid manifest digest")
+        .map_err(domain_error)
 }
 
 fn effect_id(

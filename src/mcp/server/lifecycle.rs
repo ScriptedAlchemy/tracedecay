@@ -6,7 +6,6 @@ use super::*;
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 const STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE: Duration = Duration::from_secs(2);
-const PROJECT_SERVER_RESPONSE_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 
 async fn join_or_abort_startup_ingest(
     mut task: tokio::task::JoinHandle<()>,
@@ -162,25 +161,21 @@ async fn run_startup_session_catch_up_with_home(
 }
 
 impl McpServer {
-    pub(crate) fn revoke_project_server(&self) {
-        if let Some(live) = &self.project_server_live {
-            live.store(false, Ordering::Release);
-            self.project_server_response_revoked.cancel();
-        }
+    pub(crate) fn revoke_project_server_responses(&self) {
+        self.project_server_response_revoked.cancel();
     }
 
-    pub(crate) async fn wait_for_project_server_response_drain(&self) {
-        if tokio::time::timeout(
-            PROJECT_SERVER_RESPONSE_DRAIN_DEADLINE,
-            self.project_server_response_gate.write(),
-        )
-        .await
-        .is_err()
-        {
-            tracing::warn!(
-                deadline_secs = PROJECT_SERVER_RESPONSE_DRAIN_DEADLINE.as_secs(),
-                "revoked project server response drain timed out; retiring owner"
-            );
+    pub(crate) async fn wait_for_project_server_request_drain(&self) {
+        let _guard = self.project_server_response_gate.write().await;
+    }
+
+    pub(crate) fn abort_project_server_requests(&self) {
+        self.project_server_request_abort.cancel();
+        if let Ok(cancellations) = self.application_surface_cancellations.lock() {
+            let now = crate::mcp::server::requests::mcp_now_micros();
+            for cancellation in cancellations.values() {
+                cancellation.cancel(now);
+            }
         }
     }
 

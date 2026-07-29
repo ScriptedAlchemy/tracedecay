@@ -1205,12 +1205,26 @@ fn selected_not_downloaded_is_offline_healthy_with_retry_guidance() {
 #[test]
 fn daemon_runtime_request_keeps_startup_probe_bounded() {
     assert_eq!(
-        super::daemon_runtime_args(),
+        super::daemon_startup_runtime_args(),
         serde_json::json!({
             "format": "json",
             "startup_health": true,
             "authority_audit": false,
             "doctor_report": false,
+            "session_ingest_health": false,
+        })
+    );
+}
+
+#[test]
+fn daemon_doctor_request_uses_comprehensive_ready_owner() {
+    assert_eq!(
+        super::daemon_doctor_runtime_args(),
+        serde_json::json!({
+            "format": "json",
+            "startup_health": false,
+            "authority_audit": true,
+            "doctor_report": true,
             "session_ingest_health": false,
         })
     );
@@ -1290,6 +1304,40 @@ fn temporal_health_diagnosis_distinguishes_non_clean_availability() {
             .lines()
             .iter()
             .any(|line| line.text.contains("unavailable"))
+    );
+}
+
+#[test]
+fn cursor_key_recovery_is_advisory_only_while_the_report_owner_is_warming() {
+    let diagnosis = super::temporal_health::diagnose_with_recovery(
+        Some(&serde_json::json!({
+            "status": "complete",
+            "findings": [{
+                "kind": "cursor_key_absent",
+                "count": 8,
+            }],
+        })),
+        true,
+    );
+
+    assert_eq!(
+        diagnosis.lines()[0].level,
+        super::temporal_health::TemporalHealthLineLevel::Warn
+    );
+    assert!(
+        super::temporal_health::diagnose_with_recovery(
+            Some(&serde_json::json!({
+                "status": "complete",
+                "findings": [{
+                    "kind": "cursor_key_absent",
+                    "count": 8,
+                }],
+            })),
+            false,
+        )
+        .lines()
+        .iter()
+        .all(|line| line.level == super::temporal_health::TemporalHealthLineLevel::Fail)
     );
 }
 
@@ -1531,8 +1579,6 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
         )
         .await
         .unwrap();
-    drop(writer);
-
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
     assert_eq!(report["status"], "partial");
     let findings = report["findings"].as_array().unwrap();
@@ -1577,7 +1623,6 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
         )
         .await
         .unwrap();
-    drop(writer);
     db.checkpoint_result().await.unwrap();
 
     let before = std::fs::read(&db_path).unwrap();
@@ -1592,7 +1637,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
     assert_eq!(std::fs::read(&db_path).unwrap(), before);
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_occurrences_fts
              WHERE session_occurrences_fts MATCH 'temporalorphan'",
         )
@@ -1604,7 +1649,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
     assert_eq!(std::fs::read(&db_path).unwrap(), before);
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_summary_nodes_fts
              WHERE session_summary_nodes_fts MATCH 'temporalorphan'",
         )
@@ -1612,17 +1657,17 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
         1
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_occurrences").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_occurrences").await,
         0
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_summary_nodes").await,
         0
     );
     assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (2, 2));
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_occurrences_fts
              WHERE session_occurrences_fts MATCH 'temporalorphan'",
         )
@@ -1631,7 +1676,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
     );
     assert_eq!(
         temporal_health_test_count(
-            &db,
+            db,
             "SELECT COUNT(*) FROM session_summary_nodes_fts
              WHERE session_summary_nodes_fts MATCH 'temporalorphan'",
         )
@@ -1639,11 +1684,11 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
         0
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_occurrences").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_occurrences").await,
         0
     );
     assert_eq!(
-        temporal_health_test_count(&db, "SELECT COUNT(*) FROM session_summary_nodes").await,
+        temporal_health_test_count(db, "SELECT COUNT(*) FROM session_summary_nodes").await,
         0
     );
     assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (0, 0));
@@ -1678,7 +1723,6 @@ async fn temporal_fts_repair_accepts_exact_blob_index_damage() {
         )
         .await
         .unwrap();
-    drop(writer);
     db.checkpoint_result().await.unwrap();
 
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
@@ -1727,7 +1771,6 @@ async fn temporal_health_detects_cross_session_ownership() {
         )
         .await
         .unwrap();
-    drop(writer);
     db.checkpoint_result().await.unwrap();
 
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
@@ -2117,7 +2160,7 @@ fn daemon_startup_health_classifies_sqlite_corruption_spellings_as_terminal() {
 
 #[test]
 fn startup_runtime_probe_defers_exhaustive_audits() {
-    let args = super::daemon_runtime_args();
+    let args = super::daemon_startup_runtime_args();
 
     assert_eq!(args["startup_health"], serde_json::json!(true));
     assert_eq!(args["authority_audit"], serde_json::json!(false));

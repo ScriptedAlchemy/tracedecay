@@ -54,6 +54,8 @@ pub enum DoctorRemediationDispatchCommandV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "owner_operation", content = "target", rename_all = "snake_case")]
+// Configuration protected variants carry surface requests; boxing would change the wire shape.
+#[allow(clippy::large_enum_variant)]
 pub enum DoctorRemediationTargetV1 {
     StorageRetentionCollect,
     StorageCollectOrphanStore,
@@ -924,8 +926,7 @@ fn validate_outcome(
         }
         _ => outcome.verification != DoctorRemediationVerificationV1::Pending,
     };
-    if (owner_boundary && owner_set_verification)
-        || (owner_boundary && invalid_initial_verification)
+    if (invalid_initial_verification || owner_set_verification) && owner_boundary
         || expected_termination.is_some_and(|expected| {
             outcome
                 .execution

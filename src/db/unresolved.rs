@@ -220,7 +220,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let refs: Vec<_> = (0..UNRESOLVED_REF_WRITE_PAGE_ROWS as u32 + 1)
+        let refs: Vec<_> = (0..=(UNRESOLVED_REF_WRITE_PAGE_ROWS as u32))
             .map(|index| UnresolvedRef {
                 from_node_id: "source".to_string(),
                 reference_name: format!("target_{index}"),

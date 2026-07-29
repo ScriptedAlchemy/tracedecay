@@ -44,6 +44,7 @@ pub(crate) async fn backup_live_sqlite_database(
 
 pub(crate) struct SnapshotConnection {
     connection: Arc<Mutex<Connection>>,
+    #[cfg_attr(not(test), allow(dead_code))]
     interrupt: rusqlite::InterruptHandle,
 }
 
@@ -76,6 +77,7 @@ impl SnapshotConnection {
         Executor::execute_batch(self, sql).await
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn interrupt(&self) {
         self.interrupt.interrupt();
     }
@@ -225,6 +227,7 @@ impl SnapshotDatabase {
         &self.connection
     }
 
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -258,7 +261,7 @@ impl SnapshotDatabase {
         }
     }
 
-    /// Writes this frozen logical snapshot to one standalone SQLite file.
+    /// Writes this frozen logical snapshot to one standalone `SQLite` file.
     ///
     /// The backup reads only the already-captured immutable/copy connection;
     /// it never opens the live source authority.

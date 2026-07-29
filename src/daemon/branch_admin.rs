@@ -281,6 +281,8 @@ pub(super) struct StoreAdministration {
     >,
     gate: Arc<tokio::sync::Mutex<()>>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
+    project_server_retirements:
+        Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
@@ -310,6 +312,7 @@ impl Default for StoreAdministration {
             session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
+            project_server_retirements: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -539,6 +542,19 @@ impl StoreAdministration {
 
     pub(super) fn project_servers(&self) -> &Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>> {
         &self.project_servers
+    }
+
+    pub(super) async fn track_project_server_retirement(&self, task: tokio::task::JoinHandle<()>) {
+        let mut retirements = self.project_server_retirements.lock().await;
+        retirements.retain(|retirement| !retirement.is_finished());
+        retirements.push(task);
+    }
+
+    pub(super) async fn join_project_server_retirements(&self) {
+        let retirements = std::mem::take(&mut *self.project_server_retirements.lock().await);
+        for retirement in retirements {
+            let _ = retirement.await;
+        }
     }
 
     pub(super) async fn host_admission_broker(

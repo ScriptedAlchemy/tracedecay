@@ -31,7 +31,7 @@ pub struct GlobalDbSessionTemporalStore<'a> {
 }
 
 impl<'a> GlobalDbSessionTemporalStore<'a> {
-    pub const fn new(db: &'a RegisteredGlobalDb) -> Self {
+    pub(crate) const fn new(db: &'a RegisteredGlobalDb) -> Self {
         Self { db }
     }
 

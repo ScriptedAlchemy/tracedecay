@@ -411,24 +411,6 @@ pub(super) fn def_derives() -> ToolDefinition {
     )
 }
 
-#[cfg(test)]
-mod semantic_search_tests {
-    use super::def_search;
-
-    #[test]
-    fn search_schema_exposes_only_the_two_planned_semantic_modes() {
-        let definition = def_search();
-        assert_eq!(
-            definition.input_schema["properties"]["semantic_mode"]["enum"],
-            serde_json::json!(["fallback_allowed", "strict_semantic"])
-        );
-        assert_eq!(
-            definition.input_schema["properties"]["cursor"]["type"],
-            "string"
-        );
-    }
-}
-
 pub(super) fn def_body() -> ToolDefinition {
     def(
         "tracedecay_body",
@@ -715,4 +697,22 @@ pub(super) fn def_find_exact_symbol() -> ToolDefinition {
             "required": ["name"]
         }),
     )
+}
+
+#[cfg(test)]
+mod semantic_search_tests {
+    use super::def_search;
+
+    #[test]
+    fn search_schema_exposes_only_the_two_planned_semantic_modes() {
+        let definition = def_search();
+        assert_eq!(
+            definition.input_schema["properties"]["semantic_mode"]["enum"],
+            serde_json::json!(["fallback_allowed", "strict_semantic"])
+        );
+        assert_eq!(
+            definition.input_schema["properties"]["cursor"]["type"],
+            "string"
+        );
+    }
 }

@@ -660,7 +660,6 @@ async fn push_or_merge_role(
 
 /// Preserve an expected dashboard-held store when its snapshot could not be
 /// opened. The store stays in the denominator and projects as typed `unknown`.
-#[allow(clippy::expect_used)] // the "store" fallback key is statically valid
 fn push_or_merge_unknown_role(
     entries: &mut Vec<SampledStoreV1>,
     seen: &mut HashMap<String, usize>,
@@ -682,8 +681,7 @@ fn push_or_merge_unknown_role(
 
     let store_name = store_file_name(path);
     let store = StoreKeyV1::new(store_name.clone()).unwrap_or_else(|_| {
-        StoreKeyV1::new(sanitize_store_key(&store_name))
-            .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key"))
+        StoreKeyV1::new(sanitize_store_key(&store_name)).unwrap_or_else(|_| fallback_store_key())
     });
     let table_growth_store = store.clone();
     seen.insert(identity, entries.len());
@@ -731,7 +729,6 @@ fn store_identity(path: &str) -> String {
 
 /// Sample one store through the retained application telemetry port. A missing
 /// runtime or failed read produces typed `unknown`, never a fabricated size.
-#[allow(clippy::expect_used)] // the "store" fallback key is statically valid
 async fn sample_store(
     role: &str,
     path: &str,
@@ -760,7 +757,7 @@ async fn sample_store(
             // unknown against a sanitized fallback key rather than inventing size.
             None => {
                 let store = StoreKeyV1::new(sanitize_store_key(&store_name))
-                    .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key"));
+                    .unwrap_or_else(|_| fallback_store_key());
                 (
                     StorageTelemetryReadV1::Unknown {
                         store: store.clone(),
@@ -802,7 +799,7 @@ fn telemetry_entry(
     let role = sampled.primary_role();
     let table_growth = table_growth_dimension(sampled.table_growth_read.unwrap_or_else(|| {
         let store = StoreKeyV1::new(sanitize_store_key(&sampled.store))
-            .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key"));
+            .unwrap_or_else(|_| fallback_store_key());
         TableGrowthTelemetryReadV1::Unknown { store }
     }));
 
@@ -1095,6 +1092,13 @@ fn sanitize_store_key(name: &str) -> String {
     }
 }
 
+fn fallback_store_key() -> StoreKeyV1 {
+    match StoreKeyV1::new("store") {
+        Ok(store) => store,
+        Err(_) => unreachable!("hard-coded fallback store key is valid"),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1202,7 +1206,9 @@ mod tests {
                 | StoreGrowthDimensionV1::Observed { coverage, .. } => {
                     assert!(coverage.contains("since-daemon-start"));
                 }
-                other => panic!("store {} growth should be real, got {other:?}", entry.store),
+                StoreGrowthDimensionV1::Unknown { reason } => {
+                    panic!("store {} growth should be real, got {reason}", entry.store)
+                }
             }
             assert!(!entry.roles.is_empty());
             assert!(entry.roles.contains(&entry.role));

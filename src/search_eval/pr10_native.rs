@@ -488,17 +488,18 @@ fn ablated_profile(profile: &FusionProfile, admitted: &BTreeSet<RetrieverKind>) 
     profile
 }
 
+/// Semantic stage outcome: the retrieval result, the fusion lane input it
+/// contributes (absent when the stage stays pending), and the stage measurement.
+type SemanticStageOutcome = (
+    Pr10NativeStageResultV1<Pr10ExactFlatOracleV1>,
+    Option<CompositionLaneInput>,
+    Pr10NativeStageResultV1<Pr10NativeStageMeasurementV1>,
+);
+
 fn evaluate_semantic(
     semantic: Option<Pr10NativeSemanticInputV1<'_>>,
     fusion_profile: &FusionProfile,
-) -> Result<
-    (
-        Pr10NativeStageResultV1<Pr10ExactFlatOracleV1>,
-        Option<CompositionLaneInput>,
-        Pr10NativeStageResultV1<Pr10NativeStageMeasurementV1>,
-    ),
-    Pr10NativeEvaluationErrorV1,
-> {
+) -> Result<SemanticStageOutcome, Pr10NativeEvaluationErrorV1> {
     let Some(semantic) = semantic else {
         return Ok((
             Pr10NativeStageResultV1::Pending {

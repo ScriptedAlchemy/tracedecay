@@ -203,7 +203,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
 /// authority. Registered projects and top-level profile directories are
 /// separate cursor phases so neither the registry query nor the filesystem
 /// census performs an unbounded profile-wide scan.
-pub async fn build_storage_report_page_from_registered_global_db(
+pub(crate) async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &crate::global_db::RegisteredGlobalDb,
     cursor: Option<&str>,
@@ -223,20 +223,21 @@ pub async fn build_storage_report_page_from_registered_global_db(
         let has_more = projects.len() > limit;
         projects.truncate(limit);
         let next_cursor = if has_more {
-            projects
-                .last()
-                .map(|project| format!("{PROJECT_CURSOR_PREFIX}{}", project.project_id))
+            let Some(last_project) = projects.last() else {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: "project storage report page lost its continuation".to_owned(),
+                });
+            };
+            format!("{PROJECT_CURSOR_PREFIX}{}", last_project.project_id)
         } else {
-            Some(DIRECTORY_CURSOR_PREFIX.to_owned())
+            DIRECTORY_CURSOR_PREFIX.to_owned()
         };
         let profile_root = profile_root.to_path_buf();
         return tokio::task::spawn_blocking(move || {
             let mut report = StorageReport {
                 profile_root: profile_root.display().to_string(),
                 global_db_bytes,
-                coverage: StorageReportCoverage::partial(
-                    next_cursor.expect("project page always has a continuation"),
-                ),
+                coverage: StorageReportCoverage::partial(next_cursor),
                 ..StorageReport::default()
             };
             for project in projects {
@@ -323,7 +324,7 @@ fn list_project_directories_page(
 }
 
 /// Builds one project-scoped report on the daemon's blocking pool so bounded
-/// read-only SQLite samples cannot stall the async authority loop.
+/// read-only `SQLite` samples cannot stall the async authority loop.
 pub async fn build_project_storage_report_from_daemon(
     profile_root: &Path,
     project_id: &str,

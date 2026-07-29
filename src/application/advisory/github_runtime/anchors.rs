@@ -903,9 +903,9 @@ fn git_historical_blob(
         },
     )
     .ok()?;
-    if &blob.repository != &scope.repository_id
-        || &blob.worktree != &scope.worktree_id
-        || &blob.commit != &commit
+    if blob.repository != scope.repository_id
+        || blob.worktree != scope.worktree_id
+        || blob.commit != commit
         || blob.path.as_str() != path
     {
         return None;
@@ -916,6 +916,27 @@ fn git_historical_blob(
 fn content_digest(bytes: &[u8]) -> Option<ContentDigest> {
     let digest = Sha256::digest(bytes);
     ContentDigest::new(format!("sha256:{}", hex::encode(digest))).ok()
+}
+
+fn valid_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn digest_suffix(digest: &ManifestDigest) -> Option<&str> {
+    digest.as_str().split_once(':').map(|(_, suffix)| suffix)
+}
+
+fn anchor_key(anchor_id: &RetrievalAnchorId) -> String {
+    format!("{ANCHOR_KEY_PREFIX_V1}{}", anchor_id.as_str())
+}
+
+fn body_key(anchor_id: &RetrievalAnchorId) -> String {
+    format!("{BODY_KEY_PREFIX_V1}{}", anchor_id.as_str())
 }
 
 #[cfg(test)]
@@ -1171,25 +1192,4 @@ mod tests {
             GitHubReviewBodyReadOutcomeV1::Denied
         ));
     }
-}
-
-fn valid_relative_path(value: &str) -> bool {
-    let path = Path::new(value);
-    !value.is_empty()
-        && !path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-}
-
-fn digest_suffix(digest: &ManifestDigest) -> Option<&str> {
-    digest.as_str().split_once(':').map(|(_, suffix)| suffix)
-}
-
-fn anchor_key(anchor_id: &RetrievalAnchorId) -> String {
-    format!("{ANCHOR_KEY_PREFIX_V1}{}", anchor_id.as_str())
-}
-
-fn body_key(anchor_id: &RetrievalAnchorId) -> String {
-    format!("{BODY_KEY_PREFIX_V1}{}", anchor_id.as_str())
 }

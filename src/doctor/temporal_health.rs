@@ -51,6 +51,13 @@ impl TemporalHealthDiagnosis {
 }
 
 pub(super) fn diagnose(payload: Option<&Value>) -> TemporalHealthDiagnosis {
+    diagnose_with_recovery(payload, false)
+}
+
+pub(super) fn diagnose_with_recovery(
+    payload: Option<&Value>,
+    recovery_pending: bool,
+) -> TemporalHealthDiagnosis {
     let Some(payload) = payload else {
         return availability_diagnosis(SessionTemporalHealthStatus::Unavailable);
     };
@@ -84,7 +91,13 @@ pub(super) fn diagnose(payload: Option<&Value>) -> TemporalHealthDiagnosis {
     for (kind, count) in counts {
         let (code, label, action) = finding_contract(kind);
         lines.push(TemporalHealthLine {
-            level: TemporalHealthLineLevel::Fail,
+            level: if recovery_pending
+                && kind == SessionTemporalHealthFindingKind::CursorKeyAbsent
+            {
+                TemporalHealthLineLevel::Warn
+            } else {
+                TemporalHealthLineLevel::Fail
+            },
             text: format!(
                 "Temporal health [{code}] {label}: {count} violation(s). Recovery is daemon-owned. {action} Doctor is read-only and performed no repair."
             ),

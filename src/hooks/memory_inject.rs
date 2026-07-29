@@ -43,7 +43,6 @@ const PROMPT_RECALL_MIN_SCORE: f64 = 0.18;
 /// Reset threshold for the persisted per-session seen-fact history, mirroring
 /// `tool_hints::MAX_PERSISTED_HINT_ENTRIES`.
 const MAX_PERSISTED_SEEN_ENTRIES: usize = 4_096;
-
 const SEEN_FACTS_FILENAME: &str = "memory_inject_seen.json";
 const USER_SEEN_FACTS_FILENAME: &str = "user_memory_inject_seen.json";
 
@@ -564,15 +563,20 @@ pub async fn combined_session_memory_digest(
     if !memory_injection_enabled() {
         return None;
     }
-    let project = if crate::tracedecay::TraceDecay::is_initialized(root) {
-        select_digest_facts(digest_candidates(root).await, SESSION_DIGEST_FACT_COUNT)
-    } else {
-        Vec::new()
+    let project_digest = async {
+        if crate::tracedecay::TraceDecay::is_initialized(root) {
+            select_digest_facts(digest_candidates(root).await, SESSION_DIGEST_FACT_COUNT)
+        } else {
+            Vec::new()
+        }
     };
-    let user = select_digest_facts(
-        daemon_fact_list(Some(root), true).await,
-        SESSION_DIGEST_FACT_COUNT,
-    );
+    let user_digest = async {
+        select_digest_facts(
+            daemon_fact_list(Some(root), true).await,
+            SESSION_DIGEST_FACT_COUNT,
+        )
+    };
+    let (project, user) = tokio::join!(project_digest, user_digest);
     let facts = select_scoped_facts(user, project, SESSION_DIGEST_FACT_COUNT);
     let (text, user_ids, project_ids) =
         render_scoped_fact_block(COMBINED_DIGEST_HEADER, &facts, SESSION_DIGEST_CHAR_BUDGET)?;
@@ -596,22 +600,19 @@ pub async fn combined_prompt_memory_recall(
         }
         _ => HashSet::new(),
     };
-    let project = select_prompt_recall_facts(
-        daemon_fact_search(Some(root), prompt, false).await,
-        &project_seen,
-        PROMPT_RECALL_FACT_COUNT,
-    );
     let user_seen = match (session_id, user_seen_facts_path()) {
         (Some(session_id), Some(path)) => {
             MemoryInjectSeen::load_or_default(&path).seen_for_session(session_id)
         }
         _ => HashSet::new(),
     };
-    let user = select_prompt_recall_facts(
-        daemon_fact_search(Some(root), prompt, true).await,
-        &user_seen,
-        PROMPT_RECALL_FACT_COUNT,
+    let (project_results, user_results) = tokio::join!(
+        daemon_fact_search(Some(root), prompt, false),
+        daemon_fact_search(Some(root), prompt, true),
     );
+    let project =
+        select_prompt_recall_facts(project_results, &project_seen, PROMPT_RECALL_FACT_COUNT);
+    let user = select_prompt_recall_facts(user_results, &user_seen, PROMPT_RECALL_FACT_COUNT);
     let facts = select_scoped_facts(user, project, PROMPT_RECALL_FACT_COUNT);
     let (text, user_ids, project_ids) = render_scoped_fact_block(
         COMBINED_PROMPT_RECALL_HEADER,

@@ -76,7 +76,7 @@ pub(super) fn push_int(buf: &mut String, val: i64) {
 
 /// Rows requested per keyset page of a whole-table scan.
 ///
-/// The SQLite runtime admits a bounded number of rows per query and rejects
+/// The `SQLite` runtime admits a bounded number of rows per query and rejects
 /// anything larger outright, so a whole-table read has to arrive as a sequence
 /// of pages. This budget stays well under that admission limit while keeping
 /// the number of round trips low.
@@ -168,7 +168,7 @@ mod tests {
     use super::{FULL_SCAN_PAGE_ROWS, collect_rowid_pages};
     use crate::db::engine::TestConnection;
 
-    /// A single query over this many rows is refused by the SQLite runtime, so
+    /// A single query over this many rows is refused by the `SQLite` runtime, so
     /// a whole-table read has to page. The scan must still return every row,
     /// exactly once, in `rowid` order.
     #[tokio::test]
@@ -201,7 +201,10 @@ mod tests {
         .await
         .expect("a paged scan must not exceed the runtime materialization limit");
 
-        assert!(ROWS > FULL_SCAN_PAGE_ROWS, "the fixture must span pages");
+        assert!(
+            std::hint::black_box(ROWS) > FULL_SCAN_PAGE_ROWS,
+            "the fixture must span pages"
+        );
         assert_eq!(i64::try_from(labels.len()).expect("row count"), ROWS);
         assert_eq!(labels.first().map(String::as_str), Some("row-00001"));
         assert_eq!(labels.last().map(String::as_str), Some("row-10001"));

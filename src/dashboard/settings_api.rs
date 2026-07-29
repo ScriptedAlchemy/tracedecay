@@ -565,24 +565,6 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn validate_globs(field: &str, globs: &[String], errors: &mut Vec<Value>) {
-    for pattern in globs {
-        if pattern.trim().is_empty() {
-            errors.push(validation_error(
-                field,
-                &format!("{field} patterns must not be empty"),
-            ));
-            continue;
-        }
-        if let Err(err) = glob::Pattern::new(pattern) {
-            errors.push(validation_error(
-                field,
-                &format!("invalid glob pattern '{pattern}': {err}"),
-            ));
-        }
-    }
-}
-
 fn validation_error(field: &str, message: &str) -> Value {
     json!({ "field": field, "message": message })
 }
@@ -651,8 +633,10 @@ mod tests {
 
     #[test]
     fn automation_settings_payload_preserves_effective_resolution_failure() {
-        let mut global = automation_config::AutomationConfig::default();
-        global.timeout_secs = 0;
+        let global = automation_config::AutomationConfig {
+            timeout_secs: 0,
+            ..automation_config::AutomationConfig::default()
+        };
         let payload = automation_settings_payload(&global, Ok(None));
         let payload = serde_json::to_value(payload).expect("serialize automation settings");
 

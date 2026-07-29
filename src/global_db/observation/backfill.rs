@@ -289,6 +289,7 @@ async fn attach_legacy_observation_anchor(
             .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     for collision in alias_collisions {
         tracing::warn!(
+            alias_kind = ?collision.alias.kind(),
             existing_anchor_id = collision.existing_anchor_id.as_str(),
             candidate_anchor_id = collision.candidate_anchor_id.as_str(),
             "anchor backfill preserved alias binding; candidate stays reachable by id only"
@@ -393,7 +394,7 @@ mod tests {
     use super::*;
     use crate::db::engine::TestConnection;
 
-    /// Seeds `observations` rows with raw SQLite before the runtime writer
+    /// Seeds `observations` rows with raw `SQLite` before the runtime writer
     /// attaches. Row-at-a-time inserts through the writer actor cost seconds
     /// per thousand rows, which makes a store large enough to reproduce the
     /// real convergence failure untestable.
@@ -620,7 +621,8 @@ mod tests {
         loop {
             opens += 1;
             assert!(opens < 20_000, "convergence must not need unbounded opens");
-            let deadline = std::time::Duration::from_millis(if opens % 3 == 0 { 2 } else { 60 });
+            let deadline =
+                std::time::Duration::from_millis(if opens.is_multiple_of(3) { 2 } else { 60 });
             let open =
                 tokio::time::timeout(deadline, converge_observation_repository_provenance(&conn))
                     .await;
@@ -640,7 +642,7 @@ mod tests {
                          (watermark {watermark} < {previous_watermark})"
                     );
                     assert!(
-                        watermark > previous_watermark || opens % 3 == 0,
+                        watermark > previous_watermark || opens.is_multiple_of(3),
                         "open {opens}: a 60ms open must commit at least one page"
                     );
                     previous_watermark = watermark;

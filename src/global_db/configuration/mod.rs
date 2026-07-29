@@ -13,9 +13,10 @@ pub use migration::{
     migrate_legacy_configuration, migrate_legacy_configuration_inputs,
     migrate_legacy_configuration_inputs_with_genesis,
 };
+pub(crate) use schema::ensure_configuration_schema;
 pub use schema::{
     ConfigurationSchemaError, TOPOLOGY_POLICY_SCHEMA_VERSION,
-    WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME, ensure_configuration_schema,
+    WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME,
 };
 pub use store::{
     ConfigurationStorageError, GlobalDbConfigurationControlStore,

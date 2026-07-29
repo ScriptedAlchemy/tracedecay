@@ -136,7 +136,7 @@ pub(super) async fn payload_metadata_refs_for_scope(
 }
 
 /// Collects payload-metadata references through `rowid` keyset pages: the
-/// whole `lcm_external_payloads` table exceeds what the SQLite runtime will
+/// whole `lcm_external_payloads` table exceeds what the `SQLite` runtime will
 /// materialize for one query on a long-lived profile.
 async fn payload_metadata_refs(
     conn: &(impl QueryExecutor + ?Sized),

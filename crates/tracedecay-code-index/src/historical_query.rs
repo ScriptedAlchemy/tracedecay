@@ -492,6 +492,36 @@ mod tests {
         GitOidV1::new(byte.to_string().repeat(40)).unwrap()
     }
 
+    fn commit(
+        repo: &gix::Repository,
+        path: &str,
+        content: &[u8],
+        parent: Option<gix::hash::ObjectId>,
+    ) -> GitOidV1 {
+        let blob = repo.write_blob(content).unwrap().detach();
+        let tree = gix::objs::Tree {
+            entries: vec![gix::objs::tree::Entry {
+                mode: gix::objs::tree::EntryKind::Blob.into(),
+                filename: path.as_bytes().as_bstr().to_owned(),
+                oid: blob,
+            }],
+        };
+        let tree = repo.write_object(&tree).unwrap().detach();
+        let signature = gix::actor::SignatureRef {
+            name: b"TraceDecay".as_bstr(),
+            email: b"test@example.invalid".as_bstr(),
+            time: "1 +0000",
+        };
+        GitOidV1::new(
+            repo.new_commit_as(signature, signature, "fixture", tree, parent)
+                .unwrap()
+                .id()
+                .to_hex()
+                .to_string(),
+        )
+        .unwrap()
+    }
+
     fn request(commits: Vec<GitOidV1>) -> HistoricalQueryRequestV1 {
         HistoricalQueryRequestV1 {
             commits,

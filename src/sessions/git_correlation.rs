@@ -540,6 +540,7 @@ pub fn span_debounce_key(
     crate::context::read_cache::digest_bytes(material.as_bytes())
 }
 
+#[cfg(test)]
 /// Creates the correlation tables when missing. Version-gated via
 /// `session_schema_migrations` like the LCM schema; idempotent.
 pub(crate) async fn ensure_git_correlation_schema(

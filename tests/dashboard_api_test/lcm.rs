@@ -21,7 +21,7 @@ use tracedecay::sessions::lcm::{
     LcmCleanConfig, LcmError, LcmGcConfig, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::TraceDecayOpenOptions;
 use tracedecay_domain::ProjectId;
 
 struct Fixture {
@@ -267,7 +267,7 @@ async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
     let seeded_status = if payload_seed.is_some() {
         Some(
             runtime
-                .lcm_status_for_test("cursor", Some(&session_id))
+                .lcm_status_deep_for_test("cursor", Some(&session_id))
                 .await
                 .expect("seeded status"),
         )
@@ -564,7 +564,7 @@ fn lcm_payload_health_numbers_agree_across_status_doctor_and_dashboard() {
             modified: None,
         }))
         .await;
-        let orphan_path = fixture.orphan_path.as_ref().expect("orphan payload path");
+        let _orphan_path = fixture.orphan_path.as_ref().expect("orphan payload path");
 
         let status = fixture.seeded_status.as_ref().expect("seeded status");
         let doctor = fixture.seeded_doctor.as_ref().expect("seeded doctor");
@@ -617,8 +617,16 @@ fn lcm_payload_health_numbers_agree_across_status_doctor_and_dashboard() {
                 "reclaimable_bytes_after_grace",
             ),
         ] {
-            assert_eq!(doctor_payloads[doctor_key].as_u64(), Some(status_value));
-            assert_eq!(dashboard_health[dashboard_key].as_u64(), Some(status_value));
+            assert_eq!(
+                doctor_payloads[doctor_key].as_u64(),
+                Some(status_value),
+                "doctor payload mismatch for {doctor_key}"
+            );
+            assert_eq!(
+                dashboard_health[dashboard_key].as_u64(),
+                Some(status_value),
+                "dashboard payload mismatch for {dashboard_key}"
+            );
         }
 
         let dashboard_text = serde_json::to_string(&dashboard).unwrap();

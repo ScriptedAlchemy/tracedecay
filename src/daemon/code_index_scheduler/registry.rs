@@ -238,7 +238,7 @@ impl CodeIndexSchedulerRegistryV1 {
         });
     }
 
-    pub fn open_worktree(
+    pub(in crate::daemon) fn open_worktree(
         &self,
         project_root: &Path,
         store_root: PathBuf,
@@ -251,7 +251,7 @@ impl CodeIndexSchedulerRegistryV1 {
         CodeIndexWorktreeSchedulerV1::open(project_root, store_root, Arc::clone(&self.byte_pool))
     }
 
-    pub fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
+    pub(in crate::daemon) fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
         self.byte_pool.stats()
     }
 
@@ -276,7 +276,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    pub async fn mount_worktree(
+    pub(in crate::daemon) async fn mount_worktree(
         &self,
         project_root: &Path,
         store_root: PathBuf,
@@ -316,17 +316,17 @@ impl CodeIndexSchedulerRegistryV1 {
             &project_root,
             super::scoped_code_index_store_root(&store_root, &project_root),
         )?;
-        if let Some(hook) = semantic_schedule {
+        if let Some(hook) = semantic_schedule.clone() {
             opened.replace_semantic_schedule_hook(Some(hook));
         }
+        let restored_generation = opened.latest_complete();
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         // Serve any retained complete generation immediately so admission stays
         // non-blocking, but never treat restore as a verified freshness claim.
-        let retained_generation = opened.latest_complete();
-        let serving_generation = Arc::new(RwLock::new(retained_generation));
+        let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let (wake, shutting_down) = {
@@ -436,6 +436,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
+        if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
+            let _ = hook(&latest.generation);
+        }
         // Always schedule a background verification pass. Retained generations
         // keep queries non-blocking, but open-time clocks must not suppress
         // cadence indefinitely (the live stale-index defect).
@@ -451,7 +454,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Mount the accepted PR9 profile and query/cursor key owner for one exact
     /// admitted scope. The authority cannot be inherited by another project,
     /// repository, worktree, or ref.
-    pub async fn mount_pr9_query_authority(
+    pub(in crate::daemon) async fn mount_pr9_query_authority(
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
@@ -481,7 +484,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Revoke the live PR9 authority for one exact admitted scope before a
     /// committed profile refresh. A failed replacement therefore leaves
     /// search unavailable instead of serving the prior profile.
-    pub async fn clear_pr9_query_authority(
+    pub(in crate::daemon) async fn clear_pr9_query_authority(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
@@ -530,7 +533,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<Arc<crate::query::retrieval::Pr9QueryAuthorityV1>> {
-        let mounted = self.mounted.lock().await;
+        let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
         for worktree in mounted.values() {
             if worktree.repository_id != scope.repository_id
@@ -573,12 +576,14 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get(&project_root) else {
-            return false;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            Arc::clone(&worktree.scheduler)
         };
-        worktree
-            .scheduler
+        scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_path(path);
@@ -604,16 +609,18 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let mounted = self.mounted.lock().await;
-        let Some(worktree) = mounted.get(&project_root) else {
-            return false;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            Arc::clone(&worktree.scheduler)
         };
         let absolute = rel_paths
             .iter()
             .map(|rel| project_root.join(rel))
             .collect::<Vec<_>>();
-        worktree
-            .scheduler
+        scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_hook_paths(absolute);
@@ -806,7 +813,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
     /// returning the latest complete generation, so external out-of-band changes
     /// are reconciled without any standing filesystem watcher.
-    pub async fn latest_complete_fresh(
+    pub(in crate::daemon) async fn latest_complete_fresh(
         &self,
         project_root: &Path,
     ) -> Option<LatestCompleteCodeIndexV1> {
@@ -920,10 +927,58 @@ impl CodeIndexSchedulerRegistryV1 {
         Some(latest)
     }
 
+    /// Query-admission entry point for latency-sensitive application paths.
+    /// It serves only a generation whose freshness is already proven; stale,
+    /// restored-unverified, or busy schedulers abstain after scheduling the
+    /// background worker instead of reconciling on the caller.
+    pub(in crate::daemon) async fn latest_complete_ready(
+        &self,
+        project_root: &Path,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (scheduler, serving_generation) = {
+            let mounted = self.mounted.try_lock().ok()?;
+            let worktree = mounted.get(&project_root)?;
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.serving_generation),
+            )
+        };
+        let latest = tokio::task::spawn_blocking(move || {
+            let mut scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return None,
+            };
+            let latest = scheduler.latest_complete_ready_for_query().ok().flatten()?;
+            *serving_generation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+            Some(latest)
+        })
+        .await
+        .ok()
+        .flatten()?;
+        if let Ok(authority) = latest.test_attribution_authority() {
+            let mut authorities = self
+                .test_attribution_authorities
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authorities.insert(
+                project_root,
+                (
+                    latest.generation.manifest().generation_id.clone(),
+                    authority,
+                ),
+            );
+        }
+        Some(latest)
+    }
+
     /// Resolve one mounted root by the exact admitted repository/worktree/ref
     /// scope, then run that root's freshness ladder. A request never inherits
     /// whichever mounted worktree sorts first.
-    pub async fn latest_complete_fresh_for_scope(
+    pub(in crate::daemon) async fn latest_complete_fresh_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
@@ -948,6 +1003,30 @@ impl CodeIndexSchedulerRegistryV1 {
         } else {
             None
         }
+    }
+
+    /// Resolve one exact scope and admit only an already-current generation.
+    pub(in crate::daemon) async fn latest_complete_ready_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let root = {
+            let mounted = self.mounted.try_lock().ok()?;
+            let mut matched = None;
+            for (root, worktree) in mounted.iter() {
+                if worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+                {
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(root.clone());
+                }
+            }
+            matched?
+        };
+        let latest = self.latest_complete_ready(&root).await?;
+        Self::latest_matches_scope(&latest, scope).then_some(latest)
     }
 
     pub(in crate::daemon) async fn semantic_evaluation_snapshot_for_scope(
@@ -1049,7 +1128,7 @@ impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentI
                     "feedback-code-index-root-unavailable",
                 )
             })?;
-            let current = registry.latest_complete_fresh(&root).await.ok_or_else(|| {
+            let current = registry.latest_complete_ready(&root).await.ok_or_else(|| {
                 crate::daemon::lsp_gateway::LspRuntimeFailure::new(
                     "feedback-code-index-generation-unavailable",
                 )
@@ -1121,7 +1200,7 @@ impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
         let registry = self.clone();
         Box::pin(async move {
             let root = project_root.canonicalize().ok()?;
-            let current = registry.latest_complete_fresh(&root).await?;
+            let current = registry.latest_complete_ready(&root).await?;
             let snapshot = current.generation.snapshot();
             Some(
                 crate::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
@@ -1202,7 +1281,7 @@ impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     "lsp-code-index-root-unavailable",
                 )
             })?;
-            let current = registry.latest_complete_fresh(&root).await.ok_or_else(|| {
+            let current = registry.latest_complete_ready(&root).await.ok_or_else(|| {
                 crate::daemon::lsp_gateway::LspRuntimeFailure::new(
                     "lsp-code-index-generation-unavailable",
                 )

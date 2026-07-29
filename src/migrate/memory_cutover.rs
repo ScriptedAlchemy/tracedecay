@@ -809,7 +809,7 @@ fn source_generation(path: &Path) -> Result<String> {
                 }
                 let mut file =
                     fs::File::open(&member).map_err(|error| migration_error(error.to_string()))?;
-                let mut buffer = [0_u8; 64 * 1024];
+                let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
                 loop {
                     let read = file
                         .read(&mut buffer)
@@ -960,7 +960,7 @@ mod tests {
     };
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
-    /// A project store holding one tracked branch whose SQLite family carries a
+    /// A project store holding one tracked branch whose `SQLite` family carries a
     /// durable fact that exists nowhere else.
     struct BranchStoreFixture {
         _temp: tempfile::TempDir,
@@ -988,12 +988,12 @@ mod tests {
                 meta.add_branch(branch, &format!("branches/{branch}.db"), "main");
             }
             branch_meta::save_branch_meta(&data_root, &meta).unwrap();
-            let fixture = Self {
+
+            Self {
                 _temp: temp,
                 project_root,
                 data_root,
-            };
-            fixture
+            }
         }
 
         fn database_path(&self, branch: &str) -> PathBuf {

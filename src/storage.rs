@@ -177,7 +177,7 @@ pub fn classify_project_storage(project_root: &Path) -> ProjectStorageLocation {
     }
 }
 
-pub async fn try_classify_project_storage_with_registry(
+pub(crate) async fn try_classify_project_storage_with_registry(
     project_root: &Path,
     global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,

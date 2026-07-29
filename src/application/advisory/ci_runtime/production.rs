@@ -145,7 +145,7 @@ const MAX_CI_DISCOVERY_RECORDS_V1: usize =
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProductionCiFailureDiscoveryOutcomeV1 {
-    Found(CiFailureLocalizationRequestV1),
+    Found(Box<CiFailureLocalizationRequestV1>),
     NotConfigured,
     NotFound,
     Ambiguous,
@@ -156,9 +156,13 @@ pub enum ProductionCiFailureDiscoveryOutcomeV1 {
 }
 
 impl ProductionCiFailureDiscoveryOutcomeV1 {
+    pub(crate) fn found(request: CiFailureLocalizationRequestV1) -> Self {
+        Self::Found(Box::new(request))
+    }
+
     pub fn request(&self) -> Option<&CiFailureLocalizationRequestV1> {
         match self {
-            Self::Found(request) => Some(request),
+            Self::Found(request) => Some(request.as_ref()),
             Self::NotConfigured
             | Self::NotFound
             | Self::Ambiguous
@@ -614,7 +618,7 @@ fn select_production_ci_failure_request_v1(
     if request.validate().is_err() {
         return ProductionCiFailureDiscoveryOutcomeV1::Unavailable;
     }
-    ProductionCiFailureDiscoveryOutcomeV1::Found(request)
+    ProductionCiFailureDiscoveryOutcomeV1::found(request)
 }
 
 fn select_failed_workflow_run<'a>(
@@ -802,8 +806,17 @@ impl CiReadOnlyProviderArchiveV1 for UnavailableProductionCiArchiveV1 {
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>> {
         Box::pin(async move {
+            let provider = match ProviderId::new("provider.unavailable") {
+                Ok(provider) => provider,
+                Err(_) => match ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1) {
+                    Ok(provider) => provider,
+                    Err(error) => {
+                        panic!("static CI provider id must remain constructible: {error}")
+                    }
+                },
+            };
             CiProviderReadResultV1 {
-                provider: ProviderId::new("provider.unavailable").expect("static provider id"),
+                provider,
                 run: request.run.clone(),
                 state: CiFailureLocalizationStateV1::Unavailable,
                 coverage: CiFailureCoverageV1::Unavailable,
@@ -1940,24 +1953,24 @@ mod discovery_tests {
         };
         assert_eq!(
             consensus_ci_discovery_outcome(
-                ProductionCiFailureDiscoveryOutcomeV1::Found(request.clone()),
-                ProductionCiFailureDiscoveryOutcomeV1::Found(request.clone()),
+                ProductionCiFailureDiscoveryOutcomeV1::found(request.clone()),
+                ProductionCiFailureDiscoveryOutcomeV1::found(request.clone()),
             ),
-            ProductionCiFailureDiscoveryOutcomeV1::Found(request.clone())
+            ProductionCiFailureDiscoveryOutcomeV1::found(request.clone())
         );
 
         let mut drifted = request.clone();
         drifted.run.attempt_id = (drifted.run.attempt_id.parse::<u64>().unwrap() + 1).to_string();
         assert_eq!(
             consensus_ci_discovery_outcome(
-                ProductionCiFailureDiscoveryOutcomeV1::Found(request.clone()),
-                ProductionCiFailureDiscoveryOutcomeV1::Found(drifted),
+                ProductionCiFailureDiscoveryOutcomeV1::found(request.clone()),
+                ProductionCiFailureDiscoveryOutcomeV1::found(drifted),
             ),
             ProductionCiFailureDiscoveryOutcomeV1::Ambiguous
         );
         assert_eq!(
             consensus_ci_discovery_outcome(
-                ProductionCiFailureDiscoveryOutcomeV1::Found(request),
+                ProductionCiFailureDiscoveryOutcomeV1::found(request),
                 ProductionCiFailureDiscoveryOutcomeV1::Denied,
             ),
             ProductionCiFailureDiscoveryOutcomeV1::Denied

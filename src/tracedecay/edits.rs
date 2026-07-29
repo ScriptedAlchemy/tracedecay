@@ -183,10 +183,10 @@ impl SourceEditFileAuthority {
         let source = String::from_utf8(bytes).map_err(|error| TraceDecayError::Config {
             message: format!("failed to read {label}: {error}"),
         })?;
-        Ok((
-            source,
-            identity.expect("present source edit bytes have an opened file identity"),
-        ))
+        let identity = identity.ok_or_else(|| TraceDecayError::Config {
+            message: format!("failed to read {label}: opened file identity was missing"),
+        })?;
+        Ok((source, identity))
     }
 
     fn current_identity(&self) -> Result<Option<Handle>> {
@@ -303,9 +303,12 @@ impl SourceEditFileAuthority {
                     source_edit_path_error("sync source edit temporary file", error)
                 })?;
                 drop(output);
-                before_compare
-                    .take()
-                    .expect("source edit comparison hook runs once")();
+                let Some(before_compare) = before_compare.take() else {
+                    return Err(TraceDecayError::Config {
+                        message: "source edit comparison hook already ran".to_owned(),
+                    });
+                };
+                before_compare();
                 self.verify_parent_binding()?;
                 let (current, current_identity) = self.read_optional_with_identity()?;
                 if current.as_deref() != expected.map(str::as_bytes) {
@@ -436,7 +439,10 @@ pub(crate) async fn capture_source_edit_plan<T>(
     let result = SOURCE_EDIT_PLAN_CAPTURE
         .scope(Arc::clone(&capture), future)
         .await;
-    let files = capture.lock().expect("source edit plan lock").clone();
+    let files = capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     (result, files)
 }
 
@@ -452,7 +458,12 @@ pub(crate) async fn apply_source_edit_plan<T>(
     let result = SOURCE_EDIT_APPLY_STATE
         .scope(Arc::clone(&state), future)
         .await;
-    let complete = state.lock().expect("source edit apply lock").consumed.len() == expected_count;
+    let complete = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .consumed
+        .len()
+        == expected_count;
     (result, complete)
 }
 
@@ -503,7 +514,7 @@ pub(super) fn capture_planned_source_edit(
     let _ = SOURCE_EDIT_PLAN_CAPTURE.try_with(|capture| {
         capture
             .lock()
-            .expect("source edit plan lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(PlannedSourceEditFile {
                 relative_path: relative_path.to_owned(),
                 expected: expected.map(str::to_owned),
@@ -519,7 +530,9 @@ pub(super) fn validate_planned_source_edit(
 ) -> Result<()> {
     SOURCE_EDIT_APPLY_STATE
         .try_with(|state| {
-            let mut state = state.lock().expect("source edit apply lock");
+            let mut state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(planned) = state
                 .files
                 .iter()
@@ -1880,7 +1893,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_edit_plan_capture_retains_exact_pre_and_post_bytes() {
-        let (_, files) = capture_source_edit_plan(async {
+        let ((), files) = capture_source_edit_plan(async {
             capture_planned_source_edit("src/lib.rs", Some("before\n"), Some("after\n"));
         })
         .await;

@@ -571,11 +571,10 @@ where
                 .get::<i64>(1)
                 .map_err(|error| format!("invalid legacy entity association: {error}"))?;
             if (source_fact_id, source_entity_id) < (last_fact_id, last_entity_id)
-                || (!first_page
-                    && (source_fact_id, source_entity_id) == (last_fact_id, last_entity_id))
-                || (first_page
+                || !first_page
+                    && (source_fact_id, source_entity_id) == (last_fact_id, last_entity_id)
+                || (source_fact_id, source_entity_id) == (last_fact_id, last_entity_id)
                     && page_rows > 0
-                    && (source_fact_id, source_entity_id) == (last_fact_id, last_entity_id))
             {
                 return Err("legacy memory associations returned an unstable order".to_string());
             }

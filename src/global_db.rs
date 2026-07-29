@@ -491,6 +491,21 @@ pub(crate) async fn session_temporal_store_repair_status(
     )
 }
 
+pub(crate) async fn advance_required_session_temporal_state_repair(
+    database: &RegisteredGlobalDb,
+) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+    let status = session_temporal_store_repair_status(database).await?;
+    if status
+        == (SessionTemporalRepairOutcome::Pending {
+            stage: SessionTemporalRepairStage::RepairState,
+        })
+    {
+        advance_session_temporal_store_repair(database).await
+    } else {
+        Ok(status)
+    }
+}
+
 pub(crate) async fn advance_session_temporal_store_repair(
     database: &RegisteredGlobalDb,
 ) -> crate::errors::Result<SessionTemporalRepairOutcome> {

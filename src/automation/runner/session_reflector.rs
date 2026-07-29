@@ -36,10 +36,7 @@ use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
     build_session_reflector_evidence,
 };
-use super::retrieval::{
-    AutomationSessionRetrieval, production_project_automation_retrieval,
-    production_user_automation_retrieval,
-};
+use super::retrieval::{AutomationSessionRetrieval, production_project_automation_retrieval};
 use super::unpersisted_rejected_parts;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -640,26 +637,6 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
         None,
         config,
         backend,
-        options,
-    )
-    .await
-}
-
-/// Runs session reflection for projectless evidence and profile-level memory.
-pub(crate) async fn run_user_session_reflector_with_backend(
-    profile_root: &std::path::Path,
-    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    config: &AutomationConfig,
-    backend: &dyn AgentTaskBackend,
-    options: SessionReflectorAutomationOptions,
-) -> Result<SessionReflectorAutomationRun> {
-    let retrieval = production_user_automation_retrieval(profile_root).await;
-    run_user_session_reflector_with_backend_and_retrieval(
-        profile_root,
-        session_registry,
-        config,
-        backend,
-        retrieval.as_ref(),
         options,
     )
     .await
