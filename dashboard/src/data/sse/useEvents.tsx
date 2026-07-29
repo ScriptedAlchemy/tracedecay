@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useSyncExternalStore,
 } from 'react';
 import type { ReactNode } from 'react';
@@ -14,7 +15,7 @@ import {
   type SseConnection,
   type SseConnectionState,
 } from './connect.ts';
-import type { SseBatch } from './types.ts';
+import type { SseBatch, SseReducerStats } from './types.ts';
 
 /**
  * Period of the render clock. The plan bounds SSE-driven work at "at most ten
@@ -223,6 +224,77 @@ function useRenderTick(): (onStoreChange: () => void) => () => void {
     (onStoreChange: () => void) => (clock ? clock.subscribe(onStoreChange) : () => {}),
     [clock],
   );
+}
+
+/**
+ * Whether the projection the views are drawing has been reconciled with the
+ * stream, as a state that cannot be mistaken for health.
+ *
+ * A canonical refresh that REJECTS leaves the reducer stale on purpose and does
+ * not retry on its own, because retrying a failing refresh every tick is the
+ * storm the render clock exists to prevent. That is the right behaviour and it
+ * has one consequence: without something rendering this, the dashboard would sit
+ * on a projection it knows is stale while the link indicator still read `live`.
+ * A connection can be perfectly healthy while the data behind it is not, so the
+ * two are reported separately.
+ */
+export type ProjectionSync =
+  /** Reconciled: no canonical signal is owed and none has failed. */
+  | { readonly kind: 'synced' }
+  /** A canonical refresh is running now. */
+  | { readonly kind: 'resyncing' }
+  /** Staleness is owed a refresh that has not started or completed. */
+  | { readonly kind: 'stale'; readonly reason: string | null }
+  /** A canonical refresh rejected; the projection is knowingly behind. */
+  | { readonly kind: 'failed'; readonly reason: string }
+  /** No connection is mounted, so there is nothing to reconcile against. */
+  | { readonly kind: 'unmounted' };
+
+/** Pure derivation, so the mapping is testable without a DOM or a clock. */
+export function projectionSyncFrom(stats: SseReducerStats | null): ProjectionSync {
+  if (stats === null) return { kind: 'unmounted' };
+  const phase = stats.reseed;
+  switch (phase.phase) {
+    case 'failed':
+      return { kind: 'failed', reason: phase.reason };
+    case 'in_flight':
+      return { kind: 'resyncing' };
+    case 'superseded':
+      // The refresh that settled was answering an older signal, so a newer one
+      // is still owed: behind, not reconciled.
+      return { kind: 'stale', reason: stats.refetchReason };
+    case 'idle':
+    case 'committed':
+      return stats.stale || stats.canonicalRefreshOutstanding
+        ? { kind: 'stale', reason: stats.refetchReason }
+        : { kind: 'synced' };
+    default: {
+      const unhandled: never = phase;
+      return unhandled;
+    }
+  }
+}
+
+/** Identity of a sync reading, so the snapshot stays referentially stable across
+ * ticks that did not change it — `useSyncExternalStore` re-renders on every new
+ * object, and `stats()` allocates one per call. */
+function syncKey(sync: ProjectionSync): string {
+  return sync.kind === 'failed' || sync.kind === 'stale'
+    ? `${sync.kind}\u0000${sync.reason ?? ''}`
+    : sync.kind;
+}
+
+export function useProjectionSync(): ProjectionSync {
+  const connection = useContext(EventsContext);
+  const subscribe = useRenderTick();
+  const cache = useRef<{ key: string; value: ProjectionSync } | null>(null);
+  const getSnapshot = useCallback(() => {
+    const next = projectionSyncFrom(connection ? connection.reducer.stats() : null);
+    const key = syncKey(next);
+    if (cache.current === null || cache.current.key !== key) cache.current = { key, value: next };
+    return cache.current.value;
+  }, [connection]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 export function useEventStreamState(): {
