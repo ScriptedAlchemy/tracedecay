@@ -3219,12 +3219,12 @@ trait RetirableProjectServer: Send + Sync + 'static {
 
 impl RetirableProjectServer for crate::mcp::McpServer {
     fn revoke_and_cancel_ingest(&self) {
-        self.revoke_project_server();
+        self.revoke_project_server_responses();
         self.cancel_startup_transcript_ingest();
     }
 
     fn wait_for_response_drain(&self) -> impl std::future::Future<Output = ()> + Send {
-        self.wait_for_project_server_response_drain()
+        self.wait_for_project_server_request_drain()
     }
 }
 
