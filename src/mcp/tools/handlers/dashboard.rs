@@ -149,6 +149,7 @@ pub(super) async fn handle_dashboard(
 
             let app = router(retained_cg.as_ref(), state).await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
+            let app = crate::dashboard::with_dashboard_http_admission(app, addr);
             let url = format!("http://{addr}/");
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
