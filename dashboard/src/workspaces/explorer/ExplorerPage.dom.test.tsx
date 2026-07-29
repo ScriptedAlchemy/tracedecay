@@ -19,8 +19,8 @@ function serve(routes: Record<string, Route>) {
   });
 }
 
-function renderExplorer(routes: Record<string, Route>) {
-  vi.stubGlobal('fetch', serve(routes));
+function mount(fetchImpl: unknown) {
+  vi.stubGlobal('fetch', fetchImpl);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -28,6 +28,23 @@ function renderExplorer(routes: Record<string, Route>) {
     <QueryClientProvider client={client}>
       <ExplorerPage />
     </QueryClientProvider>,
+  );
+}
+
+function renderExplorer(routes: Record<string, Route>) {
+  return mount(serve(routes));
+}
+
+/** A daemon the browser cannot reach on one route: `fetch` rejects, which is
+ * the client-side connectivity condition — not anything a source said about
+ * itself. */
+function renderExplorerUnreachable(routes: Record<string, Route>, path: string) {
+  const reachable = serve(routes);
+  return mount(
+    vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes(path)) throw new TypeError('Failed to fetch');
+      return reachable(input);
+    }),
   );
 }
 
@@ -290,11 +307,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function unavailable(sourceId: 'code_graph' | 'sessions' | 'knowledge', code: string, message: string) {
+/** A source that reached a terminal outcome without returning a page. */
+function withoutAnswer(
+  sourceId: 'code_graph' | 'sessions' | 'knowledge',
+  outcome: 'unavailable' | 'cancelled' | 'error',
+  code: string,
+  message: string,
+) {
   const base = source(sourceId, [], 0);
   return {
     ...base,
-    outcome: 'unavailable',
+    outcome,
     completed_units: null,
     total_units: null,
     coverage: {
@@ -308,6 +331,10 @@ function unavailable(sourceId: 'code_graph' | 'sessions' | 'knowledge', code: st
     message,
     page: null,
   };
+}
+
+function unavailable(sourceId: 'code_graph' | 'sessions' | 'knowledge', code: string, message: string) {
+  return withoutAnswer(sourceId, 'unavailable', code, message);
 }
 
 describe('ExplorerPage no-falsified-UI invariant', () => {
@@ -522,6 +549,129 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
     expect(knowledge.textContent).not.toMatch(/\b0\b/);
     expect(knowledge.textContent).toMatch(/no count reported/);
+  });
+
+  it('tells a cancelled read, an unavailable source, and an empty answer apart', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [
+            source('code_graph', [], 0),
+            withoutAnswer('sessions', 'cancelled', 'session_read_cancelled', 'the read was cancelled'),
+            withoutAnswer(
+              'knowledge',
+              'unavailable',
+              'fact_store_unavailable',
+              'the fact authority is not mounted',
+            ),
+          ],
+          'partial',
+          'missing',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'missing');
+    await user.keyboard('{Enter}');
+    await screen.findByText('Some sources did not answer');
+
+    // The source that answered may show its zero — it counted, and the count
+    // was nought. The two that never answered may not, and each has to say
+    // which of the two things happened to it.
+    const code = screen.getByRole('button', { name: /^Code graph/ });
+    expect(code.textContent).toMatch(/Code graph\s*0\s*loaded/);
+    expect(code.textContent).toContain('loaded of 0 matching rows reported');
+
+    const sessions = screen.getByRole('button', { name: /^Sessions/ });
+    expect(sessions.textContent).toMatch(/read cancelled/);
+    expect(sessions.textContent).toMatch(/no count reported/);
+    expect(sessions.textContent).not.toMatch(/\b0\b/);
+
+    const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
+    expect(knowledge.textContent).toMatch(/source unavailable/);
+    expect(knowledge.textContent).toMatch(/no count reported/);
+    expect(knowledge.textContent).not.toMatch(/\b0\b/);
+  });
+
+  it('never reads a daemon the browser cannot reach as a source that failed', async () => {
+    renderExplorerUnreachable(SEARCH_ROUTES, '/api/explorer/queries');
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+    await screen.findByText('Some sources did not answer');
+
+    // No source said anything about itself — the browser never got a reply —
+    // so no lane may be shown as an unavailable or broken source.
+    for (const name of [/^Code graph/, /^Sessions/, /^Knowledge/]) {
+      const lane = screen.getByRole('button', { name });
+      expect(lane.textContent).toMatch(/daemon unreachable/);
+      expect(lane.textContent).toMatch(/no count reported/);
+      expect(lane.textContent).not.toMatch(/source unavailable/);
+    }
+  });
+
+  it('does not leave a source the run never named looking like it is still reading', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope([source('code_graph', [], 0)], 'completed', 'missing'),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'missing');
+    await user.keyboard('{Enter}');
+    await screen.findByText('Some sources did not answer');
+
+    expect(screen.getByRole('button', { name: /^Code graph/ }).textContent).toContain(
+      'loaded of 0 matching rows reported',
+    );
+    for (const name of [/^Sessions/, /^Knowledge/]) {
+      const lane = screen.getByRole('button', { name });
+      expect(lane.textContent).toMatch(/the run never named this source/);
+      expect(lane.textContent).not.toMatch(/\b0\b/);
+    }
+    // The coordinator declared canonical finality while omitting two of its own
+    // required sources, so the absence claim stays unearned.
+    expect(screen.queryByText(/No source matched/)).toBeNull();
+  });
+
+  it('renders a field the row omitted as absent rather than as a zero', async () => {
+    const rowWithoutDegree = {
+      id: 'node-2',
+      name: 'graph_without_degree',
+      kind: 'function',
+      file_path: 'src/dashboard/graph_service.rs',
+    };
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope([
+          source('code_graph', [rowWithoutDegree], 1),
+          source('sessions', [], 0),
+          source('knowledge', [], 0),
+        ]),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+
+    const row = await screen.findByRole('button', { name: /graph_without_degree/ });
+    expect(screen.queryByRole('img', { name: /^degree/ })).toBeNull();
+    expect(screen.queryByText(/edges/)).toBeNull();
+
+    await user.click(row);
+    expect(await screen.findByText('Payload provenance')).toBeTruthy();
+    // Nothing to measure is not a measurement of nothing: the section, the
+    // rail, and the payload key are all simply absent.
+    expect(screen.queryByText('Measured')).toBeNull();
+    expect(screen.queryByRole('img', { name: /^degree/ })).toBeNull();
+    const provenance = screen.getByText('Payload provenance').closest('details');
+    expect(within(provenance as HTMLElement).queryByText('degree')).toBeNull();
   });
 });
 
