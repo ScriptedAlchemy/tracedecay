@@ -8,7 +8,10 @@
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 
-/// Plan 35's hard JSON-RPC payload limit.
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::Instant;
+
+/// Hard JSON-RPC payload limit for one bridged frame.
 pub const MAX_LSP_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// A framing header is metadata, not an unbounded side channel.
 pub const MAX_LSP_HEADER_BYTES: usize = 16 * 1024;
@@ -186,6 +189,107 @@ fn parse_content_length(header: &[u8]) -> Result<usize, ContentLengthCodecError>
         }
     }
     content_length.ok_or(ContentLengthCodecError::MissingContentLength)
+}
+
+/// Failure from the deadline-aware Tokio framing adapter.
+#[derive(Debug)]
+pub enum AsyncContentLengthError {
+    Io(io::Error),
+    Codec(ContentLengthCodecError),
+    DeadlineElapsed,
+}
+
+impl From<io::Error> for AsyncContentLengthError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<ContentLengthCodecError> for AsyncContentLengthError {
+    fn from(error: ContentLengthCodecError) -> Self {
+        Self::Codec(error)
+    }
+}
+
+/// Deadline-aware Tokio reader backed by the strict [`ContentLengthCodec`].
+///
+/// The adapter never parses the payload. A deadline reached between frames is
+/// [`FramePoll::Pending`]; a deadline reached after partial input is an error,
+/// preventing callers from silently discarding an incomplete envelope.
+pub struct AsyncContentLengthReader<R> {
+    reader: R,
+    decoder: ContentLengthCodec,
+}
+
+impl<R> AsyncContentLengthReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            decoder: ContentLengthCodec::new(),
+        }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+}
+
+impl<R> AsyncContentLengthReader<R>
+where
+    R: AsyncRead + Unpin,
+{
+    pub async fn read_frame_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<FramePoll, AsyncContentLengthError> {
+        loop {
+            if let Some(frame) = self.decoder.next_frame()? {
+                return Ok(FramePoll::Frame(frame));
+            }
+            if Instant::now() >= deadline {
+                return if self.decoder.is_empty() {
+                    Ok(FramePoll::Pending)
+                } else {
+                    Err(AsyncContentLengthError::DeadlineElapsed)
+                };
+            }
+
+            let mut buffer = [0_u8; STDIO_READ_BUFFER_BYTES];
+            let read = match tokio::time::timeout_at(deadline, self.reader.read(&mut buffer)).await
+            {
+                Ok(result) => result?,
+                Err(_) if self.decoder.is_empty() => return Ok(FramePoll::Pending),
+                Err(_) => return Err(AsyncContentLengthError::DeadlineElapsed),
+            };
+            if read == 0 {
+                return if self.decoder.is_empty() {
+                    Ok(FramePoll::Closed)
+                } else {
+                    Err(ContentLengthCodecError::UnexpectedEof.into())
+                };
+            }
+            self.decoder.push(&buffer[..read]);
+        }
+    }
+}
+
+/// Encodes and writes one opaque payload before `deadline`.
+pub async fn write_content_length_frame_until<W>(
+    writer: &mut W,
+    frame: &[u8],
+    deadline: Instant,
+) -> Result<(), AsyncContentLengthError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let encoded = ContentLengthCodec::encode(frame)?;
+    tokio::time::timeout_at(deadline, async {
+        writer.write_all(&encoded).await?;
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| AsyncContentLengthError::DeadlineElapsed)??;
+    Ok(())
 }
 
 /// I/O failure emitted by the concrete non-blocking stdio framing adapter.

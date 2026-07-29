@@ -38,20 +38,20 @@ pub enum DiagnosticSeverity {
 
 /// The source lane preserved while composing a document diagnostic report.
 ///
-/// The `TraceDecay` lane names its real producer (Plan 35): a review finding and
-/// a CI-localization finding are distinct producers and must not both render
-/// as an anonymous `tracedecay`. Every non-[`DiagnosticSource::Upstream`]
-/// variant belongs to the `TraceDecay` lane and keeps its lane privileges.
+/// The `TraceDecay` lane names its real producer: a review finding and a
+/// CI-localization finding are distinct producers and must not both render as
+/// an anonymous `tracedecay`. Every non-[`DiagnosticSource::Upstream`] variant
+/// belongs to the `TraceDecay` lane and keeps its lane privileges.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DiagnosticSource {
     Upstream,
     /// TraceDecay-relayed compiler/toolchain findings.
     TraceDecay,
-    /// PR13 GitHub review advisory findings.
+    /// GitHub review advisory findings.
     TraceDecayGitHub,
-    /// PR13 CI failure-localization advisory findings.
+    /// CI failure-localization advisory findings.
     TraceDecayCi,
-    /// PR13 proximity advisory findings.
+    /// Proximity advisory findings.
     TraceDecayProximity,
 }
 
