@@ -206,29 +206,29 @@ def validate_reproducible_generation() -> None:
 
 def validate_consumers() -> None:
     repository = ROOT.parents[2]
-    adapter_path = repository / "benchmarks/storage-runtime/product_adapter.py"
+    adapter_path = repository / "benchmarks/runtime/storage_workloads.py"
     specification = importlib.util.spec_from_file_location(
-        "storage_runtime_fixture_adapter",
+        "storage_runtime_workload_kernel",
         adapter_path,
     )
     assert specification is not None and specification.loader is not None
     adapter = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = adapter
     specification.loader.exec_module(adapter)
-    assert adapter.MANIFEST_NAME == RUNTIME_MANIFEST
-    manifest, project, profile = adapter._load_fixture(ROOT, [])
-    assert manifest["schema_version"] == 1
-    assert project == ROOT and profile == ROOT
+    adapter.validate_workloads()
+    assert adapter.BENCHMARK_AUTHORITY == "measurement_fixture_not_product_contract"
+    assert "tracedecay-store" in adapter.DECLARED_CRATE_LANES
+    assert "tracedecay-rusqlite-runtime" in adapter.DECLARED_CRATE_LANES
 
-    rust_source = (
-        repository
-        / "crates/tracedecay-rusqlite-runtime/src/evidence.rs"
-    ).read_text(encoding="utf-8")
-    assert (
-        f'pub const FIXTURE_MANIFEST: &str = "{RUNTIME_MANIFEST}";'
-        in rust_source
+    identities = adapter.runtime_test_identities(
+        platform="fixture",
+        shard="storage-evidence",
+        storage_mode="isolated-sqlite",
     )
-    assert "struct FixtureManifest" in rust_source
-    assert "schema_version: u32" in rust_source
+    assert any(
+        identity.crate_tag == "tracedecay-rusqlite-runtime"
+        for identity in identities
+    )
 
 
 def main() -> None:

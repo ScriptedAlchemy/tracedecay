@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "fixture_id": "runtime-v2-final",
+  "sample_count": 1,
+  "measurement_class": "n=1 regression sample",
+  "crate_identities": [
+    "tracedecay-domain",
+    "tracedecay-store",
+    "tracedecay-application",
+    "tracedecay-api",
+    "tracedecay-capture",
+    "tracedecay-hooks",
+    "tracedecay-policy",
+    "tracedecay-rusqlite-parity",
+    "tracedecay-rusqlite-runtime",
+    "tracedecay-sdk",
+    "tracedecay-tool-catalog",
+    "integrated-v2"
+  ],
+  "journey_identities": [
+    "code-retrieval",
+    "session-retrieval",
+    "context-assembly",
+    "host-activation",
+    "host-restart",
+    "daemon-recovery"
+  ],
+  "workload_identities": [
+    "exact-symbol",
+    "exact-occurrence",
+    "lexical-literal",
+    "lexical-phrase",
+    "graph-callers",
+    "graph-callees",
+    "graph-impact",
+    "session-message-search",
+    "session-lcm-grep",
+    "session-expand-query",
+    "query-context",
+    "payload-stress",
+    "concurrent-query"
+  ],
+  "runtime_states": [
+    "cold",
+    "warm",
+    "no-op",
+    "contention",
+    "recovery"
+  ],
+  "normalization_dimensions": [
+    "platform",
+    "shard",
+    "storage_mode",
+    "concurrency",
+    "runtime_state"
+  ],
+  "abba_sequence": [
+    "A",
+    "B",
+    "B",
+    "A"
+  ],
+  "availability_states": [
+    "available",
+    "unavailable",
+    "unsupported",
+    "partial",
+    "failed"
+  ],
+  "fake_host_availability": {
+    "warming-daemon": "partial",
+    "unresponsive-daemon": "unavailable",
+    "dashboard-malformed": "failed",
+    "dashboard-204": "unavailable",
+    "dashboard-404": "unsupported",
+    "verbose-hanging-child": "failed",
+    "repeated-capture-ids": "available"
+  }
+}
