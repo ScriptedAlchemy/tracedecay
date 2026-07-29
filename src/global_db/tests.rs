@@ -949,6 +949,32 @@ async fn session_temporal_repair_resumes_one_atomic_stage_at_a_time() {
 }
 
 #[tokio::test]
+async fn required_session_temporal_state_repair_runs_once_before_background_audits() {
+    let harness = RegisteredGlobalDbHarness::open("session-repair-required-state").await;
+    let db = Arc::clone(&harness.registered);
+    super::enqueue_session_temporal_store_repair(&db)
+        .await
+        .unwrap();
+
+    let repaired = super::advance_required_session_temporal_state_repair(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        repaired,
+        super::SessionTemporalRepairOutcome::Pending {
+            stage: super::SessionTemporalRepairStage::PrepareSchema,
+        }
+    );
+    assert_eq!(
+        super::advance_required_session_temporal_state_repair(&db)
+            .await
+            .unwrap(),
+        repaired,
+        "startup admission must leave schema preparation and authority audits to background repair"
+    );
+}
+
+#[tokio::test]
 async fn session_temporal_repair_drains_to_an_honest_terminal_state() {
     let harness = RegisteredGlobalDbHarness::open("session-repair-complete").await;
     let db = Arc::clone(&harness.registered);
