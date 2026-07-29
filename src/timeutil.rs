@@ -6,18 +6,6 @@
 //! (month/day/leap years) and rejects trailing garbage, while still
 //! supporting fractional seconds (which are truncated).
 
-/// Returns the nearest-rank percentile from an ascending sample.
-///
-/// The caller owns sorting so repeated percentile reads can share one sort.
-/// Empty samples and percentiles outside `1..=100` return `None`.
-pub fn nearest_rank(sorted: &[u64], percentile: usize) -> Option<u64> {
-    if sorted.is_empty() || !(1..=100).contains(&percentile) {
-        return None;
-    }
-    let rank = percentile.saturating_mul(sorted.len()).div_ceil(100);
-    sorted.get(rank.saturating_sub(1)).copied()
-}
-
 /// Parses a timezone-aware RFC3339 timestamp (e.g. `2026-06-10T01:02:03Z`,
 /// `2026-06-10 01:02:03.123+02:00`) into non-negative Unix epoch seconds.
 ///
@@ -370,17 +358,6 @@ pub fn now_iso_utc() -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn nearest_rank_uses_real_samples() {
-        assert_eq!(nearest_rank(&[], 95), None);
-        assert_eq!(nearest_rank(&[7], 95), Some(7));
-        assert_eq!(nearest_rank(&[1, 2, 3, 4], 50), Some(2));
-        assert_eq!(nearest_rank(&(1..=100).collect::<Vec<_>>(), 99), Some(99));
-        assert_eq!(nearest_rank(&(1..=101).collect::<Vec<_>>(), 99), Some(100));
-        assert_eq!(nearest_rank(&[1], 0), None);
-        assert_eq!(nearest_rank(&[1], 101), None);
-    }
 
     #[test]
     fn parses_utc_with_fractional_seconds() {
