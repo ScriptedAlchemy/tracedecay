@@ -28,6 +28,8 @@
 //! authorities. Those reach the session actor only as injected port
 //! implementations.
 
+pub mod analyzer;
+
 mod bridge;
 mod capabilities;
 mod context;
@@ -42,10 +44,11 @@ mod rpc;
 mod session;
 
 pub use bridge::{
-    BridgeDirection, BridgePumpOutcome, ContentLengthCodec, ContentLengthCodecError,
-    ContentLengthStdioError, ContentLengthStdioTransport, DaemonLspSessionTransport, FramePoll,
-    FrameSend, LspFrame, MAX_LSP_FRAME_BYTES, MAX_LSP_HEADER_BYTES, StdioFrameTransport,
-    StdioLspBridge, StdioLspBridgeError,
+    AsyncContentLengthError, AsyncContentLengthReader, BridgeDirection, BridgePumpOutcome,
+    ContentLengthCodec, ContentLengthCodecError, ContentLengthStdioError,
+    ContentLengthStdioTransport, DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame,
+    MAX_LSP_FRAME_BYTES, MAX_LSP_HEADER_BYTES, StdioFrameTransport, StdioLspBridge,
+    StdioLspBridgeError, write_content_length_frame_until,
 };
 pub use capabilities::{
     CapabilityAvailability, CapabilityParseError, CapabilityUnavailable,
@@ -54,15 +57,16 @@ pub use capabilities::{
     UpstreamCapabilities, negotiate_capabilities,
 };
 pub use context::{
-    ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
-    ContextExpansionScope, ContextFreshness, ContextProducerState, ContextProjectionChange,
+    CanonicalContextProjectionAuthority, ContextCoverage, ContextExpansionEnvelope,
+    ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope, ContextFreshness,
+    ContextProducerState, ContextProjectionAdapter, ContextProjectionChange,
     ContextProjectionEnvelope, ContextProjectionIdentity, ContextProjectionItem,
     ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
     ContextProjectionRegistration, ContextProjectionRequest, ContextSubscribeRequest,
-    MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS,
-    MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
-    TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
-    TRACEDECAY_CONTEXT_REVISION, TRACEDECAY_SUBSCRIBE_METHOD,
+    MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_OPERATIONS, MAX_CONTEXT_PROJECTION_BYTES,
+    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES,
+    MAX_CONTEXT_SUMMARY_BYTES, TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD,
+    TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_CONTEXT_REVISION, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 pub use diagnostics::{
     DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
@@ -75,17 +79,24 @@ pub use diagnostics::{
     utf16_position_to_byte_offset,
 };
 pub use gateway::{
-    AdmittedRoot, CallHierarchyItem, DaemonLspGateway, DiagnosticTrigger, DocumentSymbol,
-    FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse, GatewayDocumentDiagnostics,
-    GatewayMethod, GatewayResponse, Hover, IncomingCall, LspLocation, MethodUnavailable,
-    MethodUnavailableReason, OutgoingCall, RenameCandidate, RenameCandidateResult,
-    RenameCandidateUnavailableReason, SemanticProviderOutcome, SemanticProviderPort,
-    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem,
-    UnavailableSemanticProvider, WorkspaceSymbol,
+    AdmittedRoot, AnalyzerCancellationAdapter, CallHierarchyItem, DaemonLspGateway,
+    DaemonLspProviderBundle, DaemonLspProviderFactory, DaemonLspRuntimeSession, DiagnosticTrigger,
+    DocumentSymbol, FeedbackCycleAdapter, FeedbackCyclePort, FeedbackCycleRequest,
+    FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayDocumentDiagnostics, GatewayMethod,
+    GatewayResponse, Hover, IncomingCall, LspAnalyzerCancellationAuthority, LspLocation,
+    LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask,
+    LspSemanticOperationOutcome, LspSemanticRequest, LspSemanticRequestAuthority,
+    MAX_FEEDBACK_CYCLES, MAX_SEMANTIC_OPERATIONS, MethodUnavailable, MethodUnavailableReason,
+    OutgoingCall, RenameCandidate, RenameCandidateResult, RenameCandidateUnavailableReason,
+    SemanticProviderAdapter, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
+    SemanticResponse, SignatureHelp, TypeHierarchyItem, UnavailableSemanticProvider,
+    WorkspaceSymbol, lsp_semantic_request, project_semantic_outcome,
 };
 pub use overlay::{
-    DebouncedDiagnostic, DebouncedDiagnosticKind, MAX_OPEN_DOCUMENTS, MAX_OVERLAY_BYTES,
-    MAX_PENDING_OVERLAY_DIAGNOSTICS, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS,
+    CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority, DebouncedDiagnostic,
+    DebouncedDiagnosticKind, DiagnosticSnapshotAdapter, MAX_DIAGNOSTIC_OPERATIONS,
+    MAX_OPEN_DOCUMENTS, MAX_OVERLAY_BYTES, MAX_PENDING_OVERLAY_DIAGNOSTICS,
+    ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS,
     OVERLAY_DIAGNOSTIC_MAX_WAIT_MS, OverlayChange, OverlayDiagnosticDebouncer, OverlayError,
     OverlaySnapshot, OverlayStore,
 };
@@ -104,7 +115,10 @@ pub use request_sequence::{
     ConnectionLocalRequestSequence, ProcessLocalRequestSequence, SequenceExhausted,
 };
 pub use session::{
-    CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
-    LspSessionControl, MAX_PENDING_REQUESTS, MAX_PUBLICATION_BYTES, PublicationAdmission,
-    PublicationDelivery, PublicationState, RequestAdmission, SessionLifecycle,
+    AuthorizedLspSession, CancellationOutcome, CompletionDisposition, DaemonLspSessionEndpoint,
+    LSP_SESSION_TTL_MS, LifecycleError, LspEndpointError, LspRequestFailure, LspRequestId,
+    LspSessionAccess, LspSessionAdmissionPort, LspSessionControl, LspSessionCredential,
+    LspSessionId, LspSessionOpenRequest, LspSessionRegistry, MAX_LSP_SESSIONS,
+    MAX_PENDING_REQUESTS, MAX_PUBLICATION_BYTES, PublicationAdmission, PublicationDelivery,
+    PublicationState, RequestAdmission, SessionLifecycle,
 };

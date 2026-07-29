@@ -1,3 +1,8 @@
+use std::path::PathBuf;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionProvider {
     Cursor,
@@ -69,6 +74,29 @@ pub const MESSAGE_SEARCH_PROVIDER_IDS: &[&str] = &[
 pub const EXPECTED_MESSAGE_SEARCH_PROVIDER: &str =
     "all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, or hermes";
 
+/// Decodes the workspace path used by Kiro's `workspace-sessions` directory.
+///
+/// Kiro's native encoding retains `+`, substitutes `_` for `/`, and omits
+/// padding. URL-safe `-` is accepted for compatibility with derived directory
+/// names. The selected engine requires canonical padding and zero trailing
+/// bits, so malformed names fail closed.
+pub fn decode_kiro_workspace_path(name: &str) -> Option<PathBuf> {
+    let trimmed = name.trim_end_matches('_');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.replace('-', "+").replace('_', "/");
+    let decoded = if normalized.contains('=') {
+        STANDARD.decode(normalized)
+    } else {
+        STANDARD_NO_PAD.decode(normalized)
+    }
+    .ok()?;
+    let path = String::from_utf8(decoded).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderScope {
     All,
@@ -113,7 +141,9 @@ impl ProviderScope {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderScope, SessionProvider};
+    use std::path::PathBuf;
+
+    use super::{ProviderScope, SessionProvider, decode_kiro_workspace_path};
 
     #[test]
     fn provider_ids_round_trip() {
@@ -130,5 +160,28 @@ mod tests {
             Ok(ProviderScope::One(SessionProvider::Vibe))
         );
         assert!(ProviderScope::parse_optional(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn kiro_workspace_path_preserves_native_and_url_safe_encodings() {
+        assert_eq!(
+            decode_kiro_workspace_path("L3RtcC9raXJvLcO_L3g"),
+            Some(PathBuf::from("/tmp/kiro-ÿ/x"))
+        );
+        assert_eq!(
+            decode_kiro_workspace_path("L1VzZXJzL-a1i-ivlS9wcm9qZWN0"),
+            Some(PathBuf::from("/Users/测试/project"))
+        );
+    }
+
+    #[test]
+    fn kiro_workspace_path_rejects_malformed_padding_and_trailing_bits() {
+        for malformed in ["Zg=", "Zg===junk", "Zh", "_"] {
+            assert_eq!(
+                decode_kiro_workspace_path(malformed),
+                None,
+                "{malformed:?} must fail closed"
+            );
+        }
     }
 }

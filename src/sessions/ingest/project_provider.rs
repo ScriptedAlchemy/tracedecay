@@ -10,7 +10,7 @@ use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{TranscriptDiscoveryBounds, TranscriptSource};
 use crate::sessions::{
     SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
-    hermes, kiro,
+    hermes, kiro, vibe,
 };
 
 use super::failure::{
@@ -27,6 +27,7 @@ pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Claude,
     SessionProvider::Cursor,
     SessionProvider::Hermes,
+    SessionProvider::Vibe,
 ];
 
 const MAX_CODEX_SOURCE_FAILURES_PER_PASS: usize = 8;
@@ -63,7 +64,7 @@ impl<'a> ProjectProviderRun<'a> {
                 SessionProvider::Claude => self.run_claude().await,
                 SessionProvider::Cursor => self.run_cursor().await,
                 SessionProvider::Hermes => self.run_hermes().await,
-                SessionProvider::Vibe => ProviderRunOutcome::skipped(),
+                SessionProvider::Vibe => self.run_vibe().await,
             }
         })
     }
@@ -189,6 +190,37 @@ impl<'a> ProjectProviderRun<'a> {
                 );
                 ProviderRunOutcome::failed(failure, 0)
             }
+        }
+    }
+
+    async fn run_vibe(self) -> ProviderRunOutcome {
+        let Some(source) = vibe::VibeSource::new() else {
+            return ProviderRunOutcome::skipped();
+        };
+        match vibe::capture_vibe_observations(
+            self.facade,
+            &source,
+            self.project_root,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                TranscriptIngestStats::default(),
+                outcome.bytes_consumed,
+                outcome.deferred || outcome.bytes_consumed > self.max_new_bytes,
+            ),
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "vibe",
+                    "observation",
+                    &error,
+                    "project Vibe observation catch-up failed",
+                ),
+                0,
+            ),
         }
     }
 

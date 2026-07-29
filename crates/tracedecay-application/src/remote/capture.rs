@@ -1,83 +1,171 @@
-//! Application ownership for PR16 offline capture.
+//! Transport-neutral admission for remote offline capture.
 //!
-//! Capture accepts only `DurableObservationV1`, which is already bound to a
-//! canonical sanitization receipt. Host hooks do not receive this spool port.
+//! The application owns authorization and command/result identity. Concrete
+//! frame encoding, encrypted spooling, state transitions, and runtime bindings
+//! remain behind [`RemoteCapturePortV1`].
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    DurableObservationV1, EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, ProjectId,
-    RemoteCapabilityV1, UtcMicros,
-};
-use tracedecay_store::{
-    RemoteCaptureFrameV1, RemoteCaptureSequenceV1, RemoteCaptureStateV1, RemoteCaptureTransitionV1,
-    RemoteEnrollmentIdentityV1, RemoteRepositoryIdentityV1, RemoteWriterBindingV1,
+    BrainNodeId, CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1, DurableObservationV1,
+    EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EntityId, ProjectId,
+    RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1, RemoteRepositoryScopeV1, UtcMicros,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RemoteAuthorityReachabilityV1 {
-    Reachable,
-    Unreachable,
-    Unknown,
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteCaptureSequenceV1 {
+    pub sequence: u64,
+    pub previous_event_id: Option<String>,
 }
 
-/// Daemon-owned reachability authority. A request DTO cannot claim that the
-/// current writer is offline.
-pub trait RemoteAuthorityReachabilityPortV1: Send + Sync {
-    fn current_writer_reachability(
-        &self,
-        writer: &RemoteWriterBindingV1,
-    ) -> Result<RemoteAuthorityReachabilityV1, RemoteCaptureApplicationErrorV1>;
+impl RemoteCaptureSequenceV1 {
+    pub fn validate(&self) -> Result<(), RemoteCaptureApplicationErrorV1> {
+        if self.sequence == 0
+            || (self.sequence == 1) != self.previous_event_id.is_none()
+            || self.previous_event_id.as_ref().is_some_and(|event_id| {
+                event_id.len() < 16
+                    || event_id.len() > 160
+                    || event_id.trim() != event_id
+                    || event_id.chars().any(char::is_control)
+            })
+        {
+            return Err(RemoteCaptureApplicationErrorV1::InvalidSequence);
+        }
+        Ok(())
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RemoteSpoolCaptureOutcome {
-    Captured,
-    AlreadyCaptured { state: RemoteCaptureStateV1 },
+/// Exact authority identity required by capture and replay. The concrete store
+/// runtime binding is intentionally absent and remains adapter-owned.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteWriterAuthorityV1 {
+    pub project_id: ProjectId,
+    pub scope: RemoteRepositoryScopeV1,
+    pub authority: CurrentRemoteAuthorityV1,
 }
 
-pub trait RemoteCaptureSpoolPortV1: Send + Sync {
-    fn capture(
-        &self,
-        frame: RemoteCaptureFrameV1,
-    ) -> Result<RemoteSpoolCaptureOutcome, RemoteCapturePersistenceErrorV1>;
-
-    fn transition(
-        &self,
-        transition: RemoteCaptureTransitionV1,
-    ) -> Result<(), RemoteCapturePersistenceErrorV1>;
+impl RemoteWriterAuthorityV1 {
+    pub fn validate(&self) -> Result<(), RemoteCaptureApplicationErrorV1> {
+        self.project_id
+            .validate()
+            .map_err(|_| RemoteCaptureApplicationErrorV1::WriterFenceMismatch)?;
+        self.scope
+            .validate()
+            .map_err(|_| RemoteCaptureApplicationErrorV1::WriterFenceMismatch)?;
+        self.authority
+            .validate()
+            .map_err(|_| RemoteCaptureApplicationErrorV1::WriterFenceMismatch)
+    }
 }
 
 #[derive(Clone, Debug)]
-pub struct OfflineCaptureAuthorityV1 {
-    enrollment: RemoteEnrollmentIdentityV1,
-    writer: RemoteWriterBindingV1,
-    policy_revision: u64,
+pub struct RemoteOfflineCaptureCommandV1 {
+    pub enrollment: EnrollmentCredentialRecordV1,
+    pub writer: RemoteWriterAuthorityV1,
+    pub policy_revision: u64,
+    pub sequence: RemoteCaptureSequenceV1,
+    pub observation: DurableObservationV1,
+    pub captured_at: UtcMicros,
 }
 
-impl OfflineCaptureAuthorityV1 {
-    pub fn enrollment(&self) -> &RemoteEnrollmentIdentityV1 {
-        &self.enrollment
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmittedRemoteCaptureV1 {
+    pub enrollment_id: EntityId,
+    pub enrollment_revision: u64,
+    pub node_id: BrainNodeId,
+    pub writer: RemoteWriterAuthorityV1,
+    pub policy_revision: u64,
+    pub sequence: RemoteCaptureSequenceV1,
+    pub observation: DurableObservationV1,
+    pub captured_at: UtcMicros,
+}
 
-    pub fn writer(&self) -> &RemoteWriterBindingV1 {
-        &self.writer
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCaptureDispositionV1 {
+    CapturedPending,
+    AlreadyPending,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteCaptureReceiptV1 {
+    pub event_id: String,
+    pub sequence: u64,
+    pub disposition: RemoteCaptureDispositionV1,
+}
+
+impl RemoteCaptureReceiptV1 {
+    pub fn validate_for(
+        &self,
+        sequence: &RemoteCaptureSequenceV1,
+    ) -> Result<(), RemoteCaptureApplicationErrorV1> {
+        if self.event_id.len() < 16
+            || self.event_id.len() > 160
+            || self.event_id.trim() != self.event_id
+            || self.event_id.chars().any(char::is_control)
+            || self.sequence != sequence.sequence
+        {
+            return Err(RemoteCaptureApplicationErrorV1::InvalidPortResult);
+        }
+        Ok(())
     }
 }
 
-/// Recheck enrollment, exact repository scope, current fence, and actual
-/// authority unreachability before allowing durable offline capture.
-pub fn authorize_offline_capture(
-    reachability: &dyn RemoteAuthorityReachabilityPortV1,
-    enrollment: &EnrollmentCredentialRecordV1,
-    project_id: ProjectId,
-    writer: RemoteWriterBindingV1,
-    policy_revision: u64,
-    observed_at: UtcMicros,
-) -> Result<OfflineCaptureAuthorityV1, RemoteCaptureApplicationErrorV1> {
-    enrollment
+/// Application-owned boundary implemented by encrypted spool adapters.
+///
+/// `capture_pending` must atomically preserve an existing identical frame or
+/// persist the new canonical frame and advance it to pending. It must not
+/// expose a store runtime request or concrete frame DTO to the application.
+pub trait RemoteCapturePortV1: Send + Sync {
+    fn current_writer_authority(
+        &self,
+        writer: &RemoteWriterAuthorityV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1>;
+
+    fn capture_pending(
+        &self,
+        command: &AdmittedRemoteCaptureV1,
+    ) -> Result<RemoteCaptureReceiptV1, RemoteCapturePersistenceErrorV1>;
+}
+
+pub struct RemoteCaptureServiceV1<P> {
+    port: P,
+}
+
+impl<P> RemoteCaptureServiceV1<P>
+where
+    P: RemoteCapturePortV1,
+{
+    pub const fn new(port: P) -> Self {
+        Self { port }
+    }
+
+    pub fn capture(
+        &self,
+        command: RemoteOfflineCaptureCommandV1,
+    ) -> Result<RemoteCaptureReceiptV1, RemoteCaptureApplicationErrorV1> {
+        let admitted = admit_capture(&self.port, command)?;
+        let receipt = self
+            .port
+            .capture_pending(&admitted)
+            .map_err(RemoteCaptureApplicationErrorV1::Persistence)?;
+        receipt.validate_for(&admitted.sequence)?;
+        Ok(receipt)
+    }
+}
+
+fn admit_capture(
+    port: &dyn RemoteCapturePortV1,
+    command: RemoteOfflineCaptureCommandV1,
+) -> Result<AdmittedRemoteCaptureV1, RemoteCaptureApplicationErrorV1> {
+    command
+        .enrollment
         .validate()
         .map_err(|_| RemoteCaptureApplicationErrorV1::InvalidEnrollment)?;
-    match enrollment.state_at(observed_at) {
+    match command.enrollment.state_at(command.captured_at) {
         EnrollmentCredentialStateV1::Active => {}
         EnrollmentCredentialStateV1::Expired => {
             return Err(RemoteCaptureApplicationErrorV1::EnrollmentExpired);
@@ -86,81 +174,50 @@ pub fn authorize_offline_capture(
             return Err(RemoteCaptureApplicationErrorV1::EnrollmentRevoked);
         }
     }
-    if !enrollment
+    if !command
+        .enrollment
         .capabilities
         .contains(&RemoteCapabilityV1::CaptureOffline)
     {
         return Err(RemoteCaptureApplicationErrorV1::CaptureNotAuthorized);
     }
-    writer
-        .validate()
-        .map_err(|_| RemoteCaptureApplicationErrorV1::WriterFenceMismatch)?;
-    if enrollment.brain_id != writer.fence.brain_id || policy_revision == 0 {
+    command.writer.validate()?;
+    command.sequence.validate()?;
+    if command.policy_revision == 0
+        || command.enrollment.brain_id != command.writer.authority.fence.brain_id
+        || command.enrollment.scope != command.writer.scope
+    {
         return Err(RemoteCaptureApplicationErrorV1::WriterFenceMismatch);
     }
-    match reachability.current_writer_reachability(&writer)? {
-        RemoteAuthorityReachabilityV1::Unreachable => {}
-        RemoteAuthorityReachabilityV1::Reachable => {
+    let current_authority = port
+        .current_writer_authority(&command.writer)
+        .map_err(RemoteCaptureApplicationErrorV1::Persistence)?;
+    current_authority
+        .validate()
+        .map_err(|_| RemoteCaptureApplicationErrorV1::AuthorityReachabilityUnknown)?;
+    match current_authority {
+        CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+            ..
+        } => {}
+        CurrentRemoteAuthorityStateV1::Available(_) => {
             return Err(RemoteCaptureApplicationErrorV1::AuthorityReachable);
         }
-        RemoteAuthorityReachabilityV1::Unknown => {
+        CurrentRemoteAuthorityStateV1::Partial { .. }
+        | CurrentRemoteAuthorityStateV1::Unavailable { .. } => {
             return Err(RemoteCaptureApplicationErrorV1::AuthorityReachabilityUnknown);
         }
     }
-    Ok(OfflineCaptureAuthorityV1 {
-        enrollment: RemoteEnrollmentIdentityV1 {
-            enrollment_id: enrollment.enrollment_id.clone(),
-            enrollment_revision: enrollment.revision,
-            node_id: enrollment.node_id.clone(),
-            repository: RemoteRepositoryIdentityV1 {
-                project_id,
-                scope: enrollment.scope.clone(),
-            },
-        },
-        writer,
-        policy_revision,
+    Ok(AdmittedRemoteCaptureV1 {
+        enrollment_id: command.enrollment.enrollment_id,
+        enrollment_revision: command.enrollment.revision,
+        node_id: command.enrollment.node_id,
+        writer: command.writer,
+        policy_revision: command.policy_revision,
+        sequence: command.sequence,
+        observation: command.observation,
+        captured_at: command.captured_at,
     })
-}
-
-pub fn capture_offline_observation(
-    spool: &dyn RemoteCaptureSpoolPortV1,
-    authority: &OfflineCaptureAuthorityV1,
-    sequence: RemoteCaptureSequenceV1,
-    observation: DurableObservationV1,
-    captured_at: UtcMicros,
-) -> Result<RemoteCaptureFrameV1, RemoteCaptureApplicationErrorV1> {
-    let frame = RemoteCaptureFrameV1::new(
-        authority.enrollment.clone(),
-        sequence,
-        captured_at,
-        authority.policy_revision,
-        authority.writer.clone(),
-        observation,
-    )
-    .map_err(|_| RemoteCaptureApplicationErrorV1::InvalidCanonicalObservation)?;
-    let capture_outcome = spool
-        .capture(frame.clone())
-        .map_err(RemoteCaptureApplicationErrorV1::Persistence)?;
-    if matches!(
-        capture_outcome,
-        RemoteSpoolCaptureOutcome::Captured
-            | RemoteSpoolCaptureOutcome::AlreadyCaptured {
-                state: RemoteCaptureStateV1::Captured
-            }
-    ) {
-        spool
-            .transition(RemoteCaptureTransitionV1 {
-                event_id: frame.event_id.clone(),
-                from: RemoteCaptureStateV1::Captured,
-                to: RemoteCaptureStateV1::Pending,
-                replay_attempt: 0,
-                observed_at: captured_at,
-                finding: None,
-                receipt: None,
-            })
-            .map_err(RemoteCaptureApplicationErrorV1::Persistence)?;
-    }
-    Ok(frame)
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -187,27 +244,89 @@ pub enum RemoteCaptureApplicationErrorV1 {
     EnrollmentRevoked,
     #[error("remote enrollment does not authorize offline capture")]
     CaptureNotAuthorized,
+    #[error("remote capture sequence is invalid")]
+    InvalidSequence,
     #[error("current remote writer fence does not match enrollment")]
     WriterFenceMismatch,
     #[error("current remote authority is reachable")]
     AuthorityReachable,
     #[error("current remote authority reachability is unknown")]
     AuthorityReachabilityUnknown,
-    #[error("canonical sanitized observation is invalid")]
-    InvalidCanonicalObservation,
+    #[error("remote capture port returned a detached result")]
+    InvalidPortResult,
     #[error(transparent)]
     Persistence(RemoteCapturePersistenceErrorV1),
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    struct FakeCapturePort {
+        authority: CurrentRemoteAuthorityStateV1,
+        captures: Mutex<Vec<u64>>,
+    }
+
+    impl RemoteCapturePortV1 for FakeCapturePort {
+        fn current_writer_authority(
+            &self,
+            _writer: &RemoteWriterAuthorityV1,
+        ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
+            Ok(self.authority.clone())
+        }
+
+        fn capture_pending(
+            &self,
+            command: &AdmittedRemoteCaptureV1,
+        ) -> Result<RemoteCaptureReceiptV1, RemoteCapturePersistenceErrorV1> {
+            self.captures
+                .lock()
+                .expect("capture calls")
+                .push(command.sequence.sequence);
+            Ok(RemoteCaptureReceiptV1 {
+                event_id: "remote.event.0123456789abcdef".to_owned(),
+                sequence: command.sequence.sequence,
+                disposition: RemoteCaptureDispositionV1::CapturedPending,
+            })
+        }
+    }
 
     #[test]
     fn unknown_reachability_is_not_treated_as_offline() {
-        assert_ne!(
-            RemoteAuthorityReachabilityV1::Unknown,
-            RemoteAuthorityReachabilityV1::Unreachable
+        let authority = CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: RemoteAuthorityUnavailableReasonV1::RegistryUnavailable,
+            observed_at: UtcMicros(1),
+        };
+        let port = FakeCapturePort {
+            authority: authority.clone(),
+            captures: Mutex::new(Vec::new()),
+        };
+        assert!(!matches!(
+            port.authority,
+            CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                ..
+            }
+        ));
+        assert!(port.captures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn detached_capture_receipt_is_rejected() {
+        let sequence = RemoteCaptureSequenceV1 {
+            sequence: 1,
+            previous_event_id: None,
+        };
+        let receipt = RemoteCaptureReceiptV1 {
+            event_id: "remote.event.0123456789abcdef".to_owned(),
+            sequence: 2,
+            disposition: RemoteCaptureDispositionV1::CapturedPending,
+        };
+        assert_eq!(
+            receipt.validate_for(&sequence),
+            Err(RemoteCaptureApplicationErrorV1::InvalidPortResult)
         );
     }
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
-use tracedecay::daemon::lsp_gateway::{
+use tracedecay_lsp::{
     AdmittedRoot, ClientCapabilities, ContextCoverage, ContextExpansionEnvelope,
     ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope, ContextFreshness,
     ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,

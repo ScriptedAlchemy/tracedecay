@@ -1,9 +1,8 @@
 //! Capability intersection for the daemon LSP 3.17 gateway.
 //!
-//! The values here are an intentionally small, transport-independent model of
-//! the PR12 matrix. The eventual initialize handler supplies the authoritative
-//! client, admitted-project, policy, and upstream facts before it advertises
-//! any capability.
+//! The values here are an intentionally small, transport-independent model.
+//! The initialize handler supplies the authoritative client, admitted-project,
+//! policy, and upstream facts before it advertises any capability.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,7 +27,17 @@ struct TraceDecayClientCapabilities {
 /// The protocol version implemented by the gateway contract.
 pub const LSP_PROTOCOL_VERSION: &str = "3.17";
 
-/// LSP 3.17 client position encodings. PR12 advertises only UTF-16.
+pub(crate) fn is_supported_context_projection(kind: &ContextProjectionKind) -> bool {
+    matches!(
+        kind.as_str(),
+        ContextProjectionKind::DIAGNOSTICS
+            | ContextProjectionKind::POST_EDIT_IMPACT
+            | ContextProjectionKind::AFFECTED_TESTS
+            | ContextProjectionKind::TEST_RUN_RESULTS
+    )
+}
+
+/// LSP 3.17 client position encodings. The gateway advertises only UTF-16.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PositionEncoding {
     #[default]
@@ -37,7 +46,7 @@ pub enum PositionEncoding {
     Utf32,
 }
 
-/// The static text-document synchronization contract advertised by PR12.
+/// The static text-document synchronization contract advertised by the gateway.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TextDocumentSync {
     pub open_close: bool,
@@ -92,7 +101,7 @@ impl SemanticCapability {
     ];
 }
 
-/// The client facts relevant to the bounded PR12 gateway negotiation.
+/// The client facts relevant to bounded gateway negotiation.
 ///
 /// An empty `position_encodings` set means the client omitted the field, which
 /// LSP 3.17 treats as implicit UTF-16 support.
@@ -119,7 +128,7 @@ impl ClientCapabilities {
             || self.position_encodings.contains(&encoding)
     }
 
-    /// Parses only the LSP capability fields PR12 actually uses. Unknown
+    /// Parses only the LSP capability fields the gateway actually uses. Unknown
     /// fields are intentionally ignored rather than becoming accidental
     /// capability authority.
     pub fn from_initialize_capabilities(value: &Value) -> Result<Self, CapabilityParseError> {
@@ -231,7 +240,7 @@ impl ClientCapabilities {
             }
             let mut negotiated = BTreeMap::new();
             for registration in tracedecay.projections {
-                if !registration.kind.is_pr12_supported()
+                if !is_supported_context_projection(&registration.kind)
                     || registration.revision == 0
                     || negotiated
                         .insert(registration.kind, registration.revision)
@@ -256,7 +265,7 @@ pub enum CapabilityParseError {
 
 /// Capabilities the daemon can safely guarantee for the admitted session.
 ///
-/// The future session constructor derives this from gateway revision,
+/// The session constructor derives this from gateway revision,
 /// project/language admission, policy, configuration, and profile state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayCapabilities {
@@ -290,7 +299,7 @@ pub struct UpstreamCapabilities {
     pub semantic: BTreeSet<SemanticCapability>,
 }
 
-/// The result of capability negotiation. Unsupported PR12 features stay false
+/// The result of capability negotiation. Unsupported features stay false
 /// regardless of client or upstream claims.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectiveCapabilities {
@@ -334,7 +343,7 @@ impl EffectiveCapabilities {
         }
     }
 
-    /// Exact PR12 server capability projection. Deferred features are absent,
+    /// Exact server capability projection. Deferred features are absent,
     /// never advertised as `false` options that a client may still invoke.
     pub fn to_lsp_server_capabilities(&self) -> Value {
         let mut capabilities = serde_json::Map::new();
@@ -469,7 +478,7 @@ pub struct CapabilityUnavailable {
     pub reason: CapabilityUnavailableReason,
 }
 
-/// Computes the bounded PR12 intersection without advertising future
+/// Computes the bounded intersection without advertising deferred
 /// capabilities such as multi-root, rename, code actions, workspace
 /// diagnostics, or execute-command.
 pub fn negotiate_capabilities(
@@ -704,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_pr12_client_fields_and_omits_deferred_server_methods() {
+    fn parses_only_supported_client_fields_and_omits_deferred_server_methods() {
         let client = ClientCapabilities::from_initialize_capabilities(&json!({
             "general": { "positionEncodings": ["utf-16"] },
             "textDocument": {

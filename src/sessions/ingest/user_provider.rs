@@ -30,7 +30,7 @@ pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
     cancellation: &ObservationCancellation,
 ) -> ProviderRunOutcome {
     UserProviderUnit {
-        store,
+        _store: store,
         profile_root,
         roots,
         facade,
@@ -43,7 +43,7 @@ pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
 }
 
 struct UserProviderUnit<'a, S> {
-    store: &'a S,
+    _store: &'a S,
     profile_root: &'a Path,
     roots: &'a [PathBuf],
     facade: &'a HostAdmissionFacade<'a>,
@@ -242,23 +242,27 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match try_ingest_file_source_bounded(
-            self.store,
+        match vibe::capture_vibe_observations(
+            self.facade,
             &source,
             self.profile_root,
-            self.max_new_bytes,
+            ObservationScopeV1::Profile,
+            Some(self.max_new_bytes),
+            self.cancellation,
         )
         .await
         {
-            Ok(source_stats) => {
-                ProviderRunOutcome::bounded(source_stats, self.max_new_bytes, false)
-            }
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                TranscriptIngestStats::default(),
+                outcome.bytes_consumed,
+                outcome.deferred,
+            ),
             Err(error) => ProviderRunOutcome::failed(
                 warn_transcript_catch_up_failure(
                     "vibe",
-                    "transcript",
+                    "observation",
                     &error,
-                    "user Vibe transcript catch-up failed",
+                    "user Vibe observation catch-up failed",
                 ),
                 self.max_new_bytes,
             ),

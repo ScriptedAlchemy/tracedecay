@@ -1,10 +1,10 @@
-//! Dashboard-owned LSP diagnostics support.
+//! Root-owned concrete semantic authorities over the crate-owned analyzer runtime.
 
-pub mod activity;
-pub mod adapters;
-pub mod broker;
-pub mod client;
+pub use tracedecay_lsp::analyzer::{activity, adapters, broker, client, settings};
+
 pub mod semantic;
-pub mod settings;
 
-pub use semantic::{Pr12ProductionSemanticAuthorities, pr12_production_semantic_authorities};
+pub use semantic::{
+    Pr12ProductionSemanticAuthorities, ProductionSemanticAuthorities,
+    pr12_production_semantic_authorities, production_semantic_authorities,
+};

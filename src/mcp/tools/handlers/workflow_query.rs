@@ -13,9 +13,10 @@ use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::support::{argument_error, string_arg, tool_json_with_md};
 use super::workflow_index::{
-    WorkflowIndexReadPort, WorkflowIndexUnavailableReason, WorkflowRunDetailCommand,
-    WorkflowRunDetailOutcome, WorkflowRunDetailView, WorkflowRunListCommand,
-    WorkflowRunListOutcome, WorkflowRunScope, list_workflow_runs, read_workflow_run,
+    WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexUnavailableReason,
+    WorkflowRunDetailCommand, WorkflowRunDetailOutcome, WorkflowRunDetailView,
+    WorkflowRunListCommand, WorkflowRunListOutcome, WorkflowRunScope, list_workflow_runs,
+    read_workflow_run,
 };
 
 const DEFAULT_WORKFLOWS_LIMIT: usize = 20;
@@ -133,9 +134,11 @@ pub(super) async fn handle_workflows(
         }
         WorkflowMode::GitScope { filter } => {
             let command = WorkflowRunListCommand {
-                scope: WorkflowRunScope::GitScope {
-                    filter: filter.clone(),
-                },
+                scope: WorkflowRunScope::GitScope(WorkflowGitScope {
+                    branch: filter.branch.clone(),
+                    worktree: filter.worktree.clone(),
+                    commit: filter.commit.clone(),
+                }),
                 limit,
             };
             match list_workflow_runs(workflow_index, command).await? {
@@ -222,10 +225,7 @@ async fn run_payload(
         };
     match agent_label {
         Some(label) => {
-            let agent = agents
-                .iter()
-                .find(|agent| agent.agent_label == label)
-                .map(|agent| &agent.row);
+            let agent = agents.iter().find(|agent| agent.agent_label == label);
             Ok(json!({
                 "status": "ok",
                 "mode": "agent",
@@ -236,21 +236,15 @@ async fn run_payload(
                 "agent": agent,
             }))
         }
-        None => {
-            let agents = agents
-                .into_iter()
-                .map(|agent| agent.row)
-                .collect::<Vec<_>>();
-            Ok(json!({
-                "status": "ok",
-                "mode": "run",
-                "run_id": run_id,
-                "found": true,
-                "run": run,
-                "agents": agents,
-                "agent_count": agents.len(),
-            }))
-        }
+        None => Ok(json!({
+            "status": "ok",
+            "mode": "run",
+            "run_id": run_id,
+            "found": true,
+            "run": run,
+            "agents": agents,
+            "agent_count": agents.len(),
+        })),
     }
 }
 
@@ -474,7 +468,7 @@ mod tests {
                 false,
             ),
             (
-                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+                WorkflowIndexUnavailableReason::IndexNotBuilt,
                 "workflow_index_not_built",
                 true,
             ),
@@ -509,7 +503,7 @@ mod tests {
         }));
         let missing_run = render_workflows_md(&run_not_found_payload("wf_absent"));
         let unavailable =
-            render_unavailable_md(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message());
+            render_unavailable_md(WorkflowIndexUnavailableReason::IndexNotBuilt.message());
 
         assert_ne!(empty_scope, missing_run);
         assert_ne!(missing_run, unavailable);
@@ -527,7 +521,7 @@ mod tests {
     #[test]
     fn unavailable_markdown_distinguishes_the_states() {
         let not_built =
-            render_unavailable_md(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message());
+            render_unavailable_md(WorkflowIndexUnavailableReason::IndexNotBuilt.message());
         let no_authority =
             render_unavailable_md(WorkflowIndexUnavailableReason::AuthorityNotRetained.message());
         assert_ne!(not_built, no_authority);

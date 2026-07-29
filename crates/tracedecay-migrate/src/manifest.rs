@@ -426,6 +426,7 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use crate::final_v2::*;
     use crate::inventory::MigrationInventory;
 
     /// Records what a checkpoint save asked the host to do, in order, so the
@@ -719,5 +720,192 @@ mod tests {
             StoreArtifactPath::from_relative(dir.path(), Path::new("link/graph.db"), 0),
             Err(StoreArtifactPathValidationError::Symlink)
         );
+    }
+
+    #[test]
+    fn final_v2_target_is_one_authoritative_schema_with_permanent_families() {
+        let target = FinalTargetSchemaManifest::authoritative();
+
+        assert_eq!(target.schema_id, FINAL_V2_SCHEMA_ID);
+        assert_eq!(
+            target
+                .families
+                .iter()
+                .map(|family| family.family)
+                .collect::<Vec<_>>(),
+            vec![
+                FinalSchemaFamily::BranchStackRevisions,
+                FinalSchemaFamily::BranchStackRevisionNodes,
+                FinalSchemaFamily::BranchStackRevisionEdges,
+                FinalSchemaFamily::BranchStackPreviews,
+                FinalSchemaFamily::BranchStackConsumedApprovals,
+                FinalSchemaFamily::BranchStackJournals,
+                FinalSchemaFamily::BranchStackReceipts,
+                FinalSchemaFamily::BranchStackQuarantine,
+                FinalSchemaFamily::RemoteObservationTransactions,
+                FinalSchemaFamily::RemoteAdmittedEncryptionMetadata,
+                FinalSchemaFamily::RemoteReplayDeduplication,
+                FinalSchemaFamily::RemoteBackupStaging,
+                FinalSchemaFamily::RemoteAuthorityCas,
+            ]
+        );
+        target.validate().expect("canonical final target");
+
+        let contract = LastReleasedToFinalV2MigrationContract::authoritative();
+        assert_eq!(contract.source_schema_id, LAST_RELEASED_SCHEMA_ID);
+        assert_eq!(contract.target_schema.schema_id, FINAL_V2_SCHEMA_ID);
+        contract
+            .validate()
+            .expect("one direct released-to-final cutover");
+    }
+
+    #[test]
+    fn final_families_declare_identity_cas_one_use_and_destructive_safety() {
+        let target = FinalTargetSchemaManifest::authoritative();
+
+        assert!(
+            target
+                .family(FinalSchemaFamily::BranchStackRevisions)
+                .invariants
+                .contains(&FinalSchemaInvariant::ExactProjectAndSourceGeneration)
+        );
+        assert!(
+            target
+                .family(FinalSchemaFamily::BranchStackConsumedApprovals)
+                .invariants
+                .contains(&FinalSchemaInvariant::OneUse)
+        );
+        assert!(
+            target
+                .family(FinalSchemaFamily::RemoteAuthorityCas)
+                .invariants
+                .contains(&FinalSchemaInvariant::CompareAndSwap)
+        );
+        assert!(
+            target
+                .family(FinalSchemaFamily::RemoteBackupStaging)
+                .invariants
+                .contains(&FinalSchemaInvariant::VerifiedBackupBeforeDestruction)
+        );
+    }
+
+    fn final_source(generation: &str) -> ExactMigrationSourceIdentity {
+        ExactMigrationSourceIdentity::new("project.final-v2", generation, LAST_RELEASED_SCHEMA_ID)
+            .expect("source identity")
+    }
+
+    fn verified_backup(source: ExactMigrationSourceIdentity) -> VerifiedBackupIdentity {
+        VerifiedBackupIdentity::new("backup.final-v2", source, "archive.final-v2", [7; 32], 100)
+            .expect("verified backup")
+    }
+
+    #[test]
+    fn checkpoint_selects_rollback_before_and_roll_forward_after_boundary() {
+        let source = final_source("source-generation.7");
+        let backup = verified_backup(source.clone());
+        let mut checkpoint = DurableMigrationCheckpoint::before_publication(
+            "checkpoint.final-v2",
+            "migration.final-v2",
+            source.clone(),
+            backup,
+            110,
+        )
+        .expect("pre-publication checkpoint");
+        assert_eq!(
+            checkpoint.recovery_action(),
+            CutoverRecoveryAction::RollbackBeforePublication
+        );
+
+        let receipt = CutoverPublicationReceipt::new(
+            "publication.final-v2",
+            source,
+            FINAL_V2_SCHEMA_ID,
+            "authority-cas.final-v2",
+            120,
+        )
+        .expect("publication receipt");
+        checkpoint
+            .record_publication(receipt)
+            .expect("publish exact source generation");
+        assert_eq!(
+            checkpoint.recovery_action(),
+            CutoverRecoveryAction::RollForwardAfterPublication
+        );
+        checkpoint.validate().expect("durable published checkpoint");
+    }
+
+    #[test]
+    fn publication_receipt_must_match_the_exact_project_and_source_generation() {
+        let source = final_source("source-generation.7");
+        let backup = verified_backup(source.clone());
+        let mut checkpoint = DurableMigrationCheckpoint::before_publication(
+            "checkpoint.final-v2",
+            "migration.final-v2",
+            source,
+            backup,
+            110,
+        )
+        .expect("pre-publication checkpoint");
+        let wrong_generation = CutoverPublicationReceipt::new(
+            "publication.final-v2",
+            final_source("source-generation.8"),
+            FINAL_V2_SCHEMA_ID,
+            "authority-cas.final-v2",
+            120,
+        )
+        .expect("well-formed mismatched receipt");
+
+        assert_eq!(
+            checkpoint.record_publication(wrong_generation),
+            Err(MigrationContractError::IdentityMismatch)
+        );
+        assert_eq!(
+            checkpoint.recovery_action(),
+            CutoverRecoveryAction::RollbackBeforePublication
+        );
+    }
+
+    #[test]
+    fn archive_expiry_needs_a_matching_caller_declared_policy_receipt() {
+        let source = final_source("source-generation.7");
+        let backup = verified_backup(source.clone());
+        let mut checkpoint = DurableMigrationCheckpoint::before_publication(
+            "checkpoint.final-v2",
+            "migration.final-v2",
+            source.clone(),
+            backup,
+            110,
+        )
+        .expect("pre-publication checkpoint");
+        checkpoint
+            .record_publication(
+                CutoverPublicationReceipt::new(
+                    "publication.final-v2",
+                    source.clone(),
+                    FINAL_V2_SCHEMA_ID,
+                    "authority-cas.final-v2",
+                    120,
+                )
+                .expect("publication receipt"),
+            )
+            .expect("publication");
+        let policy = ArchiveExpiryPolicyReceipt::new(
+            "retention-policy.final-v2",
+            source,
+            "archive.final-v2",
+            125,
+            200,
+        )
+        .expect("caller-declared policy receipt");
+
+        assert_eq!(
+            checkpoint.archive_expiry_eligibility(&policy, 199),
+            Err(MigrationContractError::ArchiveNotYetEligible)
+        );
+        let eligibility = checkpoint
+            .archive_expiry_eligibility(&policy, 200)
+            .expect("policy makes the exact archive eligible");
+        assert_eq!(eligibility.archive_id, "archive.final-v2");
+        assert_eq!(eligibility.policy_receipt_id, "retention-policy.final-v2");
     }
 }

@@ -1,6 +1,15 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use tracedecay::diagnostics::lsp;
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tracedecay_lsp::analyzer as lsp;
+use tracedecay_lsp::{
+    AdmittedRoot, AnalyzerCancellationPort, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor,
+    AnalyzerTransitionError, LspRequestId, SemanticProviderOutcome, SemanticProviderPort,
+    SemanticRequest, SemanticResponse,
+};
 
 const FAKE_LANGUAGE: &str = "fake";
 const FAKE_PATH: &str = "src/lib.fake";
@@ -22,6 +31,100 @@ const FAKE_LSP_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from
 const FAKE_LSP_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 const HANGING_WRITE_LINE_COUNT: usize = 64_000;
+
+struct FakeLspPhaseControl {
+    listener: TcpListener,
+    address: std::net::SocketAddr,
+}
+
+struct ReachedFakeLspPhase {
+    stream: TcpStream,
+}
+
+impl FakeLspPhaseControl {
+    async fn bind() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        Self { listener, address }
+    }
+
+    fn script_preamble(&self, phases: &[&str]) -> String {
+        let phases = phases
+            .iter()
+            .map(|phase| format!("{phase:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"
+import socket
+
+TRACEDECAY_PHASES = {{{phases}}}
+
+def tracedecay_maybe_phase(name):
+    if name not in TRACEDECAY_PHASES:
+        return
+    with socket.create_connection(("127.0.0.1", {port})) as control:
+        control.sendall((name + "\n").encode("utf-8"))
+        control.shutdown(socket.SHUT_WR)
+        if control.recv(1) != b"1":
+            raise RuntimeError("phase control closed before release")
+"#,
+            port = self.address.port(),
+            phases = phases,
+        )
+    }
+
+    async fn wait_for(&self, expected: &str) -> ReachedFakeLspPhase {
+        let (stream, _) = self.listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut actual = String::new();
+        reader.read_line(&mut actual).await.unwrap();
+        assert_eq!(actual.trim_end(), expected);
+        ReachedFakeLspPhase {
+            stream: reader.into_inner(),
+        }
+    }
+}
+
+impl ReachedFakeLspPhase {
+    async fn release(mut self) {
+        self.stream.write_all(b"1").await.unwrap();
+    }
+}
+
+struct PendingSemanticProvider;
+
+impl SemanticProviderPort for PendingSemanticProvider {
+    fn request(
+        &self,
+        _root: &AdmittedRoot,
+        _request_id: &LspRequestId,
+        _request: &SemanticRequest,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        SemanticProviderOutcome::Pending
+    }
+}
+
+struct UnavailableSemanticProvider;
+
+impl SemanticProviderPort for UnavailableSemanticProvider {
+    fn request(
+        &self,
+        _root: &AdmittedRoot,
+        _request_id: &LspRequestId,
+        _request: &SemanticRequest,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        SemanticProviderOutcome::Unavailable
+    }
+}
+
+struct FixedCancellation(bool);
+
+impl AnalyzerCancellationPort for FixedCancellation {
+    fn cancel_upstream(&self, _root: &AdmittedRoot, _request_id: &LspRequestId) -> bool {
+        self.0
+    }
+}
 
 fn bounded_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
     lsp::client::LspRefreshTimeouts::new(
@@ -51,45 +154,165 @@ fn loaded_runner_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
 }
 
 #[test]
-fn builtin_registry_advertises_phase_one_setup_contract() {
-    let adapters = lsp::adapters::builtin_adapters();
-    for language in [
-        "rust",
-        "typescript",
-        "javascript",
-        "python",
-        "go",
-        "c",
-        "cpp",
-        "objc",
-        "zig",
-        "lua",
-        "php",
-    ] {
-        let adapter = adapter(&adapters, language);
-        assert!(
-            !adapter.extensions.is_empty(),
-            "{language} should advertise file extensions"
-        );
-        assert!(
-            !adapter.install_options.is_empty(),
-            "{language} should expose setup help"
-        );
-    }
+fn analyzer_lifecycle_is_project_scoped_and_preserves_failure_evidence() {
+    let root = AdmittedRoot::new("file:///project");
+    let other = AdmittedRoot::new("file:///other");
+    let mut supervisor = AnalyzerSupervisor::new(root.clone());
 
-    assert_eq!(adapter(&adapters, "typescript").args, ["--stdio"]);
-    assert_eq!(adapter(&adapters, "javascript").args, ["--stdio"]);
-    assert_eq!(adapter(&adapters, "python").args, ["--stdio"]);
-    assert!(
-        adapter(&adapters, "typescript").install_options[0]
-            .command
-            .contains("typescript-language-server")
+    assert_eq!(
+        supervisor.apply(&other, AnalyzerEvent::StartRequested),
+        Err(AnalyzerTransitionError::RootMismatch {
+            expected: root.clone(),
+            actual: other,
+        })
     );
-    assert!(
-        adapter(&adapters, "rust").install_options[0]
-            .command
-            .contains("rust-analyzer")
+    supervisor
+        .apply(&root, AnalyzerEvent::StartRequested)
+        .unwrap();
+    supervisor
+        .apply(&root, AnalyzerEvent::TransportFailed)
+        .unwrap();
+    assert_eq!(supervisor.state(), AnalyzerState::RestartBackoff);
+    assert_eq!(
+        supervisor.failure_evidence(),
+        Some(("analyzer-transport-failed", "Analyzer transport failed."))
     );
+
+    supervisor
+        .apply(&root, AnalyzerEvent::StartRequested)
+        .unwrap();
+    supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
+    assert!(supervisor.is_ready_for(&root));
+    assert_eq!(supervisor.failure_evidence(), None);
+}
+
+#[test]
+fn polyglot_semantics_route_unique_extensions_and_fall_back_on_ambiguity() {
+    let routed: Arc<dyn SemanticProviderPort + Send + Sync> = Arc::new(PendingSemanticProvider);
+    let fallback: Arc<dyn SemanticProviderPort + Send + Sync> =
+        Arc::new(UnavailableSemanticProvider);
+    let root = AdmittedRoot::new("file:///project");
+    let request_id = LspRequestId::Number(1);
+    let request = SemanticRequest::DocumentSymbols {
+        document_uri: "file:///project/src/app.TS".to_string(),
+    };
+
+    let unique = lsp::PolyglotSemanticProvider::new(
+        vec![lsp::LanguageSemanticRoute::new(["ts"], Arc::clone(&routed))],
+        Arc::clone(&fallback),
+    );
+    assert!(matches!(
+        unique.request(&root, &request_id, &request),
+        SemanticProviderOutcome::Pending
+    ));
+
+    let ambiguous = lsp::PolyglotSemanticProvider::new(
+        vec![
+            lsp::LanguageSemanticRoute::new(["ts"], Arc::clone(&routed)),
+            lsp::LanguageSemanticRoute::new(["TS"], routed),
+        ],
+        fallback,
+    );
+    assert!(matches!(
+        ambiguous.request(&root, &request_id, &request),
+        SemanticProviderOutcome::Unavailable
+    ));
+}
+
+#[test]
+fn composite_analyzer_cancellation_fans_out() {
+    let cancellation = lsp::CompositeAnalyzerCancellation::new(vec![
+        Arc::new(FixedCancellation(false)),
+        Arc::new(FixedCancellation(true)),
+    ]);
+
+    assert!(cancellation.cancel_upstream(
+        &AdmittedRoot::new("file:///project"),
+        &LspRequestId::Number(2)
+    ));
+}
+
+#[test]
+fn broker_exposes_project_scoped_readiness_without_lsp_transport() {
+    let project = tempfile::tempdir().unwrap();
+    let script_path = project.path().join("fake_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        project.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(project.path())
+        .unwrap()
+        .to_string();
+
+    let authority = broker
+        .semantic_authority_if_available(
+            FAKE_LANGUAGE,
+            project.path().to_path_buf(),
+            root_uri.clone(),
+            bounded_fake_lsp_timeouts(),
+        )
+        .unwrap()
+        .expect("fake analyzer is executable");
+    let readiness = authority.analyzer_readiness();
+
+    assert_eq!(readiness.root().uri(), root_uri);
+    assert_eq!(readiness.state(), AnalyzerState::AwaitingStart);
+    assert_eq!(readiness.failure_evidence(), None);
+}
+
+#[test]
+fn broker_rejects_analyzer_workspace_outside_project_scope() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let script_path = project.path().join("fake_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        project.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let root_uri = url::Url::from_directory_path(project.path())
+        .unwrap()
+        .to_string();
+
+    let result = broker.semantic_authority_if_available(
+        FAKE_LANGUAGE,
+        outside.path().to_path_buf(),
+        root_uri,
+        bounded_fake_lsp_timeouts(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(error) if error.to_string().contains("outside the admitted project root")
+    ));
+}
+
+#[test]
+fn broker_rejects_analyzer_root_uri_for_another_project() {
+    let project = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let script_path = project.path().join("fake_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+    let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
+        project.path(),
+        vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
+    );
+    let other_uri = url::Url::from_directory_path(other.path())
+        .unwrap()
+        .to_string();
+
+    let result = broker.semantic_authority_if_available(
+        FAKE_LANGUAGE,
+        project.path().to_path_buf(),
+        other_uri,
+        bounded_fake_lsp_timeouts(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(error) if error.to_string().contains("does not match the admitted project root")
+    ));
 }
 
 #[test]
@@ -141,23 +364,49 @@ async fn settings_persist_under_dashboard_root() {
 
     assert!(!loaded.language_enabled("python"));
     assert_eq!(loaded.idle_backfill, lsp::settings::IdleBackfillMode::Off);
+
+    let replacement = lsp::settings::CodeDiagnosticsSettings::default();
+    lsp::settings::save_settings(temp.path(), &replacement)
+        .await
+        .unwrap();
+    assert_eq!(
+        lsp::settings::load_settings(temp.path()).await.unwrap(),
+        replacement
+    );
+    let backup = lsp::settings::settings_path(temp.path()).with_extension("json.bak");
+    let backup: lsp::settings::CodeDiagnosticsSettings =
+        serde_json::from_slice(&tokio::fs::read(backup).await.unwrap()).unwrap();
+    assert_eq!(backup, settings);
 }
 
 #[tokio::test]
 async fn stdio_client_collects_publish_diagnostics() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake_lsp.py");
-    std::fs::write(&script_path, fake_lsp_script()).unwrap();
-
-    let diagnostics = lsp::client::collect_document_diagnostics(
-        python_command(),
-        &[script_path.display().to_string()],
-        temp.path(),
-        vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-        FAKE_LSP_TIMEOUT,
+    let control = FakeLspPhaseControl::bind().await;
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble(
+            &control.script_preamble(&["initialized", "document-written"]),
+            FAKE_DIAGNOSTIC_PUBLISH,
+        ),
     )
-    .await
     .unwrap();
+
+    let root = temp.path().to_path_buf();
+    let collect = tokio::spawn(async move {
+        lsp::client::collect_document_diagnostics(
+            python_command(),
+            &[script_path.display().to_string()],
+            &root,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            FAKE_LSP_TIMEOUT,
+        )
+        .await
+    });
+    control.wait_for("initialized").await.release().await;
+    control.wait_for("document-written").await.release().await;
+    let diagnostics = collect.await.unwrap().unwrap();
 
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].file, "src/lib.fake");
@@ -325,14 +574,20 @@ async fn broker_marks_missing_lsp_command_unavailable_after_refresh_failure() {
 async fn broker_marks_initialize_exit_crashed_without_message_classification() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("missing_component_lsp.py");
+    let control = FakeLspPhaseControl::bind().await;
     std::fs::write(
         &script_path,
-        r#"
+        format!(
+            r#"
 import sys
 
+{control}
 sys.stderr.write("error: unknown binary 'rust-analyzer' in toolchain 'test-toolchain'\n")
 sys.stderr.flush()
+tracedecay_maybe_phase("process-exit")
 "#,
+            control = control.script_preamble(&["process-exit"]),
+        ),
     )
     .unwrap();
     let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
@@ -340,14 +595,19 @@ sys.stderr.flush()
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );
 
-    let err = broker
-        .refresh_documents(
-            FAKE_LANGUAGE,
-            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            std::time::Duration::from_millis(500),
-        )
-        .await
-        .unwrap_err();
+    let refresh = tokio::spawn(async move {
+        let result = broker
+            .refresh_documents(
+                FAKE_LANGUAGE,
+                vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+                std::time::Duration::from_millis(500),
+            )
+            .await;
+        (broker, result)
+    });
+    control.wait_for("process-exit").await.release().await;
+    let (broker, result) = refresh.await.unwrap();
+    let err = result.unwrap_err();
 
     assert!(err.to_string().contains("unknown binary"));
     let snapshot = broker.snapshot();
@@ -617,7 +877,15 @@ async fn stdio_client_returns_diagnostics_for_suppress_empty_servers() {
 async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("cancel_partial_lsp.py");
-    std::fs::write(&script_path, fake_lsp_script_with_partial_publish()).unwrap();
+    let control = FakeLspPhaseControl::bind().await;
+    std::fs::write(
+        &script_path,
+        fake_lsp_script_with_preamble(
+            &control.script_preamble(&["partial-frame-flushed"]),
+            PARTIAL_DIAGNOSTIC_PUBLISH,
+        ),
+    )
+    .unwrap();
     let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
         temp.path(),
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
@@ -638,42 +906,24 @@ async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
             .collect_diagnostics(std::time::Duration::from_millis(500))
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    control
+        .wait_for("partial-frame-flushed")
+        .await
+        .release()
+        .await;
     handle.abort();
     let _ = handle.await;
 
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
     // The property under test is that aborting a partial refresh does not
     // poison the broker: a *subsequent* refresh must spin up a clean client.
-    // On a loaded CI runner the recovery client's `python3` cold-start can
-    // exceed the initialize floor and surface a transient "initialize timed
-    // out" — that is a slow start, not a poisoned broker — so retry the
-    // recovery a bounded number of times before asserting.
-    let mut recovery = None;
-    for attempt in 0..5 {
-        let result = broker
-            .refresh_documents(
-                FAKE_LANGUAGE,
-                vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-                FAKE_LSP_TIMEOUT,
-            )
-            .await;
-        match &result {
-            Ok(()) => {
-                recovery = Some(result);
-                break;
-            }
-            Err(err) if err.to_string().contains("initialize timed out") => {
-                recovery = Some(result);
-                if attempt + 1 < 5 {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-            Err(err) => panic!("recovery refresh failed unexpectedly: {err}"),
-        }
-    }
-    recovery
-        .expect("recovery refresh should have been attempted")
+    broker
+        .refresh_documents_with_timeouts(
+            FAKE_LANGUAGE,
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            loaded_runner_fake_lsp_timeouts(),
+        )
+        .await
         .expect("next refresh should start a clean client and recover");
 
     let snapshot = broker.snapshot();
@@ -686,9 +936,19 @@ async fn broker_waits_for_active_lsp_refresh_instead_of_timing_out_lock() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake_lsp.py");
     let counter_path = temp.path().join("starts.txt");
+    let control = FakeLspPhaseControl::bind().await;
+    let preamble = format!(
+        r#"
+with open({counter_path:?}, "a", encoding="utf-8") as f:
+    f.write("start\n")
+{control}
+"#,
+        counter_path = counter_path.display().to_string(),
+        control = control.script_preamble(&["write-acquired"]),
+    );
     std::fs::write(
         &script_path,
-        fake_lsp_script_that_records_start(&counter_path),
+        fake_lsp_script_with_preamble(&preamble, EMPTY_DIAGNOSTIC_PUBLISH),
     )
     .unwrap();
     let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
@@ -710,18 +970,23 @@ async fn broker_waits_for_active_lsp_refresh_instead_of_timing_out_lock() {
         .unwrap()
         .expect("second refresh should prepare");
 
-    let first_refresh = async move {
+    let first_refresh = tokio::spawn(async move {
         first
             .collect_diagnostics(std::time::Duration::from_millis(500))
             .await
-    };
-    let second_refresh = async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+    let write_acquired = control.wait_for("write-acquired").await;
+    let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
+    let second_refresh = tokio::spawn(async move {
+        let _ = second_started_tx.send(());
         second
             .collect_diagnostics(std::time::Duration::from_millis(50))
             .await
-    };
-    let (first_completed, second_completed) = tokio::join!(first_refresh, second_refresh);
+    });
+    second_started_rx.await.unwrap();
+    write_acquired.release().await;
+    let first_completed = first_refresh.await.unwrap();
+    let second_completed = second_refresh.await.unwrap();
 
     assert!(first_completed.is_ok());
     assert!(
@@ -998,16 +1263,6 @@ async fn broker_resolve_enclosing_nodes_attributes_diagnostic_to_smallest_span()
     );
 }
 
-fn adapter<'a>(
-    adapters: &'a [lsp::adapters::LspAdapterDefinition],
-    language: &str,
-) -> &'a lsp::adapters::LspAdapterDefinition {
-    adapters
-        .iter()
-        .find(|adapter| adapter.language == language)
-        .unwrap_or_else(|| panic!("missing adapter for {language}"))
-}
-
 fn assert_engine_state(
     snapshot: &lsp::broker::DiagnosticsSnapshot,
     language: &str,
@@ -1256,8 +1511,14 @@ while True:
         break
     if message.get("method") == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {"textDocumentSync": 1}}})
+    elif message.get("method") == "initialized":
+        if "tracedecay_maybe_phase" in globals():
+            tracedecay_maybe_phase("initialized")
     elif message.get("method") == "textDocument/didOpen":
         uri = message["params"]["textDocument"]["uri"]
+        if "tracedecay_maybe_phase" in globals():
+            tracedecay_maybe_phase("document-written")
+            tracedecay_maybe_phase("write-acquired")
 "#,
     );
     script.push_str(did_open_body);
@@ -1307,6 +1568,8 @@ const INITIAL_EMPTY_THEN_DIAGNOSTIC_PUBLISH: &str = r#"        send({"jsonrpc": 
 
 const PARTIAL_DIAGNOSTIC_PUBLISH: &str = r#"        sys.stdout.buffer.write(b"Content-Length: 120\r\n\r\n{\"jsonrpc\":\"2.0\"")
         sys.stdout.buffer.flush()
+        if "tracedecay_maybe_phase" in globals():
+            tracedecay_maybe_phase("partial-frame-flushed")
         import time
         time.sleep(60)
 "#;

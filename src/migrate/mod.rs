@@ -9,3 +9,4 @@ pub mod registry;
 /// it decides escalation policy without opening a store. Re-exported here so
 /// `crate::migrate::durability` stays the caller path.
 pub use tracedecay_migrate::durability;
+pub use tracedecay_migrate::final_v2;

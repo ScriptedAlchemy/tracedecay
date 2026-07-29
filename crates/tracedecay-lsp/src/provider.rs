@@ -38,14 +38,61 @@ pub enum AnalyzerEvent {
     Crashed,
     StartupFailed,
     TimedOut,
+    Cancelled,
+    RemoteError,
+    TransportFailed,
+    InvalidResponse,
     Disabled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl AnalyzerEvent {
+    pub const fn coverage_token(self) -> Option<&'static str> {
+        match self {
+            Self::Crashed => Some("analyzer-crashed"),
+            Self::StartupFailed => Some("analyzer-start-failed"),
+            Self::TimedOut => Some("analyzer-timeout"),
+            Self::Cancelled => Some("analyzer-cancelled"),
+            Self::RemoteError => Some("analyzer-remote-error"),
+            Self::TransportFailed => Some("analyzer-transport-failed"),
+            Self::InvalidResponse => Some("analyzer-invalid-response"),
+            Self::StartRequested | Self::Ready | Self::Disabled => None,
+        }
+    }
+
+    pub const fn failure_detail(self) -> Option<&'static str> {
+        match self {
+            Self::Crashed => Some("Analyzer process exited unexpectedly."),
+            Self::StartupFailed => Some("Analyzer failed to start."),
+            Self::TimedOut => Some("Analyzer request timed out."),
+            Self::Cancelled => Some("Analyzer request was cancelled."),
+            Self::RemoteError => Some("Analyzer request failed with a remote error."),
+            Self::TransportFailed => Some("Analyzer transport failed."),
+            Self::InvalidResponse => Some("Analyzer returned an invalid response."),
+            Self::StartRequested | Self::Ready | Self::Disabled => None,
+        }
+    }
+
+    const fn consumes_restart_budget(self) -> bool {
+        matches!(
+            self,
+            Self::Crashed
+                | Self::StartupFailed
+                | Self::TimedOut
+                | Self::TransportFailed
+                | Self::InvalidResponse
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AnalyzerTransitionError {
     InvalidTransition {
         from: AnalyzerState,
         event: AnalyzerEvent,
+    },
+    RootMismatch {
+        expected: AdmittedRoot,
+        actual: AdmittedRoot,
     },
 }
 
@@ -53,20 +100,26 @@ pub enum AnalyzerTransitionError {
 /// no executable path, environment, command line, stderr, or process handle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalyzerSupervisor {
+    root: AdmittedRoot,
     state: AnalyzerState,
     restart_attempts: u8,
-}
-
-impl Default for AnalyzerSupervisor {
-    fn default() -> Self {
-        Self {
-            state: AnalyzerState::AwaitingStart,
-            restart_attempts: 0,
-        }
-    }
+    last_failure: Option<AnalyzerEvent>,
 }
 
 impl AnalyzerSupervisor {
+    pub fn new(root: AdmittedRoot) -> Self {
+        Self {
+            root,
+            state: AnalyzerState::AwaitingStart,
+            restart_attempts: 0,
+            last_failure: None,
+        }
+    }
+
+    pub fn root(&self) -> &AdmittedRoot {
+        &self.root
+    }
+
     pub fn state(&self) -> AnalyzerState {
         self.state
     }
@@ -75,21 +128,52 @@ impl AnalyzerSupervisor {
         self.restart_attempts
     }
 
+    pub fn last_failure(&self) -> Option<AnalyzerEvent> {
+        self.last_failure
+    }
+
+    /// Stable machine token and bounded human detail shared by LSP error data
+    /// and non-LSP readiness surfaces.
+    pub fn failure_evidence(&self) -> Option<(&'static str, &'static str)> {
+        let failure = self.last_failure?;
+        Some((failure.coverage_token()?, failure.failure_detail()?))
+    }
+
     pub fn apply(
         &mut self,
+        root: &AdmittedRoot,
         event: AnalyzerEvent,
     ) -> Result<AnalyzerState, AnalyzerTransitionError> {
+        if root != &self.root {
+            return Err(AnalyzerTransitionError::RootMismatch {
+                expected: self.root.clone(),
+                actual: root.clone(),
+            });
+        }
         let next = match (self.state, event) {
             (
                 AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff,
                 AnalyzerEvent::StartRequested,
             ) => AnalyzerState::Starting,
-            (AnalyzerState::Starting, AnalyzerEvent::Ready) => AnalyzerState::Ready,
+            (AnalyzerState::Starting | AnalyzerState::Ready, AnalyzerEvent::Ready) => {
+                AnalyzerState::Ready
+            }
             (
                 AnalyzerState::Starting,
-                AnalyzerEvent::StartupFailed | AnalyzerEvent::Crashed | AnalyzerEvent::TimedOut,
+                AnalyzerEvent::StartupFailed
+                | AnalyzerEvent::Crashed
+                | AnalyzerEvent::TimedOut
+                | AnalyzerEvent::TransportFailed
+                | AnalyzerEvent::InvalidResponse,
             )
-            | (AnalyzerState::Ready, AnalyzerEvent::Crashed | AnalyzerEvent::TimedOut) => {
+            | (
+                AnalyzerState::Ready,
+                AnalyzerEvent::Crashed
+                | AnalyzerEvent::TimedOut
+                | AnalyzerEvent::TransportFailed
+                | AnalyzerEvent::InvalidResponse,
+            ) => {
+                debug_assert!(event.consumes_restart_budget());
                 self.restart_attempts = self.restart_attempts.saturating_add(1);
                 if self.restart_attempts >= MAX_ANALYZER_RESTARTS {
                     AnalyzerState::Exhausted
@@ -97,17 +181,36 @@ impl AnalyzerSupervisor {
                     AnalyzerState::RestartBackoff
                 }
             }
+            (AnalyzerState::Starting | AnalyzerState::Ready, AnalyzerEvent::Cancelled) => {
+                AnalyzerState::RestartBackoff
+            }
+            (AnalyzerState::Ready, AnalyzerEvent::RemoteError) => AnalyzerState::Ready,
             (_, AnalyzerEvent::Disabled) => AnalyzerState::Unavailable,
             (from, event) => {
                 return Err(AnalyzerTransitionError::InvalidTransition { from, event });
             }
         };
+        match event {
+            AnalyzerEvent::Ready | AnalyzerEvent::Disabled => self.last_failure = None,
+            AnalyzerEvent::StartRequested => {}
+            AnalyzerEvent::Crashed
+            | AnalyzerEvent::StartupFailed
+            | AnalyzerEvent::TimedOut
+            | AnalyzerEvent::Cancelled
+            | AnalyzerEvent::RemoteError
+            | AnalyzerEvent::TransportFailed
+            | AnalyzerEvent::InvalidResponse => self.last_failure = Some(event),
+        }
         self.state = next;
         Ok(next)
     }
 
     pub fn is_ready(&self) -> bool {
         self.state == AnalyzerState::Ready
+    }
+
+    pub fn is_ready_for(&self, root: &AdmittedRoot) -> bool {
+        root == &self.root && self.is_ready()
     }
 }
 
@@ -514,16 +617,77 @@ mod tests {
 
     #[test]
     fn supervisor_exhausts_restart_budget_without_spawning_a_fallback_process() {
-        let mut supervisor = AnalyzerSupervisor::default();
+        let root = AdmittedRoot::new("file:///project");
+        let mut supervisor = AnalyzerSupervisor::new(root.clone());
         for attempt in 1..=MAX_ANALYZER_RESTARTS {
-            supervisor.apply(AnalyzerEvent::StartRequested).unwrap();
-            let state = supervisor.apply(AnalyzerEvent::StartupFailed).unwrap();
+            supervisor
+                .apply(&root, AnalyzerEvent::StartRequested)
+                .unwrap();
+            let state = supervisor
+                .apply(&root, AnalyzerEvent::StartupFailed)
+                .unwrap();
             if attempt == MAX_ANALYZER_RESTARTS {
                 assert_eq!(state, AnalyzerState::Exhausted);
             } else {
                 assert_eq!(state, AnalyzerState::RestartBackoff);
             }
         }
+        assert_eq!(
+            supervisor.failure_evidence(),
+            Some(("analyzer-start-failed", "Analyzer failed to start."))
+        );
+    }
+
+    #[test]
+    fn supervisor_rejects_cross_project_events_without_mutating_readiness() {
+        let root = AdmittedRoot::new("file:///project-a");
+        let other = AdmittedRoot::new("file:///project-b");
+        let mut supervisor = AnalyzerSupervisor::new(root.clone());
+
+        assert_eq!(
+            supervisor.apply(&other, AnalyzerEvent::StartRequested),
+            Err(AnalyzerTransitionError::RootMismatch {
+                expected: root,
+                actual: other,
+            })
+        );
+        assert_eq!(supervisor.state(), AnalyzerState::AwaitingStart);
+        assert_eq!(supervisor.restart_attempts(), 0);
+        assert_eq!(supervisor.last_failure(), None);
+    }
+
+    #[test]
+    fn readiness_preserves_typed_failure_until_the_analyzer_recovers() {
+        let root = AdmittedRoot::new("file:///project");
+        let mut supervisor = AnalyzerSupervisor::new(root.clone());
+
+        supervisor
+            .apply(&root, AnalyzerEvent::StartRequested)
+            .unwrap();
+        supervisor
+            .apply(&root, AnalyzerEvent::TransportFailed)
+            .unwrap();
+        assert_eq!(supervisor.state(), AnalyzerState::RestartBackoff);
+        assert_eq!(
+            supervisor.last_failure(),
+            Some(AnalyzerEvent::TransportFailed)
+        );
+        assert_eq!(
+            supervisor.failure_evidence(),
+            Some(("analyzer-transport-failed", "Analyzer transport failed."))
+        );
+
+        supervisor
+            .apply(&root, AnalyzerEvent::StartRequested)
+            .unwrap();
+        assert_eq!(
+            supervisor.failure_evidence(),
+            Some(("analyzer-transport-failed", "Analyzer transport failed."))
+        );
+        supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
+        assert!(supervisor.is_ready_for(&root));
+        assert_eq!(supervisor.last_failure(), None);
+        assert_eq!(supervisor.failure_evidence(), None);
     }
 
     #[test]

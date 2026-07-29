@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_lsp::{FramePoll, FrameSend};
 
 #[tokio::test]
 async fn project_owner_wait_stops_when_the_client_disconnects() {
@@ -364,7 +365,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         .expect("reconnect over fresh daemon connection");
     assert!(matches!(
         session.poll_daemon_frame().await.expect("resumed poll"),
-        crate::lsp_bridge::FramePoll::Frame(frame) if frame.ends_with(b"\"resumed\"}}")
+        FramePoll::Frame(frame) if frame.ends_with(b"\"resumed\"}}")
     ));
     assert_eq!(
         session
@@ -373,7 +374,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
             )
             .await
             .expect("resumed client frame"),
-        crate::lsp_bridge::FrameSend::Sent
+        FrameSend::Sent
     );
     session.detach().await.expect("detach resumed session");
     server.await.expect("server task");

@@ -9,7 +9,7 @@ use tracedecay_domain::{
     BrainId, BrainNodeId, CredentialRevocationReceiptV1, CredentialRotationReceiptV1,
     CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1,
     EnrollmentGrantV1, EntityId, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
-    RemoteRepositoryScopeV1, RemoteWriterFenceV1, UtcMicros, validate_remote_secret_length,
+    RemoteRepositoryScopeV1, UtcMicros, validate_remote_secret_length,
 };
 
 /// Opaque credential accepted only at an application boundary.
@@ -363,8 +363,8 @@ fn fingerprints_equal(
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        AuthorityEpoch, EntityVersionId, ProjectionGenerationId, RefId, RepositoryId,
-        RepositoryStateSnapshotId, ShardId, WorktreeId,
+        AuthorityEpoch, EntityVersionId, ProjectionGenerationId, RefId, RemoteWriterFenceV1,
+        RepositoryId, RepositoryStateSnapshotId, ShardId, WorktreeId,
     };
 
     fn credential(value: u8) -> OpaqueRemoteCredential {

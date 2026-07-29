@@ -22,6 +22,11 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use tracedecay_capture::kiro::{
+    KiroSnapshotMessage, snapshot_native_payload, stable_message_id as stable_kiro_message_id,
+};
+use tracedecay_sessions::decode_kiro_workspace_path;
+
 use crate::application::host_admission::HostAdmissionFacade;
 #[cfg(test)]
 use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
@@ -36,9 +41,8 @@ use crate::sessions::shared::{
 };
 use crate::sessions::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotAdmissionRunner, SnapshotCaptureOutcome, StableMessageIdDomains,
-    bounded_snapshot_input_len, non_durable_snapshot_record, read_snapshot_text_bounded,
-    snapshot_message_fields, stable_snapshot_message_id,
+    SnapshotAdmissionRunner, SnapshotCaptureOutcome, bounded_snapshot_input_len,
+    non_durable_snapshot_record, read_snapshot_text_bounded,
 };
 #[cfg(test)]
 use crate::sessions::snapshot_observation::{
@@ -56,8 +60,6 @@ use tracedecay_domain::{
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
 const PROVIDER: &str = "kiro";
-const DELIMITED_NATIVE_MESSAGE_ID_DOMAIN: &[u8] = b"tracedecay.kiro-delimited-native-message.v2";
-const DERIVED_MESSAGE_ID_DOMAIN: &[u8] = b"tracedecay.kiro-derived-message.v3";
 const KIRO_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
     "kiro_workspace_cwd",
     "kiro_workspace_worktree",
@@ -291,7 +293,7 @@ fn collect_user_workspace_session_files(
                 return None;
             }
             let workspace =
-                decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())?;
+                decode_kiro_workspace_path(entry.file_name().to_string_lossy().as_ref())?;
             if registered_roots
                 .iter()
                 .any(|root| path_belongs_to_project(&workspace, root))
@@ -424,7 +426,7 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
             continue;
         }
         let Some(workspace) =
-            decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())
+            decode_kiro_workspace_path(entry.file_name().to_string_lossy().as_ref())
         else {
             continue;
         };
@@ -614,7 +616,7 @@ fn workspace_from_sessions_path(path: &Path) -> Option<PathBuf> {
         .iter()
         .position(|component| component.as_os_str() == "workspace-sessions")?;
     let encoded = components.get(idx + 1)?.as_os_str().to_str()?;
-    decode_workspace_sessions_dir(encoded)
+    decode_kiro_workspace_path(encoded)
 }
 
 fn workspace_hash_from_path(path: &Path) -> Option<String> {
@@ -710,47 +712,6 @@ fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
 )]
 fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-fn decode_workspace_sessions_dir(name: &str) -> Option<PathBuf> {
-    let trimmed = name.trim_end_matches('_');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut padded = trimmed.replace('-', "+").replace('_', "/");
-    let rem = padded.len() % 4;
-    if rem > 0 {
-        padded.push_str(&"=".repeat(4 - rem));
-    }
-    let decoded = base64_decode(&padded)?;
-    let path = String::from_utf8(decoded).ok()?;
-    let path = path.trim();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
-}
-
-fn base64_decode(input: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::new();
-    let mut buf = 0_u32;
-    let mut bits = 0_u32;
-    for byte in input.bytes() {
-        if byte == b'=' {
-            break;
-        }
-        let val = TABLE.iter().position(|&c| c == byte)? as u32;
-        buf = (buf << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
 }
 
 fn session_id_from_transcript(path: &Path, value: &Value) -> String {
@@ -980,7 +941,18 @@ pub(crate) fn normalize_kiro_snapshot_observations(
         .map(|message| {
             let order = u64::try_from(message.ordinal)
                 .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-            let payload = snapshot_native_payload(message).to_string().into_bytes();
+            let payload = snapshot_native_payload(KiroSnapshotMessage {
+                session_id: &message.session_id,
+                message_id: &message.message_id,
+                role: &message.role,
+                timestamp: message.timestamp,
+                ordinal: message.ordinal,
+                text: &message.text,
+                kind: message.kind.as_deref(),
+                model: message.model.as_deref(),
+            })
+            .to_string()
+            .into_bytes();
             Ok(KiroSnapshotObservationRecord {
                 session_id: message.session_id.clone(),
                 native_record_id: message.message_id.clone(),
@@ -989,13 +961,6 @@ pub(crate) fn normalize_kiro_snapshot_observations(
             })
         })
         .collect()
-}
-
-/// Shape only Kiro fields evidenced by the repository's transcript fixtures.
-/// Kiro currently has no fixture-backed lineage, reasoning, structured tool,
-/// Git, or workflow observation contract, so those fields remain absent.
-fn snapshot_native_payload(message: &SessionMessageRecord) -> Value {
-    Value::Object(snapshot_message_fields(PROVIDER, message))
 }
 
 fn stable_message_id(
@@ -1007,27 +972,13 @@ fn stable_message_id(
     text: &str,
 ) -> String {
     let native_id = string_field(entry, &["id", "messageId", "message_id", "eventId"]);
-    let timestamp_bytes = timestamp.map(i64::to_be_bytes);
-    let timestamp_bytes = timestamp_bytes
-        .as_ref()
-        .map_or(&[][..], |bytes| bytes.as_slice());
-    let occurrence_bytes = u64::try_from(occurrence).unwrap_or(u64::MAX).to_be_bytes();
-    stable_snapshot_message_id(
-        StableMessageIdDomains {
-            delimited_domain: DELIMITED_NATIVE_MESSAGE_ID_DOMAIN,
-            delimited_prefix: "kiro.message-id.v2.",
-            derived_domain: DERIVED_MESSAGE_ID_DOMAIN,
-            derived_prefix: "kiro.derived-message.v3.",
-        },
+    stable_kiro_message_id(
         session_id,
         native_id.as_deref(),
-        &[
-            session_id.as_bytes(),
-            role.as_bytes(),
-            timestamp_bytes,
-            text.as_bytes(),
-            &occurrence_bytes,
-        ],
+        role,
+        timestamp,
+        occurrence,
+        text,
     )
 }
 

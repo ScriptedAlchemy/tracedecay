@@ -6,8 +6,17 @@
 //! receive an overlay only through its explicitly admitted session adapter.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::diagnostics::{LspRange, PositionError, utf16_position_to_byte_offset};
+use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
+use crate::gateway::{AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner};
+use crate::provider::{
+    DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
+    DiagnosticSnapshotPort, GenerationDiagnostics,
+};
+use crate::request_sequence::ProcessLocalRequestSequence;
+use tracedecay_domain::ContentDigest;
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -199,6 +208,176 @@ fn ensure_size(text: &str) -> Result<(), OverlayError> {
     Ok(())
 }
 
+pub const MAX_DIAGNOSTIC_OPERATIONS: usize = 128;
+
+/// Exact input passed to canonical diagnostic refresh work.
+#[derive(Clone, Debug)]
+pub struct CanonicalDiagnosticRefreshRequest {
+    pub root: AdmittedRoot,
+    pub document_uri: String,
+    pub overlay: Option<OverlaySnapshot>,
+    pub source_generation: Option<u64>,
+}
+
+/// Current canonical managed diagnostics created by the feedback owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedDiagnosticSnapshot {
+    pub generation: u64,
+    pub diagnostics: Vec<crate::diagnostics::GatewayDiagnostic>,
+}
+
+pub trait ManagedDiagnosticSnapshotPort: Send + Sync {
+    fn snapshot(
+        &self,
+        request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>>;
+}
+
+/// Non-blocking application boundary for a complete diagnostic snapshot.
+pub trait CanonicalDiagnosticSnapshotAuthority: Send + Sync {
+    fn refresh(
+        &self,
+        request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>>;
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DiagnosticOperationKey {
+    root_uri: String,
+    document_uri: String,
+    overlay_version: i64,
+    overlay_language_id: Option<String>,
+    overlay_digest: Option<ContentDigest>,
+}
+
+/// Bounded non-blocking broker over canonical diagnostic refresh work.
+pub struct DiagnosticSnapshotAdapter {
+    runtime: Arc<dyn LspRuntimeSpawner>,
+    authority: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
+    next_operation: ProcessLocalRequestSequence,
+    operations: BoundedOperationTable<
+        DiagnosticOperationKey,
+        DiagnosticRefreshIdentity,
+        DiagnosticSnapshotOutcome,
+    >,
+}
+
+impl DiagnosticSnapshotAdapter {
+    pub fn new(
+        runtime: Arc<dyn LspRuntimeSpawner>,
+        authority: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
+    ) -> Self {
+        Self {
+            runtime,
+            authority,
+            next_operation: ProcessLocalRequestSequence::starting_at(1),
+            operations: BoundedOperationTable::new(MAX_DIAGNOSTIC_OPERATIONS),
+        }
+    }
+
+    fn key(
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+    ) -> DiagnosticOperationKey {
+        DiagnosticOperationKey {
+            root_uri: root.uri().to_owned(),
+            document_uri: document_uri.to_owned(),
+            overlay_version: overlay.map_or(0, |overlay| overlay.version),
+            overlay_language_id: overlay.map(|overlay| overlay.language_id.clone()),
+            overlay_digest: overlay.map(|overlay| ContentDigest::of_bytes(overlay.text.as_bytes())),
+        }
+    }
+}
+
+impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
+    fn document_diagnostics(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+    ) -> DiagnosticSnapshotOutcome {
+        let key = Self::key(root, document_uri, overlay);
+        match self.operations.poll(&key) {
+            OperationPoll::Ready {
+                metadata: _,
+                result,
+            } => result,
+            OperationPoll::Pending(identity) => DiagnosticSnapshotOutcome::Refreshing(identity),
+            OperationPoll::Dropped(_) => DiagnosticSnapshotOutcome::Failed {
+                source_generation: None,
+                failure_class: "diagnostic-operation-dropped".to_owned(),
+            },
+            OperationPoll::Missing | OperationPoll::Mismatch(_) => {
+                DiagnosticSnapshotOutcome::Partial {
+                    source_generation: None,
+                    coverage: "refresh-required".to_owned(),
+                }
+            }
+            OperationPoll::Busy => DiagnosticSnapshotOutcome::Partial {
+                source_generation: None,
+                coverage: "runtime-busy".to_owned(),
+            },
+        }
+    }
+
+    fn request_document_refresh(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+        source_generation: Option<u64>,
+    ) -> DiagnosticRefreshAdmission {
+        let key = Self::key(root, document_uri, overlay);
+        let request = CanonicalDiagnosticRefreshRequest {
+            root: root.clone(),
+            document_uri: document_uri.to_owned(),
+            overlay: overlay.cloned(),
+            source_generation,
+        };
+        let authority = Arc::clone(&self.authority);
+        let admission: Result<_, crate::request_sequence::SequenceExhausted> =
+            self.operations.admit_with(key, self.runtime.as_ref(), || {
+                let operation_id = self.next_operation.next_string("lsp-diagnostic-")?;
+                let identity = DiagnosticRefreshIdentity {
+                    operation_id: operation_id.clone(),
+                    source_generation,
+                    target_generation: None,
+                };
+                let operation = Box::pin(async move {
+                    match authority.refresh(request).await {
+                        Ok(diagnostics) => DiagnosticSnapshotOutcome::Ready {
+                            diagnostics,
+                            completed_operation_id: Some(operation_id),
+                        },
+                        Err(error) => DiagnosticSnapshotOutcome::Failed {
+                            source_generation,
+                            failure_class: error.class().to_owned(),
+                        },
+                    }
+                }) as LspRuntimeFuture<DiagnosticSnapshotOutcome>;
+                Ok((identity, operation))
+            });
+        match admission {
+            Ok(OperationAdmission::Started(identity)) => {
+                DiagnosticRefreshAdmission::Started(identity)
+            }
+            Ok(OperationAdmission::Existing(identity)) => {
+                DiagnosticRefreshAdmission::AlreadyRunning(identity)
+            }
+            Ok(OperationAdmission::Busy) => DiagnosticRefreshAdmission::Rejected {
+                failure_class: "runtime-busy".to_owned(),
+            },
+            Ok(OperationAdmission::Saturated) => DiagnosticRefreshAdmission::Rejected {
+                failure_class: "diagnostic-capacity".to_owned(),
+            },
+            Err(_) => DiagnosticRefreshAdmission::Rejected {
+                failure_class: "diagnostic-identity-exhausted".to_owned(),
+            },
+        }
+    }
+}
+
 /// A scheduled document diagnostic operation. The protocol session turns a
 /// refresh into a provider call and a clear into an empty publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -343,6 +522,13 @@ impl OverlayDiagnosticDebouncer {
 mod tests {
     use super::*;
     use crate::diagnostics::{LspPosition, LspRange};
+    use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask};
+    use crate::provider::{
+        DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
+        DiagnosticSnapshotPort, GenerationDiagnostics,
+    };
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
 
     fn range(start: u32, end: u32) -> LspRange {
         LspRange {
@@ -511,5 +697,74 @@ mod tests {
                 kind: DebouncedDiagnosticKind::Refresh,
             }]
         );
+    }
+
+    struct InlineTask;
+
+    impl LspRuntimeTask for InlineTask {
+        fn abort(&self) {}
+    }
+
+    struct InlineWake;
+
+    impl Wake for InlineWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    struct InlineSpawner;
+
+    impl LspRuntimeSpawner for InlineSpawner {
+        fn spawn(&self, mut future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
+            let waker = Waker::from(Arc::new(InlineWake));
+            let mut context = Context::from_waker(&waker);
+            assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
+            Box::new(InlineTask)
+        }
+    }
+
+    struct Diagnostics;
+
+    impl CanonicalDiagnosticSnapshotAuthority for Diagnostics {
+        fn refresh(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>> {
+            Box::pin(async {
+                Ok(GenerationDiagnostics {
+                    generation: 7,
+                    upstream: Vec::new(),
+                    tracedecay: Vec::new(),
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn diagnostic_broker_reuses_exact_overlay_identity_and_polls_completion() {
+        let adapter =
+            DiagnosticSnapshotAdapter::new(Arc::new(InlineSpawner), Arc::new(Diagnostics));
+        let root = AdmittedRoot::new("file:///root");
+        let overlay = OverlaySnapshot {
+            uri: "file:///root/a.rs".to_owned(),
+            language_id: "rust".to_owned(),
+            version: 3,
+            text: "fn main() {}".to_owned(),
+            ephemeral: true,
+        };
+        assert_eq!(
+            adapter.request_document_refresh(&root, "file:///root/a.rs", Some(&overlay), None,),
+            DiagnosticRefreshAdmission::Started(DiagnosticRefreshIdentity {
+                operation_id: "lsp-diagnostic-1".to_owned(),
+                source_generation: None,
+                target_generation: None,
+            })
+        );
+        assert!(matches!(
+            adapter.document_diagnostics(&root, "file:///root/a.rs", Some(&overlay)),
+            DiagnosticSnapshotOutcome::Ready {
+                diagnostics: GenerationDiagnostics { generation: 7, .. },
+                ..
+            }
+        ));
     }
 }

@@ -279,7 +279,7 @@ fn admitted_rust_chunk(
         sanitizer_revision,
         id("policy.fixture.v1"),
         id("chunker.v1"),
-        tracedecay_code_index::extraction::LanguageRegistry::new(),
+        tracedecay_code_extraction::LanguageRegistry::new(),
     );
     let (artifacts, authority) = chunker
         .index_file_with_authority_from_extraction(

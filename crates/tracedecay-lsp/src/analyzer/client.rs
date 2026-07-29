@@ -21,15 +21,21 @@ use lsp_types::{
     WorkspaceSymbolParams,
 };
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::application::context::CancellationToken;
-use crate::diagnostics::lsp::broker::{CodeDiagnostic, DiagnosticSeverity};
-use crate::errors::{Result, TraceDecayError};
-use crate::request_identity::ConnectionLocalRequestSequence;
+use super::broker::{CodeDiagnostic, DiagnosticSeverity};
+use super::error::{
+    AnalyzerCancellation as CancellationToken, AnalyzerResult as Result,
+    AnalyzerRuntimeError as TraceDecayError,
+};
+use crate::{
+    AnalyzerEvent, AsyncContentLengthError, AsyncContentLengthReader,
+    ConnectionLocalRequestSequence, FramePoll, write_content_length_frame_until,
+};
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -102,6 +108,46 @@ pub enum LspSemanticRequest {
     PrepareRename(TextDocumentPositionParams),
 }
 
+pub fn decode_semantic_request(
+    request: crate::LspSemanticRequest,
+) -> std::result::Result<LspSemanticRequest, LspSemanticRequestError> {
+    let method = request.method();
+    let params = request.into_params();
+    match method {
+        "textDocument/declaration" => decode(params).map(LspSemanticRequest::Declaration),
+        "textDocument/definition" => decode(params).map(LspSemanticRequest::Definition),
+        "textDocument/typeDefinition" => decode(params).map(LspSemanticRequest::TypeDefinition),
+        "textDocument/implementation" => decode(params).map(LspSemanticRequest::Implementation),
+        "textDocument/references" => decode(params).map(LspSemanticRequest::References),
+        "textDocument/hover" => decode(params).map(LspSemanticRequest::Hover),
+        "textDocument/documentSymbol" => decode(params).map(LspSemanticRequest::DocumentSymbols),
+        "workspace/symbol" => decode(params).map(LspSemanticRequest::WorkspaceSymbols),
+        "textDocument/prepareCallHierarchy" => {
+            decode(params).map(LspSemanticRequest::PrepareCallHierarchy)
+        }
+        "callHierarchy/incomingCalls" => decode(params).map(LspSemanticRequest::IncomingCalls),
+        "callHierarchy/outgoingCalls" => decode(params).map(LspSemanticRequest::OutgoingCalls),
+        "textDocument/signatureHelp" => decode(params).map(LspSemanticRequest::SignatureHelp),
+        "textDocument/prepareTypeHierarchy" => {
+            decode(params).map(LspSemanticRequest::PrepareTypeHierarchy)
+        }
+        "typeHierarchy/supertypes" => {
+            decode(params).map(LspSemanticRequest::TypeHierarchySupertypes)
+        }
+        "typeHierarchy/subtypes" => decode(params).map(LspSemanticRequest::TypeHierarchySubtypes),
+        "textDocument/prepareRename" => decode(params).map(LspSemanticRequest::PrepareRename),
+        _ => Err(LspSemanticRequestError::InvalidResponse {
+            class: "unsupported semantic method".to_owned(),
+        }),
+    }
+}
+
+fn decode<T: DeserializeOwned>(value: Value) -> std::result::Result<T, LspSemanticRequestError> {
+    serde_json::from_value(value).map_err(|error| LspSemanticRequestError::InvalidResponse {
+        class: error.to_string(),
+    })
+}
+
 impl LspSemanticRequest {
     pub fn method(&self) -> &'static str {
         match self {
@@ -135,14 +181,20 @@ pub enum LspSemanticRequestError {
 }
 
 impl LspSemanticRequestError {
-    pub fn coverage_token(&self) -> &'static str {
+    pub fn analyzer_event(&self) -> AnalyzerEvent {
         match self {
-            Self::Cancelled => "analyzer-cancelled",
-            Self::TimedOut => "analyzer-timeout",
-            Self::Remote { .. } => "analyzer-remote-error",
-            Self::Transport { .. } => "analyzer-transport-failed",
-            Self::InvalidResponse { .. } => "analyzer-invalid-response",
+            Self::Cancelled => AnalyzerEvent::Cancelled,
+            Self::TimedOut => AnalyzerEvent::TimedOut,
+            Self::Remote { .. } => AnalyzerEvent::RemoteError,
+            Self::Transport { .. } => AnalyzerEvent::TransportFailed,
+            Self::InvalidResponse { .. } => AnalyzerEvent::InvalidResponse,
         }
+    }
+
+    pub fn coverage_token(&self) -> &'static str {
+        self.analyzer_event()
+            .coverage_token()
+            .unwrap_or("analyzer-request-failed")
     }
 }
 
@@ -198,7 +250,7 @@ pub struct StdioLspClient {
     document_versions: BTreeMap<String, i32>,
     next_request_id: ConnectionLocalRequestSequence,
     stdin: tokio::process::ChildStdin,
-    reader: BufReader<tokio::process::ChildStdout>,
+    reader: AsyncContentLengthReader<tokio::process::ChildStdout>,
     child: tokio::process::Child,
     stderr_task: JoinHandle<()>,
 }
@@ -231,7 +283,7 @@ impl StdioLspClient {
         let stderr = child.stderr.take().ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to open stderr for LSP server '{command}'"),
         })?;
-        let mut reader = BufReader::new(stdout);
+        let mut reader = AsyncContentLengthReader::new(stdout);
         let stderr_capture = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = spawn_stderr_capture(stderr, Arc::clone(&stderr_capture));
 
@@ -288,19 +340,15 @@ impl StdioLspClient {
         // crash reason (e.g. a toolchain's "unknown binary" complaint) is
         // never dropped.
         let initialize_result = match send_initialize {
-            Ok(()) => tokio::time::timeout(
-                timeouts.initialize_response,
-                wait_for_initialize(&mut reader),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(TraceDecayError::Config {
-                    message: format!(
-                        "LSP server '{command}' initialize timed out after {} ms",
-                        timeouts.initialize_response.as_millis()
-                    ),
-                })
-            }),
+            Ok(()) => {
+                wait_for_initialize(
+                    &mut reader,
+                    tokio::time::Instant::now() + timeouts.initialize_response,
+                    command,
+                    timeouts.initialize_response,
+                )
+                .await
+            }
             Err(err) => Err(err),
         };
         if let Err(err) = initialize_result {
@@ -822,39 +870,35 @@ fn enrich_start_error(command: &str, err: TraceDecayError, stderr: &str) -> Trac
     }
 }
 
-async fn wait_for_initialize(reader: &mut BufReader<tokio::process::ChildStdout>) -> Result<()> {
+async fn wait_for_initialize(
+    reader: &mut AsyncContentLengthReader<tokio::process::ChildStdout>,
+    deadline: tokio::time::Instant,
+    command: &str,
+    timeout: Duration,
+) -> Result<()> {
     loop {
-        let Some(message) = read_message(reader).await? else {
-            return Err(TraceDecayError::Config {
-                message: "LSP server closed before initialize response".to_string(),
-            });
+        let frame = match reader.read_frame_until(deadline).await {
+            Ok(FramePoll::Frame(frame)) => frame,
+            Ok(FramePoll::Pending) | Err(AsyncContentLengthError::DeadlineElapsed) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "LSP server '{command}' initialize timed out after {} ms",
+                        timeout.as_millis()
+                    ),
+                });
+            }
+            Ok(FramePoll::Closed) => {
+                return Err(TraceDecayError::Config {
+                    message: "LSP server closed before initialize response".to_string(),
+                });
+            }
+            Err(error) => return Err(frame_read_error(error)),
         };
+        let message = decode_message(&frame)?;
         if message.id == Some(json!(1)) {
             return Ok(());
         }
     }
-}
-
-async fn write_message(stdin: &mut tokio::process::ChildStdin, value: Value) -> Result<()> {
-    let body = serde_json::to_vec(&value).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to encode LSP message: {e}"),
-    })?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stdin
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to write LSP message: {e}"),
-        })?;
-    stdin
-        .write_all(&body)
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to write LSP message: {e}"),
-        })?;
-    stdin.flush().await.map_err(|e| TraceDecayError::Config {
-        message: format!("failed to flush LSP message: {e}"),
-    })
 }
 
 async fn write_message_with_timeout(
@@ -862,14 +906,20 @@ async fn write_message_with_timeout(
     value: Value,
     timeout: Duration,
 ) -> Result<()> {
-    tokio::time::timeout(timeout, write_message(stdin, value))
+    let body = serde_json::to_vec(&value).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to encode LSP message: {e}"),
+    })?;
+    write_content_length_frame_until(stdin, &body, tokio::time::Instant::now() + timeout)
         .await
-        .map_err(|_| TraceDecayError::Config {
-            message: format!(
-                "LSP message write timed out after {} ms",
-                timeout.as_millis()
-            ),
-        })?
+        .map_err(|error| match error {
+            AsyncContentLengthError::DeadlineElapsed => TraceDecayError::Config {
+                message: format!(
+                    "LSP message write timed out after {} ms",
+                    timeout.as_millis()
+                ),
+            },
+            error => frame_write_error(error),
+        })
 }
 
 fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
@@ -895,148 +945,45 @@ fn cancel_request_message(request_id: u64) -> Value {
     })
 }
 
-async fn read_message(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
-) -> Result<Option<JsonRpcMessage>> {
-    let mut content_length = None;
-    loop {
-        let mut line = String::new();
-        let bytes = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to read LSP header: {e}"),
-            })?;
-        if bytes == 0 {
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        let Some((name, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            content_length = value.trim().parse::<usize>().ok();
-        }
-    }
-    let Some(length) = content_length else {
-        return Err(TraceDecayError::Config {
-            message: "LSP message missing Content-Length header".to_string(),
-        });
-    };
-    let mut body = vec![0_u8; length];
-    reader
-        .read_exact(&mut body)
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read LSP body: {e}"),
-        })?;
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to parse LSP message: {e}"),
-        })
-}
-
 async fn read_message_until(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
+    reader: &mut AsyncContentLengthReader<tokio::process::ChildStdout>,
     deadline: tokio::time::Instant,
     timeouts: LspRefreshTimeouts,
 ) -> Result<Option<JsonRpcMessage>> {
-    let mut header = Vec::new();
-    while !header.ends_with(b"\r\n\r\n") && !header.ends_with(b"\n\n") {
-        let Some(byte) = read_byte_until(reader, deadline, !header.is_empty(), timeouts).await?
-        else {
-            return Ok(None);
-        };
-        header.push(byte);
-        if header.len() > 16 * 1024 {
-            return Err(TraceDecayError::Config {
-                message: "LSP message header exceeded 16 KiB".to_string(),
-            });
-        }
+    match reader.read_frame_until(deadline).await {
+        Ok(FramePoll::Frame(frame)) => decode_message(&frame).map(Some),
+        Ok(FramePoll::Pending | FramePoll::Closed) => Ok(None),
+        Err(AsyncContentLengthError::DeadlineElapsed) => Err(refresh_timed_out(timeouts)),
+        Err(error) => Err(frame_read_error(error)),
     }
-
-    let header = String::from_utf8_lossy(&header);
-    let content_length = header.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("content-length")
-            .then(|| value.trim().parse::<usize>().ok())
-            .flatten()
-    });
-    let Some(length) = content_length else {
-        return Err(TraceDecayError::Config {
-            message: "LSP message missing Content-Length header".to_string(),
-        });
-    };
-
-    let mut body = vec![0_u8; length];
-    let mut read = 0;
-    while read < length {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(refresh_timed_out(timeouts));
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let bytes_read = match tokio::time::timeout(remaining, reader.read(&mut body[read..])).await
-        {
-            Ok(Ok(bytes_read)) => bytes_read,
-            Ok(Err(err)) => {
-                return Err(TraceDecayError::Config {
-                    message: format!("failed to read LSP body: {err}"),
-                });
-            }
-            Err(_) => return Err(refresh_timed_out(timeouts)),
-        };
-        if bytes_read == 0 {
-            return Err(TraceDecayError::Config {
-                message: "LSP server closed before completing message body".to_string(),
-            });
-        }
-        read += bytes_read;
-    }
-
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to parse LSP message: {e}"),
-        })
 }
 
-async fn read_byte_until(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
-    deadline: tokio::time::Instant,
-    partial_message: bool,
-    timeouts: LspRefreshTimeouts,
-) -> Result<Option<u8>> {
-    let now = tokio::time::Instant::now();
-    if now >= deadline {
-        return if partial_message {
-            Err(refresh_timed_out(timeouts))
-        } else {
-            Ok(None)
-        };
-    }
-    let mut byte = [0_u8; 1];
-    match tokio::time::timeout(
-        deadline.saturating_duration_since(now),
-        reader.read(&mut byte),
-    )
-    .await
-    {
-        Ok(Ok(0)) if partial_message => Err(TraceDecayError::Config {
-            message: "LSP server closed before completing message header".to_string(),
-        }),
-        Ok(Ok(0)) => Ok(None),
-        Ok(Ok(_)) => Ok(Some(byte[0])),
-        Ok(Err(err)) => Err(TraceDecayError::Config {
-            message: format!("failed to read LSP header: {err}"),
-        }),
-        Err(_) if partial_message => Err(refresh_timed_out(timeouts)),
-        Err(_) => Ok(None),
-    }
+fn decode_message(body: &[u8]) -> Result<JsonRpcMessage> {
+    serde_json::from_slice(body).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to parse LSP message: {e}"),
+    })
+}
+
+fn frame_read_error(error: AsyncContentLengthError) -> TraceDecayError {
+    let message = match error {
+        AsyncContentLengthError::Io(error) => format!("failed to read LSP frame: {error}"),
+        AsyncContentLengthError::Codec(error) => {
+            format!("failed to decode LSP Content-Length frame: {error:?}")
+        }
+        AsyncContentLengthError::DeadlineElapsed => "LSP frame read timed out".to_owned(),
+    };
+    TraceDecayError::Config { message }
+}
+
+fn frame_write_error(error: AsyncContentLengthError) -> TraceDecayError {
+    let message = match error {
+        AsyncContentLengthError::Io(error) => format!("failed to write LSP message: {error}"),
+        AsyncContentLengthError::Codec(error) => {
+            format!("failed to encode LSP Content-Length frame: {error:?}")
+        }
+        AsyncContentLengthError::DeadlineElapsed => "LSP message write timed out".to_owned(),
+    };
+    TraceDecayError::Config { message }
 }
 
 fn file_uri(path: &Path) -> String {
@@ -1067,7 +1014,7 @@ fn lsp_initialization_options(command: &str) -> Value {
 /// Build a `file://` URI from raw path text, normalizing `\` to `/` and
 /// percent-encoding. Handles POSIX paths, Windows drive paths (`C:/…`), and UNC
 /// (`//server/share`) prefixes. Shared with the Kiro installer.
-pub(crate) fn file_uri_from_path_text(path: &str) -> String {
+pub fn file_uri_from_path_text(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let encoded = percent_encode_file_uri_path(&normalized);
     if normalized.starts_with("//") {
@@ -1151,7 +1098,9 @@ fn code_diagnostic(
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs() as i64)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 fn code_to_string(value: NumberOrString) -> String {

@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
-import * as settingsModelModule from './settingsModel.ts';
 import {
+  buildSettingsEditor,
   buildSettingsModel,
   countSettings,
   filterOverrides,
   filterRows,
   isPathLike,
+  planProjectChangeAgainst,
+  planUserChangeAgainst,
   readSettingsEnvelope,
+  settingsRevisionConflict,
   splitPath,
 } from './settingsModel.ts';
 
@@ -21,6 +24,16 @@ if (settingsRead.outcome !== 'settings') {
   );
 }
 const payload = settingsRead.payload;
+
+// The change-planning tests below call `planProjectChangeAgainst` and
+// `planUserChangeAgainst` because those are what the editor's reducer calls.
+// Planning against an editor rather than a payload is also what makes the
+// fixture's editability an explicit precondition instead of a null check
+// repeated in every case.
+const editor = buildSettingsEditor(payload);
+if (!editor) {
+  throw new Error('the /api/settings fixture must produce an editable snapshot');
+}
 
 describe('Settings read model', () => {
   it('reads every top-level group the payload carries', () => {
@@ -279,10 +292,6 @@ describe('Settings value helpers', () => {
 
 describe('Settings authorized changes', () => {
   it('captures the editable values and configuration revision from the GET payload', () => {
-    const buildSettingsEditor = modelFunction<(payload: unknown) => unknown>(
-      'buildSettingsEditor',
-    );
-
     expect(buildSettingsEditor(payload)).toEqual({
       projectExpectedRevisionId: 'rev-42',
       userExpectedRevisionId: 'user-rev-7',
@@ -306,16 +315,8 @@ describe('Settings authorized changes', () => {
   });
 
   it('builds a project patch containing only supported changed fields', () => {
-    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
-      'buildSettingsEditor',
-    );
-    const planProjectSettingsChange = modelFunction<
-      (payload: unknown, values: unknown) => unknown
-    >('planProjectSettingsChange');
-    const editor = buildSettingsEditor(payload);
-
     expect(
-      planProjectSettingsChange(payload, {
+      planProjectChangeAgainst(editor, {
         ...editor.project,
         include: ['src/**', 'tests/**'],
         max_file_size: '2097152',
@@ -335,15 +336,7 @@ describe('Settings authorized changes', () => {
   });
 
   it('rejects project values the backend validation rejects before a request', () => {
-    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
-      'buildSettingsEditor',
-    );
-    const planProjectSettingsChange = modelFunction<
-      (payload: unknown, values: unknown) => any
-    >('planProjectSettingsChange');
-    const editor = buildSettingsEditor(payload);
-
-    const result = planProjectSettingsChange(payload, {
+    const result = planProjectChangeAgainst(editor, {
       ...editor.project,
       include: [''],
       exclude: ['src/['],
@@ -351,35 +344,29 @@ describe('Settings authorized changes', () => {
       auto_track_pr_poll_secs: '59',
     });
 
-    expect(result.outcome).toBe('invalid');
-    expect(result.errors).toEqual([
-      { field: 'include', message: 'include patterns must not be empty' },
-      { field: 'exclude', message: "invalid glob pattern 'src/['" },
-      { field: 'max_file_size', message: 'max_file_size must be at least 1 byte' },
-      {
-        field: 'auto_track_pr_poll_secs',
-        message: 'auto_track_pr_poll_secs must be at least 60 seconds',
-      },
-    ]);
+    expect(result).toMatchObject({
+      outcome: 'invalid',
+      errors: [
+        { field: 'include', message: 'include patterns must not be empty' },
+        { field: 'exclude', message: "invalid glob pattern 'src/['" },
+        { field: 'max_file_size', message: 'max_file_size must be at least 1 byte' },
+        {
+          field: 'auto_track_pr_poll_secs',
+          message: 'auto_track_pr_poll_secs must be at least 60 seconds',
+        },
+      ],
+    });
   });
 
   it('matches the backend glob parser at escape and negated-class boundaries', () => {
-    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
-      'buildSettingsEditor',
-    );
-    const planProjectSettingsChange = modelFunction<
-      (payload: unknown, values: unknown) => any
-    >('planProjectSettingsChange');
-    const editor = buildSettingsEditor(payload);
-
     expect(
-      planProjectSettingsChange(payload, {
+      planProjectChangeAgainst(editor, {
         ...editor.project,
         include: ['src/\\'],
       }).outcome,
     ).toBe('ready');
     expect(
-      planProjectSettingsChange(payload, {
+      planProjectChangeAgainst(editor, {
         ...editor.project,
         include: ['[!]'],
       }),
@@ -390,16 +377,8 @@ describe('Settings authorized changes', () => {
   });
 
   it('builds a user patch containing only supported changed fields', () => {
-    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
-      'buildSettingsEditor',
-    );
-    const planUserSettingsChange = modelFunction<
-      (payload: unknown, values: unknown) => unknown
-    >('planUserSettingsChange');
-    const editor = buildSettingsEditor(payload);
-
     expect(
-      planUserSettingsChange(payload, {
+      planUserChangeAgainst(editor, {
         ...editor.user,
         upload_enabled: true,
         watcher_debounce: '15s',
@@ -415,16 +394,8 @@ describe('Settings authorized changes', () => {
   });
 
   it('rejects user values the backend validation rejects before a request', () => {
-    const buildSettingsEditor = modelFunction<(payload: unknown) => any>(
-      'buildSettingsEditor',
-    );
-    const planUserSettingsChange = modelFunction<
-      (payload: unknown, values: unknown) => any
-    >('planUserSettingsChange');
-    const editor = buildSettingsEditor(payload);
-
     expect(
-      planUserSettingsChange(payload, {
+      planUserChangeAgainst(editor, {
         ...editor.user,
         watcher_debounce: '1h',
         extraction_timeout_secs: '0',
@@ -445,10 +416,6 @@ describe('Settings authorized changes', () => {
   });
 
   it('checks stale revisions against the mutated resource', () => {
-    const settingsRevisionConflict = modelFunction<
-      (scope: 'project' | 'user', expectedRevisionId: string, payload: unknown) => unknown
-    >('settingsRevisionConflict');
-
     expect(settingsRevisionConflict('project', 'rev-41', payload)).toEqual({
       expectedRevisionId: 'rev-41',
       actualRevisionId: 'rev-42',
@@ -461,9 +428,3 @@ describe('Settings authorized changes', () => {
     expect(settingsRevisionConflict('user', 'user-rev-7', payload)).toBeNull();
   });
 });
-
-function modelFunction<T>(name: string): T {
-  const candidate = Reflect.get(settingsModelModule, name);
-  expect(candidate, `${name} must be implemented`).toBeTypeOf('function');
-  return candidate as T;
-}
