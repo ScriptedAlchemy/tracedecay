@@ -352,6 +352,9 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 jsonschema = { version = "0.46.8", default-features = false }
 static_assertions = "1.1.0"
+# Test builds opt into the query kernel's `*_for_test` constructors; the
+# feature stays off for production builds.
+tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

@@ -1424,8 +1424,8 @@ pub struct PageRequest {
 }
 
 impl PageRequest {
-    #[cfg(test)]
-    pub(crate) const fn for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub const fn for_test(
         remaining_items: usize,
         remaining_total_bytes: usize,
         max_item_bytes: usize,

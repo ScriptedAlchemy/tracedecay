@@ -90,8 +90,8 @@ impl TemporalHydratedResult {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn available_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn available_for_test(
         rank: u32,
         stable_id: impl Into<String>,
         anchor_id: RetrievalAnchorId,
@@ -105,8 +105,8 @@ impl TemporalHydratedResult {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn unavailable_for_test(
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn unavailable_for_test(
         rank: u32,
         stable_id: impl Into<String>,
         anchor_id: RetrievalAnchorId,
