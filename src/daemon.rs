@@ -4727,10 +4727,7 @@ async fn production_project_server(
     })?;
     let semantic_auto_download_enabled =
         semantic_config.auto_download && runtime.semantic_auto_download();
-    let _ = crate::semantic_code::apply_config_and_queue_startup(
-        semantic_config.selected_model.as_deref(),
-        semantic_auto_download_enabled,
-    );
+    let semantic_startup_selection = semantic_config.selected_model.clone();
     let semantic_database = cg.dashboard_database_guard();
     let project_database_is_read_only = cg.db().filesystem_is_read_only();
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
@@ -4980,6 +4977,22 @@ async fn production_project_server(
                 ),
             ],
         );
+        let semantic_startup_project = canonical_project_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let _ = crate::semantic_code::apply_config_and_queue_startup(
+                semantic_startup_selection.as_deref(),
+                semantic_auto_download_enabled,
+            );
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", semantic_startup_project.display().to_string()),
+                    ("phase", "semantic_startup_configured".to_owned()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        });
         let quarantine_on_upgrade_failure = AtomicBool::new(false);
         let session_capabilities_published = AtomicBool::new(false);
         let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
