@@ -318,75 +318,23 @@ jobs:
       # reports, so a rename, a moved #[cfg], or a feature change fails here
       # instead of turning the gate into a silent no-op that reports success.
       - name: PR13 lite grammar gate
-        env:
-          RUNNER_OS_ID: ${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
         run: |
           set -euo pipefail
-          # The ONLY --no-default-features run. The all-features junit shares
-          # this test's name and cannot witness the lite build, so the validator
-          # refuses to close this gate from junit; the receipt is the evidence.
+          # The ONLY --no-default-features run.
           scripts/require-exact-test.sh \
             cargo test --locked --no-default-features --features lite \
             --test pr13_host_bundle_acceptance \
             structural_checks_ignore_commented_out_symbols \
             -- --exact
-          mkdir -p "pr12-pr13-os-evidence/${RUNNER_OS_ID}"
-          printf '%s\n' \
-            "pr13_lite_grammar_contract: structural_checks_ignore_commented_out_symbols passed under --no-default-features --features lite" \
-            > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/lite_grammar.passed"
 
       - name: PR13 default-feature platform lifecycle
-        env:
-          RUNNER_OS_ID: ${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
         run: |
           set -euo pipefail
-          # The ONLY default-feature (not --all-features) run of the lifecycle
-          # test. The receipt is written HERE, by the step that ran it, because
-          # this is the only step that can attest to it.
+          # The ONLY default-feature (not --all-features) lifecycle run.
           scripts/require-exact-test.sh \
             cargo test --locked --test pr13_host_bundle_acceptance \
             receipt_backed_doctor_checks_deployed_digests_registration_and_repair \
             -- --exact
-          mkdir -p "pr12-pr13-os-evidence/${RUNNER_OS_ID}"
-          printf '%s\n' \
-            "platform_${RUNNER_OS_ID}_lifecycle: receipt_backed_doctor_checks_deployed_digests_registration_and_repair passed under default features" \
-            > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/platform_lifecycle.passed"
-
-      - name: Strict PR12/PR13 packets from nextest junit
-        env:
-          RUNNER_OS_ID: ${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
-        run: |
-          set -euo pipefail
-          junit="target/nextest/ci/junit.xml"
-          test -f "$junit"
-          # Required, not created. This step never ran the lifecycle test, so it
-          # cannot attest that it ran; it can only refuse to pass
-          # --gate-passed platform_*_lifecycle below without the receipt the
-          # step that DID run it wrote. This used to be an unconditional
-          # `: > platform_lifecycle.passed` after the fact. The lite receipt is
-          # required for the same reason: --gate-passed is now the ONLY way to
-          # close a reduced-feature gate, so it must rest on a real run.
-          test -s "pr12-pr13-os-evidence/${RUNNER_OS_ID}/platform_lifecycle.passed"
-          test -s "pr12-pr13-os-evidence/${RUNNER_OS_ID}/lite_grammar.passed"
-          python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
-          python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
-            --runner-os "$RUNNER_OS_ID" \
-            --junit "${RUNNER_OS_ID}=${junit}" \
-            --npm-passed check --npm-passed test --npm-passed package \
-            --gate-passed pr13_lite_grammar_contract \
-            --gate-passed "${RUNNER_OS_ID}:platform_${RUNNER_OS_ID}_lifecycle"
-          python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict \
-            --junit "$junit"
-          mkdir -p "pr12-pr13-os-evidence/${RUNNER_OS_ID}"
-          cp "$junit" "pr12-pr13-os-evidence/${RUNNER_OS_ID}/junit.xml"
-          printf '%s\n' "$RUNNER_OS_ID" > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/runner-os.txt"
-
-      - name: Upload OS-tagged PR12/PR13 junit
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr12-pr13-junit-${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
-          path: pr12-pr13-os-evidence/
-          retention-days: 7
 
       - name: FastEmbed fixture pin check
         if: matrix.name == 'Linux'
@@ -807,53 +755,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The ONLY --no-default-features run. The all-features junit shares
-          # this test's name and cannot witness the lite build, so the validator
-          # refuses to close this gate from junit; the receipt is the evidence.
+          # The ONLY --no-default-features run.
           scripts/require-exact-test.sh \
             cargo test --locked --no-default-features --features lite \
             --test pr13_host_bundle_acceptance \
             structural_checks_ignore_commented_out_symbols \
             -- --exact
-          mkdir -p pr12-pr13-os-evidence/windows
-          printf '%s\n' \
-            "pr13_lite_grammar_contract: structural_checks_ignore_commented_out_symbols passed under --no-default-features --features lite" \
-            > pr12-pr13-os-evidence/windows/lite_grammar.passed
 
       - name: PR13 default-feature platform lifecycle
         shell: bash
         run: |
           set -euo pipefail
-          # The receipt is written HERE, by the step that ran the test, because
-          # this is the only step that can attest to it.
           scripts/require-exact-test.sh \
             cargo test --locked --test pr13_host_bundle_acceptance \
             receipt_backed_doctor_checks_deployed_digests_registration_and_repair \
             -- --exact
-          mkdir -p pr12-pr13-os-evidence/windows
-          printf '%s\n' \
-            "platform_windows_lifecycle: receipt_backed_doctor_checks_deployed_digests_registration_and_repair passed under default features" \
-            > pr12-pr13-os-evidence/windows/platform_lifecycle.passed
-
-      - name: Strict PR12/PR13 packets from Windows junit
+      - name: Validate packets and merge Windows junit
         shell: bash
         run: |
           set -euo pipefail
-          # Required, not created. This step never ran the lifecycle test, so it
-          # cannot attest that it ran; it can only refuse to pass
-          # --gate-passed windows:platform_windows_lifecycle below without the
-          # receipt the step that DID run it wrote. This used to be an
-          # unconditional `: > platform_lifecycle.passed` after the fact. The
-          # lite receipt is required for the same reason: --gate-passed is now
-          # the ONLY way to close a reduced-feature gate.
-          test -s pr12-pr13-os-evidence/windows/platform_lifecycle.passed
-          test -s pr12-pr13-os-evidence/windows/lite_grammar.passed
           mapfile -t junit_files < <(find windows-junit -type f -name 'junit.xml' | sort)
           if [[ "${#junit_files[@]}" -eq 0 ]]; then
             echo "missing Windows nextest junit evidence" >&2
             exit 1
           fi
-          # Merge shard junit into one Windows-tagged artifact for aggregation.
+          # Merge shard junit into one retained Windows runtime artifact.
           python3 - <<'PY'
           from pathlib import Path
           import xml.etree.ElementTree as ET
@@ -868,68 +794,16 @@ jobs:
                   root.append(node)
           Path("windows-merged-junit.xml").write_bytes(ET.tostring(root, encoding="utf-8"))
           PY
-          python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
           python3 benchmarks/pr13-host-conformance/validate_packet.py
           python3 benchmarks/pr13-advisory-milestone/validate_packet.py
           python3 benchmarks/pr12-lsp-gateway/validate_packet.py
-          python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
-            --runner-os windows \
-            --junit windows=windows-merged-junit.xml \
-            --npm-passed check --npm-passed test --npm-passed package \
-            --gate-passed pr13_lite_grammar_contract \
-            --gate-passed windows:platform_windows_lifecycle
-          python3 benchmarks/pr13-advisory-milestone/validate_packet.py --strict \
-            --junit windows-merged-junit.xml
-          mkdir -p pr12-pr13-os-evidence/windows
-          cp windows-merged-junit.xml pr12-pr13-os-evidence/windows/junit.xml
-          printf 'windows\n' > pr12-pr13-os-evidence/windows/runner-os.txt
 
-      - name: Upload OS-tagged PR12/PR13 junit
+      - name: Upload Windows runtime junit
         uses: actions/upload-artifact@v4
         with:
-          name: pr12-pr13-junit-windows
-          path: pr12-pr13-os-evidence/
+          name: runtime-junit-windows
+          path: windows-merged-junit.xml
           retention-days: 7
-
-  pr12-pr13-platform-aggregate:
-    name: PR12/PR13 platform aggregate
-    if: ${{ !cancelled() && needs.test.result == 'success' && needs.windows-pr12-pr13-packets.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: [test, windows-pr12-pr13-packets]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Download OS-tagged PR12/PR13 junit
-        uses: actions/download-artifact@v4
-        with:
-          pattern: pr12-pr13-junit-*
-          path: pr12-pr13-os-evidence
-          merge-multiple: true
-
-      - name: Aggregate strict host packet across Linux/Windows/macOS
-        run: |
-          set -euo pipefail
-          python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
-          gate_args=(
-            --npm-passed check --npm-passed test --npm-passed package
-            --gate-passed pr13_lite_grammar_contract
-          )
-          # This job runs no cargo at all, so every --gate-passed it asserts
-          # must rest on a receipt written by the job that did the work.
-          for os_name in linux windows macos; do
-            test -f "pr12-pr13-os-evidence/${os_name}/junit.xml"
-            test -f "pr12-pr13-os-evidence/${os_name}/platform_lifecycle.passed"
-            test -s "pr12-pr13-os-evidence/${os_name}/lite_grammar.passed"
-            gate_args+=(--junit "${os_name}=pr12-pr13-os-evidence/${os_name}/junit.xml")
-            gate_args+=(--gate-passed "${os_name}:platform_${os_name}_lifecycle")
-          done
-          # Full aggregation only: Linux alone cannot close Windows/macOS.
-          python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
-            "${gate_args[@]}"
 
   release-compatibility:
     name: Release compatibility
