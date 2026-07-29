@@ -409,6 +409,7 @@ pub(crate) enum SessionTemporalRepairOutcome {
 }
 
 const SESSION_TEMPORAL_REPAIR_NAME: &str = "session-temporal-v1";
+const SESSION_TEMPORAL_REPAIR_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, Copy)]
 struct SessionTemporalRepairCheckpoint {
@@ -440,10 +441,22 @@ pub(crate) async fn enqueue_session_temporal_store_repair(
                 cursor INTEGER NOT NULL DEFAULT 0 CHECK(cursor >= 0),
                 requested_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS session_temporal_repair_receipts (
+                repair_name TEXT PRIMARY KEY,
+                repair_version INTEGER NOT NULL CHECK(repair_version > 0),
+                completed_at INTEGER NOT NULL
              )",
         )
         .await
         .map_err(|error| global_db_operation_error("create session repair checkpoint", error))?;
+    let existing = read_session_temporal_repair_checkpoint(&transaction).await?;
+    if existing.is_none() && session_temporal_repair_receipt_is_current(&transaction).await? {
+        transaction.commit().await.map_err(|error| {
+            global_db_operation_error("commit completed session repair request", error)
+        })?;
+        return Ok(SessionTemporalRepairOutcome::NotRequired);
+    }
     transaction
         .execute(
             "INSERT INTO session_temporal_repair_progress (
@@ -610,6 +623,23 @@ pub(crate) async fn advance_session_temporal_store_repair_with_page_rows(
         } else {
             transaction
                 .execute(
+                    "INSERT INTO session_temporal_repair_receipts (
+                        repair_name, repair_version, completed_at
+                     ) VALUES (?1, ?2, unixepoch())
+                     ON CONFLICT(repair_name) DO UPDATE SET
+                        repair_version = excluded.repair_version,
+                        completed_at = excluded.completed_at",
+                    crate::db::engine::params![
+                        SESSION_TEMPORAL_REPAIR_NAME,
+                        SESSION_TEMPORAL_REPAIR_VERSION
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    global_db_operation_error("receipt completed session temporal repair", error)
+                })?;
+            transaction
+                .execute(
                     "DELETE FROM session_temporal_repair_progress WHERE repair_name = ?1",
                     crate::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
                 )
@@ -656,6 +686,34 @@ pub(crate) async fn repair_session_temporal_store(
             unreachable!("session repair loop exits only on a terminal outcome")
         }
     }
+}
+
+async fn session_temporal_repair_receipt_is_current(
+    conn: &(impl crate::db::engine::QueryExecutor + ?Sized),
+) -> crate::errors::Result<bool> {
+    if !connection_table_exists(conn, "session_temporal_repair_receipts").await? {
+        return Ok(false);
+    }
+    let mut rows = crate::db::engine::QueryExecutor::query(
+        conn,
+        "SELECT repair_version
+         FROM session_temporal_repair_receipts
+         WHERE repair_name = ?1",
+        crate::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
+    )
+    .await
+    .map_err(|error| global_db_operation_error("read session repair receipt", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error("read session repair receipt", error))?
+    else {
+        return Ok(false);
+    };
+    let version = row
+        .get::<i64>(0)
+        .map_err(|error| global_db_operation_error("read session repair receipt", error))?;
+    Ok(version == SESSION_TEMPORAL_REPAIR_VERSION)
 }
 
 async fn read_session_temporal_repair_checkpoint(
