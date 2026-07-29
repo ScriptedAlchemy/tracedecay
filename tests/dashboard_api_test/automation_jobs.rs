@@ -1,6 +1,98 @@
 use crate::dashboard_api_support::*;
 
 #[test]
+fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let tmp = tempdir_or_panic();
+        let tmp_root = tmp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
+        let project_root = tmp_root.join("project");
+        let global_db_path = tmp_root.join("global").join("global.db");
+        let profile_root = tmp_root.join("profile").join(".tracedecay");
+        let marker = tmp_root.join("dashboard-command-ran");
+        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+        let missing_codex_bin = tmp_root.join("missing-codex");
+        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &missing_codex_bin);
+
+        let mut global_config = tracedecay::user_config::UserConfig::default();
+        global_config.automation.enabled = true;
+        global_config.automation.backend =
+            tracedecay::automation::config::AutomationBackend::CodexAppServer;
+        global_config
+            .save()
+            .expect("global user config should save");
+
+        let (cg, host_runtime) = setup_project(&project_root).await;
+        let agent = http_agent();
+        let port = pick_free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let mut server = spawn_dashboard_server_with_host_runtime(
+            cg,
+            host_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            port,
+        );
+        wait_for_dashboard(&agent, &base_url).await;
+
+        let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, rejected) = patch_json_body(
+            &agent,
+            &config_url,
+            &serde_json::json!({ "allow_job_commands": true }),
+        );
+        assert_eq!(status, 400, "{rejected}");
+
+        #[cfg(windows)]
+        let command = format!("echo exploited> \"{}\"", marker.display());
+        #[cfg(not(windows))]
+        let command = format!("printf exploited > '{}'", marker.display());
+        let jobs_url = format!("{base_url}/api/automation/jobs");
+        let (status, created) = post_json_body(
+            &agent,
+            &jobs_url,
+            &serde_json::json!({
+                "id": "untrusted-command",
+                "name": "Untrusted command",
+                "prompt": "Do nothing.",
+                "enabled": true,
+                "pre_run_command": command,
+            }),
+        );
+        assert_eq!(status, 200, "{created}");
+
+        let (status, accepted) = post_json_body(
+            &agent,
+            &format!("{jobs_url}/untrusted-command/run"),
+            &serde_json::json!({}),
+        );
+        assert_eq!(status, 202, "{accepted}");
+        for _ in 0..50 {
+            if marker.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !marker.exists(),
+            "dashboard HTTP must not enable the pre-run shell command"
+        );
+
+        let (status, capabilities) = get_json(&agent, &format!("{base_url}/api/capabilities"));
+        assert_eq!(status, 200);
+        assert!(capabilities["features"].is_object(), "{capabilities}");
+
+        server.stop();
+    });
+}
+
+#[test]
 fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
