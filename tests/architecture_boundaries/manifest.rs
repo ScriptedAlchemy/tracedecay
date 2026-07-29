@@ -113,6 +113,11 @@ const CONTRACT_PACKAGE_ALLOWLISTS: &[(&str, &[&str])] = &[
             "tracedecay-domain",
         ],
     ),
+    // The stdio LSP bridge frames opaque payload bytes with the standard
+    // library alone. An empty allowlist is the contract, not an omission:
+    // adding any dependency — including a serialization or LSP model crate —
+    // requires a decision recorded here.
+    ("crates/tracedecay-lsp/Cargo.toml", &[]),
     (
         "crates/tracedecay-policy/Cargo.toml",
         &["serde", "serde_json", "tracedecay-domain"],
@@ -1491,20 +1496,24 @@ fn physical_manifest_contract_discovers_inside_rust_symlinks() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n").unwrap();
     }
-    fs::create_dir_all(repository.join("src/query")).unwrap();
+    fs::create_dir_all(repository.join("crates/tracedecay-query/src")).unwrap();
     fs::create_dir_all(repository.join("shared")).unwrap();
-    fs::write(repository.join("src/query/mod.rs"), "mod safe;\n").unwrap();
+    fs::write(
+        repository.join("crates/tracedecay-query/src/lib.rs"),
+        "mod safe;\n",
+    )
+    .unwrap();
     fs::write(repository.join("shared/safe.rs"), "pub struct Safe;\n").unwrap();
     symlink(
         repository.join("shared/safe.rs"),
-        repository.join("src/query/safe.rs"),
+        repository.join("crates/tracedecay-query/src/safe.rs"),
     )
     .unwrap();
     let mut tracked = TEST_WORKSPACE_MANIFESTS
         .iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    tracked.push(PathBuf::from("src/query/safe.rs"));
+    tracked.push(PathBuf::from("crates/tracedecay-query/src/safe.rs"));
 
     let layout =
         inspect_physical_manifest_paths(repository, &tracked).expect("inspect inside Rust symlink");
@@ -1516,11 +1525,11 @@ fn physical_manifest_contract_discovers_inside_rust_symlinks() {
     assert!(
         layout
             .symlinked_rust_sources
-            .contains(Path::new("src/query/safe.rs"))
+            .contains(Path::new("crates/tracedecay-query/src/safe.rs"))
     );
     let sources = [
-        PathBuf::from("src/query/mod.rs"),
-        PathBuf::from("src/query/safe.rs"),
+        PathBuf::from("crates/tracedecay-query/src/lib.rs"),
+        PathBuf::from("crates/tracedecay-query/src/safe.rs"),
     ]
     .into_iter()
     .collect();

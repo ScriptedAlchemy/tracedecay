@@ -12,6 +12,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const FORBIDDEN_LIBSQL_CRATE: &str = "libsql";
+/// Structural search is the one module in the code-index package that reads
+/// files itself: it walks caller-selected candidates off disk before any pattern
+/// runs. It lived outside `src/code_index` before the crate extraction and stays
+/// outside that guard, which checks this path still exists rather than assuming
+/// it — every other module in the package is held to the captured-input
+/// contract.
+const CODE_INDEX_STRUCTURAL_SEARCH_WALKER: &str =
+    "crates/tracedecay-code-index/src/ast_grep_search.rs";
 
 fn path_matches_forbidden_prefix(path: &[String], prefixes: &[&[&str]]) -> Option<String> {
     for prefix in prefixes {
@@ -500,20 +508,29 @@ fn git_index_transaction_daemon_adapter_has_no_side_file_authority() {
 #[test]
 fn code_index_is_filesystem_store_model_and_transport_free() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let roots = [PathBuf::from("src/code_index")]
+    let roots = [PathBuf::from("crates/tracedecay-code-index/src")]
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let sources = filesystem_rust_sources(&repository, &roots).expect("resolve code-index sources");
+    let mut sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve code-index sources");
     assert!(!sources.is_empty(), "code-index sources must exist");
+    assert!(
+        sources.remove(Path::new(CODE_INDEX_STRUCTURAL_SEARCH_WALKER)),
+        "{CODE_INDEX_STRUCTURAL_SEARCH_WALKER} no longer exists; re-scope this exclusion instead of \
+         leaving it to silently drop a module from the guard"
+    );
 
+    // The extracted package cannot name root modules as `crate::daemon`,
+    // `crate::db`, `crate::global_db`, `crate::mcp`, `crate::semantic_code`, or
+    // `crate::store` any more — inside the crate `crate::` is the code index
+    // itself. Forbidding the root crate and its sibling adapters wholesale is
+    // the same contract stated at the package boundary.
     let forbidden: &[&[&str]] = &[
-        &["crate", "daemon"],
-        &["crate", "db"],
-        &["crate", "global_db"],
-        &["crate", "mcp"],
-        &["crate", "semantic_code"],
-        &["crate", "store"],
+        &["tracedecay"],
+        &["tracedecay_api"],
+        &["tracedecay_hooks"],
         &["tracedecay_store"],
+        &["tracedecay_rusqlite_runtime"],
         &["fastembed"],
         &[FORBIDDEN_LIBSQL_CRATE],
         &["rusqlite"],
@@ -567,6 +584,54 @@ fn hook_v2_dispatch_uses_typed_daemon_delivery_ports() {
             && ports.contains("hook_v2_feedback_notice_delivery")
             && ports.contains("hook_v2_admit"),
         "root daemon ports must own admit and feedback-notice delivery transport"
+    );
+}
+
+/// The extracted bridge package declares no dependencies at all, so its manifest
+/// allowlist cannot express what the crate must not reach for. This guard covers
+/// the standard-library authority the manifest is blind to: the bridge moves
+/// opaque payload bytes over the stdio handles it is given and owns no
+/// filesystem, socket, process, thread, or JSON-parsing authority.
+#[test]
+fn lsp_bridge_package_owns_only_stdio_framing_authority() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-lsp/src")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources = filesystem_rust_sources(&repository, &roots).expect("resolve LSP bridge sources");
+    assert!(!sources.is_empty(), "LSP bridge sources must exist");
+
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay"],
+        &["tracedecay_api"],
+        &["tracedecay_application"],
+        &["tracedecay_domain"],
+        &["tracedecay_hooks"],
+        &["tracedecay_store"],
+        &["tracedecay_rusqlite_runtime"],
+        &[FORBIDDEN_LIBSQL_CRATE],
+        &["rusqlite"],
+        &["sqlx"],
+        &["axum"],
+        &["tower"],
+        &["hyper"],
+        &["tokio"],
+        &["async_std"],
+        &["lsp_types"],
+        &["serde"],
+        &["serde_json"],
+        &["std", "env"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+        &["std", "thread"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect LSP bridge sources");
+    assert!(
+        violations.is_empty(),
+        "the LSP bridge must stay a byte-level stdio framing adapter without store, transport, platform, or payload-parsing authority:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
     );
 }
 
