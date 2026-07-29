@@ -1,19 +1,23 @@
+import { z } from 'zod';
+import type { SettingsPayloadV1 } from '../../contracts/generated.ts';
 import {
   buildSettingsEditor,
-  settingsPayload,
+  readSettingsEnvelope,
   settingsRevisionConflict,
+  settingsRevisionId,
   type ProjectSettingsChangeSet,
+  type SettingsScope,
   type SettingsValidationError,
   type UserSettingsChangeSet,
 } from './settingsModel.ts';
 
-export type SettingsMutationScope = 'project' | 'user';
+export type SettingsMutationScope = SettingsScope;
 
 export type SettingsMutationResult =
   | {
       readonly outcome: 'success';
       readonly scope: SettingsMutationScope;
-      readonly payload: Record<string, unknown>;
+      readonly payload: SettingsPayloadV1;
       readonly revisionId: string;
       readonly resyncRecommended: boolean;
       readonly restartRecommended: boolean;
@@ -55,6 +59,7 @@ export interface SettingsMutationRequest {
 export async function applySettingsMutation(
   request: SettingsMutationRequest,
 ): Promise<SettingsMutationResult> {
+  const readAuthority = `GET ${request.readUrl}`;
   const current = await fetchJson(request.readUrl);
   if (current.outcome !== 'response') return current;
   if (!current.response.ok) {
@@ -63,23 +68,22 @@ export async function applySettingsMutation(
       detail: `Unable to refresh settings before apply (HTTP ${current.response.status}).`,
     };
   }
-  const currentPayload = settingsPayload(current.body);
-  if (!isRecord(currentPayload)) {
-    return protocolError(`GET ${request.readUrl}`, 'expected an envelope carrying a payload.');
-  }
-  if (!buildSettingsEditor(currentPayload)) {
+  const currentPayload = contractedPayload(current.body, readAuthority);
+  if (!currentPayload.parsed) return currentPayload.violation;
+  if (!buildSettingsEditor(currentPayload.payload)) {
     return protocolError(
-      `GET ${request.readUrl}`,
+      readAuthority,
       'the response omitted editable values or revision identity.',
     );
   }
   const conflict = settingsRevisionConflict(
     request.scope,
     request.expectedRevisionId,
-    currentPayload,
+    currentPayload.payload,
   );
   if (conflict) return { outcome: 'conflict', ...conflict };
 
+  const patchAuthority = `PATCH ${request.patchUrl}`;
   const patched = await fetchJson(request.patchUrl, {
     method: 'PATCH',
     headers: JSON_HEADERS,
@@ -102,36 +106,97 @@ export async function applySettingsMutation(
       detail: `Settings update failed (HTTP ${patched.response.status}).`,
     };
   }
-  const patchedPayload = settingsPayload(patched.body);
-  if (!isRecord(patchedPayload)) {
-    return protocolError(
-      `PATCH ${request.patchUrl}`,
-      'expected an envelope carrying a payload.',
-    );
-  }
-  const editor = buildSettingsEditor(patchedPayload);
+  const patchedPayload = contractedPayload(patched.body, patchAuthority);
+  if (!patchedPayload.parsed) return patchedPayload.violation;
+  const editor = buildSettingsEditor(patchedPayload.payload);
   if (!editor) {
     return protocolError(
-      `PATCH ${request.patchUrl}`,
+      patchAuthority,
       'the response omitted editable values or revision identity.',
     );
   }
   return {
     outcome: 'success',
     scope: request.scope,
-    payload: patchedPayload,
-    revisionId:
-      request.scope === 'project'
-        ? editor.projectExpectedRevisionId
-        : editor.userExpectedRevisionId,
-    resyncRecommended: patchedPayload['resync_recommended'] === true,
-    restartRecommended: patchedPayload['restart_recommended'] === true,
+    payload: patchedPayload.payload,
+    revisionId: settingsRevisionId(editor, request.scope),
+    resyncRecommended: patchedPayload.payload.resync_recommended === true,
+    restartRecommended: patchedPayload.payload.restart_recommended === true,
   };
 }
 
+type ContractedPayload =
+  | { readonly parsed: true; readonly payload: SettingsPayloadV1 }
+  | {
+      readonly parsed: false;
+      readonly violation: Extract<SettingsMutationResult, { outcome: 'protocol_error' }>;
+    };
+
+/**
+ * The settings payload as the generated contract accepts it, or the named
+ * authority that failed to produce one. The two refusals are different
+ * accusations and stay apart: a body that is not the envelope at all, and an
+ * envelope whose payload the contract rejects.
+ */
+function contractedPayload(body: unknown, authority: string): ContractedPayload {
+  const read = readSettingsEnvelope(body);
+  switch (read.outcome) {
+    case 'settings':
+      return { parsed: true, payload: read.payload };
+    case 'not_an_envelope':
+      return {
+        parsed: false,
+        violation: protocolError(authority, 'expected an envelope carrying a payload.'),
+      };
+    case 'unsupported_payload':
+      return {
+        parsed: false,
+        violation: protocolError(
+          authority,
+          'the response omitted editable values or revision identity.',
+        ),
+      };
+    default: {
+      const exhaustive: never = read;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * CONTRACT GAP — the settings refusal bodies are not generated.
+ *
+ * `/api/settings/{project,user}` build their 400/409/503 bodies with
+ * `serde_json::json!` in `crates/tracedecay-api/src/configuration.rs`
+ * (`settings_validation_error`, `configuration_revision_conflict_error`,
+ * `configuration_authority_unavailable_error`), so schemars never sees them
+ * and `contracts/generated.ts` carries no type for them. The success payload
+ * is contracted and is parsed as such above; only the refusals are read here.
+ *
+ * Every member below is therefore optional and every absence resolves to a
+ * stated unavailable value — a missing `actual_revision_id` reads as unknown,
+ * a missing `detail` says the authority is unavailable without naming which.
+ * None of it is inferred, and none of it turns a refusal into a success.
+ */
+const RefusalBodySchema = z
+  .object({
+    detail: z.string().optional(),
+    expected_revision_id: z.string().optional(),
+    actual_revision_id: z.string().optional(),
+    validation_errors: z
+      .array(z.object({ field: z.string(), message: z.string() }).passthrough())
+      .optional(),
+  })
+  .passthrough();
+
+function readRefusal(body: unknown): z.infer<typeof RefusalBodySchema> {
+  const parsed = RefusalBodySchema.safeParse(body);
+  return parsed.success ? parsed.data : {};
+}
+
 function unavailableDetail(body: unknown): string {
-  const detail = isRecord(body) ? body['detail'] : undefined;
-  return typeof detail === 'string' && detail.length > 0
+  const detail = readRefusal(body).detail;
+  return detail != null && detail.length > 0
     ? `Nothing was applied: ${detail.replace(/\.$/, '')}.`
     : 'Nothing was applied: the authority for this write is unavailable.';
 }
@@ -174,20 +239,14 @@ function protocolError(
 }
 
 function readValidation(body: unknown): SettingsMutationResult | null {
-  if (!isRecord(body) || !Array.isArray(body['validation_errors'])) return null;
-  const errors = body['validation_errors'].flatMap((item): SettingsValidationError[] => {
-    if (!isRecord(item)) return [];
-    const field = item['field'];
-    const message = item['message'];
-    return typeof field === 'string' && typeof message === 'string'
-      ? [{ field, message }]
-      : [];
-  });
+  const refusal = readRefusal(body);
+  const errors: readonly SettingsValidationError[] = (refusal.validation_errors ?? []).map(
+    ({ field, message }) => ({ field, message }),
+  );
   if (errors.length === 0) return null;
   return {
     outcome: 'validation',
-    detail:
-      typeof body['detail'] === 'string' ? body['detail'] : 'Settings validation failed.',
+    detail: refusal.detail ?? 'Settings validation failed.',
     errors,
   };
 }
@@ -196,26 +255,12 @@ function readConflict(
   body: unknown,
   fallbackExpectedRevisionId: string,
 ): SettingsMutationResult {
-  if (!isRecord(body)) {
-    return {
-      outcome: 'conflict',
-      expectedRevisionId: fallbackExpectedRevisionId,
-      actualRevisionId: null,
-    };
-  }
+  const refusal = readRefusal(body);
   return {
     outcome: 'conflict',
-    expectedRevisionId:
-      typeof body['expected_revision_id'] === 'string'
-        ? body['expected_revision_id']
-        : fallbackExpectedRevisionId,
-    actualRevisionId:
-      typeof body['actual_revision_id'] === 'string' ? body['actual_revision_id'] : null,
+    expectedRevisionId: refusal.expected_revision_id ?? fallbackExpectedRevisionId,
+    actualRevisionId: refusal.actual_revision_id ?? null,
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 const JSON_HEADERS = {

@@ -76,3 +76,8 @@ cc = "1"
 [dev-dependencies]
 static_assertions = "1.1.0"
 tempfile = "3"
+
+[[bench]]
+name = "code_index_chunks"
+harness = false
+test = false
