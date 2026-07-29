@@ -21,9 +21,9 @@ export interface StorySurface {
   /** One-line description of what the surface renders. */
   readonly description: string;
   /**
-   * Whether the surface currently renders a wired workspace page or the
-   * truthful pending placeholder. Recorded in the manifest so a reviewer can
-   * tell an intentional placeholder from a broken surface.
+   * Whether the surface currently renders a wired workspace page or a truthful
+   * contract gate. Recorded in the manifest so a reviewer can distinguish an
+   * unavailable backend read model from a broken surface.
    */
   readonly wired: boolean;
 }
@@ -112,6 +112,13 @@ export const STORY_SURFACES: readonly StorySurface[] = [
     label: 'Settings',
     description: 'Effective layered configuration and validated changes.',
     wired: true,
+  },
+  {
+    id: 'work',
+    path: '/work',
+    label: 'Work',
+    description: 'Canonical task and runtime projections, withheld until their generated contract lands.',
+    wired: false,
   },
 ] as const;
 
