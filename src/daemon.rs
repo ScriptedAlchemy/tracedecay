@@ -73,6 +73,7 @@ const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
+const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
 const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 /// Backoff for a persisted-row authority defect, which only an operator can
@@ -509,10 +510,14 @@ fn code_index_search_executor(
     project_id: tracedecay_domain::ProjectId,
     admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
 ) -> crate::mcp::server::CodeIndexSearchExecutor {
+    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
+        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
+    ));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();
         let admission_provider = admission_provider.clone();
+        let execution_admission = Arc::clone(&execution_admission);
         Box::pin(async move {
             let scope = match project_open_owners::resolved_scope_for_project(
                 &request.project_root,
@@ -643,6 +648,20 @@ fn code_index_search_executor(
                     },
                 );
             }
+            let execution_permit = match execution_admission.try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "search_capacity_unavailable",
+                            },
+                        },
+                    );
+                }
+            };
             let execution_result = {
                 let execution_schedulers = schedulers.clone();
                 let execution_project_root = project_root.clone();
@@ -655,6 +674,7 @@ fn code_index_search_executor(
                     );
                 let runtime = tokio::runtime::Handle::current();
                 let mut execution = tokio::task::spawn_blocking(move || {
+                    let _execution_permit = execution_permit;
                     runtime.block_on(async move {
                         execution_schedulers
                             .execute_pr9_with_semantic(

@@ -990,8 +990,3 @@ impl BoundedLevenshteinWorkspace {
         (distance <= bound).then_some(distance)
     }
 }
-
-fn bounded_levenshtein(left: &str, right: &str, bound: usize) -> Option<usize> {
-    let left: Vec<char> = left.chars().collect();
-    BoundedLevenshteinWorkspace::default().distance(&left, right, bound)
-}
