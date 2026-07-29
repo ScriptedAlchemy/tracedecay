@@ -566,13 +566,6 @@ impl RegisteredWorkflowIndexSnapshot {
         self.has_tables(&["workflow_runs", "workflow_agents"]).await
     }
 
-    /// Whether git correlation exists in this store yet. Only git-scope reads
-    /// need it; a project can have a complete workflow index and none of this.
-    pub(crate) async fn git_correlation_tables_present(&self) -> Result<bool, WorkflowIndexError> {
-        self.has_tables(&["session_git_spans", "commit_sessions"])
-            .await
-    }
-
     pub(crate) async fn runs_for_session(
         &self,
         parent_session_id: &str,
