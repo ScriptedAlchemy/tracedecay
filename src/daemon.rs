@@ -4481,13 +4481,14 @@ async fn production_project_server(
     if let Some(attempts) = project_open_attempts {
         attempts.fetch_add(1, Ordering::Relaxed);
     }
-    let (initial_cg, initial_deferred_post_open_health) = Box::pin(open_project_for_handshake(
-        canonical_project_path,
-        handshake,
-        store_administration,
-        true,
-    ))
-    .await?;
+    let (initial_cg, initial_deferred_post_open_health) =
+        Box::pin(open_project_for_handshake_with_health_mode(
+            canonical_project_path,
+            handshake,
+            store_administration,
+            true,
+        ))
+        .await?;
     let initial_key = ProjectServerKey::from_open_project(&initial_cg, handshake)?;
     let synchronous_post_open_health = store_administration
         .project_servers()
@@ -4498,7 +4499,7 @@ async fn production_project_server(
         drop(initial_deferred_post_open_health);
         initial_cg.close();
         let (validated_cg, validated_deferred_post_open_health) =
-            Box::pin(open_project_for_handshake(
+            Box::pin(open_project_for_handshake_with_health_mode(
                 canonical_project_path,
                 handshake,
                 store_administration,
@@ -6124,7 +6125,23 @@ async fn write_tool_list_changed_notification(transport: &mut impl McpTransport)
     Ok(())
 }
 
+#[cfg(test)]
 async fn open_project_for_handshake(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+    store_administration: &StoreAdministration,
+) -> Result<crate::tracedecay::TraceDecay> {
+    let (cg, _) = open_project_for_handshake_with_health_mode(
+        project_path,
+        handshake,
+        store_administration,
+        false,
+    )
+    .await?;
+    Ok(cg)
+}
+
+async fn open_project_for_handshake_with_health_mode(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
