@@ -65,26 +65,38 @@ pub(crate) enum WorkflowIndexUnavailableReason {
     /// The daemon retained no project-session authority for this request, so
     /// there is no index to consult. Another mount is required, not a retry.
     AuthorityNotRetained,
-    /// The store opened without workflow-index tables. Admission installs them
-    /// in the same transaction that publishes the runtime, so this is a
-    /// fail-closed guard: it keeps a store that somehow escaped that DDL from
-    /// answering as an empty index rather than an absent one.
-    SchemaNotInstalled,
+    /// The store opened without workflow-index tables.
+    ///
+    /// One reason covers git-scope reads too. Admission installs the
+    /// git-correlation and workflow-index DDL in the same transaction, so a
+    /// store cannot hold one set and lack the other; there is no separate
+    /// "correlation not built" state to report.
+    WorkflowIndexNotBuilt,
 }
 
 impl WorkflowIndexUnavailableReason {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::AuthorityNotRetained => "authority_not_retained",
-            Self::SchemaNotInstalled => "schema_not_installed",
+            Self::WorkflowIndexNotBuilt => "workflow_index_not_built",
+        }
+    }
+
+    /// Whether the same request can succeed later without the caller changing
+    /// anything. Admission reinstalls the workflow DDL on the next mount, so an
+    /// absent index resolves on its own; an unretained authority does not.
+    pub(crate) const fn is_retryable(self) -> bool {
+        match self {
+            Self::AuthorityNotRetained => false,
+            Self::WorkflowIndexNotBuilt => true,
         }
     }
 
     pub(crate) const fn message(self) -> &'static str {
         match self {
             Self::AuthorityNotRetained => "registered project session database is unavailable",
-            Self::SchemaNotInstalled => {
-                "the registered project session database has no workflow index schema"
+            Self::WorkflowIndexNotBuilt => {
+                "the workflow index has not been built for this project yet"
             }
         }
     }
@@ -166,7 +178,7 @@ mod tests {
             self.lists.lock().expect("lists").push(command);
             Box::pin(async {
                 Ok(WorkflowRunListOutcome::Unavailable(
-                    WorkflowIndexUnavailableReason::SchemaNotInstalled,
+                    WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
                 ))
             })
         }
@@ -175,7 +187,7 @@ mod tests {
             self.details.lock().expect("details").push(command);
             Box::pin(async {
                 Ok(WorkflowRunDetailOutcome::Unavailable(
-                    WorkflowIndexUnavailableReason::SchemaNotInstalled,
+                    WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
                 ))
             })
         }
@@ -234,13 +246,15 @@ mod tests {
     fn unavailable_reasons_are_distinct_on_the_wire() {
         let reasons = [
             WorkflowIndexUnavailableReason::AuthorityNotRetained,
-            WorkflowIndexUnavailableReason::SchemaNotInstalled,
+            WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
         ];
         let wire = reasons.map(WorkflowIndexUnavailableReason::as_str);
-        assert_eq!(wire, ["authority_not_retained", "schema_not_installed"]);
+        assert_eq!(wire, ["authority_not_retained", "workflow_index_not_built"]);
+        assert!(!WorkflowIndexUnavailableReason::AuthorityNotRetained.is_retryable());
+        assert!(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.is_retryable());
         assert_ne!(
             WorkflowIndexUnavailableReason::AuthorityNotRetained.message(),
-            WorkflowIndexUnavailableReason::SchemaNotInstalled.message()
+            WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message()
         );
     }
 
