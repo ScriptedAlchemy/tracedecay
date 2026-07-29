@@ -82,6 +82,7 @@ assert_required_assets() {
   local root_package=$1
   local application_package=$2
   local api_package=$3
+  local lsp_package=$4
   local required
   local -a root_assets=(
     "plugin/.lsp.json"
@@ -97,7 +98,7 @@ assert_required_assets() {
     "src/application/advisory/runtime.rs"
     "src/application/feedback/cycle_runtime.rs"
     "src/application/primitives/runtime.rs"
-    "src/daemon/lsp_gateway/protocol.rs"
+    "src/daemon/lsp_gateway/mod.rs"
     "src/lsp_bridge.rs"
     "src/query/retrieval/semantic/service.rs"
     "src/query/retrieval/semantic/tests.rs"
@@ -134,6 +135,13 @@ assert_required_assets() {
     "src/http.rs"
     "src/sse.rs"
   )
+  # The gateway protocol and stdio framing ship from their own crate now. The
+  # root package keeps only the façade, so pinning them here is what keeps the
+  # distribution gate covering the LSP surface end to end.
+  local -a lsp_assets=(
+    "src/bridge.rs"
+    "src/protocol.rs"
+  )
 
   for required in "${root_assets[@]}"; do
     [[ -f "$root_package/$required" ]] ||
@@ -146,6 +154,10 @@ assert_required_assets() {
   for required in "${api_assets[@]}"; do
     [[ -f "$api_package/$required" ]] ||
       die "packaged tracedecay-api crate is missing $required"
+  done
+  for required in "${lsp_assets[@]}"; do
+    [[ -f "$lsp_package/$required" ]] ||
+      die "packaged tracedecay-lsp crate is missing $required"
   done
   python3 "$repo/scripts/check-dashboard-bundle.py" \
     "$root_package/dashboard/app-dist"
@@ -300,6 +312,7 @@ run_self_test() {
   local root="$fixture/root"
   local application="$fixture/application"
   local api="$fixture/api"
+  local lsp="$fixture/lsp"
   local path
   for path in plugin/.lsp.json; do
     mkdir -p -- "$root/$(dirname -- "$path")"
@@ -321,7 +334,7 @@ run_self_test() {
     src/application/advisory/runtime.rs \
     src/application/feedback/cycle_runtime.rs \
     src/application/primitives/runtime.rs \
-    src/daemon/lsp_gateway/protocol.rs \
+    src/daemon/lsp_gateway/mod.rs \
     src/lsp_bridge.rs \
     src/query/retrieval/semantic/service.rs \
     src/query/retrieval/semantic/tests.rs \
@@ -357,13 +370,22 @@ run_self_test() {
     mkdir -p -- "$api/$(dirname -- "$path")"
     : >"$api/$path"
   done
+  for path in src/bridge.rs src/protocol.rs; do
+    mkdir -p -- "$lsp/$(dirname -- "$path")"
+    : >"$lsp/$path"
+  done
   mkdir -p -- "$root/dashboard/app-dist/static/js"
   printf '<script src="/static/js/index.fixture.js"></script>\n' \
     >"$root/dashboard/app-dist/index.html"
   printf '%0800d' 0 >"$root/dashboard/app-dist/static/js/index.fixture.js"
-  assert_required_assets "$root" "$application" "$api"
+  assert_required_assets "$root" "$application" "$api" "$lsp"
+  rm -- "$lsp/src/protocol.rs"
+  if (assert_required_assets "$root" "$application" "$api" "$lsp") >/dev/null 2>&1; then
+    die "self-test: missing extracted LSP asset was accepted"
+  fi
+  : >"$lsp/src/protocol.rs"
   rm -- "$root/plugin/.lsp.json"
-  if (assert_required_assets "$root" "$application" "$api") >/dev/null 2>&1; then
+  if (assert_required_assets "$root" "$application" "$api" "$lsp") >/dev/null 2>&1; then
     die "self-test: missing distribution asset was accepted"
   fi
 
@@ -641,10 +663,12 @@ root_package=${package_dirs[tracedecay]:-}
 application_package=${package_dirs[tracedecay-application]:-}
 api_package=${package_dirs[tracedecay-api]:-}
 catalog_package=${package_dirs[tracedecay-tool-catalog]:-}
-[[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package ]] ||
+lsp_package=${package_dirs[tracedecay-lsp]:-}
+[[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package && -n $lsp_package ]] ||
   die "workspace packages required by the distribution gate were not produced"
 
-assert_required_assets "$root_package" "$application_package" "$api_package"
+assert_required_assets \
+  "$root_package" "$application_package" "$api_package" "$lsp_package"
 verify_feature_wiring "$repo/Cargo.toml" "$root_package/Cargo.toml"
 
 patch_config="$work/packaged-crates.toml"
