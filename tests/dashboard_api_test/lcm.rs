@@ -21,7 +21,7 @@ use tracedecay::sessions::lcm::{
     LcmCleanConfig, LcmError, LcmGcConfig, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::TraceDecayOpenOptions;
 use tracedecay_domain::ProjectId;
 
 struct Fixture {
@@ -564,7 +564,7 @@ fn lcm_payload_health_numbers_agree_across_status_doctor_and_dashboard() {
             modified: None,
         }))
         .await;
-        let orphan_path = fixture.orphan_path.as_ref().expect("orphan payload path");
+        let _orphan_path = fixture.orphan_path.as_ref().expect("orphan payload path");
 
         let status = fixture.seeded_status.as_ref().expect("seeded status");
         let doctor = fixture.seeded_doctor.as_ref().expect("seeded doctor");
