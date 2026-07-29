@@ -1438,6 +1438,9 @@ mod hook_branch_writer_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod host_admission_tests;
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod query_scope_tests;
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests;
 #[cfg(test)]

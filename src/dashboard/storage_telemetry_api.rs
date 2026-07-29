@@ -49,7 +49,7 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::DashboardState;
@@ -558,12 +558,9 @@ fn storage_telemetry_ports() -> &'static Mutex<HashMap<String, CachedStoreTeleme
 }
 
 fn storage_telemetry_context(state: &DashboardState) -> Option<RequestContext> {
-    let project_id = ProjectId::new(state.project_id.as_deref()?).ok()?;
-    let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
-        &state.project_root,
-        &project_id,
-    )
-    .ok()?;
+    // The exact scope was resolved once when the dashboard state was built;
+    // this handler never re-resolves repository/worktree identity from paths.
+    let scope = state.resolved_scope.clone()?;
     let now = UtcMicros(now_micros());
     let expires_at = UtcMicros(now.0.saturating_add(30_000_000));
     let actor = ActorId::new("actor.dashboard.storage-telemetry").ok()?;
@@ -1122,6 +1119,47 @@ mod tests {
             .await
             .expect("dashboard state");
         (project, state, graph_total_bytes)
+    }
+
+    #[tokio::test]
+    async fn storage_telemetry_context_reuses_the_state_resolved_scope() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, state, _) = state_for_test().await;
+
+        let context = storage_telemetry_context(&state).expect("telemetry context");
+
+        // The per-request application context is minted from the exact scope
+        // resolved once at state construction; the handler never re-resolves
+        // repository/worktree identity from paths ad hoc.
+        assert_eq!(
+            context.scope(),
+            state.resolved_scope.as_ref().expect("state resolved scope"),
+        );
+        context.scope().validate().expect("valid scope");
+    }
+
+    #[tokio::test]
+    async fn storage_telemetry_without_resolved_scope_fails_closed() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, mut state, _) = state_for_test().await;
+        state.resolved_scope = None;
+
+        // No exact scope means no per-request application context; the handler
+        // reports every store as typed unknown, never a fabricated read.
+        assert!(storage_telemetry_context(&state).is_none());
+        let samples = collect_store_samples(&state, false).await;
+        assert!(!samples.is_empty());
+        for sample in &samples {
+            assert!(
+                matches!(sample.read, StorageTelemetryReadV1::Unknown { .. }),
+                "store {} should be typed unknown without an exact scope",
+                sample.store
+            );
+            assert_eq!(
+                sample.omission_reason.as_deref(),
+                Some("exact project telemetry scope is unavailable"),
+            );
+        }
     }
 
     #[tokio::test]

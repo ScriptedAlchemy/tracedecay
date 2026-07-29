@@ -69,6 +69,7 @@ mod projects;
 mod read_model;
 mod savings_api;
 mod savings_pricing;
+pub(crate) mod scope;
 mod settings_api;
 mod storage_findings_api;
 mod storage_telemetry_api;
@@ -202,6 +203,12 @@ impl AdmittedDoctorReportV1 {
 pub(crate) struct DashboardState {
     /// Registered project id for profile-backed stores, when known.
     pub(crate) project_id: Option<String>,
+    /// Exact application scope resolved ONCE when this state was constructed.
+    /// `None` is the explicit fail-closed state (missing registry, invalid
+    /// project id, or unresolvable exact root): handlers report their typed
+    /// unavailable states from it and never re-resolve scope from paths or
+    /// the CWD per request.
+    pub(crate) resolved_scope: Option<tracedecay_application::ResolvedScope>,
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
@@ -453,6 +460,10 @@ async fn build_state_inner(
         .unwrap_or_default();
     let state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
+        resolved_scope: scope::resolve_dashboard_scope(
+            cg.project_root(),
+            cg.store_layout().identity.project_id.as_deref(),
+        ),
         project_graph,
         project_graph_resolver,
         memory_owner,
@@ -1464,6 +1475,44 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod authority_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dashboard_state_resolves_exact_application_scope_once() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-resolved-scope",
+        )
+        .await
+        .expect("project init");
+        let project_id = ProjectId::new(
+            cg.store_layout()
+                .identity
+                .project_id
+                .clone()
+                .expect("registered project id"),
+        )
+        .expect("valid project id");
+        let expected = crate::daemon::project_open_owners::resolved_scope_for_project(
+            cg.project_root(),
+            &project_id,
+        )
+        .expect("daemon exact-root scope");
+
+        let state = build_state(&cg).await.expect("dashboard state");
+
+        // The exact-root HTTP surface resolves the same project and scope
+        // through the application type, once, at state construction.
+        let scope = state
+            .resolved_scope
+            .clone()
+            .expect("exact resolved application scope");
+        assert_eq!(scope, expected);
+        scope.validate().expect("resolved scope validates");
+    }
 
     #[tokio::test]
     async fn project_memory_owner_uses_validated_store_identity() {
