@@ -369,7 +369,11 @@ mod tests {
             ..GitQueryBounds::default()
         };
         let timed_out = GitQueryBounds {
-            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            deadline: Some(
+                Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap(),
+            ),
             ..GitQueryBounds::default()
         };
 

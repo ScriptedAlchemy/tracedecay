@@ -250,7 +250,7 @@ async fn checked_in_codex_goal_materializes_one_generation_bound_occurrence() {
         occurrence
             .message_id
             .as_ref()
-            .map(|message_id| message_id.as_str()),
+            .map(tracedecay_domain::MessageId::as_str),
         Some("record.goal.fixture")
     );
     assert_eq!(

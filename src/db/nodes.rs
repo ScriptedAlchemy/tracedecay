@@ -510,7 +510,7 @@ impl Database {
     /// Returns every node in the database.
     ///
     /// Read through `rowid` keyset pages: whole-table reads on a real project
-    /// exceed what the SQLite runtime will materialize for one query.
+    /// exceed what the `SQLite` runtime will materialize for one query.
     pub async fn get_all_nodes(&self) -> Result<Vec<Node>> {
         collect_rowid_pages(
             &self.engine_conn(),

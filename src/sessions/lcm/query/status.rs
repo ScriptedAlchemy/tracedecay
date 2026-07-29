@@ -795,7 +795,7 @@ mod tests {
         )
         .await
         .expect("create session tables");
-        schema::ensure_lcm_schema(&*conn)
+        schema::ensure_lcm_schema(&conn)
             .await
             .expect("create LCM schema");
         (directory, conn)

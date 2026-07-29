@@ -220,8 +220,10 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
                     resolutions.push(Ok(resolved.anchor_id));
                 }
                 Ok(_)
-                | Err(SessionTemporalExecutionError::Denied)
-                | Err(SessionTemporalExecutionError::WrongScope) => {
+                | Err(
+                    SessionTemporalExecutionError::Denied
+                    | SessionTemporalExecutionError::WrongScope,
+                ) => {
                     resolutions.push(Err(HydrationStateV1::Unauthorized));
                 }
                 Err(SessionTemporalExecutionError::Deleted) => {

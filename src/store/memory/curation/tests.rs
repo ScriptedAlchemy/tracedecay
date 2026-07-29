@@ -257,7 +257,7 @@ async fn curated_correction_rejects_self_only_evidence_without_writing_provenanc
                     transaction,
                     &owner,
                     &source,
-                    &[source.clone()],
+                    std::slice::from_ref(&source),
                     Confidence::new(0.8).unwrap(),
                     "normalize_tags",
                     None,

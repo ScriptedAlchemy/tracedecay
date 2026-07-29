@@ -2472,7 +2472,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::config::ensure_runtime_configuration_for_registered_database(
             project_root,
             layout,
-            self.project_registered.as_ref().cloned().ok_or_else(|| {
+            self.project_registered.clone().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind configuration test project sessions".to_string(),
                     message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2491,7 +2491,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::config::resolve_runtime_configuration_for_registered_database(
             project_root,
             layout,
-            self.project_registered.as_ref().cloned().ok_or_else(|| {
+            self.project_registered.clone().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind configuration test project sessions".to_string(),
                     message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2510,7 +2510,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::config::load_runtime_configuration_for_registered_database_read_only(
             project_root,
             layout,
-            self.project_registered.as_ref().cloned().ok_or_else(|| {
+            self.project_registered.clone().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind read-only configuration test project sessions".to_string(),
                     message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2554,7 +2554,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority,
     > {
         let database = match scope {
-            HostAdmissionScope::Project => self.project_registered.as_ref().cloned(),
+            HostAdmissionScope::Project => self.project_registered.clone(),
             HostAdmissionScope::Profile => Some(Arc::clone(&self.profile_registered)),
         }
         .ok_or_else(|| crate::errors::TraceDecayError::Database {

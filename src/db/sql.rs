@@ -76,7 +76,7 @@ pub(super) fn push_int(buf: &mut String, val: i64) {
 
 /// Rows requested per keyset page of a whole-table scan.
 ///
-/// The SQLite runtime admits a bounded number of rows per query and rejects
+/// The `SQLite` runtime admits a bounded number of rows per query and rejects
 /// anything larger outright, so a whole-table read has to arrive as a sequence
 /// of pages. This budget stays well under that admission limit while keeping
 /// the number of round trips low.
@@ -168,7 +168,7 @@ mod tests {
     use super::{FULL_SCAN_PAGE_ROWS, collect_rowid_pages};
     use crate::db::engine::TestConnection;
 
-    /// A single query over this many rows is refused by the SQLite runtime, so
+    /// A single query over this many rows is refused by the `SQLite` runtime, so
     /// a whole-table read has to page. The scan must still return every row,
     /// exactly once, in `rowid` order.
     #[tokio::test]

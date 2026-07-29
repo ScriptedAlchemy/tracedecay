@@ -477,9 +477,10 @@ fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortEr
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Default)]
 pub(crate) enum TemporalSessionScopeFilterV1 {
     #[serde(rename = "all")]
+    #[default]
     All,
     #[serde(rename = "parents_only")]
     ParentsOnly,
@@ -487,26 +488,15 @@ pub(crate) enum TemporalSessionScopeFilterV1 {
     SubagentsOnly,
 }
 
-impl Default for TemporalSessionScopeFilterV1 {
-    fn default() -> Self {
-        Self::All
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Default)]
 pub(crate) enum TemporalMessageTypeFilterV1 {
     #[serde(rename = "all")]
+    #[default]
     All,
     #[serde(rename = "direct_user")]
     DirectUser,
     #[serde(rename = "tool_result")]
     ToolResult,
-}
-
-impl Default for TemporalMessageTypeFilterV1 {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 /// Canonical semantic eligibility applied by the read port before candidates
@@ -766,18 +756,13 @@ pub struct KernelVersions {
     pub configuration_digest: BindingDigest,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum TemporalParticipantAuthorization {
     #[serde(rename = "a")]
     Authorized,
     #[serde(rename = "n")]
+    #[default]
     Denied,
-}
-
-impl Default for TemporalParticipantAuthorization {
-    fn default() -> Self {
-        Self::Denied
-    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

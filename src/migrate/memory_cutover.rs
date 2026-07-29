@@ -960,7 +960,7 @@ mod tests {
     };
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
-    /// A project store holding one tracked branch whose SQLite family carries a
+    /// A project store holding one tracked branch whose `SQLite` family carries a
     /// durable fact that exists nowhere else.
     struct BranchStoreFixture {
         _temp: tempfile::TempDir,
@@ -988,12 +988,12 @@ mod tests {
                 meta.add_branch(branch, &format!("branches/{branch}.db"), "main");
             }
             branch_meta::save_branch_meta(&data_root, &meta).unwrap();
-            let fixture = Self {
+
+            Self {
                 _temp: temp,
                 project_root,
                 data_root,
-            };
-            fixture
+            }
         }
 
         fn database_path(&self, branch: &str) -> PathBuf {

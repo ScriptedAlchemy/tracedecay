@@ -140,7 +140,7 @@ impl Database {
 
     /// Returns all file records.
     /// Read through `rowid` keyset pages: whole-table reads on a real project
-    /// exceed what the SQLite runtime will materialize for one query.
+    /// exceed what the `SQLite` runtime will materialize for one query.
     pub async fn get_all_files(&self) -> Result<Vec<FileRecord>> {
         collect_rowid_pages(
             &self.engine_conn(),

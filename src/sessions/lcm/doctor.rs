@@ -1328,7 +1328,7 @@ mod tests {
         )
         .await
         .map_err(|err| format!("create test schema prerequisites: {err}"))?;
-        schema::ensure_lcm_schema(&*conn)
+        schema::ensure_lcm_schema(&conn)
             .await
             .map_err(|err| format!("create LCM test schema: {err}"))?;
         Ok((db_path, conn))

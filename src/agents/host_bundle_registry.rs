@@ -771,7 +771,7 @@ mod tests {
 
     /// Both writers must agree even when the running binary is not the
     /// installed one — `./target/release/tracedecay reinstall` is exactly the
-    /// case that corrupted the OpenCode transaction and wedged the shared
+    /// case that corrupted the `OpenCode` transaction and wedged the shared
     /// component-set journal.
     #[test]
     fn opencode_core_assets_do_not_depend_on_the_running_executable_path() {

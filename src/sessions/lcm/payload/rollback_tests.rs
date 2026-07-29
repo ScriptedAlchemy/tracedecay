@@ -87,7 +87,7 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
     )
     .await
     .unwrap();
-    schema::ensure_lcm_schema(&*conn).await.unwrap();
+    schema::ensure_lcm_schema(&conn).await.unwrap();
     conn.execute_batch(
         "INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'rollback-session', '/tmp/project', '/tmp/project');

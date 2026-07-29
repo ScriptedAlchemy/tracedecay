@@ -2,7 +2,7 @@
 //!
 //! The helper is deliberately not linked into the daemon. This module accepts
 //! only an explicit executable and an explicit authority-store path, freezes a
-//! coherent single-file copy with the canonical SQLite snapshot machinery, and
+//! coherent single-file copy with the canonical `SQLite` snapshot machinery, and
 //! exchanges one closed, versioned request from the shared parity protocol.
 
 #![cfg(test)]
@@ -479,12 +479,12 @@ async fn materialize_single_file(
     let copy_result = tokio::select! {
         biased;
         () = &mut interrupted => {
-            let _ = connection.interrupt();
+            let () = connection.interrupt();
             let _ = (&mut copy).await;
             Err(RusqliteParityInfrastructureErrorV1::Cancelled)
         }
         () = &mut deadline_wait => {
-            let _ = connection.interrupt();
+            let () = connection.interrupt();
             let _ = (&mut copy).await;
             Err(RusqliteParityInfrastructureErrorV1::DeadlineExceeded)
         }
