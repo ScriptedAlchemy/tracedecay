@@ -1640,8 +1640,8 @@ mod tests {
             "each failure class needs its own distinguishable template"
         );
         for detail in templates {
-            let serialized = serde_json::to_string(&json!({ "detail": detail }))
-                .expect("serialized error data");
+            let serialized =
+                serde_json::to_string(&json!({ "detail": detail })).expect("serialized error data");
             for forbidden in [
                 "bearer-secret",
                 "YWxpY2U6c2VjcmV0",
