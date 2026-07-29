@@ -232,26 +232,6 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
     .await
 }
 
-/// Runs skill writing from profile-level projectless session evidence.
-pub(crate) async fn run_user_skill_writer_with_backend(
-    profile_root: &std::path::Path,
-    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    config: &AutomationConfig,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-) -> Result<SkillWriterAutomationRun> {
-    let retrieval = production_user_automation_retrieval(profile_root).await;
-    run_user_skill_writer_with_backend_and_retrieval(
-        profile_root,
-        session_registry,
-        config,
-        backend,
-        retrieval.as_ref(),
-        options,
-    )
-    .await
-}
-
 pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
     profile_root: &std::path::Path,
     session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
