@@ -263,6 +263,21 @@ pub fn verified_embedded_host_component_set(
     requested_components: &[HostBundleComponentV1],
     now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
+    let tracedecay_bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    verified_embedded_host_component_set_with_tracedecay_bin(
+        host,
+        requested_components,
+        now_unix,
+        &tracedecay_bin,
+    )
+}
+
+pub fn verified_embedded_host_component_set_with_tracedecay_bin(
+    host: HostKindV1,
+    requested_components: &[HostBundleComponentV1],
+    now_unix: u64,
+    tracedecay_bin: &str,
+) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
     if let Some(reason) = unsupported_host_component_set_reason(host) {
         return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
     }
@@ -282,7 +297,12 @@ pub fn verified_embedded_host_component_set(
     let mut manifest_digests = BTreeSet::new();
     let mut entries = Vec::with_capacity(components.len());
     for component in components {
-        let bundle = verified_embedded_host_bundle(host, component, now_unix)?;
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            host,
+            component,
+            now_unix,
+            tracedecay_bin,
+        )?;
         if !bundle
             .manifest
             .artifacts
@@ -311,13 +331,23 @@ pub fn verified_embedded_host_component_set(
 pub fn verified_embedded_host_bundle(
     host: HostKindV1,
     component: HostBundleComponentV1,
+    now_unix: u64,
+) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
+    let tracedecay_bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    verified_embedded_host_bundle_with_tracedecay_bin(host, component, now_unix, &tracedecay_bin)
+}
+
+fn verified_embedded_host_bundle_with_tracedecay_bin(
+    host: HostKindV1,
+    component: HostBundleComponentV1,
     _now_unix: u64,
+    tracedecay_bin: &str,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
     require_component_capabilities(host, component)
         .map_err(|_| HostBundleRegistryError::Incompatible)?;
     let host_name = host_name(host);
     let component_name = component_name(component);
-    let assets = component_assets(host, component)?;
+    let assets = component_assets(host, component, tracedecay_bin)?;
     let artifacts = assets
         .iter()
         .map(|(path, bytes)| HostBundleArtifactV1 {
@@ -404,6 +434,7 @@ fn embedded_bundle_identity(
 fn component_assets(
     host: HostKindV1,
     component: HostBundleComponentV1,
+    tracedecay_bin: &str,
 ) -> Result<Vec<(String, Vec<u8>)>, HostBundleRegistryError> {
     // The managed Hermes plugin package is also written by the legacy installer
     // that the compatibility registration adapter re-runs during apply, and the
@@ -417,8 +448,7 @@ fn component_assets(
     // installed path (for example `./target/release/tracedecay reinstall`) and
     // corrupted every Hermes transaction.
     if (host, component) == (HostKindV1::Hermes, HostBundleComponentV1::Core) {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::hermes::rendered_plugin_files(&bin)
+        let files = super::hermes::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -446,8 +476,7 @@ fn component_assets(
                 | HostBundleComponentV1::OperatorMcp
         )
     {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::cursor::rendered_plugin_files(&bin)
+        let files = super::cursor::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostBundleComponentV1::Core;
         return Ok(files
@@ -474,8 +503,7 @@ fn component_assets(
                 | HostBundleComponentV1::OperatorMcp
         )
     {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::codex::rendered_global_plugin_files(&bin)
+        let files = super::codex::rendered_global_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostBundleComponentV1::Core;
         return Ok(files
@@ -502,8 +530,7 @@ fn component_assets(
                 | HostBundleComponentV1::OperatorMcp
         )
     {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::claude::rendered_plugin_files(&bin)
+        let files = super::claude::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostBundleComponentV1::Core;
         return Ok(files
@@ -522,8 +549,7 @@ fn component_assets(
     // native plugin. Render the complete managed inventory with the installed
     // binary path; companion MCP components would duplicate that ownership.
     if (host, component) == (HostKindV1::KimiCode, HostBundleComponentV1::Core) {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::kimi::rendered_plugin_files(&bin)
+        let files = super::kimi::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -541,8 +567,7 @@ fn component_assets(
     // during an in-tree reinstall. Context MCP and Agent remain disjoint
     // compiled assets.
     if (host, component) == (HostKindV1::OpenCode, HostBundleComponentV1::Core) {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::opencode::rendered_plugin_files(&bin)
+        let files = super::opencode::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -740,9 +765,13 @@ mod tests {
     fn kimi_catalog_assets_match_the_legacy_installer_rendering() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::kimi::rendered_plugin_files(&bin).unwrap();
-        let bundle =
-            verified_embedded_host_bundle(HostKindV1::KimiCode, HostBundleComponentV1::Core, 0)
-                .unwrap();
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::KimiCode,
+            HostBundleComponentV1::Core,
+            0,
+            &bin,
+        )
+        .unwrap();
 
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
@@ -793,9 +822,13 @@ mod tests {
     fn opencode_catalog_assets_match_the_legacy_installer_rendering() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::opencode::rendered_plugin_files(&bin).unwrap();
-        let bundle =
-            verified_embedded_host_bundle(HostKindV1::OpenCode, HostBundleComponentV1::Core, 0)
-                .unwrap();
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::OpenCode,
+            HostBundleComponentV1::Core,
+            0,
+            &bin,
+        )
+        .unwrap();
 
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
@@ -819,12 +852,17 @@ mod tests {
     /// component-set journal.
     #[test]
     fn opencode_core_assets_do_not_depend_on_the_running_executable_path() {
-        let assets = component_assets(HostKindV1::OpenCode, HostBundleComponentV1::Core).unwrap();
         let running = std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let installed =
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let assets = component_assets(
+            HostKindV1::OpenCode,
+            HostBundleComponentV1::Core,
+            &installed,
+        )
+        .unwrap();
         assert_eq!(assets.len(), 1);
         let body = String::from_utf8(assets[0].1.clone()).unwrap();
         assert!(
@@ -843,9 +881,13 @@ mod tests {
     fn hermes_catalog_assets_match_the_legacy_installer_rendering() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::hermes::rendered_plugin_files(&bin).unwrap();
-        let bundle =
-            verified_embedded_host_bundle(HostKindV1::Hermes, HostBundleComponentV1::Core, 0)
-                .unwrap();
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::Hermes,
+            HostBundleComponentV1::Core,
+            0,
+            &bin,
+        )
+        .unwrap();
 
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
@@ -869,12 +911,13 @@ mod tests {
     /// `component-set-journal.hermes.v1.json` behind.
     #[test]
     fn hermes_core_assets_do_not_depend_on_the_running_executable_path() {
-        let assets = component_assets(HostKindV1::Hermes, HostBundleComponentV1::Core).unwrap();
         let running = std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let installed =
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let assets =
+            component_assets(HostKindV1::Hermes, HostBundleComponentV1::Core, &installed).unwrap();
         let tools = assets
             .iter()
             .find(|(path, _)| path == ".hermes/plugins/tracedecay/tools.py")
