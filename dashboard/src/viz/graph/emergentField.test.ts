@@ -2,6 +2,7 @@ import Graph from 'graphology';
 import { describe, expect, it } from 'vitest';
 import {
   composeConstellation,
+  loadForceAtlas2,
   settleEmergentField,
   type ForceAtlas2Module,
 } from './emergentField.ts';
@@ -159,5 +160,17 @@ describe('composeConstellation', () => {
     expect(Math.hypot(orphan[0], orphan[1])).toBeLessThanOrEqual(
       2 * 5 + Number.EPSILON,
     );
+  });
+});
+
+describe('loadForceAtlas2', () => {
+  // The dynamic import is the only reference to the layout engine anywhere in
+  // the canvas, so this is also the check that the seam still resolves a real
+  // engine rather than a namespace with the algorithm hidden behind interop.
+  it('resolves the synchronous ForceAtlas2 entry point', async () => {
+    const engine = await loadForceAtlas2();
+
+    expect(typeof engine.assign).toBe('function');
+    expect(typeof engine.inferSettings).toBe('function');
   });
 });
