@@ -59,8 +59,16 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS generation_diagnosti
     CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state
         ON generation_diagnostics (generation_id, record_state);
 
+    CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state_anchor
+        ON generation_diagnostics (generation_id, record_state, diagnostic_anchor);
+
     CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_file
         ON generation_diagnostics (file_occurrence_id, generation_id);
+
+    CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_file_generation_state_anchor
+        ON generation_diagnostics (
+            file_occurrence_id, generation_id, record_state, diagnostic_anchor
+        );
 
     CREATE TABLE IF NOT EXISTS diagnostic_generation_publications (
         generation_id TEXT PRIMARY KEY,
@@ -458,6 +466,101 @@ impl<'a> DiagnosticsStore<'a> {
         generation: &CodeGenerationId,
     ) -> Result<Vec<GenerationDiagnosticV1>> {
         self.query_generation(generation, Some(STATE_CURRENT)).await
+    }
+
+    /// One bounded page of current records plus the exact lane cardinality.
+    pub(crate) async fn current_records_page(
+        &self,
+        generation: &CodeGenerationId,
+        file_occurrence_id: Option<&FileOccurrenceId>,
+        after_anchor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<GenerationDiagnosticV1>, usize, bool)> {
+        let operation = "diagnostics current_records_page";
+        let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
+            db_message(
+                operation,
+                "diagnostic page limit exceeds the SQLite integer range",
+            )
+        })?;
+        let (sql, query_params) = match (file_occurrence_id, after_anchor) {
+            (None, None) => (
+                format!(
+                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     ORDER BY diagnostic_anchor LIMIT ?3"
+                ),
+                params![generation.as_str(), STATE_CURRENT, fetch_limit],
+            ),
+            (None, Some(anchor)) => (
+                format!(
+                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state = ?2 \
+                     AND diagnostic_anchor > ?3 ORDER BY diagnostic_anchor LIMIT ?4"
+                ),
+                params![generation.as_str(), STATE_CURRENT, anchor, fetch_limit],
+            ),
+            (Some(file), None) => (
+                format!(
+                    "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                     AND record_state = ?3 ORDER BY diagnostic_anchor LIMIT ?4"
+                ),
+                params![
+                    file.as_str(),
+                    generation.as_str(),
+                    STATE_CURRENT,
+                    fetch_limit
+                ],
+            ),
+            (Some(file), Some(anchor)) => (
+                format!(
+                    "{SELECT_RECORDS} WHERE file_occurrence_id = ?1 AND generation_id = ?2 \
+                     AND record_state = ?3 AND diagnostic_anchor > ?4 \
+                     ORDER BY diagnostic_anchor LIMIT ?5"
+                ),
+                params![
+                    file.as_str(),
+                    generation.as_str(),
+                    STATE_CURRENT,
+                    anchor,
+                    fetch_limit
+                ],
+            ),
+        };
+        let mut rows = self
+            .conn
+            .query(&sql, query_params)
+            .await
+            .map_err(|e| db_error(operation, e))?;
+        let mut records = collect_rows(&mut rows, operation).await?;
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+
+        let (count_sql, count_params) = match file_occurrence_id {
+            None => (
+                "SELECT COUNT(*) FROM generation_diagnostics \
+                 WHERE generation_id = ?1 AND record_state = ?2",
+                params![generation.as_str(), STATE_CURRENT],
+            ),
+            Some(file) => (
+                "SELECT COUNT(*) FROM generation_diagnostics \
+                 WHERE file_occurrence_id = ?1 AND generation_id = ?2 AND record_state = ?3",
+                params![file.as_str(), generation.as_str(), STATE_CURRENT],
+            ),
+        };
+        let mut count_rows = self
+            .conn
+            .query(count_sql, count_params)
+            .await
+            .map_err(|e| db_error(operation, e))?;
+        let total = count_rows
+            .next()
+            .await
+            .map_err(|e| db_error(operation, e))?
+            .ok_or_else(|| db_message(operation, "diagnostic count returned no row"))?
+            .get::<i64>(0)
+            .map_err(|e| db_error(operation, e))?;
+        let total = usize::try_from(total)
+            .map_err(|_| db_message(operation, "diagnostic count is outside the usize range"))?;
+        Ok((records, total, has_more))
     }
 
     /// Current records for one file occurrence inside `generation`.
