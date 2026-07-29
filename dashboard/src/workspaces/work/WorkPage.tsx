@@ -33,17 +33,8 @@ const BOUNDARY: readonly { term: string; reading: string }[] = [
   { term: 'Projections', reading: 'Not rendered' },
   { term: 'Commands', reading: 'Not exposed' },
   { term: 'Activity stream', reading: 'Not registered' },
+  { term: 'Wire authority', reading: WIRE_AUTHORITY },
 ];
-
-/** The reasons present in one group, in row order and without repeats.
- *
- * The chips carry the state; the group says why once. Sixteen rows each
- * repeating "no generated read model" beside its own chip is the same sentence
- * sixteen times, which reads as noise rather than as an inventory. */
-function reasonSummaries(surfaces: readonly WithheldSurface[]): string[] {
-  const summaries = surfaces.map((surface) => withheldPresentation(surface.reason).summary);
-  return [...new Set(summaries)];
-}
 
 function WithheldRow({ surface }: { surface: WithheldSurface }) {
   const presentation = withheldPresentation(surface.reason);
@@ -56,12 +47,8 @@ function WithheldRow({ surface }: { surface: WithheldSurface }) {
       <td className="px-2 py-1.5">
         <span className="td-value whitespace-nowrap text-text-secondary">{surface.requires}</span>
       </td>
-      {/* From `lg` the state label stays on one line, which keeps the rows one
-        * line tall and the ledger scannable. Below it the chip is allowed to
-        * wrap, because a nowrap chip is width the 320px reflow budget does not
-        * have. */}
-      <td className="px-2 py-1.5 lg:whitespace-nowrap">
-        <StateChip kind={presentation.state} />
+      <td className="px-2 py-1.5">
+        <StateChip kind={presentation.state} detail={presentation.summary} />
       </td>
     </tr>
   );
@@ -114,17 +101,7 @@ export function WorkPage() {
             </Panel>
 
             {WITHHELD_WORK.map((group) => (
-              <Panel
-                key={group.id}
-                legend={group.legend}
-                bodyClassName="p-0"
-                elevation="well"
-                footer={
-                  <p className="text-3xs tracking-[0.04em] text-text-muted">
-                    Withheld here because there is {reasonSummaries(group.surfaces).join(', and ')}.
-                  </p>
-                }
-              >
+              <Panel key={group.id} legend={group.legend} bodyClassName="p-0" elevation="well">
                 <div
                   // Focusable and named: the ledger outruns 320px and 400% zoom
                   // sideways, and a scroll container a keyboard cannot reach is
@@ -177,7 +154,7 @@ export function WorkPage() {
                   </span>
                 }
               >
-                boundary
+                authority boundary
               </Legend>
 
               <dl className="mt-4 space-y-2.5 text-xs">
