@@ -5,11 +5,11 @@
 //! projection, and the analyzer broker ports — live in [`tracedecay_lsp`] and
 //! are re-exported here so daemon callers keep one gateway façade.
 //!
-//! What stays daemon-owned is exactly what needs daemon authority: the
-//! authenticated session registry ([`endpoint`]), analyzer/store composition
-//! ([`factory`]), and the adapters that bind application semantic, context,
-//! diagnostic, and feedback authorities to the crate's ports
-//! ([`runtime_adapters`]). Those reach a session only as injected ports.
+//! What stays daemon-owned is exactly what needs daemon authority: admission
+//! implementations and registry storage, analyzer/store composition
+//! ([`factory`]), plus Tokio and `lsp-types` bindings
+//! ([`runtime_adapters`]). Gateway policy and broker state live in
+//! [`tracedecay_lsp`].
 
 mod endpoint;
 mod factory;
@@ -64,14 +64,13 @@ pub use endpoint::{
 };
 pub use factory::{
     DaemonLspProviderBundle, DaemonLspProviderFactory, DaemonLspRuntimeSession,
-    Pr12LspSessionFactory,
+    DaemonLspSessionFactory, Pr12LspSessionFactory,
 };
 pub use runtime_adapters::{
     BrokerDiagnosticSnapshotAuthority, CanonicalContextProjectionAuthority,
     CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
     FeedbackCycleRuntimePort, LspAnalyzerCancellationAuthority, LspDiagnosticDocumentPort,
     LspRuntimeFailure, LspRuntimeFuture, LspSemanticOperationOutcome, LspSemanticRequestAuthority,
-    MAX_PR12_FEEDBACK_CYCLES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
-    Pr12AnalyzerCancellationAdapter, Pr12ContextProjectionAdapter, Pr12DiagnosticSnapshotAdapter,
-    Pr12FeedbackCycleAdapter, Pr12SemanticProviderAdapter,
+    MAX_FEEDBACK_CYCLES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
+    Pr12SemanticProviderAdapter,
 };

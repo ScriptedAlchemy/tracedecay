@@ -15,6 +15,7 @@ use tokio::net::UnixStream;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
+use tracedecay_lsp::{AdmittedRoot, LspSessionRegistry};
 
 use crate::application::context::CancellationToken;
 use crate::client_identity::DaemonClientIdentity;
@@ -1763,7 +1764,7 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 /// or expires.
 #[derive(Clone)]
 struct DaemonInvocationState {
-    lsp_session_registry: Arc<tokio::sync::Mutex<lsp_gateway::LspSessionRegistry>>,
+    lsp_session_registry: Arc<tokio::sync::Mutex<LspSessionRegistry>>,
     service: DaemonInvocationService,
     github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
@@ -1781,7 +1782,7 @@ impl Default for DaemonInvocationState {
             DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
         Self {
             lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
-                lsp_gateway::LspSessionRegistry::default(),
+                LspSessionRegistry::default(),
             )),
             service,
             github_credential_lifecycle:
@@ -7585,10 +7586,10 @@ async fn cleanup_connection_lsp_sessions(
     }
 }
 
-fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<lsp_gateway::AdmittedRoot> {
+fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoot> {
     url::Url::from_file_path(project_path)
         .ok()
-        .map(|uri| lsp_gateway::AdmittedRoot::new(uri.to_string()))
+        .map(|uri| AdmittedRoot::new(uri.to_string()))
 }
 
 #[cfg(unix)]

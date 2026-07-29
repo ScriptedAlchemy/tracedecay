@@ -32,6 +32,7 @@ use tracedecay_domain::{
     DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1, ProviderId, RefId,
     RepositoryId, RetrievalAnchorId, SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
+use tracedecay_lsp::DiagnosticSource;
 
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::errors::{Result, TraceDecayError};
@@ -1071,8 +1072,6 @@ mod tests {
     /// records and reads them back — it never inspects source strings.
     #[tokio::test]
     async fn published_pillar_records_map_to_producer_specific_lsp_sources() {
-        use crate::daemon::lsp_gateway::DiagnosticSource;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let conn = crate::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
         let store = DiagnosticsStore::new_runtime(&conn);

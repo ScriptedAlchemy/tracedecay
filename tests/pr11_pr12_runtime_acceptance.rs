@@ -30,12 +30,10 @@ use tracedecay::application_surface::{
     execute_application_surface, http_application_router, parse_application_surface_request,
     resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
 };
-use tracedecay::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
 use tracedecay::daemon_client::{
     DaemonInvocationClient, DaemonLspSessionClient, RequestedOutputFormat,
 };
-use tracedecay::lsp_bridge::{FramePoll, FrameSend};
 use tracedecay::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
@@ -59,6 +57,7 @@ use tracedecay_domain::{
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, LocatorDigest, ManifestDigest,
     ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
 };
+use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 
 struct RuntimeFixture {

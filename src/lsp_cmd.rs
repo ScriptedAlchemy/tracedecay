@@ -6,7 +6,7 @@ use tokio::time::{Duration, interval};
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::{DaemonInvocationClient, DaemonLspSessionClient};
 use tracedecay::diagnostics::lsp::{adapters as lsp_adapters, broker as lsp_broker};
-use tracedecay::lsp_bridge::{ContentLengthCodec, FramePoll, FrameSend};
+use tracedecay_lsp::{ContentLengthCodec, FramePoll, FrameSend};
 
 use crate::cli::LspAction;
 
