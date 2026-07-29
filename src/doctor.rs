@@ -410,13 +410,20 @@ fn describe_resolved_store(layout: &StoreLayout) -> String {
 }
 
 async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<serde_json::Value> {
-    daemon_project_status_with_deadline(
-        project_path,
+    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        Some(project_path.to_path_buf()),
+        None,
+        false,
+        false,
+    )?;
+    let result = crate::daemon::call_default_tool_within(
+        &handshake,
+        "tracedecay_runtime",
+        daemon_doctor_runtime_args(),
         tokio::time::Instant::now() + std::time::Duration::from_secs(10),
-        false,
-        false,
     )
-    .await
+    .await?;
+    daemon_runtime_status(&result)
 }
 
 async fn daemon_project_status_with_deadline(
