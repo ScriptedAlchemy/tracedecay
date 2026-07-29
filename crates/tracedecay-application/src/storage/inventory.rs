@@ -92,6 +92,9 @@ impl CodeGenerationRetentionRecordV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.collectable_generation_count > self.superseded_generation_count
             || self.collectable_generation_bytes.get() > self.superseded_generation_bytes.get()
+            || (self.superseded_generation_count == 0 && self.superseded_generation_bytes.get() > 0)
+            || (self.collectable_generation_count == 0
+                && self.collectable_generation_bytes.get() > 0)
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "code generation retention totals",
@@ -223,6 +226,19 @@ mod tests {
             superseded_generation_bytes: StorageByteSizeV1(3_000),
             collectable_generation_count: 4,
             collectable_generation_bytes: StorageByteSizeV1(2_000),
+        };
+
+        assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn code_generation_retention_rejects_bytes_without_generations() {
+        let record = CodeGenerationRetentionRecordV1 {
+            store: StoreKeyV1::new("code-index-v1").expect("valid"),
+            superseded_generation_count: 1,
+            superseded_generation_bytes: StorageByteSizeV1(1_000),
+            collectable_generation_count: 0,
+            collectable_generation_bytes: StorageByteSizeV1(1),
         };
 
         assert!(record.validate().is_err());

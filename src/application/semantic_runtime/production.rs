@@ -44,7 +44,7 @@ use crate::query::retrieval::semantic::{
 use crate::retention::code_index_generations::{
     CodeGenerationRetentionModeV1, CodeGenerationRetentionReceiptV1,
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention,
-    plan_code_generation_retention,
+    plan_code_generation_retention, recover_code_generation_retention,
 };
 use crate::search_eval::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
 use crate::search_eval::pr10_native::{
@@ -251,6 +251,7 @@ impl ProductionSemanticRuntimeV1 {
         let plan_root = store_root.clone();
         let planned_sources = vector_readable_sources.clone();
         let plan = tokio::task::spawn_blocking(move || {
+            recover_code_generation_retention(&plan_root, &planned_sources)?;
             plan_code_generation_retention(
                 &plan_root,
                 &planned_sources,

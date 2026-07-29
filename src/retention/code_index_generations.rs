@@ -16,6 +16,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_application::{DirectorySyncPolicy, atomic_write};
 use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
 
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
@@ -23,10 +24,14 @@ pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
 const ACTIVE_POINTER_FILE: &str = "active-code-generation-v1.json";
 const GENERATIONS_DIRECTORY: &str = "code-generations-v1";
 const RECEIPTS_DIRECTORY: &str = "code-generation-retention-receipts-v1";
+const QUARANTINE_DIRECTORY: &str = ".code-generation-retention-quarantine-v1";
 const STORE_LOCK_FILE: &str = ".code-generation-retention.lock";
 const RECEIPT_SCHEMA: &str = "tracedecay.code-generation-retention-receipt.v1";
+const TRANSACTION_FILE: &str = ".code-generation-retention-transaction-v1.json";
+const TRANSACTION_SCHEMA: &str = "tracedecay.code-generation-retention-transaction.v1";
 const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 1;
 const MAX_GENERATION_METADATA_PREFIX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TRANSACTION_BYTES: u64 = 1024 * 1024;
 
 #[derive(Deserialize)]
 struct SealedGenerationManifestMetadataV1 {
@@ -113,6 +118,14 @@ pub struct CodeGenerationRetentionReceiptV1 {
     pub completed_at_micros: i64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CodeGenerationRetentionTransactionV1 {
+    schema: String,
+    active_pointer: DurablePublicationPointerV1,
+    receipt: CodeGenerationRetentionReceiptV1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeGenerationRetentionReportV1 {
     pub plan: CodeGenerationRetentionPlanV1,
@@ -161,6 +174,11 @@ pub fn plan_code_generation_retention(
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     rollback_floor: usize,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    if transaction_path(store_root).exists() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "code-generation retention recovery is pending".to_owned(),
+        ));
+    }
     let active_pointer = read_active_pointer(store_root)?;
     validate_generation_file(&active_pointer.generation_file)?;
     let active_generation_id = CodeGenerationId::new(active_pointer.generation_id.clone())
@@ -391,7 +409,7 @@ pub fn execute_code_generation_retention(
     mode: CodeGenerationRetentionModeV1,
     completed_at: UtcMicros,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
-    if mode == CodeGenerationRetentionModeV1::DryRun || plan.collectable_generations.is_empty() {
+    if mode == CodeGenerationRetentionModeV1::DryRun {
         return Ok(CodeGenerationRetentionReportV1 {
             plan,
             deleted_generations: Vec::new(),
@@ -399,7 +417,19 @@ pub fn execute_code_generation_retention(
         });
     }
 
+    let vector_readable_sources = plan.vector_readable_sources.clone();
+    let rollback_floor = plan.rollback_floor;
     let _store_lock = acquire_code_generation_store_lock(store_root)?;
+    recover_pending_transaction_unlocked(store_root, &vector_readable_sources)?;
+    let plan =
+        plan_code_generation_retention(store_root, &vector_readable_sources, rollback_floor)?;
+    if plan.collectable_generations.is_empty() {
+        return Ok(CodeGenerationRetentionReportV1 {
+            plan,
+            deleted_generations: Vec::new(),
+            receipt: None,
+        });
+    }
     if read_active_pointer(store_root)? != plan.active_pointer {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "active generation changed after the retention mark phase".to_owned(),
@@ -418,21 +448,47 @@ pub fn execute_code_generation_retention(
         }
     }
 
-    let mut deleted_generations = Vec::with_capacity(plan.collectable_generations.len());
-    for generation in &plan.collectable_generations {
-        std::fs::remove_file(generations_root.join(&generation.generation_file))
-            .map_err(storage)?;
-        deleted_generations.push(generation.clone());
-    }
-    sync_directory(&generations_root)?;
-
+    let deleted_generations = plan.collectable_generations.clone();
     let receipt = build_receipt(&plan, deleted_generations.clone(), completed_at)?;
-    write_receipt(store_root, &receipt)?;
+    let transaction = CodeGenerationRetentionTransactionV1 {
+        schema: TRANSACTION_SCHEMA.to_owned(),
+        active_pointer: plan.active_pointer.clone(),
+        receipt: receipt.clone(),
+    };
+    persist_transaction(store_root, &transaction)?;
+
+    let result = (|| {
+        stage_collectable_generations(store_root, &transaction)?;
+        if read_active_pointer(store_root)? != transaction.active_pointer {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "active generation changed while retention candidates were quarantined".to_owned(),
+            ));
+        }
+        write_receipt(store_root, &receipt)?;
+        cleanup_committed_transaction(store_root, &transaction, &vector_readable_sources)?;
+        clear_transaction(store_root)
+    })();
+    if let Err(error) = result {
+        if !receipt_is_durable(store_root, &receipt)? {
+            rollback_staged_transaction(store_root, &transaction)?;
+            clear_transaction(store_root)?;
+        }
+        return Err(error);
+    }
+
     Ok(CodeGenerationRetentionReportV1 {
         plan,
         deleted_generations,
         receipt: Some(receipt),
     })
+}
+
+pub fn recover_code_generation_retention(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let _store_lock = acquire_code_generation_store_lock(store_root)?;
+    recover_pending_transaction_unlocked(store_root, vector_readable_sources)
 }
 
 pub fn run_code_generation_retention(
@@ -442,6 +498,9 @@ pub fn run_code_generation_retention(
     mode: CodeGenerationRetentionModeV1,
     completed_at: UtcMicros,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
+    if mode == CodeGenerationRetentionModeV1::Apply {
+        recover_code_generation_retention(store_root, vector_readable_sources)?;
+    }
     let plan = plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?;
     execute_code_generation_retention(store_root, plan, mode, completed_at)
 }
@@ -499,6 +558,360 @@ pub fn observe_code_generation_retention(
         ));
     }
     Ok(observation)
+}
+
+fn recover_pending_transaction_unlocked(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let Some(transaction) = load_transaction(store_root)? else {
+        return Ok(());
+    };
+
+    if receipt_is_durable(store_root, &transaction.receipt)? {
+        cleanup_committed_transaction(store_root, &transaction, vector_readable_sources)?;
+    } else {
+        rollback_staged_transaction(store_root, &transaction)?;
+    }
+    clear_transaction(store_root)
+}
+
+fn transaction_path(store_root: &Path) -> PathBuf {
+    store_root.join(TRANSACTION_FILE)
+}
+
+fn transaction_stage_root(
+    store_root: &Path,
+    receipt: &CodeGenerationRetentionReceiptV1,
+) -> PathBuf {
+    store_root
+        .join(QUARANTINE_DIRECTORY)
+        .join(&receipt.receipt_digest)
+}
+
+fn persist_transaction(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    validate_transaction(transaction)?;
+    let bytes = serde_json::to_vec(transaction).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "retention transaction serialization failed: {error}"
+        ))
+    })?;
+    atomic_write(
+        &transaction_path(store_root),
+        "code-generation-retention-transaction",
+        &bytes,
+        DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(storage)
+}
+
+fn load_transaction(
+    store_root: &Path,
+) -> Result<Option<CodeGenerationRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
+    let path = transaction_path(store_root);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    };
+    if bytes.len() as u64 > MAX_TRANSACTION_BYTES {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "retention transaction '{}' exceeds the bounded journal size",
+            path.display()
+        )));
+    }
+    let transaction = serde_json::from_slice(&bytes).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "retention transaction '{}' is unreadable: {error}",
+            path.display()
+        ))
+    })?;
+    validate_transaction(&transaction)?;
+    Ok(Some(transaction))
+}
+
+fn validate_transaction(
+    transaction: &CodeGenerationRetentionTransactionV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if transaction.schema != TRANSACTION_SCHEMA || transaction.receipt.schema != RECEIPT_SCHEMA {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "retention transaction has an incompatible schema".to_owned(),
+        ));
+    }
+    if transaction.receipt.receipt_digest.len() != 64
+        || !transaction
+            .receipt
+            .receipt_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "retention transaction receipt digest is not a SHA-256 file component".to_owned(),
+        ));
+    }
+    validate_generation_file(&transaction.active_pointer.generation_file)?;
+    let pointer_generation = CodeGenerationId::new(
+        transaction.active_pointer.generation_id.clone(),
+    )
+    .map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "retention transaction active generation id is invalid: {error}"
+        ))
+    })?;
+    if pointer_generation != transaction.receipt.active_generation_id {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "retention transaction active pointer does not match its receipt".to_owned(),
+        ));
+    }
+    let mut generation_ids = BTreeSet::new();
+    let mut generation_files = BTreeSet::new();
+    for generation in &transaction.receipt.deleted_generations {
+        validate_generation_file(&generation.generation_file)?;
+        if !generation_ids.insert(generation.generation_id.clone())
+            || !generation_files.insert(generation.generation_file.clone())
+        {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "retention transaction has duplicate generation identities".to_owned(),
+            ));
+        }
+    }
+    if generation_ids.is_empty()
+        || generation_ids.contains(&transaction.receipt.active_generation_id)
+        || !transaction
+            .receipt
+            .vector_readable_sources
+            .is_disjoint(&generation_ids)
+        || transaction.receipt.reclaimed_bytes
+            != total_bytes(&transaction.receipt.deleted_generations)
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "retention transaction violates exact liveness or byte invariants".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn receipt_path(store_root: &Path, receipt: &CodeGenerationRetentionReceiptV1) -> PathBuf {
+    store_root
+        .join(RECEIPTS_DIRECTORY)
+        .join(format!("receipt-{}.json", receipt.receipt_digest))
+}
+
+fn receipt_bytes(
+    receipt: &CodeGenerationRetentionReceiptV1,
+) -> Result<Vec<u8>, CodeGenerationRetentionErrorV1> {
+    serde_json::to_vec(receipt).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "retention receipt serialization failed: {error}"
+        ))
+    })
+}
+
+fn receipt_is_durable(
+    store_root: &Path,
+    receipt: &CodeGenerationRetentionReceiptV1,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    let path = receipt_path(store_root, receipt);
+    if !regular_file_exists(&path)? {
+        return Ok(false);
+    }
+    let existing = std::fs::read(&path).map_err(storage)?;
+    if existing != receipt_bytes(receipt)? {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "retention receipt digest collides with different bytes".to_owned(),
+        ));
+    }
+    Ok(true)
+}
+
+fn stage_collectable_generations(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let generations_root = store_root.join(GENERATIONS_DIRECTORY);
+    let stage_root = transaction_stage_root(store_root, &transaction.receipt);
+    std::fs::create_dir_all(&stage_root).map_err(storage)?;
+    sync_directory(stage_root.parent().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState("retention quarantine has no parent".to_owned())
+    })?)?;
+
+    for generation in &transaction.receipt.deleted_generations {
+        let source = generations_root.join(&generation.generation_file);
+        let staged = stage_root.join(&generation.generation_file);
+        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
+            (true, false) => {
+                let metadata = std::fs::metadata(&source).map_err(storage)?;
+                if metadata.len() != generation.size_bytes {
+                    return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                        "collectable generation '{}' changed after the mark phase",
+                        generation.generation_file
+                    )));
+                }
+                std::fs::rename(&source, &staged).map_err(storage)?;
+                sync_directory(&generations_root)?;
+                sync_directory(&stage_root)?;
+            }
+            (false, false) => {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "collectable generation '{}' is missing before quarantine",
+                    generation.generation_file
+                )));
+            }
+            (false, true) => {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "collectable generation '{}' was already quarantined",
+                    generation.generation_file
+                )));
+            }
+            (true, true) => {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "collectable generation '{}' exists in both source and quarantine",
+                    generation.generation_file
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rollback_staged_transaction(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let generations_root = store_root.join(GENERATIONS_DIRECTORY);
+    let stage_root = transaction_stage_root(store_root, &transaction.receipt);
+    for generation in &transaction.receipt.deleted_generations {
+        let source = generations_root.join(&generation.generation_file);
+        let staged = stage_root.join(&generation.generation_file);
+        match (regular_file_exists(&source)?, regular_file_exists(&staged)?) {
+            (true, false) => {}
+            (false, true) => {
+                std::fs::rename(&staged, &source).map_err(storage)?;
+                sync_directory(&generations_root)?;
+                sync_directory(&stage_root)?;
+            }
+            (false, false) => {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "retention rollback cannot find '{}'",
+                    generation.generation_file
+                )));
+            }
+            (true, true) => {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "retention rollback found duplicate '{}'",
+                    generation.generation_file
+                )));
+            }
+        }
+    }
+    remove_empty_stage_root(&stage_root)
+}
+
+fn cleanup_committed_transaction(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    ensure_transaction_liveness(store_root, transaction, vector_readable_sources)?;
+    let generations_root = store_root.join(GENERATIONS_DIRECTORY);
+    let stage_root = transaction_stage_root(store_root, &transaction.receipt);
+    for generation in &transaction.receipt.deleted_generations {
+        let source = generations_root.join(&generation.generation_file);
+        if regular_file_exists(&source)? {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "retention receipt is durable but '{}' returned to the generation directory",
+                generation.generation_file
+            )));
+        }
+        let staged = stage_root.join(&generation.generation_file);
+        if regular_file_exists(&staged)? {
+            std::fs::remove_file(&staged).map_err(storage)?;
+            sync_directory(&stage_root)?;
+        }
+    }
+    remove_empty_stage_root(&stage_root)
+}
+
+fn ensure_transaction_liveness(
+    store_root: &Path,
+    transaction: &CodeGenerationRetentionTransactionV1,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let current = read_active_pointer(store_root)?;
+    let current_generation =
+        CodeGenerationId::new(current.generation_id.clone()).map_err(|error| {
+            CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "current active generation id is invalid during retention recovery: {error}"
+            ))
+        })?;
+    let deleted_ids = transaction
+        .receipt
+        .deleted_generations
+        .iter()
+        .map(|generation| generation.generation_id.clone())
+        .collect::<BTreeSet<_>>();
+    if deleted_ids.contains(&current_generation)
+        || transaction
+            .receipt
+            .deleted_generations
+            .iter()
+            .any(|generation| generation.generation_file == current.generation_file)
+        || !deleted_ids.is_disjoint(vector_readable_sources)
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "retention recovery would remove an active or vector-readable generation".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn clear_transaction(store_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let path = transaction_path(store_root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => sync_directory(store_root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+fn remove_empty_stage_root(stage_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let mut entries = match std::fs::read_dir(stage_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage(error)),
+    };
+    if entries.next().is_some() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "retention quarantine '{}' contains unexpected files",
+            stage_root.display()
+        )));
+    }
+    std::fs::remove_dir(stage_root).map_err(storage)?;
+    sync_directory(stage_root.parent().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState("retention quarantine has no parent".to_owned())
+    })?)
+}
+
+fn regular_file_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "retention path '{}' is not a regular file",
+            path.display()
+        ))),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(storage(error)),
+    }
 }
 
 fn read_active_pointer(
@@ -637,4 +1050,155 @@ fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {
 
 fn storage(error: impl std::fmt::Display) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::Storage(error.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct FixtureGeneration {
+        id: CodeGenerationId,
+        file: String,
+        state_digest: String,
+    }
+
+    fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
+        let store = tempfile::TempDir::new().expect("create generation store");
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        std::fs::create_dir_all(&generations_root).expect("create generation directory");
+        let mut generations = Vec::with_capacity(count);
+
+        for sequence in 0..count {
+            let generation_id =
+                CodeGenerationId::new(format!("generation.v1.fixture.{sequence:08}"))
+                    .expect("valid generation id");
+            let sealed_at = i64::try_from(sequence).expect("fixture sequence fits i64");
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "format_revision": SEALED_GENERATION_FORMAT_REVISION_V1,
+                "manifest": {
+                    "generation_id": generation_id.as_str(),
+                    "seal": { "sealed_at": sealed_at },
+                },
+                "chunks": [],
+            }))
+            .expect("serialize generation fixture");
+            let state_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+            let file = format!(
+                "generation-{}.json",
+                state_digest.strip_prefix("sha256:").expect("digest prefix")
+            );
+            std::fs::write(generations_root.join(&file), bytes).expect("write generation fixture");
+            generations.push(FixtureGeneration {
+                id: generation_id,
+                file,
+                state_digest,
+            });
+        }
+
+        let active = generations.last().expect("at least one generation");
+        let pointer = DurablePublicationPointerV1 {
+            generation_id: active.id.as_str().to_owned(),
+            snapshot_content_identity: "snapshot.fixture".to_owned(),
+            publication_digest: "sha256:publication".to_owned(),
+            sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
+            generation_file: active.file.clone(),
+            state_digest: active.state_digest.clone(),
+        };
+        std::fs::write(
+            store.path().join(ACTIVE_POINTER_FILE),
+            serde_json::to_vec(&pointer).expect("serialize active pointer"),
+        )
+        .expect("write active pointer");
+
+        (store, generations)
+    }
+
+    #[test]
+    fn apply_preserves_collectable_generations_when_receipt_commit_fails() {
+        let (store, _generations) = fixture_store(5);
+        let plan = plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("plan retention");
+        assert_eq!(plan.collectable_generations.len(), 1);
+        let collectable = plan.collectable_generations[0].clone();
+        let active_file = plan.active_generation_file().to_owned();
+        let rollback_files = plan
+            .superseded_generations
+            .iter()
+            .take(plan.rollback_floor)
+            .map(|generation| generation.generation_file.clone())
+            .collect::<Vec<_>>();
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+
+        std::fs::write(store.path().join(RECEIPTS_DIRECTORY), b"not a directory")
+            .expect("block receipt directory");
+        let error = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(100),
+        )
+        .expect_err("receipt commit must fail");
+
+        assert!(matches!(error, CodeGenerationRetentionErrorV1::Storage(_)));
+        assert!(
+            generations_root
+                .join(&collectable.generation_file)
+                .is_file(),
+            "a failed receipt commit must not unlink collectable evidence"
+        );
+        assert!(
+            generations_root.join(active_file).is_file(),
+            "retention must preserve the active generation"
+        );
+        for rollback_file in rollback_files {
+            assert!(
+                generations_root.join(rollback_file).is_file(),
+                "retention must preserve the rollback floor"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_restores_quarantined_generations_without_a_durable_receipt() {
+        let (store, _generations) = fixture_store(5);
+        let vector_readable_sources = BTreeSet::new();
+        let plan = plan_code_generation_retention(
+            store.path(),
+            &vector_readable_sources,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("plan retention");
+        let collectable = plan.collectable_generations[0].clone();
+        let receipt = build_receipt(&plan, plan.collectable_generations.clone(), UtcMicros(101))
+            .expect("build retention receipt");
+        let transaction = CodeGenerationRetentionTransactionV1 {
+            schema: TRANSACTION_SCHEMA.to_owned(),
+            active_pointer: plan.active_pointer.clone(),
+            receipt: receipt.clone(),
+        };
+        let generations_root = store.path().join(GENERATIONS_DIRECTORY);
+        let staged_root = transaction_stage_root(store.path(), &receipt);
+
+        persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+        stage_collectable_generations(store.path(), &transaction).expect("stage generation");
+        assert!(!generations_root.join(&collectable.generation_file).exists());
+        assert!(staged_root.join(&collectable.generation_file).is_file());
+
+        recover_code_generation_retention(store.path(), &vector_readable_sources)
+            .expect("recover uncommitted transaction");
+
+        assert!(
+            generations_root
+                .join(&collectable.generation_file)
+                .is_file()
+        );
+        assert!(!transaction_path(store.path()).exists());
+        assert!(!staged_root.exists());
+    }
 }

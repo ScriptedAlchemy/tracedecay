@@ -403,10 +403,22 @@ fn append_project_report(
     {
         return Ok(());
     }
-    if generation_digest_scan_exceeds_budget(
+    let digest_scan_exceeds_budget = match generation_digest_scan_exceeds_budget(
         &code_index_store_root,
         CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES,
-    )? {
+    ) {
+        Ok(exceeds_budget) => exceeds_budget,
+        Err(_) => {
+            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+                project_id: project_id.to_owned(),
+                store_root: code_index_store_root.display().to_string(),
+                state: StorageReportAvailabilityState::Unavailable,
+                reason: Some("generation_retention_scan_unavailable".to_owned()),
+            });
+            return Ok(());
+        }
+    };
+    if digest_scan_exceeds_budget {
         code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
             project_id: project_id.to_owned(),
             store_root: code_index_store_root.display().to_string(),
@@ -415,17 +427,36 @@ fn append_project_report(
         });
         return Ok(());
     }
-    let readable_sources =
-        crate::store::vector_generations::retained_readable_sources_from_read_only_project_store(
+    let readable_sources = match crate::store::vector_generations::retained_readable_sources_from_read_only_project_store(
             &data_root,
-        )
-        .map_err(|error| report_error("read vector-readable code generations", error))?;
-    let plan = plan_code_generation_retention(
+        ) {
+        Ok(readable_sources) => readable_sources,
+        Err(_) => {
+            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+                project_id: project_id.to_owned(),
+                store_root: code_index_store_root.display().to_string(),
+                state: StorageReportAvailabilityState::Unavailable,
+                reason: Some("generation_retention_liveness_unavailable".to_owned()),
+            });
+            return Ok(());
+        }
+    };
+    let plan = match plan_code_generation_retention(
         &code_index_store_root,
         &readable_sources,
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .map_err(|error| report_error("plan code-generation retention", error))?;
+    ) {
+        Ok(plan) => plan,
+        Err(_) => {
+            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+                project_id: project_id.to_owned(),
+                store_root: code_index_store_root.display().to_string(),
+                state: StorageReportAvailabilityState::Unavailable,
+                reason: Some("generation_retention_plan_unavailable".to_owned()),
+            });
+            return Ok(());
+        }
+    };
     code_generation_retention.push(CodeGenerationRetentionDryRunEntry {
         project_id: project_id.to_owned(),
         store_root: code_index_store_root.display().to_string(),
@@ -776,6 +807,43 @@ mod tests {
         assert_eq!(report.stores[0].canonical_root, "/repos/a");
         assert!(report.code_generation_retention.is_empty());
         assert!(!profile_root.join(GLOBAL_DB_FILENAME).exists());
+    }
+
+    #[test]
+    fn unreadable_generation_retention_is_typed_unavailable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_graph_db(&profile_root, "proj_a");
+        let canonical_root = Path::new("/repos/a");
+        let data_root = profile_root.join("projects").join("proj_a");
+        let store_root =
+            scoped_code_index_store_root(&data_root.join("code-index-v1"), canonical_root);
+        std::fs::create_dir_all(store_root.join(CODE_GENERATIONS_DIRECTORY)).unwrap();
+        std::fs::write(store_root.join("active-code-generation-v1.json"), b"{}").unwrap();
+
+        let report = build_project_storage_report(&profile_root, "proj_a", canonical_root).unwrap();
+
+        assert!(report.code_generation_retention.is_empty());
+        let availability = report
+            .code_generation_retention_availability
+            .first()
+            .expect("unavailable retention state");
+        assert_eq!(
+            availability.project_id, "proj_a",
+            "the unavailable state must name its owning project"
+        );
+        assert_eq!(availability.store_root, store_root.display().to_string());
+        assert_eq!(
+            availability.state,
+            StorageReportAvailabilityState::Unavailable
+        );
+        assert!(
+            availability
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.ends_with("_unavailable"))
+        );
     }
 
     #[test]
