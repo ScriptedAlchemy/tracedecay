@@ -18,6 +18,7 @@ pub mod feedback;
 pub mod framed_log;
 pub mod git;
 pub mod handlers;
+pub mod invocation;
 pub mod lsp_context_catalog;
 pub mod memory;
 pub mod observability;
@@ -108,6 +109,12 @@ pub use git::{
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
+};
+pub use invocation::{
+    ApplicationInvocation, ApplicationInvocationBinding, ApplicationInvocationContext,
+    ApplicationInvocationExecutor, ApplicationInvocationFuture, ApplicationRequest,
+    ApplicationResponse, ApplicationStream, ApplicationStreamResponse, InvocationCancellation,
+    InvocationError, InvocationTarget,
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use memory::{
