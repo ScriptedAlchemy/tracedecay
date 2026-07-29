@@ -5942,6 +5942,13 @@ async fn production_project_server(
                 } else {
                     (false, None)
                 };
+                // The retained core owns preview-only source editing and never
+                // receives the full server's Git mutation authority. Once the
+                // upgrade fails, its mutation lane must become terminal rather
+                // than remaining in a warming state forever.
+                if let Some(mutation) = &core_source_edit_mutation {
+                    mutation.mark_failed();
+                }
                 if core_retained {
                     if let Some(failed_full_server) = failed_full_server {
                         failed_full_server.revoke_project_server_responses();
@@ -5966,11 +5973,6 @@ async fn production_project_server(
                         ],
                     );
                 } else {
-                    // The core preview lane cannot remain warming once its
-                    // published owner is being retired.
-                    if let Some(mutation) = &core_source_edit_mutation {
-                        mutation.mark_failed();
-                    }
                     let mut removed = {
                         let mut servers = store_administration.project_servers().lock().await;
                         if quarantine_on_upgrade_failure.load(Ordering::Acquire) {
