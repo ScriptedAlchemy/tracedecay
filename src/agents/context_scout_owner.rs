@@ -37,6 +37,8 @@ pub(crate) type ProjectScoutRuntime = ContextScoutDurableRuntimeV1<
     Arc<dyn ContextScoutModelAssistantV1>,
 >;
 
+type ProjectContextScoutOwnerRegistry = BTreeMap<[u8; 16], Vec<Weak<ProjectContextScoutOwnerV1>>>;
+
 pub struct ProjectContextScoutOwnerV1 {
     store: Arc<ProjectContextScoutDurableStoreV1>,
     runtime: Mutex<ProjectScoutRuntime>,
@@ -46,10 +48,8 @@ pub struct ProjectContextScoutOwnerV1 {
     startup: ContextScoutDurableStartupOutcomeV1,
 }
 
-fn registered_context_scout_owners()
--> &'static StdMutex<BTreeMap<[u8; 16], Vec<Weak<ProjectContextScoutOwnerV1>>>> {
-    static OWNERS: OnceLock<StdMutex<BTreeMap<[u8; 16], Vec<Weak<ProjectContextScoutOwnerV1>>>>> =
-        OnceLock::new();
+fn registered_context_scout_owners() -> &'static StdMutex<ProjectContextScoutOwnerRegistry> {
+    static OWNERS: OnceLock<StdMutex<ProjectContextScoutOwnerRegistry>> = OnceLock::new();
     OWNERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
