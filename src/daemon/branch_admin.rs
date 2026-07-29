@@ -885,6 +885,23 @@ impl StoreAdministration {
         operation().await
     }
 
+    /// Runs an operator-facing writer operation only when it can acquire the
+    /// administration lane immediately. Destructive commands must report busy
+    /// instead of silently queuing behind project warm-up.
+    async fn try_with_writer<Operation, OperationFuture, Output>(
+        &self,
+        operation: Operation,
+    ) -> Option<Output>
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = Output>,
+    {
+        let writer = self.gate.try_lock().ok()?;
+        let output = operation().await;
+        drop(writer);
+        Some(output)
+    }
+
     /// Cancels while queued for writer administration, then lets an admitted
     /// operation finish its transactionally safe unit before releasing it.
     pub(super) async fn with_writer_until_cancelled<Operation, OperationFuture, Output>(
@@ -972,7 +989,7 @@ impl StoreAdministration {
         branch_gc_days: u64,
         orphan_db_gc_days: u64,
     ) -> Result<crate::branch::BranchAdminReport> {
-        self.with_writer(|| async {
+        self.try_with_writer(|| async {
             if let Some(recovery) =
                 crate::branch::prepare_pending_branch_admin_recovery(data_root)?
             {
@@ -1115,6 +1132,11 @@ impl StoreAdministration {
             )
         })
         .await
+        .unwrap_or_else(|| {
+            Err(TraceDecayError::Config {
+                message: "branch store administration is busy: another daemon writer is active; retry after current project maintenance finishes".to_owned(),
+            })
+        })
     }
 }
 
@@ -1284,6 +1306,18 @@ pub(super) async fn write_branch_admin_response(
 mod tests {
     use super::super::{ProjectRouteKey, StoreOwnerKey};
     use super::*;
+
+    #[tokio::test]
+    async fn destructive_writer_operation_fails_fast_while_lane_is_busy() {
+        let administration = StoreAdministration::default();
+        let _writer = administration.gate.lock().await;
+
+        let outcome = administration
+            .try_with_writer(|| async { "unexpected admission" })
+            .await;
+
+        assert!(outcome.is_none());
+    }
 
     #[tokio::test]
     async fn unavailable_spool_does_not_block_unrelated_database_authority() {
