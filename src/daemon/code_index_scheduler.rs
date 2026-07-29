@@ -754,6 +754,10 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// signature is unchanged resets the staleness clock without paying the
     /// O(repo) read+hash capture.
     last_stat_signature: Option<String>,
+    /// A restored generation has not yet been reconciled against the current
+    /// worktree bytes. It may remain available for rollback/history, but
+    /// request admission must fail closed and schedule background truth.
+    freshness_unknown: bool,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     /// Keeps the current snapshot's interned bytes alive in the shared pool.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
@@ -838,6 +842,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ));
             }
         }
+        let freshness_unknown = restored.is_some();
         let latest_content_identity = restored
             .as_ref()
             .map(|generation| generation.snapshot().content_identity.clone());
@@ -854,6 +859,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             last_reconciled_at: Instant::now(),
             last_reconciled_at_micros: now_micros().0,
             last_stat_signature: None,
+            freshness_unknown,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
             publication,
@@ -894,6 +900,21 @@ impl CodeIndexWorktreeSchedulerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
+        DaemonCodeIndexControlV1::advance(&self.epoch);
+        self.wake.notify_one();
+    }
+
+    fn request_background_reconcile(&self) {
+        {
+            let mut hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hints.overflow();
+        }
+        // `Notify` already coalesces stored permits. Always refresh the permit:
+        // a prior worker may have consumed its wake and then failed before
+        // draining this overflow marker.
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
@@ -1057,8 +1078,40 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) {
         self.git_metadata = metadata;
         self.last_stat_signature = signature;
+        self.freshness_unknown = false;
         self.last_reconciled_at = Instant::now();
         self.last_reconciled_at_micros = now_micros().0;
+    }
+
+    /// Admit only already-current immutable evidence. Expensive truth capture
+    /// and generation publication belong to the background worker; a request
+    /// that detects stale or unproven state schedules that worker and abstains.
+    fn latest_complete_ready_for_query(
+        &mut self,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        if self.freshness_unknown
+            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+                .differs_from(&self.git_metadata)
+        {
+            self.request_background_reconcile();
+            return Ok(None);
+        }
+        if self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold {
+            match self.worktree_stat_signature() {
+                Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
+                    self.last_reconciled_at = Instant::now();
+                    self.last_reconciled_at_micros = now_micros().0;
+                }
+                _ => {
+                    self.request_background_reconcile();
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(self.latest_complete())
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source

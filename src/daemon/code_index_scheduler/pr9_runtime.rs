@@ -268,7 +268,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .map_err(|error| Pr9SearchExecutionErrorV1::InvalidScope(error.to_string()))?;
         validate_search_policy(&input)?;
         let latest = self
-            .latest_complete_fresh_for_scope(scope)
+            .latest_complete_ready_for_scope(scope)
             .await
             .ok_or(Pr9SearchExecutionErrorV1::GenerationUnavailable)?;
         let authority = self

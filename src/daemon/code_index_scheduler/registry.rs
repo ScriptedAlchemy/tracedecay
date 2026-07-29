@@ -643,6 +643,54 @@ impl CodeIndexSchedulerRegistryV1 {
         Some(latest)
     }
 
+    /// Query-admission entry point for latency-sensitive application paths.
+    /// It serves only a generation whose freshness is already proven; stale,
+    /// restored-unverified, or busy schedulers abstain after scheduling the
+    /// background worker instead of reconciling on the caller.
+    pub async fn latest_complete_ready(
+        &self,
+        project_root: &Path,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (scheduler, serving_generation) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.serving_generation),
+            )
+        };
+        let latest = tokio::task::spawn_blocking(move || {
+            let mut scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return None,
+            };
+            let latest = scheduler.latest_complete_ready_for_query().ok().flatten()?;
+            *serving_generation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+            Some(latest)
+        })
+        .await
+        .ok()
+        .flatten()?;
+        if let Ok(authority) = latest.test_attribution_authority() {
+            let mut authorities = self
+                .test_attribution_authorities
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authorities.insert(
+                project_root,
+                (
+                    latest.generation.manifest().generation_id.clone(),
+                    authority,
+                ),
+            );
+        }
+        Some(latest)
+    }
+
     /// Resolve one mounted root by the exact admitted repository/worktree/ref
     /// scope, then run that root's freshness ladder. A request never inherits
     /// whichever mounted worktree sorts first.
@@ -671,6 +719,30 @@ impl CodeIndexSchedulerRegistryV1 {
         } else {
             None
         }
+    }
+
+    /// Resolve one exact scope and admit only an already-current generation.
+    pub async fn latest_complete_ready_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let root = {
+            let mounted = self.mounted.lock().await;
+            let mut matched = None;
+            for (root, worktree) in mounted.iter() {
+                if worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+                {
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(root.clone());
+                }
+            }
+            matched?
+        };
+        let latest = self.latest_complete_ready(&root).await?;
+        Self::latest_matches_scope(&latest, scope).then_some(latest)
     }
 
     pub(in crate::daemon) async fn semantic_evaluation_snapshot_for_scope(
@@ -772,7 +844,7 @@ impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentI
                     "feedback-code-index-root-unavailable",
                 )
             })?;
-            let current = registry.latest_complete_fresh(&root).await.ok_or_else(|| {
+            let current = registry.latest_complete_ready(&root).await.ok_or_else(|| {
                 crate::daemon::lsp_gateway::LspRuntimeFailure::new(
                     "feedback-code-index-generation-unavailable",
                 )
@@ -844,7 +916,7 @@ impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
         let registry = self.clone();
         Box::pin(async move {
             let root = project_root.canonicalize().ok()?;
-            let current = registry.latest_complete_fresh(&root).await?;
+            let current = registry.latest_complete_ready(&root).await?;
             let snapshot = current.generation.snapshot();
             Some(
                 crate::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
@@ -925,7 +997,7 @@ impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     "lsp-code-index-root-unavailable",
                 )
             })?;
-            let current = registry.latest_complete_fresh(&root).await.ok_or_else(|| {
+            let current = registry.latest_complete_ready(&root).await.ok_or_else(|| {
                 crate::daemon::lsp_gateway::LspRuntimeFailure::new(
                     "lsp-code-index-generation-unavailable",
                 )
