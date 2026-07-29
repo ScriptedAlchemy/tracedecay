@@ -1,8 +1,5 @@
 //! Schema-shape introspection probes and the payload-bearing assertion-header
 //! scrub used during V20 upgrades.
-//!
-//! Split out of the former single-file `schema` module as a pure mechanical
-//! move; contents are unchanged.
 
 use serde_json::{Value, json};
 

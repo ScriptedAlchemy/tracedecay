@@ -1,7 +1,4 @@
 //! Versioned schema upgrade and fresh-install entry points (V20..V23).
-//!
-//! Split out of the former single-file `schema` module as a pure mechanical
-//! move; contents are unchanged.
 
 use crate::errors::Result;
 

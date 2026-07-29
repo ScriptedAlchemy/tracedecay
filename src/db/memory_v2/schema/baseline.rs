@@ -1,7 +1,4 @@
 //! V19 additive baseline schema installer.
-//!
-//! Split out of the former single-file `schema` module as a pure mechanical
-//! move; contents are unchanged.
 
 use crate::errors::Result;
 

@@ -1,9 +1,7 @@
 //! Owner-scoped V2 fact-lineage row writers.
 //!
-//! This module was split from a single 1225-line `writers.rs` into focused
-//! submodules along writer-family boundaries. The moves are purely mechanical:
-//! no SQL, string, or behavior changed. Re-exports below preserve every
-//! `writers::` path relied on by the rest of `memory_v2`.
+//! Re-exports below preserve every `writers::` path relied on by the rest of
+//! `memory_v2`.
 
 mod compatibility_bank;
 mod lineage;
