@@ -3,7 +3,7 @@ import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
-import { Legend, Meter, Readout } from '../../ui/instrument.tsx';
+import { Meter, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';

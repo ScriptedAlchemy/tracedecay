@@ -38,7 +38,6 @@ export const schedulerStatusUrl = '/api/automation/scheduler/status';
  * dropped response cannot toggle something twice.
  */
 export function setSchedulerPaused(
-  paused: boolean,
   url: string,
 ): Promise<LegacyResult<AutomationSchedulerStatusV1>> {
   return fetchLegacy(url, AutomationSchedulerStatusV1Schema, { method: 'POST' });
@@ -59,7 +58,6 @@ export function useSchedulerControl() {
   return useMutation({
     mutationFn: (paused: boolean) =>
       setSchedulerPaused(
-        paused,
         scopedUrl(scope, `/api/automation/scheduler/${paused ? 'pause' : 'resume'}`),
       ),
     onSuccess: (result) => {
