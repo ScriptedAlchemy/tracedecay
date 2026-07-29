@@ -2,7 +2,7 @@
 //!
 //! Session backfill/query logic depends on the port; this module owns the
 //! concrete registered-database binding, authority checks, and high-level
-//! façade methods previously inlined on `RegisteredGlobalDb`.
+//! façade methods.
 
 use std::future::Future;
 
