@@ -25,6 +25,7 @@ use std::time::UNIX_EPOCH;
 use tracedecay_capture::kiro::{
     KiroSnapshotMessage, snapshot_native_payload, stable_message_id as stable_kiro_message_id,
 };
+use tracedecay_sessions::decode_kiro_workspace_path;
 
 use crate::application::host_admission::HostAdmissionFacade;
 #[cfg(test)]
@@ -292,7 +293,7 @@ fn collect_user_workspace_session_files(
                 return None;
             }
             let workspace =
-                decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())?;
+                decode_kiro_workspace_path(entry.file_name().to_string_lossy().as_ref())?;
             if registered_roots
                 .iter()
                 .any(|root| path_belongs_to_project(&workspace, root))
@@ -425,7 +426,7 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
             continue;
         }
         let Some(workspace) =
-            decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())
+            decode_kiro_workspace_path(entry.file_name().to_string_lossy().as_ref())
         else {
             continue;
         };
@@ -615,7 +616,7 @@ fn workspace_from_sessions_path(path: &Path) -> Option<PathBuf> {
         .iter()
         .position(|component| component.as_os_str() == "workspace-sessions")?;
     let encoded = components.get(idx + 1)?.as_os_str().to_str()?;
-    decode_workspace_sessions_dir(encoded)
+    decode_kiro_workspace_path(encoded)
 }
 
 fn workspace_hash_from_path(path: &Path) -> Option<String> {
@@ -711,47 +712,6 @@ fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
 )]
 fn pathbuf_from_decoded_bytes(bytes: Vec<u8>) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-fn decode_workspace_sessions_dir(name: &str) -> Option<PathBuf> {
-    let trimmed = name.trim_end_matches('_');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut padded = trimmed.replace('-', "+").replace('_', "/");
-    let rem = padded.len() % 4;
-    if rem > 0 {
-        padded.push_str(&"=".repeat(4 - rem));
-    }
-    let decoded = base64_decode(&padded)?;
-    let path = String::from_utf8(decoded).ok()?;
-    let path = path.trim();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
-}
-
-fn base64_decode(input: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::new();
-    let mut buf = 0_u32;
-    let mut bits = 0_u32;
-    for byte in input.bytes() {
-        if byte == b'=' {
-            break;
-        }
-        let val = TABLE.iter().position(|&c| c == byte)? as u32;
-        buf = (buf << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
 }
 
 fn session_id_from_transcript(path: &Path, value: &Value) -> String {

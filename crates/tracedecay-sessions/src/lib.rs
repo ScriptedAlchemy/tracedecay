@@ -16,6 +16,7 @@ pub use authorization::{
 pub use ingest::{NewRows, StoredCursor, TranscriptIngestStats};
 pub use provider::{
     EXPECTED_MESSAGE_SEARCH_PROVIDER, MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider,
+    decode_kiro_workspace_path,
 };
 pub use workflow::{
     WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError,
