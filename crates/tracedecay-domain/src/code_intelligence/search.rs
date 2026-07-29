@@ -634,21 +634,6 @@ pub struct CodeSearchChunkV1 {
     pub sanitized_text: BoundedSanitizedText,
 }
 
-/// Type-state boundary for chunks re-admitted by parser-backed extraction.
-///
-/// Consumers may accept this contract without depending on the concrete
-/// extraction engine. Implementations remain owned by that engine and return
-/// the native domain chunk after their authority checks have succeeded.
-///
-/// # Safety
-///
-/// Implementors must only wrap chunks whose authority-sensitive exact terms
-/// were produced or revalidated by parser-backed extraction. Implementing this
-/// trait for untrusted chunks can admit forged exact-index evidence.
-pub unsafe trait ExtractionAdmittedChunkV1 {
-    fn into_admitted_chunk(self) -> CodeSearchChunkV1;
-}
-
 impl<'de> Deserialize<'de> for CodeSearchChunkV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

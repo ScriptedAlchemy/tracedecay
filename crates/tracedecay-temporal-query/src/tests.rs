@@ -30,7 +30,7 @@ use super::resolution::types::{
     ResolutionAssertion, ResolutionEvidence, ResolutionOccurrence, ValidatedAuthorization,
 };
 use super::{TemporalKernelError, TemporalKernelRequest, execute_temporal_kernel};
-use crate::test_support::block_on;
+use crate::temporal::test_support::block_on;
 
 struct FakeReadPort {
     candidates: Vec<RankingCandidate>,

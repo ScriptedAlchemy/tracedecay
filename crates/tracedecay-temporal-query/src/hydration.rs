@@ -301,12 +301,12 @@ mod tests {
     };
 
     use super::*;
-    use crate::ports::{
+    use crate::temporal::ports::{
         BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions,
         TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
     };
-    use crate::resolution::types::ValidatedAuthorization;
-    use crate::test_support::block_on;
+    use crate::temporal::resolution::types::ValidatedAuthorization;
+    use crate::temporal::test_support::block_on;
 
     fn anchor(value: &str) -> RetrievalAnchorId {
         serde_json::from_str(&format!("\"{value}\"")).expect("valid anchor")
