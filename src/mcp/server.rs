@@ -545,6 +545,9 @@ pub struct McpServer {
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    /// Daemon-owned route liveness. A failed post-open health check revokes
+    /// every tool on retained transports before cache retirement can await.
+    project_server_live: Option<Arc<AtomicBool>>,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -853,6 +856,7 @@ impl McpServer {
             retained_project_graph_resolver,
             project_routes,
             application_invocation_executor,
+            project_server_live,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
@@ -1088,6 +1092,7 @@ impl McpServer {
             connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
             application_surface_client: tokio::sync::OnceCell::new(),
             application_invocation_executor,
+            project_server_live,
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 
