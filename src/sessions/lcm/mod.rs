@@ -56,7 +56,6 @@ pub use types::{
 };
 
 pub use gc::LcmGcReport;
-pub(crate) use retention::run_session_retention;
 pub use retention::{
     LcmRetentionConfig, LcmRetentionPhaseReport, LcmRetentionReport, RetentionMode,
 };
