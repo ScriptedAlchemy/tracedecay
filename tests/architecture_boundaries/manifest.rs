@@ -72,6 +72,16 @@ const CONTRACT_PACKAGE_ALLOWLISTS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "crates/tracedecay-capture/Cargo.toml",
+        &[
+            "hex",
+            "serde_json",
+            "sha2",
+            "thiserror",
+            "tracedecay-domain",
+        ],
+    ),
+    (
         "crates/tracedecay-code-index/Cargo.toml",
         &[
             "ast-grep-core",
@@ -104,6 +114,17 @@ const CONTRACT_PACKAGE_ALLOWLISTS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "crates/tracedecay-host-integration/Cargo.toml",
+        &[
+            "schemars",
+            "serde",
+            "serde_json",
+            "sha2",
+            "thiserror",
+            "tracedecay-domain",
+        ],
+    ),
+    (
         "crates/tracedecay-hooks/Cargo.toml",
         &[
             "serde",
@@ -113,11 +134,28 @@ const CONTRACT_PACKAGE_ALLOWLISTS: &[(&str, &[&str])] = &[
             "tracedecay-domain",
         ],
     ),
-    // The stdio LSP bridge frames opaque payload bytes with the standard
-    // library alone. An empty allowlist is the contract, not an omission:
-    // adding any dependency — including a serialization or LSP model crate —
-    // requires a decision recorded here.
-    ("crates/tracedecay-lsp/Cargo.toml", &[]),
+    // The LSP package models protocol and session values, so it may serialize
+    // and name documents. It must never gain a store, driver, transport, or
+    // runtime: those would move gateway decisions behind the adapter boundary.
+    // The stdio bridge inside it is held to the stricter byte-level contract by
+    // `dependency_boundaries::lsp_bridge_package_owns_only_stdio_framing_authority`,
+    // which forbids the payload parsing this package-level list permits.
+    (
+        "crates/tracedecay-lsp/Cargo.toml",
+        &["serde", "serde_json", "tracedecay-domain", "url"],
+    ),
+    // Migration planning stays database-independent: it reaches persistence
+    // through `tracedecay-store` contracts and must never allowlist a driver.
+    (
+        "crates/tracedecay-migrate/Cargo.toml",
+        &[
+            "serde",
+            "serde_json",
+            "tempfile",
+            "tracedecay-domain",
+            "tracedecay-store",
+        ],
+    ),
     (
         "crates/tracedecay-policy/Cargo.toml",
         &["serde", "serde_json", "tracedecay-domain"],
