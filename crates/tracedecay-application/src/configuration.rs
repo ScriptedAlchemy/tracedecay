@@ -4,6 +4,10 @@
 //! the reviewed operation identities, schemas, and surface bindings beside the
 //! application feature without importing a transport or persistence adapter.
 
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::configuration::{
+    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
+};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
@@ -21,6 +25,25 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
+
+/// Typed input for the first configuration read migrated through the daemon
+/// invocation boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationGetRequestV1 {
+    pub key: SettingKey,
+}
+
+/// Typed revision-CAS input for the first configuration write migrated through
+/// the daemon invocation boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationSetRequestV1 {
+    pub layer: ConfigurationLayerIdV1,
+    pub key: SettingKey,
+    pub value: ConfigurationValueV1,
+    pub expected_revision: ConfigurationRevisionId,
+}
 
 struct ConfigurationSurfaceSpec {
     name: &'static str,
@@ -463,5 +486,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             CONFIGURATION_SURFACE_OPERATION_NAMES
         );
+    }
+
+    #[test]
+    fn invocation_requests_keep_configuration_read_and_cas_inputs_typed() {
+        let get = ConfigurationGetRequestV1 {
+            key: tracedecay_domain::configuration::SettingKey::new("mcp.tool_timings").unwrap(),
+        };
+        let set = ConfigurationSetRequestV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
+            key: get.key.clone(),
+            value: tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+            expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId::new(
+                "revision.configuration-test",
+            )
+            .unwrap(),
+        };
+
+        assert_eq!(get.key, set.key);
+        assert!(matches!(
+            set.value,
+            tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true)
+        ));
     }
 }

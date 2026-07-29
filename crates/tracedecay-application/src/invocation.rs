@@ -9,7 +9,7 @@ use std::pin::Pin;
 
 use serde_json::Value;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
-use tracedecay_tool_catalog::{BindingId, SurfaceOperationName};
+use tracedecay_tool_catalog::{BindingId, BindingSurface, SurfaceOperationName};
 
 use crate::context::{CancellationSignal, Deadline, RequestId, ResolvedScope};
 use crate::error::ApplicationContractError;
@@ -36,6 +36,7 @@ impl InvocationTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationInvocationBinding {
     binding_id: BindingId,
+    surface: BindingSurface,
     operation: SurfaceOperationName,
     result_contract: ResultContractRef,
     page: PageRequest,
@@ -44,12 +45,14 @@ pub struct ApplicationInvocationBinding {
 impl ApplicationInvocationBinding {
     pub fn new(
         binding_id: BindingId,
+        surface: BindingSurface,
         operation: SurfaceOperationName,
         result_contract: ResultContractRef,
         page: PageRequest,
     ) -> Result<Self, ApplicationContractError> {
         Ok(Self {
             binding_id,
+            surface,
             operation,
             result_contract,
             page,
@@ -58,6 +61,10 @@ impl ApplicationInvocationBinding {
 
     pub fn binding_id(&self) -> &BindingId {
         &self.binding_id
+    }
+
+    pub const fn surface(&self) -> BindingSurface {
+        self.surface
     }
 
     pub fn operation(&self) -> &SurfaceOperationName {
@@ -70,6 +77,24 @@ impl ApplicationInvocationBinding {
 
     pub fn page(&self) -> &PageRequest {
         &self.page
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        BindingId,
+        BindingSurface,
+        SurfaceOperationName,
+        ResultContractRef,
+        PageRequest,
+    ) {
+        (
+            self.binding_id,
+            self.surface,
+            self.operation,
+            self.result_contract,
+            self.page,
+        )
     }
 }
 
@@ -111,6 +136,15 @@ impl ApplicationInvocationContext {
 
     pub fn cancellation(&self) -> &CancellationSignal {
         &self.cancellation
+    }
+
+    pub fn into_parts(self) -> (RequestId, InvocationTarget, Deadline, CancellationSignal) {
+        (
+            self.request_id,
+            self.target,
+            self.deadline,
+            self.cancellation,
+        )
     }
 }
 
@@ -254,6 +288,10 @@ impl ApplicationInvocation {
     pub fn request(&self) -> &ApplicationRequest {
         &self.request
     }
+
+    pub fn into_parts(self) -> (ApplicationInvocationContext, ApplicationRequest) {
+        (self.context, self.request)
+    }
 }
 
 /// Non-disclosing invocation failure.
@@ -279,17 +317,12 @@ impl From<ApplicationProblem> for InvocationError {
     }
 }
 
-/// Successful non-stream application response.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ApplicationResponse {
-    pub envelope: ApplicationEnvelope<Value>,
-}
-
 /// Stream page for an in-flight operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApplicationStream {
     pub operation_id: RequestId,
-    pub events: Vec<Value>,
+    pub events: Vec<crate::StreamEvent<Value>>,
+    pub frontier: crate::StreamFrontier,
     pub next_sequence: Option<u64>,
     pub terminated: bool,
 }
@@ -307,6 +340,30 @@ pub struct InvocationCancellation {
     pub cancelled: bool,
 }
 
+/// Closed successful responses from the invocation executor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApplicationResponse {
+    Unary {
+        envelope: ApplicationEnvelope<Value>,
+    },
+    Stream(ApplicationStreamResponse),
+    Cancellation(InvocationCancellation),
+    ObservationAccepted,
+}
+
+impl ApplicationResponse {
+    pub fn unary(envelope: ApplicationEnvelope<Value>) -> Self {
+        Self::Unary { envelope }
+    }
+
+    pub fn envelope(&self) -> Option<&ApplicationEnvelope<Value>> {
+        match self {
+            Self::Unary { envelope } => Some(envelope),
+            Self::Stream(_) | Self::Cancellation(_) | Self::ObservationAccepted => None,
+        }
+    }
+}
+
 pub type ApplicationInvocationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// One canonical invoke path for every adapter surface.
@@ -319,22 +376,21 @@ pub trait ApplicationInvocationExecutor: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use serde_json::json;
     use tracedecay_domain::{
         ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
     };
-    use tracedecay_tool_catalog::{BindingId, SchemaId, SurfaceOperationName};
+    use tracedecay_tool_catalog::{BindingId, BindingSurface, SchemaId, SurfaceOperationName};
 
     use crate::{
         CancellationSignal, Deadline, OpaqueCursor, PageRequest, RequestId, ResolvedScope,
-        ResultContractRef,
+        ResultContractRef, StreamFrontier,
     };
 
     use super::{
         ApplicationInvocation, ApplicationInvocationBinding, ApplicationInvocationContext,
-        ApplicationRequest, InvocationTarget,
+        ApplicationRequest, ApplicationResponse, ApplicationStream, ApplicationStreamResponse,
+        InvocationCancellation, InvocationTarget,
     };
 
     fn scope() -> ResolvedScope {
@@ -350,6 +406,7 @@ mod tests {
     fn binding(operation: &str) -> ApplicationInvocationBinding {
         ApplicationInvocationBinding::new(
             BindingId::new(format!("binding.mcp.{operation}.v1")).unwrap(),
+            BindingSurface::Mcp,
             SurfaceOperationName::new(operation).unwrap(),
             ResultContractRef::new(
                 SchemaId::new(format!("schema.application.{operation}.result")).unwrap(),
@@ -404,6 +461,7 @@ mod tests {
         .unwrap();
 
         let binding = invocation.request().binding().unwrap();
+        assert_eq!(binding.surface(), BindingSurface::Mcp);
         assert_eq!(binding.operation().as_str(), "configuration_get");
         assert_eq!(
             invocation.request().surface_payload(),
@@ -415,12 +473,52 @@ mod tests {
     fn stream_and_cancellation_requests_are_closed_contract_variants() {
         let operation_id = RequestId::new("request.originating-operation").unwrap();
         let stream = ApplicationRequest::operation_events(operation_id.clone(), 4, None).unwrap();
-        let cancellation = ApplicationRequest::operation_cancel(operation_id).unwrap();
+        let cancellation = ApplicationRequest::operation_cancel(operation_id.clone()).unwrap();
 
         assert!(stream.binding().is_none());
         assert!(cancellation.binding().is_none());
         assert!(stream.is_stream());
         assert!(cancellation.is_cancellation());
+        let stream_response = ApplicationResponse::Stream(ApplicationStreamResponse {
+            stream: ApplicationStream {
+                operation_id: operation_id.clone(),
+                events: Vec::new(),
+                frontier: StreamFrontier {
+                    next_sequence: 0,
+                    retained_from_sequence: 0,
+                    resume_token: None,
+                },
+                next_sequence: None,
+                terminated: false,
+            },
+        });
+        assert!(matches!(
+            stream_response,
+            ApplicationResponse::Stream(ApplicationStreamResponse {
+                stream: ApplicationStream {
+                    operation_id: stream_id,
+                    events,
+                    frontier: StreamFrontier {
+                        next_sequence: 0,
+                        retained_from_sequence: 0,
+                        resume_token: None,
+                    },
+                    next_sequence: None,
+                    terminated: false,
+                },
+            }) if stream_id == operation_id && events.is_empty()
+        ));
+        let cancellation_response = ApplicationResponse::Cancellation(InvocationCancellation {
+            operation_id: operation_id.clone(),
+            cancelled: true,
+        });
+        assert!(matches!(
+            cancellation_response,
+            ApplicationResponse::Cancellation(InvocationCancellation {
+                operation_id: cancelled_id,
+                cancelled: true,
+            }) if cancelled_id == operation_id
+        ));
     }
 
     #[test]
@@ -438,10 +536,6 @@ mod tests {
                 .feedback_observation_parts()
                 .map(|(_, _, event)| event),
             Some(&json!({"event": "delivered"}))
-        );
-        assert_eq!(
-            BTreeSet::from(["binding", "operation", "payload"]),
-            BTreeSet::from(["binding", "operation", "payload"])
         );
     }
 }
