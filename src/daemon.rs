@@ -6925,6 +6925,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                 &store_administration,
                 &canonical_project_path,
                 &handshake,
+                ProjectServerRequirement::Core,
             )
             .await?
             .is_some_and(|server| server.doctor_report_ready())
