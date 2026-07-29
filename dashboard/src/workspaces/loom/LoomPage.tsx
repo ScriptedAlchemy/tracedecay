@@ -5,7 +5,6 @@ import { Waypoints } from 'lucide-react';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import type { WireEnvelope } from '../../contracts/wire.ts';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { StateChip } from '../../ui/StateChip';
 import {
   Legend,
