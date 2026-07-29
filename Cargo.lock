@@ -5487,6 +5487,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-hooks",
+ "tracedecay-lsp",
  "tracedecay-policy",
  "tracedecay-query",
  "tracedecay-rusqlite-parity",
@@ -5577,6 +5578,10 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
 ]
+
+[[package]]
+name = "tracedecay-lsp"
+version = "0.1.0"
 
 [[package]]
 name = "tracedecay-policy"
