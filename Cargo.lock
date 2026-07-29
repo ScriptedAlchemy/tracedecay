@@ -5430,7 +5430,6 @@ name = "tracedecay"
 version = "0.0.67"
 dependencies = [
  "amari-holographic",
- "ast-grep-core",
  "axum",
  "bincode",
  "cap-fs-ext",
@@ -5479,8 +5478,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiktoken-rs",
- "tokensave-large-treesitters",
- "tokensave-medium-treesitters",
  "tokio",
  "tokio-stream",
  "toml",
@@ -5491,6 +5488,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-hooks",
  "tracedecay-policy",
+ "tracedecay-query",
  "tracedecay-rusqlite-parity",
  "tracedecay-rusqlite-runtime",
  "tracedecay-sqlite-parity-protocol",
@@ -5499,8 +5497,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
- "tree-sitter-hlsl",
- "tree-sitter-language",
  "ureq",
  "url",
  "walkdir",
@@ -5589,6 +5585,23 @@ dependencies = [
  "serde",
  "serde_json",
  "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-query"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.13.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "static_assertions",
+ "thiserror",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-policy",
+ "zeroize",
 ]
 
 [[package]]
