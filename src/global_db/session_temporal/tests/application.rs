@@ -1,22 +1,27 @@
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{
-    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, WorktreeId,
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
 };
+use tracedecay_domain::{
+    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros,
+    WorktreeId,
+};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::harness::{EXTERNAL_PAYLOAD, INLINE_PAYLOAD, PROJECT_ID, RegisteredTemporalHarness};
 use crate::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalQuery,
 };
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
@@ -30,12 +35,14 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         SessionAuthorizationGrant::issue(
             AuthorizationGrantId::new("grant.temporal.application").unwrap(),
             7,
             context,
+            binding,
             request,
         )
     }
@@ -59,7 +66,8 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
     let harness = RegisteredTemporalHarness::open("registered-root-filter").await;
     let policy_digest = harness.seed_root_fixture().await;
     let before = Sha256::digest(std::fs::read(harness.registered.db_path()).unwrap());
-    let context = request_context("root.one", "request.registered-root", policy_digest);
+    let (context, binding) =
+        request_context("root.one", "request.registered-root", policy_digest);
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         AllowAuthorizer,
@@ -69,7 +77,11 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
     );
 
     let all = service
-        .retrieve(&context, root_query("session.root.a", None, None, 8))
+        .retrieve(
+            &context,
+            &binding,
+            root_query("session.root.a", None, None, 8),
+        )
         .await;
     let SessionRetrievalOutcome::Complete { items, .. } = all else {
         panic!("root-wide retrieval was not complete: {all:?}");
@@ -116,6 +128,7 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
     let filtered = service
         .retrieve(
             &context,
+            &binding,
             root_query("session.root.a", Some("provider.application"), None, 8),
         )
         .await;
@@ -131,6 +144,7 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
     let exact = service
         .retrieve(
             &context,
+            &binding,
             SessionTemporalQuery::new(
                 SessionId::new("session.root.a").unwrap(),
                 Some("provider.application".to_owned()),
@@ -160,7 +174,8 @@ async fn registered_root_scope_isolated_and_provider_filtered() {
 async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift() {
     let harness = RegisteredTemporalHarness::open("registered-root-restart").await;
     let policy_digest = harness.seed_root_fixture().await;
-    let context = request_context("root.one", "request.registered-restart", policy_digest);
+    let (context, binding) =
+        request_context("root.one", "request.registered-restart", policy_digest);
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
         AllowAuthorizer,
@@ -169,7 +184,11 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
     let first = service
-        .retrieve(&context, root_query("session.root.a", None, None, 1))
+        .retrieve(
+            &context,
+            &binding,
+            root_query("session.root.a", None, None, 1),
+        )
         .await;
     let SessionRetrievalOutcome::Partial { items, omitted, .. } = first else {
         panic!("first root page was not partial: {first:?}");
@@ -189,6 +208,7 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
     let resumed = restarted
         .retrieve(
             &context,
+            &binding,
             root_query("session.root.b", None, Some(cursor.clone()), 1),
         )
         .await;
@@ -207,6 +227,7 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
         restarted
             .retrieve(
                 &context,
+                &binding,
                 SessionTemporalQuery::new(
                     SessionId::new("session.root.a").unwrap(),
                     None,
@@ -223,10 +244,13 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
             .await,
         SessionRetrievalOutcome::WrongScope
     ));
+    let (other_context, other_binding) =
+        request_context("root.other", "request.scope-drift", policy_digest);
     assert!(matches!(
         restarted
             .retrieve(
-                &request_context("root.other", "request.scope-drift", policy_digest),
+                &other_context,
+                &other_binding,
                 root_query("session.root.b", None, Some(cursor), 1),
             )
             .await,
@@ -248,6 +272,8 @@ async fn registered_occurrence_hydrates_inline_and_external_payloads_without_wri
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
+    let (context, binding) =
+        request_context("root.one", "request.registered-hydration", policy_digest);
     for temporal_mode in [
         TemporalModeV1::Current,
         TemporalModeV1::AsOf {
@@ -258,7 +284,8 @@ async fn registered_occurrence_hydrates_inline_and_external_payloads_without_wri
     ] {
         let outcome = service
             .retrieve(
-                &request_context("root.one", "request.registered-hydration", policy_digest),
+                &context,
+                &binding,
                 occurrence_query("inline", temporal_mode),
             )
             .await;
@@ -268,13 +295,15 @@ async fn registered_occurrence_hydrates_inline_and_external_payloads_without_wri
         assert_eq!(items[0].ranked.len(), 1);
         assert!(items[0].context.rendered.contains(INLINE_PAYLOAD));
     }
+    let (external_context, external_binding) = request_context(
+        "root.one",
+        "request.registered-external-hydration",
+        policy_digest,
+    );
     let external = service
         .retrieve(
-            &request_context(
-                "root.one",
-                "request.registered-external-hydration",
-                policy_digest,
-            ),
+            &external_context,
+            &external_binding,
             occurrence_query("external", TemporalModeV1::Current),
         )
         .await;
@@ -309,10 +338,13 @@ async fn registered_complete_zero_preserves_the_authoritative_store() {
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
+    let (context, binding) =
+        request_context("root.one", "request.complete-zero", policy_digest);
     assert!(matches!(
         service
             .retrieve(
-                &request_context("root.one", "request.complete-zero", policy_digest),
+                &context,
+                &binding,
                 occurrence_query("absent", TemporalModeV1::Current),
             )
             .await,
@@ -324,28 +356,70 @@ async fn registered_complete_zero_preserves_the_authoritative_store() {
     );
 }
 
-fn request_context(root: &str, request_id: &str, policy_digest: [u8; 32]) -> RequestContext {
-    RequestContext::new(
-        ActorId::new("actor.cursor").unwrap(),
-        RequestId::new(request_id).unwrap(),
-        ResolvedSessionIdentity::for_project(
-            ProfileId::new("profile.primary").unwrap(),
-            ProjectId::new(PROJECT_ID).unwrap(),
-            SessionStoreId::new("store.project.tracedecay").unwrap(),
-            SessionRootId::new(root).unwrap(),
-            ResolvedGitRoute::new(
-                RepositoryId::new("repository.tracedecay").unwrap(),
-                WorktreeId::new("worktree.main").unwrap(),
-                BranchId::new("branch.temporal-application").unwrap(),
-            ),
+fn request_context(
+    root: &str,
+    request: &str,
+    policy_digest: [u8; 32],
+) -> (RequestContext, SessionRequestBinding) {
+    let actor = ActorId::new("actor.cursor").unwrap();
+    let request_id = RequestId::new(request).unwrap();
+    let identity = ResolvedSessionIdentity::for_project(
+        ProfileId::new("profile.primary").unwrap(),
+        ProjectId::new(PROJECT_ID).unwrap(),
+        SessionStoreId::new("store.project.tracedecay").unwrap(),
+        SessionRootId::new(root).unwrap(),
+        ResolvedGitRoute::new(
+            RepositoryId::new("repository.tracedecay").unwrap(),
+            WorktreeId::new("worktree.main").unwrap(),
+            BranchId::new("branch.temporal-application").unwrap(),
         ),
-        CapabilityDigest::new(DIGEST),
-        PolicyDigest::new(policy_digest),
-        ConfigurationDigest::new(DIGEST),
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
-        CancellationToken::new(),
-        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+    );
+    let scope = identity.application_scope().unwrap();
+    let capability = CapabilityDigest::new(DIGEST);
+    let policy = PolicyDigest::new(policy_digest);
+    let configuration = ConfigurationDigest::new(DIGEST);
+    let cancellation = CancellationToken::for_application_request(&request_id);
+    let budgets = RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap();
+    let observed_at = application_observed_at();
+    let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.temporal.application.test").unwrap(),
+        1,
+        session_application_grant_digest(
+            capability,
+            policy,
+            configuration,
+            &cancellation,
+            budgets,
+        )
+        .unwrap(),
+        actor.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.session.temporal-application-test").unwrap()]),
+        DisclosureClass::Evidence,
     )
+    .unwrap();
+    let context = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        request_id,
+        Deadline::new(expires_at).unwrap(),
+        CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let binding = SessionRequestBinding::new(
+        identity,
+        capability,
+        policy,
+        configuration,
+        cancellation,
+        budgets,
+    );
+    (context, binding)
 }
 
 fn root_query(
