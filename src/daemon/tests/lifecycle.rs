@@ -743,6 +743,12 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
             .expect("read request")
             .expect("request line");
         let request: Value = serde_json::from_str(&request_line).expect("request json");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), lines.next_line(),)
+                .await
+                .is_err(),
+            "client write half must remain open while the response is in flight"
+        );
         let (probe, _) = tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
             .await
             .expect("liveness probe timed out")

@@ -504,7 +504,6 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
             writer.write_all(b"\n").await?;
         }
         writer.flush().await?;
-        writer.shutdown().await?;
         Ok(())
     };
     match client_deadline {
