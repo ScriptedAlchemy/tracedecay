@@ -316,6 +316,29 @@ fn observation_application_uses_narrow_capture_ports() {
 }
 
 #[test]
+fn observation_projection_owns_raw_storage_and_uses_store_records() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        "src/global_db/observation_projection/apply.rs",
+        "src/global_db/observation_projection/rebuild.rs",
+        "src/global_db/observation_projection/state.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(path)).expect("read projection adapter");
+        for forbidden in [
+            "crate::sessions::SessionRecord",
+            "crate::sessions::SessionMessageRecord",
+            "crate::sessions::{SessionMessageRecord, SessionRecord}",
+            "crate::sessions::lcm::raw",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} must not reach through sessions for projection storage: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn application_dependencies_are_exactly_the_use_case_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-application");
