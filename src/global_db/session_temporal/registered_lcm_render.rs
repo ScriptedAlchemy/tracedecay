@@ -13,7 +13,7 @@ use crate::sessions::lcm::{
     LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, payload,
 };
 
-use super::lcm_render::apply_canonical_content;
+use crate::sessions::lcm::render::apply_canonical_content;
 
 macro_rules! field {
     ($row:expr, $column:expr) => {

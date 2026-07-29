@@ -3763,9 +3763,11 @@ impl HostAdmissionTestRuntimeV1 {
             .begin_write_transaction()
             .await
             .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let summary =
-            crate::sessions::lcm::dag::insert_summary_node_in_transaction(&transaction, draft)
-                .await?;
+        let publisher =
+            crate::global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
+                &transaction,
+            );
+        let summary = crate::sessions::lcm::dag::insert_summary_node(&publisher, draft).await?;
         transaction.commit().await?;
         Ok(summary)
     }

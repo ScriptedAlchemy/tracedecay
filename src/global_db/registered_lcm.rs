@@ -548,9 +548,16 @@ impl RegisteredGlobalDb {
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        let response =
-            compression::compress(&transaction, storage_root, request, &mut payload_rollback)
-                .await?;
+        let publisher =
+            session_temporal_operations::GlobalDbLcmSummaryPublication::new(&transaction);
+        let response = compression::compress(
+            &transaction,
+            &publisher,
+            storage_root,
+            request,
+            &mut payload_rollback,
+        )
+        .await?;
         transaction.commit().await?;
         payload_rollback.disarm();
         Ok(response)

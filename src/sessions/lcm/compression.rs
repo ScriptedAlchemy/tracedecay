@@ -351,6 +351,7 @@ pub(crate) async fn preflight(
 
 pub(crate) async fn compress(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
@@ -419,11 +420,12 @@ pub(crate) async fn compress(
         return Ok(response);
     }
 
-    compress_in_transaction(conn, request, &summarizer).await
+    compress_in_transaction(conn, publisher, request, &summarizer).await
 }
 
 async fn compress_in_transaction(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
 ) -> Result<LcmCompressionResponse, LcmError> {
@@ -432,7 +434,7 @@ async fn compress_in_transaction(
         return Ok(response);
     }
     if let Some(response) =
-        no_backlog_compression_response(conn, &request, summarizer, &context).await?
+        no_backlog_compression_response(conn, publisher, &request, summarizer, &context).await?
     {
         return Ok(response);
     }
@@ -443,7 +445,7 @@ async fn compress_in_transaction(
         return Ok(response);
     }
 
-    persist_and_replay_backlog_compression(conn, request, summarizer, context).await
+    persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context).await
 }
 
 async fn prepare_compression_context(
@@ -517,6 +519,7 @@ fn frontier_changed_response(
 
 async fn no_backlog_compression_response(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: &CompressionTransactionContext,
@@ -531,6 +534,7 @@ async fn no_backlog_compression_response(
     }
     if let Some(response) = condense_summary_nodes_if_ready(
         conn,
+        publisher,
         request,
         summarizer,
         &context.conversation_id,
@@ -681,6 +685,7 @@ fn auxiliary_summary_response(
 
 async fn persist_and_replay_backlog_compression(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: CompressionTransactionContext,
@@ -692,6 +697,7 @@ async fn persist_and_replay_backlog_compression(
     };
     let write_result = persist_compression_transaction_writes(
         conn,
+        publisher,
         CompressionTransactionWriteRequest {
             request: &request,
             conversation_id: &context.conversation_id,
@@ -783,6 +789,7 @@ async fn persist_and_replay_backlog_compression(
 
 async fn persist_compression_transaction_writes(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     write: CompressionTransactionWriteRequest<'_>,
 ) -> Result<CompressionTransactionWriteResult, LcmError> {
     let pass_limit = if write.forced_overflow_recovery {
@@ -816,8 +823,8 @@ async fn persist_compression_transaction_writes(
         );
         fallback_used |= pass_fallback_used;
 
-        let summary = dag::insert_summary_node_in_transaction(
-            conn,
+        let summary = dag::insert_summary_node(
+            publisher,
             summary_draft(
                 &write.request.provider,
                 write.conversation_id,
@@ -1563,6 +1570,7 @@ fn condensation_draft(
 
 async fn condense_summary_nodes_if_ready(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     conversation_id: &str,
@@ -1611,8 +1619,8 @@ async fn condense_summary_nodes_if_ready(
         .collect::<Vec<_>>();
     let (summary_text, fallback_used) =
         rescuing_summary_text_from_texts(summary_text, &source_texts, source_tokens);
-    let summary = dag::insert_summary_node_in_transaction(
-        conn,
+    let summary = dag::insert_summary_node(
+        publisher,
         condensation_draft(
             &request.provider,
             conversation_id,

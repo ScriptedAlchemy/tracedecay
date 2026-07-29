@@ -14,7 +14,7 @@ use crate::sessions::lcm::{
     types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft},
 };
 
-pub(crate) use publication::publish_immutable_summary;
+pub(crate) use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
 pub(crate) const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";

@@ -1,5 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::application::session::compatibility::{
+    derived_text_for_index, derived_text_for_snippet, projected_content_hash,
+};
 use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
@@ -879,9 +882,9 @@ async fn write_staged_message(
     message: &SessionMessageRecord,
 ) -> ProjectionStoreResult<()> {
     let json = encode_json(message, "encode staged projection message")?;
-    let content_hash = crate::sessions::lcm::raw::sha256_hex(&message.text);
-    let snippet = crate::sessions::lcm::raw::derived_text_for_snippet(&message.text);
-    let index = crate::sessions::lcm::raw::derived_text_for_index(&message.text);
+    let content_hash = projected_content_hash(&message.text);
+    let snippet = derived_text_for_snippet(&message.text);
+    let index = derived_text_for_index(&message.text);
     conn.execute(
         "INSERT INTO observation_projection_rebuild_messages (
             projector_version, generation, output_provider, output_message_id,

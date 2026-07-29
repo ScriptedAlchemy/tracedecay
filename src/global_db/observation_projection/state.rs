@@ -2,9 +2,11 @@ use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SessionMessageProjection,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SessionMessageProjection, SessionMessageRecord,
+    SessionRecord,
 };
 
+use crate::application::session::compatibility::projected_content_hash;
 use crate::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
@@ -154,7 +156,7 @@ pub(super) async fn read_session(
     conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
-) -> ProjectionStoreResult<Option<crate::sessions::SessionRecord>> {
+) -> ProjectionStoreResult<Option<SessionRecord>> {
     let mut rows = conn
         .query(
             "SELECT provider, session_id, project_key, project_path, title, started_at, ended_at,
@@ -172,7 +174,7 @@ pub(super) async fn read_session(
     else {
         return Ok(None);
     };
-    Ok(Some(crate::sessions::SessionRecord {
+    Ok(Some(SessionRecord {
         provider: row
             .get(0)
             .map_err(|error| storage("decode projected session", error))?,
@@ -220,7 +222,7 @@ pub(super) async fn read_message(
     conn: &impl QueryExecutor,
     provider: &str,
     message_id: &str,
-) -> ProjectionStoreResult<Option<crate::sessions::SessionMessageRecord>> {
+) -> ProjectionStoreResult<Option<SessionMessageRecord>> {
     let mut rows = conn
         .query(
             "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
@@ -243,7 +245,7 @@ pub(super) async fn read_message(
                 .map_err(|error| storage("decode projected message", error))?
         };
     }
-    Ok(Some(crate::sessions::SessionMessageRecord {
+    Ok(Some(SessionMessageRecord {
         provider: cell!(0),
         message_id: cell!(1),
         session_id: cell!(2),
@@ -780,10 +782,7 @@ pub(in super::super) async fn verify_output_authority(
     verify_rows(conn, &owner_projection).await
 }
 
-pub(super) fn session_rows_compatible(
-    actual: &crate::sessions::SessionRecord,
-    expected: &crate::sessions::SessionRecord,
-) -> bool {
+pub(super) fn session_rows_compatible(actual: &SessionRecord, expected: &SessionRecord) -> bool {
     reconcile_session_rows(actual, expected).is_some()
 }
 
@@ -797,9 +796,7 @@ pub(super) fn session_rows_compatible(
 /// [`reconcile_session_rows`] itself stays pure string/shape logic with no
 /// filesystem access. macOS `/var` firmlink expansions are collapsed back to the
 /// public `/var/...` spelling inside [`canonical_project_path`].
-pub(super) fn canonicalize_session_project_paths(
-    session: &crate::sessions::SessionRecord,
-) -> crate::sessions::SessionRecord {
+pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> SessionRecord {
     let Some(canonical) = canonical_project_path(&session.project_path) else {
         return session.clone();
     };
@@ -880,9 +877,9 @@ fn canonical_project_path(path: &str) -> Option<String> {
 /// as apply — never touches the filesystem and stays reproducible from stored
 /// evidence.
 pub(super) fn reconcile_session_rows(
-    actual: &crate::sessions::SessionRecord,
-    expected: &crate::sessions::SessionRecord,
-) -> Option<crate::sessions::SessionRecord> {
+    actual: &SessionRecord,
+    expected: &SessionRecord,
+) -> Option<SessionRecord> {
     if actual.provider != expected.provider || actual.session_id != expected.session_id {
         return None;
     }
@@ -912,7 +909,7 @@ pub(super) fn reconcile_session_rows(
     } else {
         return None;
     };
-    Some(crate::sessions::SessionRecord {
+    Some(SessionRecord {
         provider: actual.provider.clone(),
         session_id: actual.session_id.clone(),
         project_key,
@@ -1027,16 +1024,16 @@ fn reconcile_usage(
 }
 
 pub(super) fn message_rows_compatible(
-    actual: &crate::sessions::SessionMessageRecord,
-    expected: &crate::sessions::SessionMessageRecord,
+    actual: &SessionMessageRecord,
+    expected: &SessionMessageRecord,
 ) -> bool {
     actual == expected
 }
 
 pub(super) async fn protected_message_rows_compatible(
     conn: &impl QueryExecutor,
-    actual: &crate::sessions::SessionMessageRecord,
-    expected: &crate::sessions::SessionMessageRecord,
+    actual: &SessionMessageRecord,
+    expected: &SessionMessageRecord,
 ) -> ProjectionStoreResult<bool> {
     if actual.provider != expected.provider
         || actual.message_id != expected.message_id
@@ -1065,7 +1062,7 @@ pub(super) async fn protected_message_rows_compatible(
     else {
         return Ok(false);
     };
-    let expected_hash = crate::sessions::lcm::raw::sha256_hex(&expected.text);
+    let expected_hash = projected_content_hash(&expected.text);
     if metadata
         .get("external_payload")
         .and_then(serde_json::Value::as_bool)
@@ -1126,14 +1123,16 @@ pub(super) async fn protected_message_rows_compatible(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod reconcile_tests {
+    use tracedecay_store::SessionRecord;
+
     use super::reconcile_session_rows;
     #[cfg(unix)]
     use super::{canonicalize_session_project_paths, converge_session_project_paths};
     #[cfg(unix)]
     use crate::db::engine::{Executor, QueryExecutor, TestConnection};
 
-    fn record(project_path: &str) -> crate::sessions::SessionRecord {
-        crate::sessions::SessionRecord {
+    fn record(project_path: &str) -> SessionRecord {
+        SessionRecord {
             provider: "codex".to_owned(),
             session_id: "session-family".to_owned(),
             project_key: project_path.to_owned(),
