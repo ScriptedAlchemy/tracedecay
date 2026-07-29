@@ -1,6 +1,3 @@
-// Contract-test adapters keep the trait's `impl Future` signature shape
-// explicit; the bodies are the async implementation.
-#![allow(clippy::manual_async_fn)]
 use super::common::*;
 use super::*;
 
@@ -266,79 +263,72 @@ fn rebuild_dispositions_form_a_monotonic_state_machine() {
 }
 
 impl SessionTemporalProjectionStore for InMemorySessionPorts {
-    fn begin_session_generation_rebuild_supported(
+    async fn begin_session_generation_rebuild_supported(
         &self,
         _permit: SessionGenerationRebuildBeginPermit,
         request: SessionGenerationRebuildRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionGenerationRebuildReceiptV1>> + Send {
-        async move {
-            yield_once().await;
-            let mut state = self.state.lock().unwrap();
-            let disposition = if state.rebuild.is_some() {
-                SessionGenerationRebuildDispositionV1::Resumed
-            } else {
-                SessionGenerationRebuildDispositionV1::Started
-            };
-            let receipt =
-                SessionGenerationRebuildReceiptV1::new(&request, disposition, UtcMicros(101))?;
-            if let Some(previous) = &state.rebuild {
-                previous.validate_successor(&receipt)?;
-            }
-            state.rebuild = Some(receipt.clone());
-            Ok(receipt)
+    ) -> SessionStoreResult<SessionGenerationRebuildReceiptV1> {
+        yield_once().await;
+        let mut state = self.state.lock().unwrap();
+        let disposition = if state.rebuild.is_some() {
+            SessionGenerationRebuildDispositionV1::Resumed
+        } else {
+            SessionGenerationRebuildDispositionV1::Started
+        };
+        let receipt =
+            SessionGenerationRebuildReceiptV1::new(&request, disposition, UtcMicros(101))?;
+        if let Some(previous) = &state.rebuild {
+            previous.validate_successor(&receipt)?;
         }
+        state.rebuild = Some(receipt.clone());
+        Ok(receipt)
     }
 
-    fn persist_session_temporal_projection_batch_supported(
+    async fn persist_session_temporal_projection_batch_supported(
         &self,
         _permit: SessionProjectionBatchPersistPermit,
         batch: SessionTemporalProjectionBatchV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionTemporalProjectionBatchReceiptV1>> + Send
-    {
-        async move {
-            yield_once().await;
-            let mut state = self.state.lock().unwrap();
-            let batch_digest = temporal_digest('b');
-            let receipt = if let Some(existing) = &state.projection {
-                SessionTemporalProjectionBatchReceiptV1::exact_replay(
-                    &batch,
-                    batch_digest,
-                    existing,
-                    UtcMicros(102),
-                )?
-            } else {
-                SessionTemporalProjectionBatchReceiptV1::applied(
-                    &batch,
-                    batch_digest,
-                    batch.occurrences().len(),
-                    batch.copies().len(),
-                    batch.assertions().len(),
-                    UtcMicros(102),
-                )?
-            };
-            state.projection = Some(receipt.clone());
-            Ok(receipt)
-        }
+    ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
+        yield_once().await;
+        let mut state = self.state.lock().unwrap();
+        let batch_digest = temporal_digest('b');
+        let receipt = if let Some(existing) = &state.projection {
+            SessionTemporalProjectionBatchReceiptV1::exact_replay(
+                &batch,
+                batch_digest,
+                existing,
+                UtcMicros(102),
+            )?
+        } else {
+            SessionTemporalProjectionBatchReceiptV1::applied(
+                &batch,
+                batch_digest,
+                batch.occurrences().len(),
+                batch.copies().len(),
+                batch.assertions().len(),
+                UtcMicros(102),
+            )?
+        };
+        state.projection = Some(receipt.clone());
+        Ok(receipt)
     }
 
-    fn activate_session_temporal_generation_supported(
+    async fn activate_session_temporal_generation_supported(
         &self,
         _permit: SessionGenerationActivatePermit,
         request: SessionGenerationActivationRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionGenerationActivationReceiptV1>> + Send {
-        async move {
-            yield_once().await;
-            let frozen = request.snapshot().watermarks();
-            let mut activated = SessionFrozenWatermarksV1::new(
-                request.generation(),
-                frozen.source_frontier(),
-                frozen.projection_frontier(),
-                frozen.summary_frontier(),
-            );
-            if let Some(cursor_key) = frozen.cursor_key() {
-                activated = activated.with_cursor_key(cursor_key.clone());
-            }
-            SessionGenerationActivationReceiptV1::new(&request, activated, UtcMicros(103))
+    ) -> SessionStoreResult<SessionGenerationActivationReceiptV1> {
+        yield_once().await;
+        let frozen = request.snapshot().watermarks();
+        let mut activated = SessionFrozenWatermarksV1::new(
+            request.generation(),
+            frozen.source_frontier(),
+            frozen.projection_frontier(),
+            frozen.summary_frontier(),
+        );
+        if let Some(cursor_key) = frozen.cursor_key() {
+            activated = activated.with_cursor_key(cursor_key.clone());
         }
+        SessionGenerationActivationReceiptV1::new(&request, activated, UtcMicros(103))
     }
 }

@@ -447,6 +447,7 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
         project_path,
         tokio::time::Instant::now() + std::time::Duration::from_secs(10),
         false,
+        false,
     )
     .await
 }
@@ -455,6 +456,7 @@ async fn daemon_project_status_with_deadline(
     project_path: &Path,
     startup_deadline: tokio::time::Instant,
     report_admission: bool,
+    startup_health_only: bool,
 ) -> crate::errors::Result<serde_json::Value> {
     let handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(project_path.to_path_buf()),
@@ -494,7 +496,11 @@ async fn daemon_project_status_with_deadline(
     let result = crate::daemon::call_default_tool_within(
         &handshake,
         "tracedecay_runtime",
-        daemon_runtime_args(),
+        if startup_health_only {
+            daemon_startup_runtime_args()
+        } else {
+            daemon_doctor_runtime_args()
+        },
         startup_deadline,
     )
     .await?;
@@ -509,7 +515,7 @@ pub async fn wait_for_daemon_startup_health(
     wait_for_daemon_startup_health_with(
         timeout,
         std::time::Duration::from_millis(500),
-        || daemon_project_status_with_deadline(&project_path, startup_deadline, true),
+        || daemon_project_status_with_deadline(&project_path, startup_deadline, true, true),
         |progress| {
             eprintln!(
                 "Waiting for daemon startup health convergence: elapsed={}s waiting_on={} change={}",
@@ -808,12 +814,26 @@ fn daemon_admission_args() -> serde_json::Value {
     })
 }
 
-fn daemon_runtime_args() -> serde_json::Value {
+fn daemon_startup_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
         "startup_health": true,
         "authority_audit": false,
         "doctor_report": false,
+        "session_ingest_health": false,
+    })
+}
+
+fn daemon_doctor_runtime_args() -> serde_json::Value {
+    serde_json::json!({
+        "format": "json",
+        "startup_health": false,
+        "authority_audit": true,
+        "doctor_report": true,
+        // `authority_audit` already requests session-temporal health. Keeping
+        // ingest health false avoids the core startup-only interception and
+        // routes comprehensive Doctor through the ready project owner, where
+        // the composed Doctor report reader is mounted.
         "session_ingest_health": false,
     })
 }
@@ -1102,8 +1122,16 @@ fn authority_audit_unavailable_message(reason: &str) -> &'static str {
 
 fn check_session_temporal_health(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
     eprintln!("\n\x1b[1mSession temporal health\x1b[0m");
-    let diagnosis =
-        temporal_health::diagnose(status.and_then(|status| status.get("session_temporal_health")));
+    let recovery_pending = status.is_some_and(|status| {
+        status
+            .pointer("/doctor_report/reason")
+            .and_then(serde_json::Value::as_str)
+            == Some("doctor_report_owner_warming")
+    });
+    let diagnosis = temporal_health::diagnose_with_recovery(
+        status.and_then(|status| status.get("session_temporal_health")),
+        recovery_pending,
+    );
     for line in diagnosis.lines() {
         match line.level {
             temporal_health::TemporalHealthLineLevel::Pass => dc.pass(&line.text),

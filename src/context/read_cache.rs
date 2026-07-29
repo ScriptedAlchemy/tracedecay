@@ -82,7 +82,7 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
 /// cache was written) is reported as a miss; the caller is expected to
 /// recompute and `put` a fresh row, which replaces the stale one via the
 /// primary-key `INSERT OR REPLACE`.
-pub async fn get(
+pub(crate) async fn get(
     conn: &impl QueryExecutor,
     project_id: &str,
     session_id: &str,

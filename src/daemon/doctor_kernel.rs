@@ -506,10 +506,10 @@ pub fn code_index_read(signal: CodeIndexMountSignalV1) -> CodeIndexMountReadV1 {
 /// Read the real code-index mount state from the daemon scheduler registry.
 ///
 /// An unmounted worktree reports `Unmounted`; a mounted worktree whose freshness
-/// ladder yields a complete generation reports `Mounted` (the ladder already
-/// reconciled it, so it is current); a mounted worktree with no published
-/// generation is still `Indexing`. No signal is fabricated — the registry is the
-/// authority for what is mounted.
+/// ladder has already proven a complete generation current reports `Mounted`;
+/// stale, restored-unverified, or busy schedulers report `Indexing` and schedule
+/// background reconciliation. Doctor never performs code-index catch-up on its
+/// request path.
 pub(in crate::daemon) async fn code_index_read_from_registry(
     registry: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -517,7 +517,7 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
     if !registry.is_worktree_mounted(project_root).await {
         return code_index_read(CodeIndexMountSignalV1::Unmounted);
     }
-    let signal = if registry.latest_complete_fresh(project_root).await.is_some() {
+    let signal = if registry.latest_complete_ready(project_root).await.is_some() {
         CodeIndexMountSignalV1::MountedFresh
     } else {
         CodeIndexMountSignalV1::Indexing
@@ -786,6 +786,78 @@ struct CollectedStoreTelemetryV1 {
     table_growth_evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
 }
 
+const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
+
+fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
+    let mut pending = vec![root.to_path_buf()];
+    let mut observed_bytes = 0_u64;
+    let mut observed_entries = 0_usize;
+    while let Some(path) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            observed_entries = observed_entries.saturating_add(1);
+            if observed_entries > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES {
+                return false;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                return false;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                return false;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                return false;
+            };
+            observed_bytes = observed_bytes.saturating_add(metadata.len());
+            if observed_bytes > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
+    ["", "-wal", "-shm"]
+        .into_iter()
+        .try_fold(0_u64, |total, suffix| {
+            let mut path = database_path.as_os_str().to_os_string();
+            path.push(suffix);
+            match std::fs::metadata(PathBuf::from(path)) {
+                Ok(metadata) => total
+                    .checked_add(metadata.len())
+                    .filter(|size| *size <= MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(total),
+                Err(_) => None,
+            }
+        })
+        .is_some()
+}
+
+fn permits_synchronous_table_growth(
+    read: &tracedecay_application::storage::StorageTelemetryReadV1,
+) -> bool {
+    matches!(
+        read,
+        tracedecay_application::storage::StorageTelemetryReadV1::Observed { sample }
+            if sample.total_bytes().get() <= MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
+    )
+}
+
 async fn collect_over_budget_store_findings(
     context: &RequestContext,
     telemetry_ports: &[(
@@ -804,7 +876,13 @@ async fn collect_over_budget_store_findings(
     let mut table_growth_evidence = Vec::new();
     for (store, port) in telemetry_ports {
         let read = port.store_size(context, store).await;
-        let table_growth = port.table_growth(context, store).await;
+        let table_growth = if permits_synchronous_table_growth(&read) {
+            port.table_growth(context, store).await
+        } else {
+            TableGrowthTelemetryReadV1::Unknown {
+                store: store.clone(),
+            }
+        };
         if let TableGrowthTelemetryReadV1::Observed { samples, .. } = &table_growth {
             for sample in samples {
                 tracing::info!(
@@ -952,6 +1030,9 @@ pub async fn collect_retention_backlog_findings(
     retention: &crate::config::RetentionConfig,
     observed_at_secs: i64,
 ) -> DoctorStorageFamilyReadV1 {
+    if !permits_synchronous_session_retention_backlog(profile_sessions.db_path()) {
+        return DoctorStorageFamilyReadV1::Unknown;
+    }
     let Some(file_name) = profile_sessions
         .db_path()
         .file_name()
@@ -1007,6 +1088,9 @@ pub async fn collect_code_generation_retention_findings(
         .is_file()
     {
         return DoctorStorageFamilyReadV1::Absent;
+    }
+    if !permits_synchronous_exhaustive_scan(&code_index_store_root.join("code-generations-v1")) {
+        return DoctorStorageFamilyReadV1::Unknown;
     }
     let Ok(store) = DatabaseVectorGenerationStoreV1::open_legacy_migration(graph).await else {
         return DoctorStorageFamilyReadV1::Unknown;
@@ -1306,25 +1390,33 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .and_then(|days| days.checked_mul(24 * 60 * 60))
                 .unwrap_or(i64::MAX);
             let now = now_secs();
-            let orphan = collect_orphan_store_findings(
-                registry.as_ref(),
-                &profile_root,
-                retention_secs,
-                now,
-            )
-            .await;
-            let unregistered = collect_unregistered_store_findings(
-                registry.as_ref(),
-                &profile_root,
-                retention_secs,
-                now,
-            )
-            .await;
+            let permits_profile_census =
+                permits_synchronous_exhaustive_scan(&profile_root.join("projects"));
+            let orphan = if permits_profile_census {
+                collect_orphan_store_findings(registry.as_ref(), &profile_root, retention_secs, now)
+                    .await
+            } else {
+                DoctorStorageFamilyReadV1::Unknown
+            };
+            let unregistered = if permits_profile_census {
+                collect_unregistered_store_findings(
+                    registry.as_ref(),
+                    &profile_root,
+                    retention_secs,
+                    now,
+                )
+                .await
+            } else {
+                DoctorStorageFamilyReadV1::Unknown
+            };
             let store_telemetry =
                 collect_over_budget_store_findings(&context, &telemetry_ports, &retention).await;
             let stale_branches = collect_stale_branch_store_findings(&project_root, &layout);
-            let incident_debris =
-                collect_incident_debris_findings(registry.as_ref(), &profile_root, now).await;
+            let incident_debris = if permits_profile_census {
+                collect_incident_debris_findings(registry.as_ref(), &profile_root, now).await
+            } else {
+                DoctorStorageFamilyReadV1::Unknown
+            };
             let profile_retention_backlog =
                 collect_retention_backlog_findings(profile_sessions.as_ref(), &retention, now)
                     .await;
@@ -1358,7 +1450,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .await,
             );
             let current_generation = schedulers
-                .latest_complete_fresh(&project_root)
+                .latest_complete_ready(&project_root)
                 .await
                 .map(|latest| latest.generation().manifest().generation_id.clone());
             let advisory_feedback = match feedback_runtimes.doctor_read_store(&project_root).await {
@@ -1466,7 +1558,7 @@ pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
                         }
                         actions
                     }
-                    _ => Vec::new(),
+                    DoctorRemediationKindV1::Preview => Vec::new(),
                 }
             })
         },

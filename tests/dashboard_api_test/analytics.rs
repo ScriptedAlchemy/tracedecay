@@ -17,7 +17,6 @@ use tracedecay::dashboard;
 use tracedecay::global_db::AnalyticsEventInsert;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::resolve_layout_for_current_profile;
-use tracedecay::tracedecay::TraceDecay;
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
     ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalQueryObservedV1,

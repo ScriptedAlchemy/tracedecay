@@ -264,6 +264,6 @@ mod tests {
     #[test]
     fn production_coordinator_is_a_concrete_project_runtime_mount() {
         assert_production_mount::<ProductionSemanticActivationCoordinatorV1>();
-        let _constructor = ProductionSemanticActivationCoordinatorV1::new;
+        std::hint::black_box(ProductionSemanticActivationCoordinatorV1::new);
     }
 }

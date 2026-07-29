@@ -331,7 +331,7 @@ pub fn canonical_stream_termination<T>(event: &StreamEvent<T>) -> Option<&Stream
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InvocationCancellationPolicy {
+pub enum InvocationCancellationPolicy {
     ReadOnly,
     AuthoritativeEffect,
 }
@@ -346,7 +346,7 @@ impl InvocationCancellationPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DaemonInvocationError {
+pub enum DaemonInvocationError {
     Cancelled {
         stage: CancellationStage,
     },

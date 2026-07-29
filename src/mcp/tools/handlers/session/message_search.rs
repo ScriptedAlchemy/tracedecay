@@ -482,6 +482,9 @@ pub(crate) enum SessionRetrievalUnavailableReason {
     RefreshWorkerRecovering,
     RefreshWorkerStalled,
     RefreshWorkerStopped,
+    #[allow(dead_code)]
+    // Complete terminal-reason contract; semantic eligibility runs before temporal ranking, so the
+    // retrieval adapter must never terminate a query as unsupported.
     UnsupportedQuery,
     #[allow(dead_code)]
     // Complete terminal-reason contract; produced by the injected retrieval service in the follow-up wiring slice.

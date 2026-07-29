@@ -242,11 +242,12 @@ pub fn staged_notice_message(counts: &AutomationPendingCounts) -> Option<String>
     }
     let mut sentence = String::from("TraceDecay automation: ");
     if !parts.is_empty() {
-        sentence.push_str(&format!(
-            "{} await{} review",
-            parts.join(" and "),
-            if counts.counted_total() == 1 { "s" } else { "" },
-        ));
+        sentence.push_str(&parts.join(" and "));
+        sentence.push_str(if counts.counted_total() == 1 {
+            " awaits review"
+        } else {
+            " await review"
+        });
     }
     let unreadable = counts.unreadable();
     if !unreadable.is_empty() {
@@ -254,11 +255,13 @@ pub fn staged_notice_message(counts: &AutomationPendingCounts) -> Option<String>
             sentence.push_str("; ");
         }
         let labels: Vec<&str> = unreadable.iter().map(|(label, _)| *label).collect();
-        sentence.push_str(&format!(
-            "the {} queue{} could not be read, so pending review is unknown",
-            labels.join(" and "),
-            if labels.len() == 1 { "" } else { "s" },
-        ));
+        sentence.push_str("the ");
+        sentence.push_str(&labels.join(" and "));
+        sentence.push_str(if labels.len() == 1 {
+            " queue could not be read, so pending review is unknown"
+        } else {
+            " queues could not be read, so pending review is unknown"
+        });
     }
     sentence.push_str(" — dashboard Memory and Skills tabs.");
     Some(sentence)

@@ -17,8 +17,8 @@ use tracedecay_domain::{
     RetrievalAnchorTargetV2, VectorWatermark,
 };
 use tracedecay_store::{
-    ObservationProjectionStatus, ObservationStoreError, ObservationStoreResult,
-    ObservedEvidenceAnchorResolution, SESSION_MESSAGE_PROJECTOR_VERSION,
+    ObservationStoreError, ObservationStoreResult, ObservedEvidenceAnchorResolution,
+    SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
 use crate::db::engine::{QueryExecutor, params};
@@ -293,37 +293,5 @@ mod tests {
             )
             .is_ok()
         );
-    }
-}
-
-async fn read_projection_status(
-    conn: &impl QueryExecutor,
-    observation_id: &CanonicalObservationIdV1,
-) -> ObservationStoreResult<ObservationProjectionStatus> {
-    let mut rows = conn
-        .query(
-            "SELECT EXISTS(
-                SELECT 1 FROM projection_queue WHERE observation_id = ?1
-             )",
-            params![observation_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage("read observation projection status", error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| storage("read observation projection status", error))?
-        .ok_or_else(|| {
-            storage_message(
-                "read observation projection status",
-                "projection status query returned no row",
-            )
-        })?;
-    match row
-        .get::<i64>(0)
-        .map_err(|error| storage("read observation projection status", error))?
-    {
-        0 => Ok(ObservationProjectionStatus::NotQueued),
-        _ => Ok(ObservationProjectionStatus::Queued),
     }
 }

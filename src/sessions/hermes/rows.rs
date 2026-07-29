@@ -2,6 +2,7 @@
 //! bounded `SQLite` page sweep.
 
 use crate::privacy::MAX_OBSERVATION_RECORD_BYTES;
+#[cfg(test)]
 use crate::sessions::shared::StoredCursor;
 
 use super::MAX_HERMES_VALUE_BYTES;
@@ -41,6 +42,7 @@ pub(crate) struct HermesRow {
 /// before `String`/`Vec` materialization.
 pub(crate) struct HermesPageRead {
     pub(crate) items: Vec<HermesRow>,
+    #[cfg(test)]
     pub(crate) new_cursor: StoredCursor,
     /// More rows remain at the authority, but the page byte budget stopped collection.
     pub(crate) truncated_by_byte_budget: bool,

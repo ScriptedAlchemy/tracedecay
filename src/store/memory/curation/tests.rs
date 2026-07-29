@@ -97,7 +97,7 @@ async fn curated_correction_provenance_is_exact_owner_scoped_and_replay_safe() {
     while let Some(row) = rows.next().await.unwrap() {
         targets.push(row.get::<String>(0).unwrap());
         assert_eq!(row.get::<String>(1).unwrap(), "derived_from");
-        assert_eq!(row.get::<f64>(2).unwrap(), 0.91);
+        assert!((row.get::<f64>(2).unwrap() - 0.91).abs() <= f64::EPSILON);
         assert_eq!(
             row.get::<String>(3).unwrap(),
             "compatibility_curation_normalize_tags"
@@ -257,7 +257,7 @@ async fn curated_correction_rejects_self_only_evidence_without_writing_provenanc
                     transaction,
                     &owner,
                     &source,
-                    &[source.clone()],
+                    std::slice::from_ref(&source),
                     Confidence::new(0.8).unwrap(),
                     "normalize_tags",
                     None,

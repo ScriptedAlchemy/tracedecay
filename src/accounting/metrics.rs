@@ -17,7 +17,7 @@ pub struct CostSummary {
 
 /// Quick cost summary for the `tracedecay status` header row.
 /// Returns `None` if no accounting data exists.
-pub async fn quick_cost_summary(
+pub(crate) async fn quick_cost_summary(
     gdb: &RegisteredGlobalDb,
     tokens_saved: u64,
     global_tokens_saved: u64,
@@ -50,7 +50,7 @@ pub async fn quick_cost_summary(
 }
 
 /// Build a full cost summary for a given time range.
-pub async fn cost_summary(
+pub(crate) async fn cost_summary(
     gdb: &RegisteredGlobalDb,
     since: u64,
     tokens_saved: u64,

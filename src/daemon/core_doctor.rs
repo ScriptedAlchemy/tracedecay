@@ -20,6 +20,17 @@ pub(crate) const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 24;
 pub(crate) struct DoctorRuntimeRequest {
     id: serde_json::Value,
     startup_health_only: bool,
+    doctor_report_requested: bool,
+}
+
+impl DoctorRuntimeRequest {
+    pub(crate) fn doctor_report_requested(&self) -> bool {
+        self.doctor_report_requested
+    }
+
+    pub(crate) fn should_serve_from_core(&self, doctor_report_ready: bool) -> bool {
+        !self.doctor_report_requested || !doctor_report_ready
+    }
 }
 
 pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
@@ -45,12 +56,17 @@ pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntime
             .get("session_ingest_health")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-    if !startup_health_only && !full_doctor {
+    let doctor_report_requested = arguments
+        .get("doctor_report")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if !startup_health_only && !full_doctor && !doctor_report_requested {
         return None;
     }
     Some(DoctorRuntimeRequest {
         id: request.id.unwrap_or(serde_json::Value::Null),
         startup_health_only,
+        doctor_report_requested,
     })
 }
 
@@ -462,13 +478,14 @@ fn doctor_semantic_runtime_status(
         .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
 
+#[cfg(test)]
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
     // Owned stores are never path-opened as a fallback. Without the daemon's
     // retained runtime authority Doctor reports explicit unavailability.
     doctor_runtime_value_inner(handshake, None, false).await
 }
 
-pub(crate) async fn write_doctor_runtime_response(
+pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
@@ -678,6 +695,8 @@ mod doctor_runtime_route_tests {
         let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
         assert_eq!(parsed.id, serde_json::json!(7));
         assert!(!parsed.startup_health_only);
+        assert!(!parsed.doctor_report_requested());
+        assert!(parsed.should_serve_from_core(true));
 
         let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
         assert!(doctor_runtime_request(&ordinary).is_none());
@@ -698,6 +717,31 @@ mod doctor_runtime_route_tests {
         let parsed = doctor_runtime_request(&startup).expect("startup health runtime request");
         assert_eq!(parsed.id, serde_json::json!(8));
         assert!(parsed.startup_health_only);
+        assert!(!parsed.doctor_report_requested());
+    }
+
+    #[test]
+    fn requested_doctor_report_uses_core_only_until_the_ready_owner_is_published() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_runtime",
+                "arguments": {
+                    "format": "json",
+                    "authority_audit": true,
+                    "doctor_report": true,
+                    "session_ingest_health": false,
+                },
+            },
+        })
+        .to_string();
+        let parsed = doctor_runtime_request(&request).expect("Doctor report request");
+
+        assert!(parsed.doctor_report_requested());
+        assert!(parsed.should_serve_from_core(false));
+        assert!(!parsed.should_serve_from_core(true));
     }
 
     #[test]

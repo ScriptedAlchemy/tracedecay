@@ -838,7 +838,6 @@ async fn issued_registered_writer_rejects_autocommit_after_scope_drop() {
         .await
         .expect_err("issued writer outlived daemon write authority");
     assert!(error.to_string().contains("active daemon"), "{error}");
-    drop(writer);
     assert!(
         !table_exists(&db, "stale_daemon_writer_must_not_persist").await,
         "rejected autocommit write persisted"
@@ -945,6 +944,32 @@ async fn session_temporal_repair_resumes_one_atomic_stage_at_a_time() {
     assert_ne!(
         second, first,
         "a restarted worker must resume after the durable checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn required_session_temporal_state_repair_runs_once_before_background_audits() {
+    let harness = RegisteredGlobalDbHarness::open("session-repair-required-state").await;
+    let db = Arc::clone(&harness.registered);
+    super::enqueue_session_temporal_store_repair(&db)
+        .await
+        .unwrap();
+
+    let repaired = super::advance_required_session_temporal_state_repair(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        repaired,
+        super::SessionTemporalRepairOutcome::Pending {
+            stage: super::SessionTemporalRepairStage::PrepareSchema,
+        }
+    );
+    assert_eq!(
+        super::advance_required_session_temporal_state_repair(&db)
+            .await
+            .unwrap(),
+        repaired,
+        "startup admission must leave schema preparation and authority audits to background repair"
     );
 }
 

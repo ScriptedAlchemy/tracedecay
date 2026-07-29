@@ -281,6 +281,7 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
+    #[allow(dead_code)] // PR9 semantic bootstrap port — preserve authority surface
     pub(crate) async fn bootstrap_pr9(
         &self,
         configuration: ConfigurationCurrentStateV1,
@@ -602,6 +603,7 @@ pub(crate) struct SemanticProtectedRollbackOperationV1 {
 
 pub(crate) struct SemanticAppliedActivationV1 {
     pub configuration_receipt: ConfigurationMutationReceipt,
+    #[allow(dead_code)] // activation outcome field — preserve authority surface
     pub semantic_receipt: Option<SemanticActivationReceiptV1>,
 }
 
@@ -644,7 +646,7 @@ mod tests {
 
     #[test]
     fn operation_requires_durable_authority_and_plan20_runtime() {
-        let _constructor = ProductionSemanticConfigurationOperationV1::new;
+        std::hint::black_box(ProductionSemanticConfigurationOperationV1::new);
     }
 
     #[test]

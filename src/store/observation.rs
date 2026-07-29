@@ -59,9 +59,14 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
             .as_ref()
             .map(|existing| classify_observation_collision(existing.observation(), &candidate));
         if collision == Some(ObservationCollisionOutcomeV1::IdentityCollision) {
-            let existing = existing
-                .as_ref()
-                .expect("classified collisions always have an existing observation");
+            let Some(existing) = existing.as_ref() else {
+                return Err(ObservationStoreError::Storage {
+                    operation: "persist_observation",
+                    source: Box::new(std::io::Error::other(
+                        "classified collisions always have an existing observation",
+                    )),
+                });
+            };
             return Err(ObservationStoreError::ObservationCollision {
                 observation_id: Box::new(observation_id),
                 existing_digest: Box::new(
@@ -112,9 +117,14 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
                 .as_ref()
                 .is_some_and(|existing| existing.observation().receipt() == candidate.receipt());
         if existed_exact {
-            let existing = existing
-                .as_ref()
-                .expect("exact duplicate classification requires a stored observation");
+            let Some(existing) = existing.as_ref() else {
+                return Err(ObservationStoreError::Storage {
+                    operation: "persist_observation",
+                    source: Box::new(std::io::Error::other(
+                        "exact duplicate classification requires a stored observation",
+                    )),
+                });
+            };
             return Ok(ObservationPersistOutcome::ExactDuplicate(
                 existing.commit_receipt().clone(),
             ));

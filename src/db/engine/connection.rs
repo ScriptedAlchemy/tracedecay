@@ -61,7 +61,8 @@ impl Runtime for MigrationSqlHandle {
     }
 
     fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot> {
-        self.begin_health_read_snapshot(READER_WAIT).map_err(Into::into)
+        self.begin_health_read_snapshot(READER_WAIT)
+            .map_err(Into::into)
     }
 
     fn begin_deferred(&self) -> Result<RuntimeTransaction> {

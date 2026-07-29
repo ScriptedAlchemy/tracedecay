@@ -74,6 +74,7 @@ const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
+const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
 const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 /// Backoff for a persisted-row authority defect, which only an operator can
@@ -510,10 +511,14 @@ fn code_index_search_executor(
     project_id: tracedecay_domain::ProjectId,
     admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
 ) -> crate::mcp::server::CodeIndexSearchExecutor {
+    let execution_admission = Arc::new(tokio::sync::Semaphore::new(
+        MAX_CONCURRENT_CODE_INDEX_SEARCHES,
+    ));
     Arc::new(move |request| {
         let schedulers = schedulers.clone();
         let project_id = project_id.clone();
         let admission_provider = admission_provider.clone();
+        let execution_admission = Arc::clone(&execution_admission);
         Box::pin(async move {
             let scope = match project_open_owners::resolved_scope_for_project(
                 &request.project_root,
@@ -644,6 +649,20 @@ fn code_index_search_executor(
                     },
                 );
             }
+            let execution_permit = match execution_admission.try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: None,
+                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "search_capacity_unavailable",
+                            },
+                        },
+                    );
+                }
+            };
             let execution_result = {
                 let execution_schedulers = schedulers.clone();
                 let execution_project_root = project_root.clone();
@@ -656,6 +675,7 @@ fn code_index_search_executor(
                     );
                 let runtime = tokio::runtime::Handle::current();
                 let mut execution = tokio::task::spawn_blocking(move || {
+                    let _execution_permit = execution_permit;
                     runtime.block_on(async move {
                         execution_schedulers
                             .execute_pr9_with_semantic(
@@ -872,16 +892,13 @@ fn code_index_search_executor(
             }
             let (semantic, ordered_candidates, next_cursor, accepted_semantic_budget) =
                 match &executed.semantic {
-                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented {
-                    composition,
-                    cursor,
-                    hydration_budget,
-                    ..
-                } => (
+                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented(
+                    augmented,
+                ) => (
                     crate::mcp::server::CodeIndexSemanticStatusV1::Complete,
-                    composition.ranked_candidates.clone(),
-                    cursor.clone(),
-                    Some(hydration_budget),
+                    augmented.composition.ranked_candidates.clone(),
+                    augmented.cursor.clone(),
+                    Some(&augmented.hydration_budget),
                 ),
                 code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
                     abstention,
@@ -2999,6 +3016,28 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         true
     }
 
+    fn swap_ready_if<F>(
+        &mut self,
+        key: &ProjectServerKey,
+        replacement: Server,
+        matches: F,
+    ) -> Option<Server>
+    where
+        F: FnOnce(&Server) -> bool,
+    {
+        let Some(entry) = self.servers.get_mut(key) else {
+            return None;
+        };
+        if !entry.publication.satisfies(ProjectServerRequirement::Core) || !matches(&entry.server) {
+            return None;
+        }
+        let displaced = std::mem::replace(&mut entry.server, replacement);
+        entry.publication = ProjectServerPublication::Core;
+        entry.last_used = Instant::now();
+        Some(displaced)
+    }
+
+    #[cfg(test)]
     fn remove(&mut self, key: &ProjectServerKey) -> Option<Server> {
         let entry = self.servers.remove(key)?;
         self.aliases.retain(|_, alias| alias != key);
@@ -3767,6 +3806,7 @@ impl DaemonEngine {
             .remove(&key);
     }
 
+    #[cfg(test)]
     async fn project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -3964,6 +4004,7 @@ impl DaemonEngine {
     /// Opens or resolves a project server while writer administration is held.
     /// Watcher and scheduler activation happen only after this returns so those
     /// components can acquire the same coordinator without recursive locking.
+    #[cfg(test)]
     async fn open_project_server(
         &self,
         handshake: &DaemonHandshake,
@@ -3995,7 +4036,7 @@ impl DaemonEngine {
             &self.http_application_registry,
             &canonical_project_path,
             handshake,
-            ProductionProjectCompositionRuntime::Unix(self.clone()),
+            ProductionProjectCompositionRuntime::Unix(Box::new(self.clone())),
             cancellation,
             #[cfg(test)]
             Some(&self.project_open_attempts),
@@ -4301,6 +4342,7 @@ async fn cancel_project_server_startup_ingests(store_administration: &StoreAdmin
 }
 
 async fn shutdown_project_servers(store_administration: &StoreAdministration) {
+    store_administration.join_project_server_retirements().await;
     let servers = detach_project_servers(store_administration).await;
     shutdown_detached_project_servers(servers).await;
 }
@@ -4336,6 +4378,68 @@ async fn shutdown_detached_project_servers(servers: Vec<Arc<crate::mcp::McpServe
         drop(graph);
         server.shutdown().await;
     }
+}
+
+const PROJECT_SERVER_REQUEST_DRAIN_DEADLINE: Duration = Duration::from_secs(35);
+const PROJECT_SERVER_ABORT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
+
+async fn wait_for_project_server_request_drains(servers: &[Arc<crate::mcp::McpServer>]) {
+    for server in servers {
+        server.wait_for_project_server_request_drain().await;
+    }
+}
+
+async fn retire_project_servers(
+    servers: Vec<Arc<crate::mcp::McpServer>>,
+    route_registered: Option<Arc<AtomicBool>>,
+) {
+    if tokio::time::timeout(
+        PROJECT_SERVER_REQUEST_DRAIN_DEADLINE,
+        wait_for_project_server_request_drains(&servers),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            deadline_secs = PROJECT_SERVER_REQUEST_DRAIN_DEADLINE.as_secs(),
+            server_count = servers.len(),
+            "retired project requests exceeded their drain deadline; cancelling them"
+        );
+        for server in &servers {
+            server.abort_project_server_requests();
+        }
+        if tokio::time::timeout(
+            PROJECT_SERVER_ABORT_DRAIN_DEADLINE,
+            wait_for_project_server_request_drains(&servers),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                deadline_secs = PROJECT_SERVER_ABORT_DRAIN_DEADLINE.as_secs(),
+                server_count = servers.len(),
+                "cancelled project requests have not yielded; retaining safe shutdown ownership"
+            );
+            wait_for_project_server_request_drains(&servers).await;
+        }
+    }
+    if let Some(route_registered) = route_registered {
+        route_registered.store(false, Ordering::Release);
+    }
+    for server in servers {
+        server.shutdown().await;
+    }
+}
+
+async fn schedule_project_server_retirement(
+    store_administration: &StoreAdministration,
+    servers: Vec<Arc<crate::mcp::McpServer>>,
+    route_registered: Option<Arc<AtomicBool>>,
+) {
+    let retirement = tokio::spawn(retire_project_servers(servers, route_registered));
+    store_administration
+        .track_project_server_retirement(retirement)
+        .await;
 }
 
 /// Kick coalesced per-profile replay without awaiting a pass (handshake-safe).
@@ -4934,7 +5038,7 @@ async fn shutdown_portable_project_open_tasks(
 #[derive(Clone)]
 enum ProductionProjectCompositionRuntime {
     #[cfg(unix)]
-    Unix(DaemonEngine),
+    Unix(Box<DaemonEngine>),
     #[cfg(any(not(unix), test, feature = "test-transport"))]
     Portable {
         semantic_auto_download: bool,
@@ -5016,6 +5120,7 @@ struct ProductionProjectComposition {
     canonical_project_path: PathBuf,
     server: Arc<crate::mcp::McpServer>,
     inserted: bool,
+    #[cfg(any(test, feature = "test-transport"))]
     semantic_auto_download_enabled: Option<bool>,
 }
 
@@ -5060,6 +5165,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
             inserted: false,
+            #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: None,
         });
     }
@@ -5081,6 +5187,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
             inserted: false,
+            #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: None,
         });
     }
@@ -5168,10 +5275,7 @@ async fn production_project_server(
     })?;
     let semantic_auto_download_enabled =
         semantic_config.auto_download && runtime.semantic_auto_download();
-    let _ = crate::semantic_code::apply_config_and_queue_startup(
-        semantic_config.selected_model.as_deref(),
-        semantic_auto_download_enabled,
-    );
+    let semantic_startup_selection = semantic_config.selected_model.clone();
     let semantic_database = cg.dashboard_database_guard();
     let project_database_is_read_only = cg.db().filesystem_is_read_only();
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
@@ -5189,6 +5293,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: existing,
             inserted: false,
+            #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
         });
     }
@@ -5409,7 +5514,7 @@ async fn production_project_server(
         // Publish the graph/search/diagnostic core before session admission.
         // Source-edit previews are available, while mutations fail closed as
         // warming until the full server has its transaction authority.
-        let owner_servers = {
+        {
             let mut servers = store_administration.project_servers().lock().await;
             if !servers.mark_ready(&key) {
                 return Err(TraceDecayError::Config {
@@ -5417,8 +5522,7 @@ async fn production_project_server(
                         .to_owned(),
                 });
             }
-            servers.servers_for_owner(&key.owner)
-        };
+        }
         log_daemon_event(
             "project_open_phase",
             &[
@@ -5430,7 +5534,25 @@ async fn production_project_server(
                 ),
             ],
         );
+        let semantic_startup_project = canonical_project_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let _ = crate::semantic_code::apply_config_and_queue_startup(
+                semantic_startup_selection.as_deref(),
+                semantic_auto_download_enabled,
+            );
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", semantic_startup_project.display().to_string()),
+                    ("phase", "semantic_startup_configured".to_owned()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+        });
         let quarantine_on_upgrade_failure = AtomicBool::new(false);
+        let session_capabilities_published = AtomicBool::new(false);
+        let mut published_full_candidate = None;
         let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
             // The core is reachable from here on, so every step below leaves
             // this block with an error instead of returning behind a published
@@ -5456,6 +5578,10 @@ async fn production_project_server(
             let registered_project_session_db = store_administration
                 .registered_project_session_database(cg.project_root(), cg.store_layout())
                 .await?;
+            crate::global_db::advance_required_session_temporal_state_repair(
+                registered_project_session_db.as_ref(),
+            )
+            .await?;
             log_daemon_event(
                 "project_open_phase",
                 &[
@@ -5595,10 +5721,41 @@ async fn production_project_server(
                     ),
                 ],
             );
-            // The candidate answers nothing until it replaces the published
-            // core, so every failure through that replacement leaves this block
-            // with an error and is stopped once below instead of at each step.
-            let admitted: Result<()> = async {
+            if *current_key.lock().await != key {
+                full_candidate.cancel_startup_transcript_ingest();
+                full_candidate.shutdown().await;
+                return Err(TraceDecayError::Config {
+                    message: "project changed branch during full capability admission".to_owned(),
+                });
+            }
+            let upgraded = store_administration
+                .project_servers()
+                .lock()
+                .await
+                .replace_ready_if(&key, Arc::clone(&full_candidate), |current| {
+                    Arc::ptr_eq(current, &resolved)
+                });
+            if !upgraded {
+                full_candidate.cancel_startup_transcript_ingest();
+                full_candidate.shutdown().await;
+                return Err(TraceDecayError::Config {
+                    message: "project server changed during session capability upgrade".to_owned(),
+                });
+            }
+            published_full_candidate = Some(Arc::clone(&full_candidate));
+            session_capabilities_published.store(true, Ordering::Release);
+            log_daemon_event(
+                "project_open_phase",
+                &[
+                    ("project", canonical_project_path.display().to_string()),
+                    ("phase", "session_capabilities_published".to_owned()),
+                    (
+                        "elapsed_ms",
+                        project_open_started.elapsed().as_millis().to_string(),
+                    ),
+                ],
+            );
+            let full_setup: Result<()> = async {
                 let full_setup_started = Instant::now();
                 let log_full_setup_phase = |phase: &'static str| {
                     log_daemon_event(
@@ -5636,17 +5793,68 @@ async fn production_project_server(
                 )
                 .await?;
                 log_full_setup_phase("git_transactions_ready");
-                invocation
-                    .mount_code_index(
+                let dependent_owners = if project_database_is_read_only {
+                    None
+                } else {
+                    let source_edit_mutation_ready =
+                        source_edit_mutation_ready.ok_or_else(|| TraceDecayError::Config {
+                            message:
+                                "writable project did not install source edit preview authority"
+                                    .to_owned(),
+                        })?;
+                    let state = project_open_owners::register_project_open_production_owners(
+                        invocation,
+                        store_administration.git_index_transaction_services(),
                         canonical_project_path,
-                        code_index_store_root,
-                        Some(&semantic_runtime),
-                        Some(semantic_database),
-                        semantic_lifecycle,
-                        Some(*semantic_resources),
+                        &project_id,
+                        full_candidate.as_ref(),
+                        source_edit_mutation_ready,
                     )
                     .await?;
-                log_full_setup_phase("code_index_mounted");
+                    log_full_setup_phase("independent_owners_registered");
+                    Some(state)
+                };
+                let code_index_invocation = invocation.clone();
+                let code_index_project = canonical_project_path.to_path_buf();
+                let code_index_semantic_runtime = semantic_runtime.clone();
+                let code_index_semantic_lifecycle = semantic_lifecycle.clone();
+                let code_index_semantic_resources = *semantic_resources;
+                let code_index_route_registered = Arc::clone(&route_registered);
+                let code_index_cancellation = cancellation.clone();
+                tokio::spawn(async move {
+                    if code_index_cancellation.is_cancelled()
+                        || !code_index_route_registered.load(Ordering::Acquire)
+                    {
+                        return;
+                    }
+                    let started = Instant::now();
+                    let outcome = code_index_invocation
+                        .mount_code_index(
+                            &code_index_project,
+                            code_index_store_root,
+                            Some(&code_index_semantic_runtime),
+                            Some(semantic_database),
+                            code_index_semantic_lifecycle,
+                            Some(code_index_semantic_resources),
+                        )
+                        .await;
+                    let mut fields = vec![
+                        ("project", code_index_project.display().to_string()),
+                        (
+                            "elapsed_ms",
+                            started.elapsed().as_millis().to_string(),
+                        ),
+                    ];
+                    match outcome {
+                        Ok(()) => fields.push(("phase", "code_index_mounted".to_owned())),
+                        Err(error) => {
+                            fields.push(("phase", "code_index_mount_degraded".to_owned()));
+                            fields.push(("error", error.to_string()));
+                        }
+                    }
+                    log_daemon_event("project_open_phase", &fields);
+                });
+                log_full_setup_phase("code_index_mount_scheduled");
                 project_open_cancellation_checkpoint(cancellation)?;
                 match invocation
                     .semantic_runtime_registrar()
@@ -5656,15 +5864,11 @@ async fn production_project_server(
                     Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
                 }
                 log_full_setup_phase("semantic_runtime_registered");
-                if !project_database_is_read_only {
-                    project_open_owners::register_project_open_production_owners(
+                if let Some(dependent_owners) = dependent_owners {
+                    project_open_owners::register_project_open_dependent_owners(
                         invocation,
-                        store_administration.git_index_transaction_services(),
                         canonical_project_path,
-                        &project_id,
-                        full_candidate.as_ref(),
-                        source_edit_mutation_ready
-                            .expect("writable projects install source edit preview authority"),
+                        dependent_owners,
                     )
                     .await?;
                     log_full_setup_phase("production_owners_registered");
@@ -5676,32 +5880,27 @@ async fn production_project_server(
                     .await?;
                     log_full_setup_phase("http_application_mounted");
                 }
-                if *current_key.lock().await != key {
-                    return Err(TraceDecayError::Config {
-                        message: "project changed branch during full capability admission"
-                            .to_owned(),
-                    });
-                }
-                let upgraded = store_administration
-                    .project_servers()
-                    .lock()
-                    .await
-                    .replace_ready_if(&key, Arc::clone(&full_candidate), |current| {
-                        Arc::ptr_eq(current, &resolved)
-                    });
-                if !upgraded {
-                    return Err(TraceDecayError::Config {
-                        message: "project server changed during full capability upgrade".to_owned(),
-                    });
-                }
                 Ok(())
             }
             .await;
-            if let Err(error) = admitted {
-                full_candidate.cancel_startup_transcript_ingest();
-                full_candidate.shutdown().await;
-                return Err(error);
+            full_setup?;
+            if *current_key.lock().await != key {
+                return Err(TraceDecayError::Config {
+                    message: "project changed branch during full capability admission".to_owned(),
+                });
             }
+            // The registry cutover prevents new core leases. Existing core
+            // requests may finish while dependent owners warm, then the
+            // displaced server is drained without closing the shared graph.
+            resolved.revoke_project_server_responses();
+            resolved.cancel_startup_transcript_ingest();
+            schedule_project_server_retirement(
+                store_administration,
+                vec![Arc::clone(&resolved)],
+                None,
+            )
+            .await;
+            full_candidate.publish_doctor_report();
             log_daemon_event(
                 "project_open_phase",
                 &[
@@ -5719,34 +5918,91 @@ async fn production_project_server(
         match full_upgrade {
             Ok(full_server) => resolved = full_server,
             Err(error) => {
-                // The published core keeps the preview executors it was opened
-                // with while it is retired. Retire their mutation lane with it
-                // so a caller reads a terminal failure instead of an authority
-                // that warms forever.
-                if let Some(mutation) = &core_source_edit_mutation {
-                    mutation.mark_failed();
-                }
-                route_registered.store(false, Ordering::Release);
-                // A branch change during the upgrade rekeys the entry, so the
-                // owner that has to be retired is the current one, not the one
-                // this open published under.
                 let failed_key = current_key.lock().await.clone();
-                let retired = retire_published_project_owner(
-                    Arc::clone(store_administration.project_servers()),
-                    failed_key.owner,
-                    owner_servers,
-                    if quarantine_on_upgrade_failure.load(Ordering::Acquire) {
-                        PublishedOwnerRetirement::QuarantineForHealth
-                    } else {
-                        PublishedOwnerRetirement::Remove
-                    },
-                )
-                .await?;
-                debug_assert!(
-                    retired > 0,
-                    "failed core upgrade must retire its published owner"
-                );
-                return Err(error);
+                let retain_core = !quarantine_on_upgrade_failure.load(Ordering::Acquire)
+                    && !cancellation.is_cancelled()
+                    && failed_key == key;
+                let (core_retained, failed_full_server) = if retain_core {
+                    let mut servers = store_administration.project_servers().lock().await;
+                    match published_full_candidate.as_ref() {
+                        Some(failed_full_server) => {
+                            let displaced =
+                                servers.swap_ready_if(&key, Arc::clone(&resolved), |current| {
+                                    Arc::ptr_eq(current, failed_full_server)
+                                });
+                            (displaced.is_some(), displaced)
+                        }
+                        None => (
+                            servers
+                                .get_ready(&key)
+                                .is_some_and(|current| Arc::ptr_eq(current, &resolved)),
+                            None,
+                        ),
+                    }
+                } else {
+                    (false, None)
+                };
+                if core_retained {
+                    if let Some(failed_full_server) = failed_full_server {
+                        failed_full_server.revoke_project_server_responses();
+                        failed_full_server.cancel_startup_transcript_ingest();
+                        schedule_project_server_retirement(
+                            store_administration,
+                            vec![failed_full_server],
+                            None,
+                        )
+                        .await;
+                    }
+                    log_daemon_event(
+                        "project_open_phase",
+                        &[
+                            ("project", canonical_project_path.display().to_string()),
+                            ("phase", "full_upgrade_degraded".to_owned()),
+                            ("error", error.to_string()),
+                            (
+                                "elapsed_ms",
+                                project_open_started.elapsed().as_millis().to_string(),
+                            ),
+                        ],
+                    );
+                } else {
+                    // The core preview lane cannot remain warming once its
+                    // published owner is being retired.
+                    if let Some(mutation) = &core_source_edit_mutation {
+                        mutation.mark_failed();
+                    }
+                    let mut removed = {
+                        let mut servers = store_administration.project_servers().lock().await;
+                        if quarantine_on_upgrade_failure.load(Ordering::Acquire) {
+                            servers.quarantine_and_remove_owner(&failed_key.owner)
+                        } else {
+                            servers.remove_owner(&failed_key.owner)
+                        }
+                    };
+                    if session_capabilities_published.load(Ordering::Acquire)
+                        && removed.iter().all(|server| !Arc::ptr_eq(server, &resolved))
+                    {
+                        removed.push(Arc::clone(&resolved));
+                    }
+                    for server in &removed {
+                        server.revoke_project_server_responses();
+                        server.cancel_startup_transcript_ingest();
+                    }
+                    debug_assert!(
+                        !removed.is_empty(),
+                        "failed core upgrade must retire its published owner"
+                    );
+                    // Request execution may itself need the owner writer held by
+                    // this open attempt. The tracked retirement starts draining
+                    // after this closure returns and releases that writer.
+                    schedule_project_server_retirement(
+                        store_administration,
+                        removed,
+                        Some(Arc::clone(&route_registered)),
+                    )
+                    .await;
+                    return Err(error);
+                }
             }
         }
     }
@@ -5755,6 +6011,7 @@ async fn production_project_server(
         canonical_project_path: canonical_project_path.to_path_buf(),
         server: resolved,
         inserted,
+        #[cfg(any(test, feature = "test-transport"))]
         semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
     })
 }
@@ -5763,7 +6020,7 @@ async fn production_project_server(
 struct ProductionProjectHarnessResourcesV1 {
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    _project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     servers: HashMap<PathBuf, Arc<crate::mcp::McpServer>>,
     _database_scope: crate::db::DaemonDatabaseScope,
     _lifecycle_lease: crate::lifecycle_lease::LifecycleLease,
@@ -5951,7 +6208,7 @@ impl ProductionProjectCompositionHarnessV1 {
             resources: Some(ProductionProjectHarnessResourcesV1 {
                 store_administration,
                 invocation,
-                project_open_gates,
+                _project_open_gates: project_open_gates,
                 servers,
                 _database_scope: database_scope,
                 _lifecycle_lease: lifecycle_lease,
@@ -6149,6 +6406,10 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 
 #[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
+    resources
+        .store_administration
+        .join_project_server_retirements()
+        .await;
     let servers = detach_project_servers(&resources.store_administration).await;
     resources.servers.clear();
     for server in &servers {
@@ -6294,15 +6555,25 @@ async fn serve_broker_socket_client(
         None
     };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
-        drop(setup_activity);
-        write_doctor_runtime_response(
-            &mut transport,
-            &handshake,
-            &engine.store_administration,
-            request,
-        )
-        .await?;
-        return Ok(());
+        let report_ready = if request.doctor_report_requested() {
+            engine
+                .cached_project_server(&handshake)
+                .await?
+                .is_some_and(|server| server.doctor_report_ready())
+        } else {
+            false
+        };
+        if request.should_serve_from_core(report_ready) {
+            drop(setup_activity);
+            write_doctor_runtime_response(
+                &mut transport,
+                &handshake,
+                &engine.store_administration,
+                request,
+            )
+            .await?;
+            return Ok(());
+        }
     }
     engine.log_client_version_skew(&handshake).await;
     ensure_user_profile_host_admission_replay_for_identity(
@@ -6646,10 +6917,29 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         None
     };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
-        drop(setup_activity);
-        write_doctor_runtime_response(&mut transport, &handshake, &store_administration, request)
+        let report_ready = if request.doctor_report_requested() {
+            let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
+            portable_cached_project_server(
+                &store_administration,
+                &canonical_project_path,
+                &handshake,
+            )
+            .await?
+            .is_some_and(|server| server.doctor_report_ready())
+        } else {
+            false
+        };
+        if request.should_serve_from_core(report_ready) {
+            drop(setup_activity);
+            write_doctor_runtime_response(
+                &mut transport,
+                &handshake,
+                &store_administration,
+                request,
+            )
             .await?;
-        return Ok(());
+            return Ok(());
+        }
     }
     ensure_user_profile_host_admission_replay_for_identity(
         &store_administration,

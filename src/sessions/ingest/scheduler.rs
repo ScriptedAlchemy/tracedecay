@@ -21,7 +21,6 @@ use super::failure::{
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, classify_transcript_ingest_failure,
     plan_round_robin_admission, scheduling_write_required,
 };
-use super::startup::TranscriptIngestOutcome;
 
 /// Durable fair-rotation cursor for project file-transcript multi-source passes.
 pub(super) const TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY: &str =

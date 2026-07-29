@@ -25,7 +25,7 @@ impl McpServer {
                 .await
                 {
                     Ok(Some(route)) => {
-                        crate::mcp::project_route::WorkspaceProjectRoute::Resolved(route)
+                        crate::mcp::project_route::WorkspaceProjectRoute::Resolved(Box::new(route))
                     }
                     Ok(None) => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
                         crate::mcp::project_route::ProjectRouteFailure {

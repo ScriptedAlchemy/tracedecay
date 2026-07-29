@@ -10,9 +10,7 @@ fn queued_cancellable_request_key(
     request_id: &Value,
     connection_scope: &str,
 ) -> Option<String> {
-    let Some(expected) = application_surface_request_id(request_id, connection_scope) else {
-        return None;
-    };
+    let expected = application_surface_request_id(request_id, connection_scope)?;
     pending_lines
         .iter()
         .any(|line| {
@@ -34,42 +32,6 @@ fn queued_cancellable_request_key(
                     == Some(&expected)
         })
         .then_some(expected)
-}
-
-#[cfg(test)]
-mod cancellable_queue_tests {
-    use super::*;
-
-    #[test]
-    fn queued_request_cancellation_is_type_preserving() {
-        let pending = VecDeque::from([
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "tools/call",
-                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
-            })
-            .to_string(),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": "tracedecay_git_status", "arguments": {}},
-            })
-            .to_string(),
-        ]);
-
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")
-                .is_some()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(1), "connection").is_none()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
-        );
-    }
 }
 
 impl McpServer {
@@ -392,6 +354,17 @@ impl McpServer {
                 let tool_name = request.params.as_ref()?.get("name")?.as_str()?.to_owned();
                 Some((id, tool_name))
             });
+            let project_tool_call = parsed
+                .as_ref()
+                .is_ok_and(|request| request.method == "tools/call")
+                && self.project_server_live.is_some();
+            let project_request_guard = if project_tool_call {
+                Some(self.project_server_response_gate.read().await)
+            } else {
+                None
+            };
+            let project_request_admitted = project_request_guard.is_none()
+                || !self.project_server_response_revoked.is_cancelled();
             let request_activity =
                 request_lifecycle.and_then(crate::daemon::DaemonLifecycle::try_enter);
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
@@ -407,6 +380,20 @@ impl McpServer {
                                 .to_string(),
                         )
                     })
+                })
+            } else if !project_request_admitted {
+                revocable_tool_call.as_ref().map(|(id, tool_name)| {
+                    JsonRpcResponse::error_with_data(
+                        id.clone(),
+                        ErrorCode::InternalError,
+                        "tool project route failed: project server was retired".to_owned(),
+                        Some(serde_json::json!({
+                            "tool": tool_name,
+                            "reason_code": "project_server_retired",
+                            "retryable": true,
+                            "detail": "the retained project server was replaced or revoked; retry against the current owner",
+                        })),
+                    )
                 })
             } else {
                 match parsed {
@@ -429,7 +416,7 @@ impl McpServer {
                                 .and_then(Value::as_str)
                                 .is_some_and(super::requests::tool_supports_live_cancellation);
                         if cancellable_tool_call {
-                            let shutdown_requested = async {
+                            let external_shutdown_requested = async {
                                 if listen_for_process_signals {
                                     #[cfg(unix)]
                                     {
@@ -450,6 +437,13 @@ impl McpServer {
                                     lifecycle.wait_for_draining().await;
                                 } else {
                                     std::future::pending::<()>().await;
+                                }
+                            };
+                            tokio::pin!(external_shutdown_requested);
+                            let shutdown_requested = async {
+                                tokio::select! {
+                                    () = &mut external_shutdown_requested => {}
+                                    () = self.project_server_request_abort.cancelled() => {}
                                 }
                             };
                             tokio::pin!(shutdown_requested);
@@ -485,23 +479,12 @@ impl McpServer {
             };
 
             if peer_closed {
+                drop(project_request_guard);
                 drop(request_activity);
                 break;
             }
 
-            let revocable_response =
-                revocable_tool_call.is_some() && self.project_server_live.is_some();
-            let project_response_guard = if revocable_response {
-                Some(self.project_server_response_gate.read().await)
-            } else {
-                None
-            };
-            let response = if let Some((id, tool_name)) = &revocable_tool_call {
-                self.project_server_revoked_response(id, tool_name)
-                    .or(response)
-            } else {
-                response
-            };
+            let revocable_response = project_tool_call && !project_request_admitted;
 
             // Drain and write any pending notifications (e.g., version warnings).
             {
@@ -560,7 +543,7 @@ impl McpServer {
                     }
                 }
             }
-            drop(project_response_guard);
+            drop(project_request_guard);
             drop(request_activity);
             if rejecting_for_drain
                 || request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting())
@@ -838,5 +821,41 @@ impl McpServer {
             0,
             project_host_admission_replay::ProjectHostAdmissionReplayTask::backoff_count,
         )
+    }
+}
+
+#[cfg(test)]
+mod cancellable_queue_tests {
+    use super::*;
+
+    #[test]
+    fn queued_request_cancellation_is_type_preserving() {
+        let pending = VecDeque::from([
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "1",
+                "method": "tools/call",
+                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "tracedecay_git_status", "arguments": {}},
+            })
+            .to_string(),
+        ]);
+
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")
+                .is_some()
+        );
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!(1), "connection").is_none()
+        );
+        assert!(
+            queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
+        );
     }
 }

@@ -391,12 +391,31 @@ struct ServiceEntry {
     authority: Arc<DaemonGitAuthoritySlot>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ServiceKey {
+    database_path: PathBuf,
+    project_id: ProjectId,
+    repository_root: PathBuf,
+}
+
+impl ServiceKey {
+    fn new(database_path: &PathBuf, project_id: &ProjectId, repository_root: &PathBuf) -> Self {
+        Self {
+            database_path: database_path.clone(),
+            project_id: project_id.clone(),
+            repository_root: repository_root.clone(),
+        }
+    }
+}
+
 /// Owns the store actor, native executor, classifier, policy recheck, and
-/// repository queue for each registered project session database.
+/// repository queue for each exact project/worktree identity. Linked
+/// worktrees share one session store actor without sharing native executors or
+/// mutation authority.
 #[derive(Default)]
 pub(crate) struct DaemonGitIndexTransactionServiceRegistry {
     stores: GitIndexTransactionStoreRegistry,
-    services: tokio::sync::Mutex<HashMap<PathBuf, ServiceEntry>>,
+    services: tokio::sync::Mutex<HashMap<ServiceKey, ServiceEntry>>,
     creation_gate: tokio::sync::Mutex<()>,
 }
 
@@ -497,8 +516,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
         .await
         .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)??;
         let service = Arc::new(service);
+        let service_key = ServiceKey::new(&database_path, &project_id, &repository_root);
         self.services.lock().await.insert(
-            database_path,
+            service_key,
             ServiceEntry {
                 project_id,
                 repository_root,
@@ -517,13 +537,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
     ) -> Result<Option<Arc<DaemonProjectGitIndexTransactionService>>, GitIndexTransactionPortError>
     {
         let services = self.services.lock().await;
-        let Some(entry) = services.get(database_path) else {
-            return Ok(None);
-        };
-        if entry.project_id != *project_id || entry.repository_root != *repository_root {
-            return Err(GitIndexTransactionPortError::PolicyDenied);
-        }
-        Ok(Some(Arc::clone(&entry.service)))
+        Ok(services
+            .get(&ServiceKey::new(database_path, project_id, repository_root))
+            .map(|entry| Arc::clone(&entry.service)))
     }
 
     pub(crate) async fn install_authority(

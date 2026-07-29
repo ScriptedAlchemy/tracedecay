@@ -1857,10 +1857,10 @@ mod tests {
         let request_line = request.lines().next().unwrap();
         let path = request_line.split_whitespace().nth(1).unwrap();
         let resolve_marker = format!("/resolve/{revision}/");
-        let upstream_path = path
-            .split_once(&resolve_marker)
-            .map(|(_, upstream_path)| upstream_path)
-            .unwrap_or_else(|| panic!("unexpected fixture hub request path: {path}"));
+        let upstream_path = path.split_once(&resolve_marker).map_or_else(
+            || panic!("unexpected fixture hub request path: {path}"),
+            |(_, upstream_path)| upstream_path,
+        );
         let body = members
             .get(upstream_path)
             .unwrap_or_else(|| panic!("unexpected fixture hub request path: {path}"));

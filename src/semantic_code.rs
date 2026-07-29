@@ -1,6 +1,7 @@
 #![allow(dead_code)] // in-flight semantic runtime root; Plan 31 native fastembed semantic code search
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
@@ -367,6 +368,7 @@ pub(crate) struct DaemonSemanticRuntimeHandleV1 {
     scheduling: SemanticRuntimeSchedulingHandleV1,
     bounds: SemanticRuntimeSchedulingBoundsV1,
     runtime: Arc<RwLock<Option<CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>>>>,
+    query_in_flight: Arc<AtomicBool>,
     transitions: Arc<Mutex<()>>,
     pool_config: SessionPoolConfigV1,
 }
@@ -422,6 +424,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                 memory_ceiling_bytes,
             },
             runtime: Arc::new(RwLock::new(None)),
+            query_in_flight: Arc::new(AtomicBool::new(false)),
             transitions: Arc::new(Mutex::new(())),
             pool_config,
         })
@@ -464,6 +467,7 @@ impl DaemonSemanticRuntimeHandleV1 {
         let projection_key = request.projection_request.target_projection_key.clone();
         let pool_config = self.pool_config.clone();
         let runtime = Arc::clone(&self.runtime);
+        let query_in_flight = Arc::clone(&self.query_in_flight);
         let work = SemanticRuntimeWorkV1::new(
             request.target_generation,
             total_units,
@@ -505,9 +509,12 @@ impl DaemonSemanticRuntimeHandleV1 {
                     }
                     *runtime
                         .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
-                        CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
-                    );
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(CurrentSemanticQueryRuntimeV1::new_with_admission(
+                            pointer.clone(),
+                            candidate,
+                            Arc::clone(&query_in_flight),
+                        ));
                     Ok(())
                 }))
             },
@@ -557,12 +564,8 @@ impl DaemonSemanticRuntimeHandleV1 {
         Some(DaemonSemanticQueryFactoryV1 { inner })
     }
 
-    /// Bind a warmed query runtime to the atomically current pointer.
-    ///
-    /// Used after publication (and by tests) so application search can obtain a
-    /// `query_factory` without joining `FastEmbed` download/indexing into the
-    /// search path. The pointer must already be current and compatible with
-    /// the admitted projection authority.
+    /// Test-only binding for a pointer published without a production runtime.
+    #[cfg(test)]
     pub(crate) fn bind_query_runtime_for_current(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
@@ -586,7 +589,11 @@ impl DaemonSemanticRuntimeHandleV1 {
             .runtime
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(CurrentSemanticQueryRuntimeV1::new(pointer, candidate));
+            Some(CurrentSemanticQueryRuntimeV1::new_with_admission(
+                pointer,
+                candidate,
+                Arc::clone(&self.query_in_flight),
+            ));
         Ok(())
     }
 
@@ -628,8 +635,15 @@ impl DaemonSemanticRuntimeHandleV1 {
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        candidate
+            .warm_query_session()
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
         Ok(PreparedSemanticRuntimeRestoreV1 {
-            runtime: CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
+            runtime: CurrentSemanticQueryRuntimeV1::new_with_admission(
+                pointer.clone(),
+                candidate,
+                Arc::clone(&self.query_in_flight),
+            ),
             pointer,
             expected_current,
             expected_status,

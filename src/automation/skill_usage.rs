@@ -13,7 +13,8 @@ mod overlap;
 mod recommendations;
 
 pub(crate) use analytics::analytics_import_key_for_request;
-pub use analytics::{ingest_analytics_events, ingest_project_analytics_events};
+pub use analytics::ingest_analytics_events;
+pub(crate) use analytics::ingest_project_analytics_events;
 pub use overlap::{
     DEFAULT_SKILL_OVERLAP_LIMIT, SKILL_OVERLAP_CONTENT_THRESHOLD, SKILL_OVERLAP_TITLE_THRESHOLD,
     SkillOverlapCandidate, skill_overlap_candidates,

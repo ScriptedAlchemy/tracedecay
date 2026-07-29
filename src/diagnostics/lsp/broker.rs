@@ -1113,7 +1113,7 @@ mod tests {
             panic!("expected partial semantic outcome");
         };
         assert_eq!(coverage, expected_coverage);
-        assert_eq!(detail.as_deref(), Some(expected_detail));
+        assert_eq!(detail, Some(expected_detail));
         for forbidden in [
             "bearer-secret",
             "YWxpY2U6c2VjcmV0",
@@ -1126,7 +1126,6 @@ mod tests {
         ] {
             assert!(
                 !detail
-                    .as_deref()
                     .expect("typed analyzer failure detail")
                     .contains(forbidden),
                 "caller detail leaked {forbidden}"

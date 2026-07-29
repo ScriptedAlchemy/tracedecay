@@ -309,7 +309,7 @@ impl Database {
 
     /// Returns every edge in the database.
     /// Read through `rowid` keyset pages: whole-table reads on a real project
-    /// exceed what the SQLite runtime will materialize for one query.
+    /// exceed what the `SQLite` runtime will materialize for one query.
     pub async fn get_all_edges(&self) -> Result<Vec<Edge>> {
         collect_rowid_pages(
             &self.engine_conn(),

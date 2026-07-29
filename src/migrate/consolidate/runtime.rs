@@ -439,14 +439,18 @@ pub(super) struct MountedConsolidationArtifactV1 {
 }
 
 impl MountedConsolidationArtifactV1 {
-    pub(super) fn database(&self) -> &Database {
-        self.database
-            .as_ref()
-            .expect("mounted consolidation database is retained until exact close")
+    pub(super) fn database(&self) -> Result<&Database> {
+        self.database.as_ref().ok_or_else(|| {
+            runtime_error("mounted consolidation database is retained until exact close")
+        })
     }
 
     pub(super) async fn checkpoint_and_close_exact(mut self) -> Result<ConsolidationAttachTokenV1> {
-        if let Err(error) = self.database().truncate_wal_for_offline_maintenance().await {
+        if let Err(error) = self
+            .database()?
+            .truncate_wal_for_offline_maintenance()
+            .await
+        {
             drop(self.database.take());
             if let Err(failure) = self
                 .registry
@@ -506,10 +510,6 @@ pub(super) struct ConsolidationAttachTokenV1 {
 }
 
 impl ConsolidationAttachTokenV1 {
-    pub(super) fn authority(&self) -> &ConsolidationArtifactAuthorityV1 {
-        &self.expected
-    }
-
     pub(super) fn into_verified_path(self) -> Result<PathBuf> {
         self.expected.validate()?;
         if self.closed.binding().shard_id != self.expected.shard_id

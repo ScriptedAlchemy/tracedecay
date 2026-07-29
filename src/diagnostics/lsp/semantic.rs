@@ -1400,7 +1400,7 @@ mod tests {
 
         assert_eq!(coverage, "graph-read-failed");
         assert_eq!(
-            detail.as_deref(),
+            detail,
             Some(LspSemanticOperationOutcome::GRAPH_READ_FAILED_DETAIL)
         );
         for forbidden in [
@@ -1413,7 +1413,6 @@ mod tests {
         ] {
             assert!(
                 !detail
-                    .as_deref()
                     .expect("typed graph failure detail")
                     .contains(forbidden),
                 "caller detail leaked {forbidden}"

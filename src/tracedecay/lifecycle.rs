@@ -359,7 +359,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only: false,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
@@ -483,20 +483,6 @@ impl TraceDecay {
             project_root,
             open_options,
             true,
-            None,
-            true,
-        )
-        .await
-    }
-
-    async fn resolve_store_layout_for_project_read_only(
-        project_root: &Path,
-        open_options: &TraceDecayOpenOptions,
-    ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_with_identity_migration(
-            project_root,
-            open_options,
-            false,
             None,
             true,
         )
@@ -1374,7 +1360,7 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
@@ -1519,6 +1505,7 @@ impl TraceDecay {
         }
     }
 
+    #[cfg(not(any(test, feature = "test-transport")))]
     async fn open_read_only_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -1638,7 +1625,7 @@ impl TraceDecay {
             fallback_warning,
             read_only: true,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
@@ -1776,7 +1763,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only: false,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: self.test_runtime_guard.clone(),
             standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),
@@ -2224,7 +2211,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
@@ -2952,17 +2939,6 @@ fn push_existing_store_artifact(
         schema_version,
         updated_at: Some(updated_at),
     });
-}
-
-/// Deletes the database and its WAL/SHM sidecars.
-fn delete_db_files(db_path: &std::path::Path) {
-    let _ = std::fs::remove_file(db_path);
-    // WAL and SHM files use the same base name with different extensions
-    let mut wal = db_path.to_path_buf();
-    wal.set_extension("db-wal");
-    let _ = std::fs::remove_file(&wal);
-    wal.set_extension("db-shm");
-    let _ = std::fs::remove_file(&wal);
 }
 
 /// Build an actionable error without replacing any member of the `SQLite`

@@ -681,6 +681,7 @@ fn read_new_rows_strict_sync(
     }
     Ok(HermesPageRead {
         items,
+        #[cfg(test)]
         new_cursor: StoredCursor {
             position: max_rowid,
             mtime: 0,

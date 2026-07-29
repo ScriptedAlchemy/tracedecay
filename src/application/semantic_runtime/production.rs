@@ -202,6 +202,7 @@ pub(crate) struct SemanticVectorPublicationLeaseV1<'runtime> {
 }
 
 impl ProductionSemanticRuntimeV1 {
+    #[allow(dead_code)] // production semantic runtime mount — preserve authority surface
     pub fn new(
         handle: DaemonSemanticRuntimeHandleV1,
         database: Arc<Database>,
@@ -358,20 +359,26 @@ impl ProductionSemanticRuntimeV1 {
         if artifact.projection() != &projection {
             return Ok(false);
         }
-        self.handle.restore_current(
-            SemanticGenerationPointerV1 {
-                generation: active.generation_id().clone(),
-                source_generation: active.source_generation().clone(),
-                projection_key: active.projection_key().clone(),
-            },
-            artifact,
-        )?;
+        let pointer = SemanticGenerationPointerV1 {
+            generation: active.generation_id().clone(),
+            source_generation: active.source_generation().clone(),
+            projection_key: active.projection_key().clone(),
+        };
+        let handle = self.handle.clone();
+        let prepared =
+            tokio::task::spawn_blocking(move || handle.prepare_restore(pointer, artifact))
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
+        if !self.handle.commit_restore(prepared) {
+            return Err(SemanticRuntimeScheduleFailureV1::Publication);
+        }
         let _ = self.lifecycle.mark_ready();
         Ok(true)
     }
 
     /// Enqueue one saved code generation. Model verification, ORT startup,
     /// changed-chunk embedding, and database publication remain background work.
+    #[allow(dead_code)] // production semantic runtime mount — preserve authority surface
     pub fn schedule_saved_generation(&self, generation: &CodeIndexPublishedGenerationV1) -> bool {
         self.schedule_saved_generation_inner(generation, None)
     }
@@ -972,6 +979,7 @@ impl ProductionSemanticRuntimeV1 {
         Ok((prepared.prepared, elapsed_micros(started), input_bytes))
     }
 
+    #[allow(dead_code)] // production semantic runtime mount — preserve authority surface
     pub(crate) async fn inspect_compatible_current_generation(
         &self,
         required: &crate::config::retrieval::SemanticCompatibilityPinsV1,
@@ -1346,13 +1354,20 @@ impl ProductionSemanticRuntimeV1 {
             source_generation: generation.source_generation().clone(),
             projection_key: generation.projection_key().clone(),
         };
-        let prepared_runtime = self.handle.prepare_restore(pointer.clone(), artifact)?;
+        let handle = self.handle.clone();
+        let prepared_pointer = pointer.clone();
+        let prepared_runtime =
+            tokio::task::spawn_blocking(move || handle.prepare_restore(prepared_pointer, artifact))
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
         let publication = store
             .activate_generation(target, Some(expected_active))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         debug_assert_eq!(publication.generation_id, pointer.generation);
-        self.handle.commit_restore(prepared_runtime);
+        if !self.handle.commit_restore(prepared_runtime) {
+            return Err(SemanticRuntimeScheduleFailureV1::Publication);
+        }
         let _ = self.lifecycle.mark_ready();
         Ok(pointer)
     }

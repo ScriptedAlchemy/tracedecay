@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// create_schema on a fresh database sets user_version to latest and creates all tables.
+/// `create_schema` on a fresh database sets `user_version` to latest and creates all tables.
 #[tokio::test]
 async fn test_create_schema_fresh_db() {
     let (conn, _dir) = create_raw_db().await;
@@ -72,7 +72,7 @@ async fn test_create_schema_fresh_db() {
     assert!(index_exists(&conn, "idx_memory_v2_compatibility_bank_dirty_owner").await);
 }
 
-/// create_schema is idempotent — calling it twice does not error.
+/// `create_schema` is idempotent — calling it twice does not error.
 #[tokio::test]
 async fn test_create_schema_idempotent() {
     let (conn, _dir) = create_raw_db().await;
@@ -452,7 +452,7 @@ async fn test_database_open_migrates_v1_to_latest() {
     assert_eq!(get_user_version(db.conn()).await, LATEST_VERSION);
 }
 
-/// After create_schema, all v5 columns on nodes exist.
+/// After `create_schema`, all v5 columns on nodes exist.
 #[tokio::test]
 async fn test_create_schema_has_all_node_columns() {
     let (conn, _dir) = create_schema_db().await;
@@ -797,7 +797,7 @@ async fn test_v11_create_schema_has_holographic_memory_schema() {
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     assert_eq!(row.get::<String>(0).unwrap(), "[]");
-    assert_eq!(row.get::<f64>(1).unwrap(), 0.5);
+    assert!((row.get::<f64>(1).unwrap() - 0.5).abs() <= f64::EPSILON);
     assert_eq!(row.get::<i64>(2).unwrap(), 0);
     assert_eq!(row.get::<i64>(3).unwrap(), 0);
     assert_eq!(row.get::<i64>(4).unwrap(), 0);
@@ -1164,7 +1164,7 @@ async fn test_v11_backfill_preserves_duplicate_legacy_content() {
 
 /// v13 archive-column cleanup must handle the odd dev-DB state where the
 /// abandoned archive revision left `superseded_by` as a generated column
-/// referencing `merged_into`: SQLite refuses to drop `merged_into` while the
+/// referencing `merged_into`: `SQLite` refuses to drop `merged_into` while the
 /// generated column still references it, so the migration has to drop the
 /// dependent column first. Regression test for the "no such column" failure.
 #[tokio::test]

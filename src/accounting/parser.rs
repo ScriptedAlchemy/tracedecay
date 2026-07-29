@@ -181,7 +181,7 @@ pub struct IngestStats {
 
 /// Ingest all Claude Code session files into the global DB.
 /// Uses offset tracking to only parse new lines since the last run.
-pub async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
+pub(crate) async fn ingest(gdb: &RegisteredGlobalDb) -> IngestStats {
     let files = find_session_files();
     let mut total_inserted = 0u64;
     let mut total_cost = 0.0f64;

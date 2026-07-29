@@ -1196,14 +1196,14 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
 }
 
 #[tokio::test]
-async fn daemon_owner_rejects_rebinding_a_project_database_to_another_worktree_root() {
+async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     let directory = tempfile::tempdir().expect("project directory");
     let alternate = tempfile::tempdir().expect("alternate worktree directory");
     let database_path = directory.path().join("canonical-project.db");
     rusqlite::Connection::open(&database_path).expect("canonical project database");
     let registry = DaemonGitIndexTransactionServiceRegistry::default();
     let project_id = id::<ProjectId>("project.singleton.fixture");
-    registry
+    let primary = registry
         .ensure_engine_test(
             database_path.clone(),
             directory.path().to_path_buf(),
@@ -1212,20 +1212,32 @@ async fn daemon_owner_rejects_rebinding_a_project_database_to_another_worktree_r
         )
         .await
         .expect("first project service");
+    let linked = registry
+        .ensure_engine_test(
+            database_path,
+            alternate.path().to_path_buf(),
+            project_id,
+            UtcMicros(21),
+        )
+        .await
+        .expect("linked worktree service");
 
-    assert_eq!(
-        registry
-            .ensure_engine_test(
-                database_path,
-                alternate.path().to_path_buf(),
-                project_id,
-                UtcMicros(21),
-            )
-            .await
-            .map(|_| ()),
-        Err(GitIndexTransactionPortError::PolicyDenied),
-        "one database must not silently reuse a native executor rooted at another worktree"
+    assert!(
+        !Arc::ptr_eq(&primary, &linked),
+        "worktrees sharing one store need independent native executors"
     );
+    let primary_owner = registry
+        .for_repository_root(directory.path())
+        .await
+        .expect("primary owner lookup")
+        .expect("primary owner");
+    let linked_owner = registry
+        .for_repository_root(alternate.path())
+        .await
+        .expect("linked owner lookup")
+        .expect("linked owner");
+    assert!(Arc::ptr_eq(&primary_owner.service, &primary));
+    assert!(Arc::ptr_eq(&linked_owner.service, &linked));
 }
 
 /// Symlink alias of an already-mounted root must resolve to the same owner

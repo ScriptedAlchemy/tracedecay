@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
@@ -111,7 +112,7 @@ pub struct CodeIndexBuildRequestV1 {
 }
 
 /// Synchronous checkpoints exposed by an application/daemon request.
-pub trait CodeIndexExecutionControlV1 {
+pub trait CodeIndexExecutionControlV1: Sync {
     fn is_cancelled(&self) -> bool;
     fn is_deadline_exceeded(&self) -> bool;
 }
@@ -164,9 +165,61 @@ struct FileGenerationArtifactsV1 {
     exact_authority: ExactExtractionAuthorityV1,
 }
 
+enum IncrementFileMaterializationV1 {
+    CarryForward(FileGenerationArtifactsV1),
+    ReExtracted {
+        file: SanitizedCodeFileV1,
+        artifact: FileGenerationArtifactsV1,
+        fallback: bool,
+    },
+    Deleted,
+}
+
 const PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN: &str =
     "tracedecay.physical-code-artifact-reuse.v1";
 const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
+// Match the established extraction ceiling: enough parallelism to use large
+// hosts without multiplying parser memory across every logical CPU.
+const MAX_CODE_INDEX_EXTRACTION_WORKERS: usize = 8;
+
+fn bounded_code_index_extraction_workers(file_count: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, MAX_CODE_INDEX_EXTRACTION_WORKERS)
+        .min(file_count.max(1))
+}
+
+fn collect_bounded_ordered<T, R, E, F>(items: &[T], operation: F) -> Result<Vec<R>, E>
+where
+    T: Sync,
+    R: Send,
+    E: Send,
+    F: Fn(&T) -> Result<R, E> + Sync,
+{
+    let workers = bounded_code_index_extraction_workers(items.len());
+    if workers == 1 {
+        return items.iter().map(operation).collect();
+    }
+    let pool = match rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|index| format!("tracedecay-code-index-{index}"))
+        .build()
+    {
+        Ok(pool) => pool,
+        Err(_) => return items.iter().map(operation).collect(),
+    };
+    let mut values = Vec::with_capacity(items.len());
+    for batch in items.chunks(workers) {
+        let results = pool.install(|| {
+            batch
+                .par_iter()
+                .map(&operation)
+                .collect::<Vec<Result<R, E>>>()
+        });
+        values.extend(results.into_iter().collect::<Result<Vec<_>, _>>()?);
+    }
+    Ok(values)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PhysicalCodeArtifactPoolStatsV1 {
@@ -956,9 +1009,9 @@ where
         request: CodeIndexBuildRequestV1,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
         let active = self.active_generation()?;
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
 
         let intake = self.intake_at(request.sealed_at, registry_for_snapshot(&request.snapshot)?);
         let capability = intake
@@ -966,7 +1019,7 @@ where
             .map_err(CodeIndexProductionErrorV1::Intake)?;
         let validated = capability.snapshot().clone();
         let captured_files = captured_files(&validated.snapshot, request.captured_files)?;
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
             self.config.repository.clone(),
@@ -1018,7 +1071,7 @@ where
                 None,
             ),
         };
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
 
         let parser_registry = Arc::new(crate::extraction::LanguageRegistry::new());
         let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
@@ -1058,7 +1111,7 @@ where
                 ));
             }
         };
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
 
         let coverage = coverage_summary(&validated.snapshot, &staged.files);
         let capability = BaseCapabilityEmitter::new(
@@ -1077,10 +1130,10 @@ where
             request.target_projection_key,
             changes,
         )?;
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
         let projection = project_for_publication(&mut self.projection, projection_request)
             .map_err(CodeIndexProductionErrorV1::Projection)?;
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
 
         let (edges, edge_abstentions) = collect_edge_evidence(&staged.files);
         let candidate = CodeIndexPublishedGenerationV1 {
@@ -1123,7 +1176,6 @@ where
     }
 
     fn checkpoint(
-        &self,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         if control.is_cancelled() {
@@ -1139,10 +1191,7 @@ where
         }
     }
 
-    fn interruption_error(
-        &self,
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> CodeIndexProductionErrorV1 {
+    fn interruption_error(control: &dyn CodeIndexExecutionControlV1) -> CodeIndexProductionErrorV1 {
         if control.is_deadline_exceeded() {
             CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
         } else {
@@ -1152,7 +1201,8 @@ where
 
     #[allow(clippy::too_many_arguments)]
     fn extract_file(
-        &self,
+        config: &CodeIndexProductionConfigV1,
+        physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
@@ -1161,8 +1211,9 @@ where
         file: &SanitizedCodeFileV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
+        record_physical_artifact: bool,
     ) -> Result<FileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
         let captured = captured_files
             .get(&file.file_occurrence_id)
             .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
@@ -1187,26 +1238,14 @@ where
                 "validated snapshot language has no descriptor".to_owned(),
             )
         })?;
-        let physical_reuse_key = canonical_sha256(&(
-            PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
-            &self.config.repository,
-            &file.logical_path,
-            &file.content_digest,
-            descriptor,
-            &self.config.sanitizer_revision,
-            &self.config.policy_revision,
-            &self.config.chunker_revision,
-            &self.config.privacy_domain,
-            self.config.privacy_key_epoch,
-            captured.sensitivity_level,
-        ))
-        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        if let Some(reused) = self.physical_artifacts.reuse(
+        let physical_reuse_key =
+            Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
+        if let Some(reused) = physical_artifacts.reuse(
             &physical_reuse_key,
             manifest.generation_id.clone(),
             file.file_occurrence_id.clone(),
         ) {
-            self.checkpoint(control)?;
+            Self::checkpoint(control)?;
             return Ok(reused);
         }
         let cancellation = ExtractionControlBridge { control };
@@ -1214,11 +1253,11 @@ where
             .extract(&receipt_bound, descriptor, &cancellation)
             .map_err(|error| match error {
                 ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
-                    self.interruption_error(control)
+                    Self::interruption_error(control)
                 }
                 error => CodeIndexProductionErrorV1::Extraction(error),
             })?;
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
         let (artifacts, exact_authority) = chunker
             .index_file_with_authority_from_extraction(
                 &receipt_bound,
@@ -1228,19 +1267,69 @@ where
                 &cancellation,
             )
             .map_err(|error| match error {
-                ChunkingFailureV1::Cancelled => self.interruption_error(control),
+                ChunkingFailureV1::Cancelled => Self::interruption_error(control),
                 error => CodeIndexProductionErrorV1::Chunk(error),
             })?;
-        self.checkpoint(control)?;
+        Self::checkpoint(control)?;
         let (extraction, _) = extraction.into_parts();
         let artifact = FileGenerationArtifactsV1 {
             extraction,
             artifacts,
             exact_authority,
         };
-        self.physical_artifacts
-            .insert(physical_reuse_key, artifact.clone());
+        if record_physical_artifact {
+            physical_artifacts.insert(physical_reuse_key, artifact.clone());
+        }
         Ok(artifact)
+    }
+
+    fn physical_reuse_key(
+        config: &CodeIndexProductionConfigV1,
+        file: &SanitizedCodeFileV1,
+        descriptor: &tracedecay_domain::LanguageDescriptorV1,
+        sensitivity_level: SensitivityLevelV1,
+    ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
+        canonical_sha256(&(
+            PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
+            &config.repository,
+            &file.logical_path,
+            &file.content_digest,
+            descriptor,
+            &config.sanitizer_revision,
+            &config.policy_revision,
+            &config.chunker_revision,
+            &config.privacy_domain,
+            config.privacy_key_epoch,
+            sensitivity_level,
+        ))
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
+    }
+
+    fn record_physical_artifact(
+        config: &CodeIndexProductionConfigV1,
+        physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
+        intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
+        file: &SanitizedCodeFileV1,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
+        artifact: &FileGenerationArtifactsV1,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let captured = captured_files
+            .get(&file.file_occurrence_id)
+            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
+        let language = file.language.as_ref().ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "present snapshot file has no declared language".to_owned(),
+            )
+        })?;
+        let descriptor = intake.registry().descriptor(language).ok_or_else(|| {
+            CodeIndexProductionErrorV1::Contract(
+                "validated snapshot language has no descriptor".to_owned(),
+            )
+        })?;
+        let physical_reuse_key =
+            Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
+        physical_artifacts.insert(physical_reuse_key, artifact.clone());
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1255,21 +1344,43 @@ where
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
-        let mut files = Vec::new();
-        for file in &snapshot.files {
-            if file.disposition == SnapshotFileDispositionV1::Present {
-                files.push(self.extract_file(
-                    intake,
-                    capability,
-                    manifest,
-                    extractor,
-                    chunker,
-                    file,
-                    captured_files,
-                    control,
-                )?);
-            }
+        let present_files = snapshot
+            .files
+            .iter()
+            .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+            .collect::<Vec<_>>();
+        let config = &self.config;
+        let physical_artifacts = &self.physical_artifacts;
+        let files = collect_bounded_ordered(&present_files, |file| {
+            Self::extract_file(
+                config,
+                physical_artifacts,
+                intake,
+                capability,
+                manifest,
+                extractor,
+                chunker,
+                file,
+                captured_files,
+                control,
+                false,
+            )
+        })?;
+        // Parallel completion order is intentionally not cache authority.
+        // Record artifacts in canonical snapshot order so bounded eviction and
+        // subsequent physical reuse remain deterministic.
+        for (file, artifact) in present_files.into_iter().zip(&files) {
+            Self::checkpoint(control)?;
+            Self::record_physical_artifact(
+                config,
+                physical_artifacts,
+                intake,
+                file,
+                captured_files,
+                artifact,
+            )?;
         }
+        Self::checkpoint(control)?;
         staged_generation(manifest.generation_id.clone(), files, Vec::new())
     }
 
@@ -1286,57 +1397,84 @@ where
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
-        let prior_files = active
+        let prior_by_occurrence = active
             .files
             .iter()
-            .map(|file| file.artifacts.chunks.clone())
-            .collect::<Vec<_>>();
-        let mut files = Vec::new();
-        let mut reextracted_files = Vec::new();
-        let mut reextracted_symbols = Vec::new();
-        let mut used_reextraction_fallback = false;
-
-        for file_plan in &increment.files {
-            self.checkpoint(control)?;
-            match &file_plan.action {
-                FileExtractionActionV1::CarryForward {
-                    file_occurrence_id,
-                    prior_file_occurrence_id,
-                    ..
-                } => {
-                    let prior = active
-                        .files
-                        .iter()
-                        .find(|file| {
-                            file.artifacts.chunks.document.file_occurrence_id
-                                == *prior_file_occurrence_id
-                        })
-                        .ok_or_else(|| {
-                            CodeIndexProductionErrorV1::Contract(
-                                "increment plan refers to a missing prior file".to_owned(),
-                            )
-                        })?;
-                    if let Ok(artifact) = prior.rematerialize_for_generation(
-                        manifest.generation_id.clone(),
-                        file_occurrence_id.clone(),
-                    ) {
-                        files.push(artifact);
-                    } else {
-                        // Opaque exact evidence may refuse generation-local
-                        // occurrence rebinding. Re-extract through the
-                        // parser authority instead of rewriting that evidence.
-                        let file = capability
-                            .snapshot()
-                            .snapshot
-                            .files
-                            .iter()
-                            .find(|file| file.file_occurrence_id == *file_occurrence_id)
+            .map(|file| {
+                (
+                    file.artifacts.chunks.document.file_occurrence_id.clone(),
+                    file,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let current_by_occurrence = capability
+            .snapshot()
+            .snapshot
+            .files
+            .iter()
+            .map(|file| (file.file_occurrence_id.clone(), file))
+            .collect::<BTreeMap<_, _>>();
+        let config = &self.config;
+        let physical_artifacts = &self.physical_artifacts;
+        let file_materializations = collect_bounded_ordered(
+            &increment.files,
+            |file_plan| -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
+                Self::checkpoint(control)?;
+                match &file_plan.action {
+                    FileExtractionActionV1::CarryForward {
+                        file_occurrence_id,
+                        prior_file_occurrence_id,
+                        ..
+                    } => {
+                        let prior = prior_by_occurrence
+                            .get(prior_file_occurrence_id)
                             .ok_or_else(|| {
                                 CodeIndexProductionErrorV1::Contract(
-                                    "increment plan refers to a missing current file".to_owned(),
+                                    "increment plan refers to a missing prior file".to_owned(),
                                 )
                             })?;
-                        files.push(self.extract_file(
+                        if let Ok(artifact) = prior.rematerialize_for_generation(
+                            manifest.generation_id.clone(),
+                            file_occurrence_id.clone(),
+                        ) {
+                            Ok(IncrementFileMaterializationV1::CarryForward(artifact))
+                        } else {
+                            // Opaque exact evidence may refuse generation-local
+                            // occurrence rebinding. Re-extract through the parser
+                            // authority instead of rewriting that evidence.
+                            let file =
+                                current_by_occurrence
+                                    .get(file_occurrence_id)
+                                    .ok_or_else(|| {
+                                        CodeIndexProductionErrorV1::Contract(
+                                            "increment plan refers to a missing current file"
+                                                .to_owned(),
+                                        )
+                                    })?;
+                            let artifact = Self::extract_file(
+                                config,
+                                physical_artifacts,
+                                intake,
+                                capability,
+                                manifest,
+                                extractor,
+                                chunker,
+                                file,
+                                captured_files,
+                                control,
+                                false,
+                            )?;
+                            Ok(IncrementFileMaterializationV1::ReExtracted {
+                                file: (**file).clone(),
+                                artifact,
+                                fallback: true,
+                            })
+                        }
+                    }
+                    FileExtractionActionV1::ReExtract { file } => {
+                        let artifact = Self::extract_file(
+                            config,
+                            physical_artifacts,
                             intake,
                             capability,
                             manifest,
@@ -1345,28 +1483,54 @@ where
                             file,
                             captured_files,
                             control,
-                        )?);
-                        used_reextraction_fallback = true;
+                            false,
+                        )?;
+                        Ok(IncrementFileMaterializationV1::ReExtracted {
+                            file: file.clone(),
+                            artifact,
+                            fallback: false,
+                        })
+                    }
+                    FileExtractionActionV1::Deleted { .. } => {
+                        Ok(IncrementFileMaterializationV1::Deleted)
                     }
                 }
-                FileExtractionActionV1::ReExtract { file } => {
-                    let artifact = self.extract_file(
+            },
+        )?;
+
+        let mut files = Vec::new();
+        let mut reextracted_files = Vec::new();
+        let mut reextracted_symbols = Vec::new();
+        let mut used_reextraction_fallback = false;
+
+        for materialization in file_materializations {
+            Self::checkpoint(control)?;
+            match materialization {
+                IncrementFileMaterializationV1::CarryForward(artifact) => files.push(artifact),
+                IncrementFileMaterializationV1::ReExtracted {
+                    file,
+                    artifact,
+                    fallback,
+                } => {
+                    Self::record_physical_artifact(
+                        config,
+                        physical_artifacts,
                         intake,
-                        capability,
-                        manifest,
-                        extractor,
-                        chunker,
-                        file,
+                        &file,
                         captured_files,
-                        control,
+                        &artifact,
                     )?;
-                    reextracted_files.push(artifact.artifacts.chunks.clone());
-                    reextracted_symbols.extend(artifact.artifacts.symbols.clone());
+                    used_reextraction_fallback |= fallback;
+                    if !fallback {
+                        reextracted_files.push(artifact.artifacts.chunks.clone());
+                        reextracted_symbols.extend(artifact.artifacts.symbols.clone());
+                    }
                     files.push(artifact);
                 }
-                FileExtractionActionV1::Deleted { .. } => {}
+                IncrementFileMaterializationV1::Deleted => {}
             }
         }
+        Self::checkpoint(control)?;
 
         if used_reextraction_fallback {
             let mut staged = staged_generation(manifest.generation_id.clone(), files, Vec::new())?;
@@ -1376,6 +1540,11 @@ where
             return Ok(staged);
         }
 
+        let prior_files = active
+            .files
+            .iter()
+            .map(|file| file.artifacts.chunks.clone())
+            .collect::<Vec<_>>();
         let materialized = materialize_generation_increment(
             increment,
             manifest.generation_id.clone(),
@@ -1615,4 +1784,41 @@ fn collect_edge_evidence(
         .collect::<Vec<_>>();
     abstentions.sort();
     (edges, abstentions)
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn code_index_extraction_parallelism_is_bounded_by_files_and_capacity() {
+        let available = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .clamp(1, MAX_CODE_INDEX_EXTRACTION_WORKERS);
+
+        assert_eq!(bounded_code_index_extraction_workers(0), 1);
+        assert_eq!(bounded_code_index_extraction_workers(1), 1);
+        assert_eq!(bounded_code_index_extraction_workers(usize::MAX), available);
+        assert!(bounded_code_index_extraction_workers(4) <= 4);
+    }
+
+    #[test]
+    fn bounded_parallel_collection_stops_after_the_failing_batch() {
+        let visited = AtomicUsize::new(0);
+        let items = (0..32).collect::<Vec<_>>();
+
+        let error = collect_bounded_ordered(&items, |item| {
+            visited.fetch_add(1, Ordering::Relaxed);
+            if *item == 2 { Err(*item) } else { Ok(*item) }
+        })
+        .expect_err("the first batch contains a fatal error");
+
+        assert_eq!(error, 2);
+        assert!(
+            visited.load(Ordering::Relaxed) <= MAX_CODE_INDEX_EXTRACTION_WORKERS,
+            "work after the failing batch must not start"
+        );
+    }
 }

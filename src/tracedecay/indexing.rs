@@ -269,8 +269,7 @@ const MAX_EXTRACTION_WORKERS: usize = 8;
 
 fn bounded_extraction_workers(available: usize, file_count: usize) -> usize {
     available
-        .max(1)
-        .min(MAX_EXTRACTION_WORKERS)
+        .clamp(1, MAX_EXTRACTION_WORKERS)
         .min(file_count.max(1))
 }
 
@@ -735,7 +734,7 @@ impl TraceDecay {
             fallback_warning: self.fallback_warning.clone(),
             read_only: self.read_only,
             context_scout_owner: self.context_scout_owner.clone(),
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: self.test_runtime_guard.clone(),
             standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),

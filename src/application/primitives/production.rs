@@ -125,7 +125,10 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
             eligible: None,
             returned: 0,
             completeness: CoverageCompleteness::Unknown,
-            domains: Vec::new(),
+            domains: vec![CoverageDomainState {
+                domain,
+                completeness: CoverageCompleteness::Unknown,
+            }],
         },
         omissions: Vec::new(),
         scores: Vec::new(),
@@ -173,7 +176,10 @@ fn diagnostics_unavailable(
             eligible: None,
             returned: 0,
             completeness: CoverageCompleteness::Unknown,
-            domains: Vec::new(),
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Diagnostic,
+                completeness: CoverageCompleteness::Unknown,
+            }],
         },
         omissions: vec![Omission {
             domain: EvidenceDomain::Diagnostic,
@@ -904,7 +910,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
-    pub(crate) fn new(
+    fn new(
         graph: Arc<TraceDecay>,
         database: Database,
         observation_database: Arc<RegisteredGlobalDb>,
@@ -1761,6 +1767,7 @@ impl tracedecay_application::AffectedTestsRetrievalPort for TraceDecayAffectedTe
 }
 
 /// How many tables the storage detail lines name before summarising the rest.
+#[cfg(test)]
 const STORAGE_TABLE_DETAIL_LIMIT: usize = 10;
 
 /// Renders per-table byte attribution for the graph store.
@@ -1769,6 +1776,7 @@ const STORAGE_TABLE_DETAIL_LIMIT: usize = 10;
 /// table holds the bytes can be reproduced through the product. A read the
 /// runtime cannot serve reports that it could not be sampled, never an absent
 /// or zero line that would read as "no table holds any bytes".
+#[cfg(test)]
 fn largest_table_details(tables: crate::errors::Result<Vec<(String, u64)>>) -> Vec<String> {
     let mut tables = match tables {
         Ok(tables) => tables,
@@ -2266,13 +2274,116 @@ pub fn admitted_root_uri_for_project(
 pub fn locator_digest_for_project(
     project_root: &Path,
 ) -> Result<ManifestDigest, ApplicationContractError> {
+    // Linked worktrees share one retained project/configuration authority.
+    // Bind that authority to their canonical Git common directory, while
+    // independent clones retain distinct locators. Non-Git projects fall back
+    // to their canonical root.
+    let repository_locator = crate::worktree::git_common_dir(project_root).unwrap_or_else(|| {
+        project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf())
+    });
     canonical_sha256(&(
-        "tracedecay.project-open.locator.v1",
-        project_root.to_string_lossy().as_ref(),
+        "tracedecay.project-open.repository-locator.v2",
+        repository_locator.to_string_lossy().as_ref(),
     ))
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "PR12 primitive project locator digest",
     })
+}
+
+#[cfg(test)]
+mod locator_digest_tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
+            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn linked_worktrees_share_repository_locator_but_independent_repositories_do_not() {
+        let temporary = TempDir::new().expect("temporary root");
+        let primary = temporary.path().join("primary");
+        let linked = temporary.path().join("linked");
+        let independent = temporary.path().join("independent");
+        std::fs::create_dir_all(&primary).expect("primary root");
+        std::fs::create_dir_all(&independent).expect("independent root");
+
+        git(&primary, &["init", "-b", "main", "--quiet"]);
+        std::fs::write(primary.join("README.md"), "primary\n").expect("fixture");
+        git(&primary, &["add", "README.md"]);
+        git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/linked",
+                linked.to_str().expect("linked path"),
+                "HEAD",
+            ],
+        );
+        git(&independent, &["init", "-b", "main", "--quiet"]);
+
+        let primary_digest = locator_digest_for_project(&primary).expect("primary locator digest");
+        let linked_digest = locator_digest_for_project(&linked).expect("linked locator digest");
+        let independent_digest =
+            locator_digest_for_project(&independent).expect("independent locator digest");
+
+        assert_eq!(linked_digest, primary_digest);
+        assert_ne!(independent_digest, primary_digest);
+    }
+}
+
+#[cfg(test)]
+mod unavailable_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn generic_failure_preserves_unknown_domain_coverage() {
+        let outcome: RetrievalPortOutcome<()> = failed(EvidenceDomain::Graph, UtcMicros(1));
+        let coverage = &outcome.evidence().coverage;
+
+        assert!(coverage.validate().is_ok());
+        assert_eq!(
+            coverage.domains,
+            vec![CoverageDomainState {
+                domain: EvidenceDomain::Graph,
+                completeness: CoverageCompleteness::Unknown,
+            }]
+        );
+    }
+
+    #[test]
+    fn diagnostic_unavailability_preserves_unknown_domain_coverage() {
+        let outcome = diagnostics_unavailable(UtcMicros(1), OmissionReason::Unavailable);
+        let coverage = &outcome.evidence().coverage;
+
+        assert!(coverage.validate().is_ok());
+        assert_eq!(
+            coverage.domains,
+            vec![CoverageDomainState {
+                domain: EvidenceDomain::Diagnostic,
+                completeness: CoverageCompleteness::Unknown,
+            }]
+        );
+    }
 }
 
 #[cfg(test)]

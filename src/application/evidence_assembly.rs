@@ -1,3 +1,5 @@
+#![allow(dead_code)] // production evidence-assembly authority; mounted via RegisteredGlobalDb
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -844,6 +846,8 @@ pub(crate) struct RuntimeEvidenceAssemblyStore {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Resolved carries the full anchor record; boxing would ripple through store match sites.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum EvidenceAssemblyAnchorResolutionV1 {
     Resolved {
         record: tracedecay_domain::RetrievalAnchorRecordV3,
@@ -1267,7 +1271,9 @@ impl tracedecay_store::EvidenceAssemblyStore for RuntimeEvidenceAssemblyStore {
                 },
             )? {
                 tracedecay_store::EvidenceAssemblyReadResultV1::ContributionPage(page) => Ok(page),
-                _ => Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+                tracedecay_store::EvidenceAssemblyReadResultV1::Publication(_) => {
+                    Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable)
+                }
             }
         }
     }

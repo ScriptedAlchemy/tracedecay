@@ -65,6 +65,7 @@ impl ActivityFamilyV1 {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 4] = [
         Self::Hook,
         Self::SessionIngest,

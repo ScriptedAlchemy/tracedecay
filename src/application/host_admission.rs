@@ -504,6 +504,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
     }
 
     #[must_use]
+    #[allow(dead_code)] // staged admission builder — preserve authority surface
     pub(crate) fn with_profile_identity(
         mut self,
         brain_id: BrainId,
@@ -515,6 +516,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
     }
 
     #[must_use]
+    #[allow(dead_code)] // staged admission builder — preserve authority surface
     pub(crate) const fn with_project_registered(mut self, runtime: &'a RegisteredGlobalDb) -> Self {
         self.project_registered = Some(runtime);
         self
@@ -689,6 +691,7 @@ impl<'a> HostAdmissionFacade<'a> {
         Self { authorities }
     }
 
+    #[allow(dead_code)] // evidence-assembly admission port — preserve authority surface
     pub(crate) async fn resolve_evidence_assembly_anchor(
         &self,
         context: &tracedecay_application::RequestContext,
@@ -1078,6 +1081,7 @@ pub struct LcmExternalPayloadManifestTestRecord {
 /// registry, and actor-time database authority used by the daemon. It exposes
 /// neither raw admission authorities nor registered database handles.
 #[doc(hidden)]
+#[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
 pub struct HostAdmissionTestRuntimeV1 {
     brain_id: BrainId,
     profile_id: UserProfileId,
@@ -1234,6 +1238,7 @@ impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
     }
 }
 
+#[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-transport"))]
@@ -2579,7 +2584,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::config::ensure_runtime_configuration_for_registered_database(
             project_root,
             layout,
-            self.project_registered.as_ref().cloned().ok_or_else(|| {
+            self.project_registered.clone().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind configuration test project sessions".to_string(),
                     message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2598,7 +2603,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::config::resolve_runtime_configuration_for_registered_database(
             project_root,
             layout,
-            self.project_registered.as_ref().cloned().ok_or_else(|| {
+            self.project_registered.clone().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind configuration test project sessions".to_string(),
                     message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2617,7 +2622,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::config::load_runtime_configuration_for_registered_database_read_only(
             project_root,
             layout,
-            self.project_registered.as_ref().cloned().ok_or_else(|| {
+            self.project_registered.clone().ok_or_else(|| {
                 crate::errors::TraceDecayError::Database {
                     operation: "bind read-only configuration test project sessions".to_string(),
                     message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2661,7 +2666,7 @@ impl HostAdmissionTestRuntimeV1 {
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority,
     > {
         let database = match scope {
-            HostAdmissionScope::Project => self.project_registered.as_ref().cloned(),
+            HostAdmissionScope::Project => self.project_registered.clone(),
             HostAdmissionScope::Profile => Some(Arc::clone(&self.profile_registered)),
         }
         .ok_or_else(|| crate::errors::TraceDecayError::Database {
@@ -4336,6 +4341,21 @@ impl HostAdmissionTestRuntimeV1 {
             .await
     }
 
+    pub async fn lcm_status_deep_for_test(
+        &self,
+        provider: &str,
+        session_id: Option<&str>,
+    ) -> Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+        self.primary_session_database_for_test()
+            .lcm_status_with_options(
+                provider,
+                session_id,
+                true,
+                &crate::sessions::lcm::LcmGcConfig::default(),
+            )
+            .await
+    }
+
     #[doc(hidden)]
     pub async fn lcm_describe_for_test(
         &self,
@@ -4483,11 +4503,10 @@ impl HostAdmissionTestRuntimeV1 {
                 [query],
             )
             .await?;
-        Ok(rows
-            .next()
-            .await?
-            .expect("COUNT(*) returns one row")
-            .get(0)?)
+        let row = rows.next().await?.ok_or_else(|| {
+            crate::sessions::lcm::LcmError::Db("COUNT(*) returned no row".to_owned())
+        })?;
+        Ok(row.get(0)?)
     }
 
     #[doc(hidden)]

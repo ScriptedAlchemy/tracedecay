@@ -1,6 +1,3 @@
-// Contract-test adapters keep the trait's `impl Future` signature shape
-// explicit; the bodies are the async implementation.
-#![allow(clippy::manual_async_fn)]
 use super::common::*;
 use super::*;
 
@@ -339,140 +336,126 @@ fn refresh_frontiers_and_progress_are_monotonic_and_terminal() {
 }
 
 impl SessionRefreshStore for InMemorySessionPorts {
-    fn begin_or_join_session_refresh_supported(
+    async fn begin_or_join_session_refresh_supported(
         &self,
         _permit: SessionRefreshBeginOrJoinPermit,
         request: SessionRefreshBeginOrJoinRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1>> + Send {
-        async move {
-            yield_once().await;
-            let mut state = self.state.lock().unwrap();
-            let disposition = match &state.refresh_request {
-                Some(existing) if existing.is_equivalent_to(&request) => {
-                    SessionRefreshDispositionV1::Joined
-                }
-                Some(_) => {
-                    return Err(SessionStoreError::IdempotencyConflict {
-                        context: "refresh join",
-                    });
-                }
-                None => SessionRefreshDispositionV1::Started,
-            };
-            state.refresh_request = Some(request.clone());
-            Ok(SessionRefreshBeginOrJoinReceiptV1::new(
-                operation_id(),
-                request.session_id().clone(),
-                request.target_frontier(),
-                disposition,
-                UtcMicros(105),
-            ))
-        }
+    ) -> SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1> {
+        yield_once().await;
+        let mut state = self.state.lock().unwrap();
+        let disposition = match &state.refresh_request {
+            Some(existing) if existing.is_equivalent_to(&request) => {
+                SessionRefreshDispositionV1::Joined
+            }
+            Some(_) => {
+                return Err(SessionStoreError::IdempotencyConflict {
+                    context: "refresh join",
+                });
+            }
+            None => SessionRefreshDispositionV1::Started,
+        };
+        state.refresh_request = Some(request.clone());
+        Ok(SessionRefreshBeginOrJoinReceiptV1::new(
+            operation_id(),
+            request.session_id().clone(),
+            request.target_frontier(),
+            disposition,
+            UtcMicros(105),
+        ))
     }
 
-    fn persist_session_refresh_progress_supported(
+    async fn persist_session_refresh_progress_supported(
         &self,
         _permit: SessionRefreshProgressPersistPermit,
         progress: SessionRefreshProgressV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshProgressV1>> + Send {
-        async move {
-            yield_once().await;
-            let mut state = self.state.lock().unwrap();
-            if let Some(previous) = &state.refresh_progress {
-                previous.validate_successor(&progress)?;
-            }
-            state.refresh_progress = Some(progress.clone());
-            Ok(progress)
+    ) -> SessionStoreResult<SessionRefreshProgressV1> {
+        yield_once().await;
+        let mut state = self.state.lock().unwrap();
+        if let Some(previous) = &state.refresh_progress {
+            previous.validate_successor(&progress)?;
         }
+        state.refresh_progress = Some(progress.clone());
+        Ok(progress)
     }
 
-    fn session_refresh_progress_supported(
+    async fn session_refresh_progress_supported(
         &self,
         _permit: SessionRefreshProgressReadPermit,
         request: SessionRefreshProgressRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<Option<SessionRefreshProgressV1>>> + Send {
-        async move {
-            yield_once().await;
-            Ok(self
-                .state
-                .lock()
-                .unwrap()
-                .refresh_progress
-                .clone()
-                .filter(|progress| {
-                    progress.operation_id() == request.operation_id()
-                        && progress.session_id() == request.session_id()
-                }))
-        }
+    ) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
+        yield_once().await;
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .refresh_progress
+            .clone()
+            .filter(|progress| {
+                progress.operation_id() == request.operation_id()
+                    && progress.session_id() == request.session_id()
+            }))
     }
 
-    fn complete_session_refresh_supported(
+    async fn complete_session_refresh_supported(
         &self,
         _permit: SessionRefreshCompletePermit,
         request: SessionRefreshCompletionRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        async move {
-            yield_once().await;
-            let receipt = SessionRefreshReceiptV1::completed(request, UtcMicros(110));
-            let mut state = self.state.lock().unwrap();
-            if let Some(progress) = &state.refresh_progress {
-                receipt.validate_transition_from(progress)?;
-            }
-            state.refresh_receipt = Some(receipt.clone());
-            Ok(receipt)
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        yield_once().await;
+        let receipt = SessionRefreshReceiptV1::completed(request, UtcMicros(110));
+        let mut state = self.state.lock().unwrap();
+        if let Some(progress) = &state.refresh_progress {
+            receipt.validate_transition_from(progress)?;
         }
+        state.refresh_receipt = Some(receipt.clone());
+        Ok(receipt)
     }
 
-    fn fail_session_refresh_supported(
+    async fn fail_session_refresh_supported(
         &self,
         _permit: SessionRefreshFailPermit,
         request: SessionRefreshFailureRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        async move {
-            yield_once().await;
-            let receipt = SessionRefreshReceiptV1::failed(request, UtcMicros(110));
-            let mut state = self.state.lock().unwrap();
-            if let Some(progress) = &state.refresh_progress {
-                receipt.validate_transition_from(progress)?;
-            }
-            state.refresh_receipt = Some(receipt.clone());
-            Ok(receipt)
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        yield_once().await;
+        let receipt = SessionRefreshReceiptV1::failed(request, UtcMicros(110));
+        let mut state = self.state.lock().unwrap();
+        if let Some(progress) = &state.refresh_progress {
+            receipt.validate_transition_from(progress)?;
         }
+        state.refresh_receipt = Some(receipt.clone());
+        Ok(receipt)
     }
 
-    fn cancel_session_refresh_supported(
+    async fn cancel_session_refresh_supported(
         &self,
         _permit: SessionRefreshCancelPermit,
         request: SessionRefreshCancellationRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        async move {
-            yield_once().await;
-            let receipt = SessionRefreshReceiptV1::cancelled(request, UtcMicros(110));
-            let mut state = self.state.lock().unwrap();
-            if let Some(progress) = &state.refresh_progress {
-                receipt.validate_transition_from(progress)?;
-            }
-            state.refresh_receipt = Some(receipt.clone());
-            Ok(receipt)
+    ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        yield_once().await;
+        let receipt = SessionRefreshReceiptV1::cancelled(request, UtcMicros(110));
+        let mut state = self.state.lock().unwrap();
+        if let Some(progress) = &state.refresh_progress {
+            receipt.validate_transition_from(progress)?;
         }
+        state.refresh_receipt = Some(receipt.clone());
+        Ok(receipt)
     }
 
-    fn session_refresh_receipt_supported(
+    async fn session_refresh_receipt_supported(
         &self,
         _permit: SessionRefreshReceiptReadPermit,
         request: SessionRefreshReceiptRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<Option<SessionRefreshReceiptV1>>> + Send {
-        async move {
-            yield_once().await;
-            Ok(self
-                .state
-                .lock()
-                .unwrap()
-                .refresh_receipt
-                .clone()
-                .filter(|receipt| {
-                    receipt.operation_id() == request.operation_id()
-                        && receipt.session_id() == request.session_id()
-                }))
-        }
+    ) -> SessionStoreResult<Option<SessionRefreshReceiptV1>> {
+        yield_once().await;
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .refresh_receipt
+            .clone()
+            .filter(|receipt| {
+                receipt.operation_id() == request.operation_id()
+                    && receipt.session_id() == request.session_id()
+            }))
     }
 }

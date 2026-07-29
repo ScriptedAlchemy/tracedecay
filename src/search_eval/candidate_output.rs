@@ -586,10 +586,15 @@ struct OccurrenceMapEntry {
     display_anchors: Vec<String>,
 }
 
+/// Retrieval adapters keyed by canonical allowed-scope key (sorted, deduped),
+/// as produced by [`canonical_scope_key`].
+type ScopedLexicalProjections = BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>;
+type ScopedGraphEvidence = BTreeMap<Vec<String>, CodeGraphEvidenceAdapterV1>;
+
 struct PublishedCorpus {
     generation: CodeIndexPublishedGenerationV1,
-    lexical_projections: BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>,
-    graph_projections: BTreeMap<Vec<String>, CodeGraphEvidenceAdapterV1>,
+    lexical_projections: ScopedLexicalProjections,
+    graph_projections: ScopedGraphEvidence,
     incremental_generation: CodeIndexPublishedGenerationV1,
     incremental_before_content_digest: String,
     incremental_after_content_digest: String,
@@ -615,13 +620,7 @@ fn build_query_projections(
     generation: &CodeIndexPublishedGenerationV1,
     file_scopes: &BTreeMap<String, String>,
     queries: &[WorkloadQueryV1],
-) -> Result<
-    (
-        BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>,
-        BTreeMap<Vec<String>, CodeGraphEvidenceAdapterV1>,
-    ),
-    CandidateOutputError,
-> {
+) -> Result<(ScopedLexicalProjections, ScopedGraphEvidence), CandidateOutputError> {
     let generation_id = generation.manifest().generation_id.clone();
     let freshness = production_code_index_freshness(
         generation.manifest().seal.sealed_at,
@@ -2130,7 +2129,7 @@ fn pr9_fallback_digest_for_query(
 
 fn pr9_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
     let mut fallback = profile.clone();
-    fallback.profile_id = "pr9-fallback".to_owned();
+    "pr9-fallback".clone_into(&mut fallback.profile_id);
     fallback.semantic_weight_ppm = 0;
     fallback.rerank_weight_ppm = 0;
     fallback
@@ -2265,6 +2264,12 @@ impl LateHydrationSource<Vec<u8>> for CandidateCorpusHydrationSourceV1<'_> {
         let source_occurrence_id = occurrence.source_occurrence_id.clone();
         let freshness = occurrence.freshness.clone();
         let path = self.published.repo_root.join(&entry.fixture_path);
+        let hydration_revision = match HydrationRevision::new("hydration.search-eval.corpus.v1") {
+            Ok(revision) => revision,
+            Err(_) => {
+                return HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::Internal);
+            }
+        };
         match fs::read(path) {
             Ok(payload) => {
                 self.source_fetches = self.source_fetches.saturating_add(1);
@@ -2272,10 +2277,7 @@ impl LateHydrationSource<Vec<u8>> for CandidateCorpusHydrationSourceV1<'_> {
                     receipt: HydrationReceipt {
                         anchor_id,
                         source_occurrence_id,
-                        hydration_revision: HydrationRevision::new(
-                            "hydration.search-eval.corpus.v1",
-                        )
-                        .expect("static hydration revision"),
+                        hydration_revision,
                         bytes_hydrated: payload.len() as u64,
                         authorized: true,
                         freshness,

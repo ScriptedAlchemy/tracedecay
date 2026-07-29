@@ -182,6 +182,7 @@ mod backend {
 ///
 /// The trait is sealed because retention admits only daemon-owned database
 /// capabilities whose writer and snapshot lifetimes are already enforced.
+#[allow(async_fn_in_trait)]
 pub trait RetentionBackend: backend::Sealed {
     #[doc(hidden)]
     async fn delete_before(&self, table: RetentionTable, cutoff: i64) -> Result<u64>;

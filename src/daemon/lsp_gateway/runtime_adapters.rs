@@ -1360,6 +1360,9 @@ struct PendingContextExpansion {
     abort: AbortHandle,
 }
 
+type DeliveredContextChanges =
+    BTreeMap<(String, Option<String>, ContextProjectionKind), ContextProjectionChange>;
+
 /// Async-capable `ContextProjectionPort` without a blocking runtime bridge.
 /// Its in-flight map is bounded by session capacity and contains only one-shot
 /// response correlation, never feedback or evidence truth.
@@ -1368,8 +1371,7 @@ pub struct Pr12ContextProjectionAdapter {
     authority: Arc<dyn CanonicalContextProjectionAuthority>,
     in_flight: Mutex<BTreeMap<ContextRequestKey, PendingContextOperation>>,
     expansions: Mutex<BTreeMap<ContextRequestKey, PendingContextExpansion>>,
-    delivered_changes:
-        Mutex<BTreeMap<(String, Option<String>, ContextProjectionKind), ContextProjectionChange>>,
+    delivered_changes: Mutex<DeliveredContextChanges>,
 }
 
 impl Pr12ContextProjectionAdapter {
@@ -1618,7 +1620,6 @@ mod tests {
         ContextCoverage, ContextExpansionEnvelope, ContextExpansionScope, ContextFreshness,
         ContextProducerState, ContextProjectionEnvelope, ContextProjectionIdentity,
     };
-
     /// `tracedecay-lsp` serializes whatever detail this adapter supplies
     /// verbatim, so this allowlist is the only thing keeping analyzer, graph,
     /// and caller text off the wire. Every template must stay a fixed
@@ -1904,7 +1905,7 @@ mod tests {
         assert!(first.poll_changes(&root, &subscriptions).is_empty());
         assert!(second.poll_changes(&root, &subscriptions).is_empty());
 
-        first.update_subscriptions(&root, &Default::default());
+        first.update_subscriptions(&root, &BTreeSet::default());
         first.update_subscriptions(&root, &subscriptions);
         assert_eq!(first.poll_changes(&root, &subscriptions).len(), 1);
         assert!(second.poll_changes(&root, &subscriptions).is_empty());

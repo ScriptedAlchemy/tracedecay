@@ -147,15 +147,20 @@ pub(in crate::daemon) struct ExecutedPr9SemanticSearchV1 {
     pub semantic: SemanticAugmentationOutcomeV1,
 }
 
+/// Augmented payload carried behind a `Box` so the augmented arm does not
+/// dominate the size of every `SemanticAugmentationOutcomeV1`, whose abstaining
+/// arm holds only a reason and the shared PR9 fallback.
+pub(in crate::daemon) struct SemanticAugmentedCompositionV1 {
+    pub composition: CompositionOutputV1,
+    pub cursor: Option<tracedecay_domain::RetrievalCursor>,
+    pub hydration_budget: tracedecay_domain::RetrievalBudget,
+    pub calibration: SemanticCalibrationEvidenceV1,
+    pub rerank: OptionalStagePublicStatus,
+    pub fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
+}
+
 pub(in crate::daemon) enum SemanticAugmentationOutcomeV1 {
-    Augmented {
-        composition: CompositionOutputV1,
-        cursor: Option<tracedecay_domain::RetrievalCursor>,
-        hydration_budget: tracedecay_domain::RetrievalBudget,
-        calibration: SemanticCalibrationEvidenceV1,
-        rerank: OptionalStagePublicStatus,
-        fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
-    },
+    Augmented(Box<SemanticAugmentedCompositionV1>),
     Fallback {
         abstention: SemanticAbstentionV1,
         fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
@@ -165,7 +170,8 @@ pub(in crate::daemon) enum SemanticAugmentationOutcomeV1 {
 impl SemanticAugmentationOutcomeV1 {
     fn fallback(&self) -> &Arc<tracedecay_domain::Pr9FallbackSubpayload> {
         match self {
-            Self::Augmented { fallback, .. } | Self::Fallback { fallback, .. } => fallback,
+            Self::Augmented(augmented) => &augmented.fallback,
+            Self::Fallback { fallback, .. } => fallback,
         }
     }
 }
@@ -305,7 +311,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &ResolvedScope,
     ) -> Option<Arc<SemanticQueryAuthorityV1>> {
-        let mounted = self.mounted.lock().await;
+        let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
         for worktree in mounted.values() {
             if worktree.repository_id != scope.repository_id
@@ -502,14 +508,16 @@ impl CodeIndexSchedulerRegistryV1 {
                     &rerank,
                     &mut composition,
                 )?;
-                Ok(SemanticAugmentationOutcomeV1::Augmented {
-                    composition,
-                    cursor,
-                    hydration_budget: authority.profile.retrieval_budget,
-                    calibration,
-                    rerank,
-                    fallback,
-                })
+                Ok(SemanticAugmentationOutcomeV1::Augmented(Box::new(
+                    SemanticAugmentedCompositionV1 {
+                        composition,
+                        cursor,
+                        hydration_budget: authority.profile.retrieval_budget,
+                        calibration,
+                        rerank,
+                        fallback,
+                    },
+                )))
             }
         }
     }

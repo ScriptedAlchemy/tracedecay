@@ -817,7 +817,8 @@ impl FakeVectorGenerationStoreV1 {
                 );
             }
         }
-        next.active_generation = transaction.next_active_generation.clone();
+        next.active_generation
+            .clone_from(&transaction.next_active_generation);
         if self.fail_before_publication_swap {
             self.fail_before_publication_swap = false;
             return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
@@ -885,7 +886,9 @@ impl FakeVectorGenerationStoreV1 {
             return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
         }
         self.staged.clear();
-        self.published.active_generation = transaction.next_active_generation.clone();
+        self.published
+            .active_generation
+            .clone_from(&transaction.next_active_generation);
         self.published.legacy_migration_receipts.insert(
             transaction.receipt.receipt_digest.clone(),
             transaction.receipt.clone(),

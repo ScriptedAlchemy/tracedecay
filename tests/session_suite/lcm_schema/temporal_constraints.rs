@@ -593,9 +593,8 @@ async fn temporal_schema_enforces_refresh_progress_and_terminal_receipts() {
             None,
         ),
     ] {
-        let failure_code = failure_code
-            .map(|code| format!("'{code}'"))
-            .unwrap_or_else(|| "NULL".to_string());
+        let failure_code =
+            failure_code.map_or_else(|| "NULL".to_string(), |code| format!("'{code}'"));
         let sql = format!(
             "INSERT INTO session_refresh_receipts (
                 session_id, operation_id, terminal_state, frontier_json,

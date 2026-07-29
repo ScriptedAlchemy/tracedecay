@@ -13,9 +13,7 @@ use tracedecay_domain::{
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome,
-};
+use crate::application::host_admission::{HostAdmissionFacade, HostAdmissionOutcome};
 use crate::application::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::db::{SqliteFileIdentityError, sqlite_generation_identity};
 use crate::sessions::shared::TranscriptIngestStats;
@@ -93,17 +91,6 @@ async fn advance_coverage(
 
 fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
     crate::sessions::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
-}
-
-pub(crate) async fn drain_hermes_projections(scope: &ObservationScopeV1) -> Result<(), String> {
-    let authorities = match scope {
-        ObservationScopeV1::Project { project_id } => {
-            HostAdmissionAuthorities::unregistered_for_project(project_id.clone())
-        }
-        ObservationScopeV1::Profile => HostAdmissionAuthorities::unregistered_for_profile(),
-    };
-    let facade = HostAdmissionFacade::new(authorities);
-    drain_hermes_projections_with_admission(&facade, scope).await
 }
 
 pub(crate) async fn drain_hermes_projections_with_admission(

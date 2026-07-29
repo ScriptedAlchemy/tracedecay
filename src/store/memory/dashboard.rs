@@ -26,7 +26,7 @@ use super::primitives::{
 };
 use super::projection::{
     compatibility_legacy_mapping_tx, load_compatibility_projection_tx,
-    resolve_compatibility_target_tx,
+    load_compatibility_projections_tx, resolve_compatibility_target_tx,
 };
 
 // Dashboard reads deliberately start from the immutable owner-bound V1 mapping.
@@ -67,7 +67,7 @@ async fn dashboard_compatibility_fact_summaries_tx(
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
-    let mut facts = Vec::with_capacity(usize::try_from(limit).unwrap_or_default());
+    let mut mapped = Vec::with_capacity(usize::try_from(limit).unwrap_or_default());
     while let Some(row) = rows
         .next()
         .await
@@ -75,21 +75,35 @@ async fn dashboard_compatibility_fact_summaries_tx(
     {
         let fact_id = FactId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
             .map_err(FactStoreError::from)?;
-        let Some(fact) = load_compatibility_projection_tx(transaction, owner, &fact_id).await?
-        else {
-            return Err(storage_message(
-                COMPATIBILITY_READ_OPERATION,
-                "owner-bound dashboard mapping has no canonical fact projection",
-            )
-            .into());
-        };
-        facts.push(tracedecay_store::CompatibilityDashboardFactSummaryV1 {
-            has_hrr_vector: row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)? != 0
-                && matches!(&fact, CompatibilityFactProjectionV1::Available(_)),
-            fact,
-        });
+        mapped.push((
+            fact_id,
+            row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)? != 0,
+        ));
     }
-    Ok(facts)
+    drop(rows);
+    let fact_ids = mapped
+        .iter()
+        .map(|(fact_id, _)| fact_id.clone())
+        .collect::<Vec<_>>();
+    let projections = load_compatibility_projections_tx(transaction, owner, &fact_ids).await?;
+    if projections.len() != mapped.len() {
+        return Err(storage_message(
+            COMPATIBILITY_READ_OPERATION,
+            "owner-bound dashboard mapping has no canonical fact projection",
+        )
+        .into());
+    }
+    Ok(mapped
+        .into_iter()
+        .zip(projections)
+        .map(
+            |((_, has_hrr_vector), fact)| tracedecay_store::CompatibilityDashboardFactSummaryV1 {
+                has_hrr_vector: has_hrr_vector
+                    && matches!(&fact, CompatibilityFactProjectionV1::Available(_)),
+                fact,
+            },
+        )
+        .collect())
 }
 
 async fn dashboard_compatibility_entities_tx(
@@ -875,7 +889,7 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
-    let mut points = Vec::with_capacity(query.limit());
+    let mut raw_points = Vec::with_capacity(query.limit());
     while let Some(row) = rows
         .next()
         .await
@@ -883,15 +897,6 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
     {
         let fact_id = FactId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
             .map_err(FactStoreError::from)?;
-        let Some(fact) =
-            load_compatibility_projection_tx(transaction, query.owner(), &fact_id).await?
-        else {
-            return Err(storage_message(
-                COMPATIBILITY_READ_OPERATION,
-                "owner-bound dashboard vector mapping has no canonical fact projection",
-            )
-            .into());
-        };
         let vector = match row.get::<crate::db::engine::Value>(1) {
             Ok(crate::db::engine::Value::Blob(bytes)) => HolographicEncoder::deserialize(&bytes)
                 .ok()
@@ -902,17 +907,10 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
                 }),
             Ok(crate::db::engine::Value::Null | _) | Err(_) => None,
         };
-        let vector = matches!(&fact, CompatibilityFactProjectionV1::Available(_))
-            .then_some(vector)
-            .flatten();
-        let bank_name = row_optional_string(&row, 2, COMPATIBILITY_READ_OPERATION)?;
-        points.push(CompatibilityDashboardVectorPointV1::new(
-            tracedecay_store::CompatibilityDashboardFactSummaryV1 {
-                has_hrr_vector: vector.is_some(),
-                fact,
-            },
+        raw_points.push((
+            fact_id,
             vector,
-            bank_name,
+            row_optional_string(&row, 2, COMPATIBILITY_READ_OPERATION)?,
             nonnegative_u64(
                 row_i64(&row, 3, COMPATIBILITY_READ_OPERATION)?,
                 "dashboard vector entity count",
@@ -921,6 +919,37 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
                 row_i64(&row, 4, COMPATIBILITY_READ_OPERATION)?,
                 "dashboard vector connection count",
             )?,
+        ));
+    }
+    drop(rows);
+    let fact_ids = raw_points
+        .iter()
+        .map(|(fact_id, ..)| fact_id.clone())
+        .collect::<Vec<_>>();
+    let facts = load_compatibility_projections_tx(transaction, query.owner(), &fact_ids).await?;
+    if facts.len() != raw_points.len() {
+        return Err(storage_message(
+            COMPATIBILITY_READ_OPERATION,
+            "owner-bound dashboard vector mapping has no canonical fact projection",
+        )
+        .into());
+    }
+    let mut points = Vec::with_capacity(raw_points.len());
+    for ((_, vector, bank_name, entity_count, connection_count), fact) in
+        raw_points.into_iter().zip(facts)
+    {
+        let vector = matches!(&fact, CompatibilityFactProjectionV1::Available(_))
+            .then_some(vector)
+            .flatten();
+        points.push(CompatibilityDashboardVectorPointV1::new(
+            tracedecay_store::CompatibilityDashboardFactSummaryV1 {
+                has_hrr_vector: vector.is_some(),
+                fact,
+            },
+            vector,
+            bank_name,
+            entity_count,
+            connection_count,
         )?);
     }
     Ok(points)

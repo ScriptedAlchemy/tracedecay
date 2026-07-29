@@ -656,6 +656,60 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduler_notifications_release_registry_while_reconcile_is_busy() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locked_tx.send(()).expect("announce scheduler lock");
+        release_rx.recv().expect("release scheduler lock");
+    });
+    locked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("scheduler lock acquisition");
+
+    let notification_registry = registry.clone();
+    let project_root = fixture.path().to_path_buf();
+    let edited_path = fixture.path().join("src/lib.rs");
+    let notification = tokio::spawn(async move {
+        notification_registry
+            .notify_path(&project_root, edited_path)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let registry_read = tokio::time::timeout(
+        Duration::from_millis(100),
+        registry.scheduler_handle(fixture.path()),
+    )
+    .await;
+    assert!(
+        registry_read.is_ok(),
+        "scheduler notification must not retain the mounted-worktree registry lock"
+    );
+
+    release_tx.send(()).expect("release scheduler");
+    assert!(notification.await.expect("notification task"));
+    blocker.join().expect("scheduler blocker");
+    registry.shutdown().await;
+}
+
 #[test]
 fn saved_edit_incremental_publish() {
     let fixture = GitFixture::new(&[(
@@ -1203,6 +1257,52 @@ fn restart_restores_complete_generation_and_content_noop() {
             panic!("restart with identical content must not republish")
         }
     }
+}
+
+#[test]
+fn restored_generation_abstains_and_schedules_background_truth() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("initial publish"));
+    }
+
+    let mut restarted = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    assert!(
+        restarted
+            .latest_complete_ready_for_query()
+            .expect("ready check")
+            .is_none(),
+        "restored bytes are not request-admissible before current truth is proven"
+    );
+    assert_eq!(
+        restarted.pending_hint_count(),
+        None,
+        "the ready check schedules one overflow reconcile for the background worker"
+    );
+    let first_wake_epoch = restarted.epoch.load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        restarted
+            .latest_complete_ready_for_query()
+            .expect("repeat ready check")
+            .is_none()
+    );
+    assert!(
+        restarted.epoch.load(std::sync::atomic::Ordering::Acquire) > first_wake_epoch,
+        "an earlier failed wake cannot strand a retained overflow marker"
+    );
+
+    let outcome = restarted.reconcile_now().expect("background truth");
+    assert!(matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_)));
+    assert!(
+        restarted
+            .latest_complete_ready_for_query()
+            .expect("ready check")
+            .is_some(),
+        "the unchanged restored generation becomes request-admissible after reconciliation"
+    );
 }
 
 #[test]
@@ -2486,6 +2586,31 @@ fn threshold_expiry_without_change_skips_full_reconcile() {
     );
 }
 
+#[test]
+fn ready_query_expiry_defers_even_an_unchanged_tree() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let policy = CodeIndexHintPolicyV1 {
+        staleness_threshold: Duration::ZERO,
+    };
+    let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
+    published(scheduler.reconcile_now().expect("baseline"));
+
+    assert!(
+        scheduler
+            .latest_complete_ready_for_query()
+            .expect("ready query")
+            .is_none(),
+        "latency-sensitive admission must abstain instead of scanning the worktree"
+    );
+    assert_eq!(
+        scheduler.pending_hint_count(),
+        None,
+        "ready admission schedules an overflow reconcile in the background"
+    );
+}
+
 /// A git operation from another process (commit here stands in for pull/rebase)
 /// is detected instantly by the tier-1 .git-metadata check, without waiting for
 /// the staleness bound and without any watcher.
@@ -3429,6 +3554,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
             .await
             .expect("mount daemon-owned scheduler")
     );
+    wait_for_initial_generation(&registry, fixture.path()).await;
 
     // The one mint: file identity and generation both come from the registry.
     let identity =

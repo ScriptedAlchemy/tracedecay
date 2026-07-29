@@ -26,7 +26,7 @@ use crate::config::PinnedUserDataDir;
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::mcp::transport::JsonRpcRequest;
 use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 const MESSAGE_SEARCH_PROJECT_ID: &str = "project.message-search-cutover";
 
@@ -67,7 +67,7 @@ async fn indexed_project() -> (
     .await
     .expect("registered message-search runtime");
     let cg = runtime
-        .initialize_project_graph_for_test(dir.path(), Default::default())
+        .initialize_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
         .await
         .expect("daemon-owned project init");
     (cg, runtime, dir, pin)
@@ -731,7 +731,7 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
 
     let runtime = registered_runtime(dir.path()).await;
     let cg = runtime
-        .open_project_graph_for_test(dir.path(), Default::default())
+        .open_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
         .await
         .expect("reopen project through daemon authority");
     let context = runtime

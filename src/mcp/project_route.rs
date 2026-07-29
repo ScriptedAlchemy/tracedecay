@@ -16,7 +16,12 @@ pub(crate) struct ResolvedProjectRoute {
     pub(crate) graph: Arc<TraceDecay>,
     pub(crate) owner: ProjectRegistryContext,
     pub(crate) requested_root: PathBuf,
+    /// Git identity observed when the route was resolved. Retained on the
+    /// route value for scope/diagnostic cutover; dispatch today keys only on
+    /// `requested_root` + mounted graph.
+    #[allow(dead_code)]
     pub(crate) requested_git_common_dir: Option<PathBuf>,
+    #[allow(dead_code)]
     pub(crate) requested_branch: Option<String>,
     /// The exact application scope resolved ONCE at the entry point for this
     /// route (plan: `docs/superpowers/plans/v2/01-domain-request-context.md`).
@@ -113,7 +118,7 @@ impl ProjectRouteFailure {
 
 #[derive(Clone)]
 pub(crate) enum WorkspaceProjectRoute {
-    Resolved(ResolvedProjectRoute),
+    Resolved(Box<ResolvedProjectRoute>),
     Failed(ProjectRouteFailure),
 }
 
@@ -139,6 +144,10 @@ impl HookProjectRouteCache {
             .or(event.cwd.as_deref())
     }
 
+    /// Path-only cache population used by unit tests that exercise
+    /// [`Self::apply_to_tool_arguments`] without a full workspace route.
+    /// Production hook dispatch records [`Self::observe_workspace_route`].
+    #[cfg(test)]
     pub(crate) fn observe_hook_event(
         &mut self,
         event: &hook_events::HookEvent,
@@ -250,7 +259,7 @@ impl HookProjectRouteCache {
                         json!({ "path": resolved.requested_root }),
                     );
                 }
-                Ok((arguments, Some(resolved.clone())))
+                Ok((arguments, Some(resolved.as_ref().clone())))
             }
             Some(WorkspaceProjectRoute::Failed(failure)) => Err(failure.clone().into_error()),
             None => Ok((self.apply_to_tool_arguments(tool_name, arguments), None)),
@@ -292,6 +301,7 @@ impl HookProjectRouteCache {
         *self = shared;
     }
 
+    #[cfg(test)]
     fn insert_session_route(&mut self, session_id: String, project_path: String) {
         if !self.paths_by_session.contains_key(&session_id) {
             self.session_order.push_back(session_id.clone());
@@ -308,6 +318,7 @@ impl HookProjectRouteCache {
         self.evict_old_session_routes();
     }
 
+    #[cfg(test)]
     fn insert_thread_route(
         &mut self,
         thread_id: String,

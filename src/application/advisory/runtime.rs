@@ -578,21 +578,40 @@ where
                 }
             }
             discovery => {
-                let (state, outcome, coverage) = ci_discovery_terminal_state(discovery)
-                    .expect("non-found discovery is terminal");
-                let degradation = match discovery {
-                    ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint) => Some(
-                        tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
-                            checkpoint.clone(),
+                if let Some((state, outcome, coverage)) = ci_discovery_terminal_state(discovery) {
+                    let degradation = match discovery {
+                        ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint) => Some(
+                            tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
+                                checkpoint.clone(),
+                            ),
                         ),
-                    ),
-                    ProductionCiFailureDiscoveryOutcomeV1::Failed(cause) => Some(
-                        tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(*cause),
-                    ),
-                    _ => None,
-                };
-                self.observe_ci_terminal(&request.feedback.input, outcome, coverage, degradation);
-                contributions.set_state(Pr13AdvisoryProviderV1::Ci, state);
+                        ProductionCiFailureDiscoveryOutcomeV1::Failed(cause) => Some(
+                            tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
+                                *cause,
+                            ),
+                        ),
+                        _ => None,
+                    };
+                    self.observe_ci_terminal(
+                        &request.feedback.input,
+                        outcome,
+                        coverage,
+                        degradation,
+                    );
+                    contributions.set_state(Pr13AdvisoryProviderV1::Ci, state);
+                } else {
+                    // Found is handled above; fail closed if the terminal map regresses.
+                    self.observe_ci_terminal(
+                        &request.feedback.input,
+                        Plan26FeedbackOutcomeV1::Unavailable,
+                        Plan26CoverageV1::Unknown,
+                        None,
+                    );
+                    contributions.set_state(
+                        Pr13AdvisoryProviderV1::Ci,
+                        ProviderEvaluationStateV1::Unavailable,
+                    );
+                }
             }
         }
 

@@ -119,15 +119,13 @@ fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
 
 fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value> {
     let reason = match error {
-        MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Store(
-            FactStoreError::Storage { source, .. },
-        ))
-        | MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Proposal(
-            FactProposalStoreError::Store(FactStoreError::Storage { source, .. }),
-        ))
-        | MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Proposal(
-            FactProposalStoreError::Storage { source, .. },
-        )) => {
+        MemoryApplicationError::Compatibility(
+            FactCompatibilityStoreError::Store(FactStoreError::Storage { source, .. })
+            | FactCompatibilityStoreError::Proposal(
+                FactProposalStoreError::Store(FactStoreError::Storage { source, .. })
+                | FactProposalStoreError::Storage { source, .. },
+            ),
+        ) => {
             let message = source.to_string();
             if message.contains("no such table")
                 && ["memory_v2_proposal_current", "memory_v2_proposals"]
@@ -141,12 +139,12 @@ fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value
                 "compatibility_proposal_authority_unavailable"
             }
         }
-        MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Store(
-            FactStoreError::Contract(_),
-        ))
-        | MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Proposal(
-            FactProposalStoreError::Store(FactStoreError::Contract(_)),
-        )) => "compatibility_proposal_authority_incompatible",
+        MemoryApplicationError::Compatibility(
+            FactCompatibilityStoreError::Store(FactStoreError::Contract(_))
+            | FactCompatibilityStoreError::Proposal(FactProposalStoreError::Store(
+                FactStoreError::Contract(_),
+            )),
+        ) => "compatibility_proposal_authority_incompatible",
         _ => return None,
     };
     Some(json!({

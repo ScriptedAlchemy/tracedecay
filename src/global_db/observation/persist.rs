@@ -1,12 +1,8 @@
 use tracedecay_domain::{
-    CanonicalObservationIdV1, NativeAliasV2, ObservationSourceCursorV1, ProjectionGenerationId,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorTargetV2, SanitizationReceiptV1,
+    CanonicalObservationIdV1, NativeAliasV2, ProjectionGenerationId, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, RetrievalAnchorTargetV2,
 };
-use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
-use tracedecay_store::{
-    ObservationCommitReceipt, ObservationStoreError, ObservationStoreResult,
-    RepositoryProvenanceAttachmentV1,
-};
+use tracedecay_store::{ObservationCommitReceipt, ObservationStoreError, ObservationStoreResult};
 
 use crate::db::engine::{Executor, QueryExecutor, params};
 
@@ -17,33 +13,16 @@ use super::codec::{
 
 /// A native alias already bound to a different anchor than the one being
 /// persisted. `persist_retrieval_anchor` always detects and reports these as
-/// data rather than deciding what to do about them: live writes must not
-/// commit a conflicting identity, so the caller maps this into
-/// [`ObservationStoreError::RetrievalAnchorAliasCollision`] and fails the
-/// transaction; the legacy anchor backfill instead logs it and continues —
-/// stores that accumulated duplicate provider records (or anchors minted by
-/// an earlier derivation) must still finish migrating, the first-bound alias
-/// is never overwritten, and the later anchor simply stays reachable only by
-/// id.
+/// data rather than deciding what to do about them: live observation writes
+/// fail closed through the store/runtime authority path, while the legacy
+/// anchor backfill logs the collision and continues — stores that accumulated
+/// duplicate provider records (or anchors minted by an earlier derivation)
+/// must still finish migrating, the first-bound alias is never overwritten,
+/// and the later anchor simply stays reachable only by id.
 pub(super) struct AnchorAliasCollision {
     pub(super) alias: Box<NativeAliasV2>,
     pub(super) existing_anchor_id: Box<RetrievalAnchorId>,
     pub(super) candidate_anchor_id: Box<RetrievalAnchorId>,
-}
-
-/// Fails closed on the first reported alias collision, matching the fixed
-/// live-write policy: a conflicting native alias must not commit.
-fn fail_closed_on_alias_collision(
-    collisions: Vec<AnchorAliasCollision>,
-) -> ObservationStoreResult<()> {
-    match collisions.into_iter().next() {
-        Some(collision) => Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-            alias: collision.alias,
-            existing_anchor_id: collision.existing_anchor_id,
-            candidate_anchor_id: collision.candidate_anchor_id,
-        }),
-        None => Ok(()),
-    }
 }
 
 async fn persist_retrieval_anchor(
@@ -214,54 +193,6 @@ pub(super) async fn persist_observation_retrieval_anchor(
     Ok((stored, projection_generation, alias_collisions))
 }
 
-async fn persist_repository_provenance_attachment(
-    conn: &impl Executor,
-    observation_id: &CanonicalObservationIdV1,
-    candidate: &RepositoryProvenanceAttachmentV1,
-) -> ObservationStoreResult<RepositoryProvenanceAttachmentV1> {
-    let stored_anchor = match candidate.anchor() {
-        Some(candidate_anchor) => {
-            let (stored_anchor, _, alias_collisions) =
-                persist_retrieval_anchor(conn, candidate_anchor).await?;
-            fail_closed_on_alias_collision(alias_collisions)?;
-            if &stored_anchor != candidate_anchor {
-                return Err(ObservationStoreError::RetrievalAnchorCollision);
-            }
-            Some(stored_anchor)
-        }
-        None => None,
-    };
-    let stored =
-        RepositoryProvenanceAttachmentV1::new(candidate.availability().clone(), stored_anchor)?;
-    let availability_json = encode(
-        stored.availability(),
-        "encode repository provenance availability",
-    )?;
-    let capture_json = stored
-        .provenance()
-        .map(|capture| encode(capture, "encode repository provenance capture"))
-        .transpose()?;
-    let owner_json = stored
-        .anchor()
-        .map(|anchor| encode(anchor.owner(), "encode repository provenance owner"))
-        .transpose()?;
-    conn.execute(
-        "INSERT INTO observation_repository_provenance (
-            observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            observation_id.as_str(),
-            availability_json.as_str(),
-            capture_json.as_deref(),
-            stored.anchor().map(|anchor| anchor.anchor_id().as_str()),
-            owner_json.as_deref(),
-        ],
-    )
-    .await
-    .map_err(|error| storage("persist observation repository provenance", error))?;
-    Ok(stored)
-}
-
 async fn read_observation_row(
     conn: &impl QueryExecutor,
     sql: &'static str,
@@ -348,181 +279,4 @@ pub(super) async fn read_by_observation_id(
         "read observation",
     )
     .await
-}
-
-async fn read_cursor(
-    conn: &impl QueryExecutor,
-    source_json: &str,
-    scope_json: &str,
-) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
-    let mut rows = conn
-        .query(
-            "SELECT cursor_json FROM source_cursors
-             WHERE source_json = ?1 AND scope_json = ?2",
-            params![source_json, scope_json],
-        )
-        .await
-        .map_err(|error| storage("read observation source cursor", error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage("read observation source cursor", error))?
-    else {
-        return Ok(None);
-    };
-    let cursor_json = row
-        .get::<String>(0)
-        .map_err(|error| storage("read observation source cursor", error))?;
-    decode(&cursor_json, "decode observation source cursor").map(Some)
-}
-
-async fn cursor_advance_receipt_matches(
-    conn: &impl QueryExecutor,
-    source_json: &str,
-    scope_json: &str,
-    advance: &ObservationCursorAdvance,
-) -> ObservationStoreResult<bool> {
-    let coverage_json = encode(&advance.coverage(), "encode observation coverage")?;
-    let mut rows = conn
-        .query(
-            "SELECT reason, receipt_id FROM source_cursor_advances
-             WHERE source_json = ?1 AND scope_json = ?2 AND coverage_json = ?3",
-            params![source_json, scope_json, coverage_json],
-        )
-        .await
-        .map_err(|error| storage("read source cursor advance receipt", error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage("read source cursor advance receipt", error))?
-    else {
-        return Ok(false);
-    };
-    let reason = row
-        .get::<String>(0)
-        .map_err(|error| storage("read source cursor advance receipt", error))?;
-    let receipt_id = row
-        .get::<Option<String>>(1)
-        .map_err(|error| storage("read source cursor advance receipt", error))?;
-    Ok(reason == advance.reason().as_str()
-        && receipt_id.as_deref()
-            == advance
-                .sanitization_receipt()
-                .map(|receipt| receipt.receipt().receipt_id().as_str()))
-}
-
-async fn persist_sanitization_receipt(
-    conn: &impl Executor,
-    receipt: &SanitizationReceiptV1,
-) -> ObservationStoreResult<()> {
-    let receipt_json = encode(receipt, "encode sanitization receipt")?;
-    let receipt_id = receipt.receipt().receipt_id().as_str();
-    let sanitizer_version = receipt.receipt().sanitizer_version().as_str();
-    let payload_digest = receipt
-        .payload()
-        .map_or("", |payload| payload.digest().as_str());
-    conn.execute(
-        "INSERT INTO sanitization_receipts
-            (receipt_id, sanitizer_version, payload_digest, receipt_json)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(receipt_id) DO NOTHING",
-        params![
-            receipt_id,
-            sanitizer_version,
-            payload_digest,
-            receipt_json.as_str()
-        ],
-    )
-    .await
-    .map_err(|error| storage("insert sanitization receipt", error))?;
-    let mut rows = conn
-        .query(
-            "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
-            params![receipt_id],
-        )
-        .await
-        .map_err(|error| storage("verify sanitization receipt", error))?;
-    let stored = rows
-        .next()
-        .await
-        .map_err(|error| storage("verify sanitization receipt", error))?
-        .ok_or_else(|| {
-            storage_message("verify sanitization receipt", "receipt insert disappeared")
-        })?
-        .get::<String>(0)
-        .map_err(|error| storage("verify sanitization receipt", error))?;
-    if stored != receipt_json {
-        return Err(ObservationStoreError::SanitizationReceiptCollision);
-    }
-    Ok(())
-}
-
-async fn write_cursor(
-    conn: &impl Executor,
-    source_json: &str,
-    scope_json: &str,
-    cursor_json: &str,
-) -> ObservationStoreResult<()> {
-    conn.execute(
-        "INSERT INTO source_cursors (source_json, scope_json, cursor_json)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(source_json, scope_json) DO UPDATE SET
-            cursor_json = excluded.cursor_json",
-        params![source_json, scope_json, cursor_json],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| storage("advance observation source cursor", error))
-}
-
-async fn apply_cursor_advance(
-    conn: &impl Executor,
-    advance: &ObservationCursorAdvance,
-) -> ObservationStoreResult<CursorAdvanceOutcome> {
-    let source_json = encode(advance.next_cursor().source(), "encode observation source")?;
-    let scope_json = encode(advance.next_cursor().scope(), "encode observation scope")?;
-    let actual_cursor = read_cursor(conn, &source_json, &scope_json).await?;
-    if actual_cursor.as_ref() == Some(advance.next_cursor()) {
-        return if cursor_advance_receipt_matches(conn, &source_json, &scope_json, advance).await? {
-            Ok(CursorAdvanceOutcome::ExactDuplicate)
-        } else {
-            Err(ObservationStoreError::CursorAdvanceCollision)
-        };
-    }
-    if actual_cursor.as_ref() != advance.expected_cursor() {
-        return Err(ObservationStoreError::CursorConflict {
-            expected: Box::new(advance.expected_cursor().cloned()),
-            actual: Box::new(actual_cursor),
-        });
-    }
-    if let Some(receipt) = advance.sanitization_receipt() {
-        persist_sanitization_receipt(conn, receipt).await?;
-    }
-    let receipt_id = advance
-        .sanitization_receipt()
-        .map(|receipt| receipt.receipt().receipt_id().as_str());
-    let coverage_json = encode(&advance.coverage(), "encode observation coverage")?;
-    let inserted = conn
-        .execute(
-            "INSERT OR IGNORE INTO source_cursor_advances(
-                source_json, scope_json, coverage_json, reason, receipt_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                source_json.as_str(),
-                scope_json.as_str(),
-                coverage_json.as_str(),
-                advance.reason().as_str(),
-                receipt_id,
-            ],
-        )
-        .await
-        .map_err(|error| storage("persist cursor coverage receipt", error))?;
-    if inserted == 0
-        && !cursor_advance_receipt_matches(conn, &source_json, &scope_json, advance).await?
-    {
-        return Err(ObservationStoreError::CursorAdvanceCollision);
-    }
-    let cursor_json = encode(advance.next_cursor(), "encode committed observation cursor")?;
-    write_cursor(conn, &source_json, &scope_json, &cursor_json).await?;
-    Ok(CursorAdvanceOutcome::Committed)
 }
