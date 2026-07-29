@@ -22,9 +22,10 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
 
     match action {
         BranchAction::List { path } => {
-            let project_path = tracedecay::config::resolve_path(path);
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
             let status = daemon_tool_json(
-                Some(&project_path),
+                Some(&resolved.project_path),
                 "tracedecay_status",
                 branch_list_rpc_args(),
             )
@@ -169,10 +170,11 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
             }
         }
         BranchAction::Add { name, path } => {
-            let project_path = tracedecay::config::resolve_path(path);
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
             let branch_name = match name {
                 Some(n) => n,
-                None => branch::current_branch(&project_path).ok_or_else(|| {
+                None => branch::current_branch(&resolved.project_path).ok_or_else(|| {
                     tracedecay::errors::TraceDecayError::Config {
                         message:
                             "cannot detect current branch (detached HEAD?). Specify a branch name."
@@ -184,7 +186,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
             let spinner = Spinner::new();
             spinner.set_message("syncing changes");
             let response = daemon_tool_json(
-                Some(&project_path),
+                Some(&resolved.project_path),
                 "tracedecay_admin_branch_add",
                 serde_json::json!({ "branch": branch_name }),
             )
@@ -207,9 +209,10 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
             }
         }
         BranchAction::Remove { name, path } => {
-            let project_path = tracedecay::config::resolve_path(path);
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
             let response = daemon_tool_json(
-                Some(&project_path),
+                Some(&resolved.project_path),
                 "tracedecay_admin_branch",
                 serde_json::json!({ "action": "remove", "branch": name }),
             )
@@ -233,9 +236,10 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
             }
         }
         BranchAction::Removeall { path } => {
-            let project_path = tracedecay::config::resolve_path(path);
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
             let response = daemon_tool_json(
-                Some(&project_path),
+                Some(&resolved.project_path),
                 "tracedecay_admin_branch",
                 serde_json::json!({ "action": "remove_all" }),
             )
@@ -266,9 +270,10 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
             }
         }
         BranchAction::Gc { path } => {
-            let project_path = tracedecay::config::resolve_path(path);
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
             let response = daemon_tool_json(
-                Some(&project_path),
+                Some(&resolved.project_path),
                 "tracedecay_admin_branch",
                 serde_json::json!({ "action": "gc" }),
             )

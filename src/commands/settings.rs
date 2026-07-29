@@ -1,25 +1,4 @@
-use std::path::{Path, PathBuf};
-
 use super::daemon::daemon_tool_json;
-
-async fn configuration_authority_root(project_path: &Path) -> tracedecay::errors::Result<PathBuf> {
-    let context = daemon_tool_json(
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({
-            "action": "registry_context",
-            "project_arg": project_path,
-        }),
-    )
-    .await?;
-    context
-        .pointer("/project/canonical_root")
-        .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from)
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "configuration authority omitted the canonical project root".to_string(),
-        })
-}
 
 pub(crate) fn handle_upload_counter(enable: bool) {
     let mut config = tracedecay::user_config::UserConfig::load();
@@ -69,9 +48,9 @@ pub(crate) async fn handle_gitignore(
             });
         }
         None => {
-            let authority_root = configuration_authority_root(&project_path).await?;
+            let resolved = super::scope::resolve_project_scope(project_path).await?;
             let response = daemon_tool_json(
-                Some(&authority_root),
+                Some(&resolved.project_path),
                 "tracedecay_admin_project",
                 serde_json::json!({ "action": "gitignore_status" }),
             )

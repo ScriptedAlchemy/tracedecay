@@ -394,14 +394,16 @@ pub(crate) async fn handle_sync(
     doctor: bool,
     verbose: bool,
 ) -> tracedecay::errors::Result<()> {
-    let project_path = tracedecay::config::resolve_path_with_discovery(path);
     if !skip_folders.is_empty() || !include_folders.is_empty() {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message: "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first".to_string(),
         });
     }
+    let resolved =
+        super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(path))
+            .await?;
     let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
-        Some(project_path.clone()),
+        Some(resolved.project_path.clone()),
         None,
         false,
         false,
@@ -418,7 +420,10 @@ pub(crate) async fn handle_sync(
             serde_json::to_string_pretty(&result).unwrap_or_default()
         );
     }
-    eprintln!("sync completed via daemon for {}", project_path.display());
+    eprintln!(
+        "sync completed via daemon for {}",
+        resolved.project_path.display()
+    );
     if doctor {
         tracedecay::doctor::run_doctor(None).await?;
     }
