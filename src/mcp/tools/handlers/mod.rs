@@ -514,6 +514,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
     pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub application_invocation_target: tracedecay_application::InvocationTarget,
     /// The code-index generation authority producers resolve identity through.
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
@@ -549,6 +550,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_request_id: None,
             application_deadline: None,
             application_cancellation: None,
+            application_invocation_target: tracedecay_application::InvocationTarget::CurrentProject,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             source_edit_executor: None,
@@ -1339,6 +1341,7 @@ async fn dispatch_application_surface_tools(
             operation,
             normalized_args,
             options.application_invocation_executor,
+            options.application_invocation_target,
             options.application_request_id.clone(),
             options.application_deadline.clone(),
             options.application_cancellation.clone(),

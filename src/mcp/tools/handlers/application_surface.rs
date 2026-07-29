@@ -1,6 +1,7 @@
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, RequestId,
+    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
+    RequestId,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::BindingId;
@@ -13,7 +14,8 @@ use crate::application_surface::{
 use crate::daemon_client::{DaemonInvocationExecutor, RequestedOutputFormat};
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::dispatch::{
-    resolve_mcp_application_surface, resolve_mcp_application_surface_with_controls,
+    resolve_mcp_application_surface_for_target,
+    resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, current_timestamp};
@@ -64,6 +66,7 @@ pub(super) async fn handle_application_surface(
     operation: ApplicationSurfaceOperation,
     normalized: NormalizedApplicationToolArgs,
     executor: Option<&dyn DaemonInvocationExecutor>,
+    target: InvocationTarget,
     protocol_request_id: Option<RequestId>,
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
@@ -93,23 +96,25 @@ pub(super) async fn handle_application_surface(
         complete_protocol_controls(&request_id, protocol_deadline, protocol_cancellation)?;
     let result = match controls {
         Some((deadline, cancellation)) => {
-            resolve_mcp_application_surface_with_controls(
+            resolve_mcp_application_surface_with_controls_for_target(
                 operation,
                 request_id,
                 request,
                 requested_format,
                 deadline,
                 cancellation,
+                target,
                 executor,
             )
             .await
         }
         None => {
-            resolve_mcp_application_surface(
+            resolve_mcp_application_surface_for_target(
                 operation,
                 request_id,
                 request,
                 requested_format,
+                target,
                 executor,
             )
             .await
