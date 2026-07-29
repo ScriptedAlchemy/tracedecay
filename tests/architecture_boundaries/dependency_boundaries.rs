@@ -5,7 +5,7 @@
 //! contracts) hold outside the query kernel as well.
 
 use crate::manifest::filesystem_rust_sources;
-use crate::module_scanner::tokenize;
+use crate::module_scanner::{SourceReference, scan_references, tokenize};
 use crate::query_kernel::{scan_extern_crate_bindings, scan_qualified_paths, scan_use_bindings};
 use std::collections::BTreeSet;
 use std::fs;
@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 const FORBIDDEN_LIBSQL_CRATE: &str = "libsql";
+const FORBIDDEN_DOMAIN_EXTRACTED_PACKAGES: &[&str] = &["tracedecay-query", "tracedecay-code-index"];
+const FORBIDDEN_DOMAIN_EXTRACTED_ROOTS: &[&[&str]] =
+    &[&["tracedecay_query"], &["tracedecay_code_index"]];
 /// Structural search is the one module in the code-index package that reads
 /// files itself: it walks caller-selected candidates off disk before any pattern
 /// runs. It lived outside `src/code_index` before the crate extraction and stays
@@ -79,6 +82,60 @@ fn scan_sources_for_forbidden_paths(
         violations.extend(forbidden_path_violations(&source, path, prefixes));
     }
     Ok(violations)
+}
+
+fn forbidden_manifest_dependency_violations(
+    manifest: &toml::Table,
+    forbidden_packages: &[&str],
+) -> BTreeSet<String> {
+    let mut violations = BTreeSet::new();
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        inspect_forbidden_dependencies(
+            manifest.get(section),
+            section,
+            forbidden_packages,
+            &mut violations,
+        );
+    }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (selector, target) in targets {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                inspect_forbidden_dependencies(
+                    target.get(section),
+                    &format!("target.{selector}.{section}"),
+                    forbidden_packages,
+                    &mut violations,
+                );
+            }
+        }
+    }
+    violations
+}
+
+fn inspect_forbidden_dependencies(
+    value: Option<&toml::Value>,
+    section: &str,
+    forbidden_packages: &[&str],
+    violations: &mut BTreeSet<String>,
+) {
+    let Some(dependencies) = value.and_then(toml::Value::as_table) else {
+        return;
+    };
+    for (alias, specification) in dependencies {
+        let package = specification
+            .as_table()
+            .and_then(|table| table.get("package"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or(alias);
+        if forbidden_packages.contains(&package) {
+            violations.insert(format!(
+                "{section} imports forbidden package {alias} -> {package}"
+            ));
+        }
+    }
 }
 
 #[test]
@@ -199,8 +256,69 @@ fn domain_contracts_are_runtime_and_store_free() {
 }
 
 #[test]
-fn domain_imports_neither_root_query_nor_root_code_index_modules() {
+fn domain_manifest_and_sources_import_neither_extracted_query_nor_code_index_crates() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_path = PathBuf::from("crates/tracedecay-domain/Cargo.toml");
+    assert!(
+        repository.join(&manifest_path).is_file(),
+        "{} must remain the tracedecay-domain manifest",
+        manifest_path.display()
+    );
+    let manifest: toml::Table = fs::read_to_string(repository.join(&manifest_path))
+        .expect("read tracedecay-domain manifest")
+        .parse()
+        .expect("parse tracedecay-domain manifest");
+    assert_eq!(
+        manifest
+            .get("package")
+            .and_then(toml::Value::as_table)
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str),
+        Some("tracedecay-domain"),
+        "the guarded manifest must identify the extracted domain crate"
+    );
+
+    for (package, root) in FORBIDDEN_DOMAIN_EXTRACTED_PACKAGES
+        .iter()
+        .zip(FORBIDDEN_DOMAIN_EXTRACTED_ROOTS)
+    {
+        let fixture: toml::Table = format!(
+            "[target.'cfg(unix)'.dependencies]\nextracted = {{ package = \"{package}\", version = \"1\" }}\n"
+        )
+        .parse()
+        .expect("parse forbidden domain dependency fixture");
+        assert!(
+            !forbidden_manifest_dependency_violations(
+                &fixture,
+                FORBIDDEN_DOMAIN_EXTRACTED_PACKAGES
+            )
+            .is_empty(),
+            "domain manifest guard accepted injected dependency on {package}"
+        );
+        let source = format!("use {}::Boundary;", root.join("::"));
+        assert!(
+            !forbidden_path_violations(
+                &source,
+                Path::new("crates/tracedecay-domain/src/injected.rs"),
+                FORBIDDEN_DOMAIN_EXTRACTED_ROOTS,
+            )
+            .is_empty(),
+            "domain source guard accepted injected import of {}",
+            root.join("::")
+        );
+    }
+
+    let manifest_violations =
+        forbidden_manifest_dependency_violations(&manifest, FORBIDDEN_DOMAIN_EXTRACTED_PACKAGES);
+    assert!(
+        manifest_violations.is_empty(),
+        "tracedecay-domain must not depend on extracted query/code-index crates:\n{}",
+        manifest_violations
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
     let roots = [PathBuf::from("crates/tracedecay-domain/src")]
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -208,20 +326,12 @@ fn domain_imports_neither_root_query_nor_root_code_index_modules() {
         filesystem_rust_sources(&repository, &roots).expect("resolve domain contract sources");
     assert!(!sources.is_empty(), "domain contract sources must exist");
 
-    let forbidden: &[&[&str]] = &[
-        &["tracedecay", "query"],
-        &["tracedecay", "code_index"],
-        &["tracedecay", "extraction"],
-        &["tracedecay", "semantic_code"],
-        &["tracedecay_code_index"],
-        &["crate", "query"],
-        &["crate", "code_index"],
-    ];
-    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
-        .expect("inspect domain sources for root query/code-index edges");
+    let violations =
+        scan_sources_for_forbidden_paths(&repository, &sources, FORBIDDEN_DOMAIN_EXTRACTED_ROOTS)
+            .expect("inspect domain sources for extracted query/code-index edges");
     assert!(
         violations.is_empty(),
-        "tracedecay-domain must import neither root query nor root code-index modules:\n{}",
+        "tracedecay-domain must not import extracted query/code-index crates:\n{}",
         violations.into_iter().collect::<Vec<_>>().join("\n")
     );
 }
@@ -597,6 +707,25 @@ fn hook_v2_dispatch_uses_typed_daemon_delivery_ports() {
 /// relocate framing decisions into a layer that is allowed to parse.
 const LSP_BRIDGE_MODULE: &str = "crates/tracedecay-lsp/src/bridge.rs";
 
+/// Every module the package declares beside the bridge. Naming any of them from
+/// the bridge would move a framing decision into a layer allowed to parse.
+/// `lsp_bridge_guard_forbids_every_sibling_module` holds this list to the
+/// package's actual module declarations, so a module extracted later cannot go
+/// unguarded the way `request_sequence` did.
+const LSP_BRIDGE_FORBIDDEN_SIBLING_MODULES: &[&[&str]] = &[
+    &["crate", "capabilities"],
+    &["crate", "context"],
+    &["crate", "diagnostics"],
+    &["crate", "dispatch"],
+    &["crate", "gateway"],
+    &["crate", "overlay"],
+    &["crate", "protocol"],
+    &["crate", "provider"],
+    &["crate", "request_sequence"],
+    &["crate", "rpc"],
+    &["crate", "session"],
+];
+
 fn assert_lsp_bridge_module_owns_only_stdio_framing_authority(repository: &Path) {
     assert!(
         repository.join(LSP_BRIDGE_MODULE).is_file(),
@@ -606,7 +735,7 @@ fn assert_lsp_bridge_module_owns_only_stdio_framing_authority(repository: &Path)
         .into_iter()
         .collect::<BTreeSet<_>>();
 
-    let forbidden: &[&[&str]] = &[
+    let mut forbidden: Vec<&[&str]> = vec![
         &["tracedecay"],
         &["tracedecay_api"],
         &["tracedecay_application"],
@@ -626,23 +755,14 @@ fn assert_lsp_bridge_module_owns_only_stdio_framing_authority(repository: &Path)
         &["serde"],
         &["serde_json"],
         &["url"],
-        &["crate", "capabilities"],
-        &["crate", "context"],
-        &["crate", "diagnostics"],
-        &["crate", "dispatch"],
-        &["crate", "gateway"],
-        &["crate", "overlay"],
-        &["crate", "protocol"],
-        &["crate", "provider"],
-        &["crate", "rpc"],
-        &["crate", "session"],
         &["std", "env"],
         &["std", "fs"],
         &["std", "net"],
         &["std", "process"],
         &["std", "thread"],
     ];
-    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+    forbidden.extend_from_slice(LSP_BRIDGE_FORBIDDEN_SIBLING_MODULES);
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, &forbidden)
         .expect("inspect LSP bridge sources");
     assert!(
         violations.is_empty(),
@@ -672,6 +792,53 @@ fn lsp_bridge_module_rejects_injected_forbidden_import() {
         .expect("write injected forbidden bridge import");
 
     assert_lsp_bridge_module_owns_only_stdio_framing_authority(temporary.path());
+}
+
+/// A literal sibling list rots silently: the bridge guard could not see
+/// `crate::request_sequence` because that module joined the package after the
+/// list was written. Comparing the list against the package's declarations
+/// makes the next extraction fail here, where the omission is obvious, instead
+/// of leaving the bridge free to name a parsing layer.
+#[test]
+fn lsp_bridge_guard_forbids_every_sibling_module() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let package_root = PathBuf::from("crates/tracedecay-lsp/src/lib.rs");
+    let source = fs::read_to_string(repository.join(&package_root))
+        .expect("read extracted LSP package root");
+    let bridge = Path::new(LSP_BRIDGE_MODULE)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("the bridge module path must name a module file");
+
+    let declared = scan_references(&source)
+        .into_iter()
+        .filter_map(|reference| match reference {
+            SourceReference::Module { name, .. } => Some(name),
+            SourceReference::Include { .. } => None,
+        })
+        .filter(|name| name != bridge)
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !declared.is_empty(),
+        "{} must declare modules beside the bridge for this comparison to prove anything",
+        package_root.display()
+    );
+
+    let guarded = LSP_BRIDGE_FORBIDDEN_SIBLING_MODULES
+        .iter()
+        .map(|path| {
+            (*path
+                .last()
+                .expect("each forbidden sibling entry names a module"))
+            .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        declared,
+        guarded,
+        "the bridge guard must forbid exactly the modules {} declares beside the bridge",
+        package_root.display()
+    );
 }
 
 /// The extracted package holds the protocol actor, session lifecycle,
@@ -734,8 +901,21 @@ fn pr12_lsp_bridge_and_gateway_do_not_duplicate_store_or_transport_authority() {
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
+    // Union non-emptiness passes while any single root resolves, so the
+    // extraction could have deleted `src/lsp_bridge.rs` and left this guard
+    // scanning the survivors in silence. Prove each root separately: a root that
+    // moves has to be re-pointed rather than carried by its neighbours.
+    for root in &roots {
+        let resolved = filesystem_rust_sources(&repository, &BTreeSet::from([root.clone()]))
+            .expect("resolve PR12 LSP source root");
+        assert!(
+            !resolved.is_empty(),
+            "PR12 LSP root {} resolves to no sources; re-point this guard at the extracted \
+             location instead of letting the remaining roots carry it",
+            root.display()
+        );
+    }
     let sources = filesystem_rust_sources(&repository, &roots).expect("resolve PR12 LSP sources");
-    assert!(!sources.is_empty(), "PR12 LSP sources must exist");
 
     let forbidden: &[&[&str]] = &[
         &["crate", "db"],

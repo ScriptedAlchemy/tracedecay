@@ -2231,7 +2231,6 @@ impl SessionCursorAuthenticator for InMemoryCursorAuthenticator {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2277,37 +2276,6 @@ mod tests {
 
     #[test]
     fn execution_control_deadlines_have_no_scheduler_state() {
-        let source = fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/temporal/ports.rs"
-        ))
-        .expect("read the temporal ports source");
-        let (production_source, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("ports module has an inline test boundary");
-        for forbidden in [
-            "use std::thread;",
-            "std::thread::",
-            "thread::spawn",
-            "thread::sleep",
-            "Waker",
-            "wake_waiters",
-            "fn register(",
-            "tokio",
-            "rusqlite",
-            "sqlx",
-            "diesel",
-            "sqlite",
-            "SELECT ",
-            "async_std",
-            "smol::",
-        ] {
-            assert!(
-                !production_source.contains(forbidden),
-                "runtime-bound deadline implementation contains forbidden `{forbidden}`"
-            );
-        }
-
         let deadline = Instant::now() + Duration::from_mins(1);
         let controls: Vec<_> = (0..64)
             .map(|_| ExecutionControl::new(Some(deadline)))
@@ -4203,42 +4171,6 @@ mod tests {
                 }
             ));
         });
-    }
-
-    #[test]
-    fn temporal_ports_and_cursor_are_runtime_and_sql_free() {
-        let ports = fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/temporal/ports.rs"
-        ))
-        .expect("ports");
-        let cursor = fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/temporal/cursor.rs"
-        ))
-        .expect("cursor");
-        let (ports_prod, _) = ports
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("ports tests");
-        let (cursor_prod, _) = cursor
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("cursor tests");
-        for (label, source) in [("ports", ports_prod), ("cursor", cursor_prod)] {
-            for forbidden in [
-                "rusqlite",
-                "sqlx",
-                "diesel",
-                "tokio::",
-                "async_std",
-                "std::thread::",
-                "thread::spawn",
-            ] {
-                assert!(
-                    !source.contains(forbidden),
-                    "{label} production source must remain SQL/runtime-free; found `{forbidden}`"
-                );
-            }
-        }
     }
 
     #[test]
