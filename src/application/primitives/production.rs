@@ -2272,13 +2272,81 @@ pub fn admitted_root_uri_for_project(
 pub fn locator_digest_for_project(
     project_root: &Path,
 ) -> Result<ManifestDigest, ApplicationContractError> {
+    // Linked worktrees share one retained project/configuration authority.
+    // Bind that authority to their canonical Git common directory, while
+    // independent clones retain distinct locators. Non-Git projects fall back
+    // to their canonical root.
+    let repository_locator = crate::worktree::git_common_dir(project_root).unwrap_or_else(|| {
+        project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf())
+    });
     canonical_sha256(&(
-        "tracedecay.project-open.locator.v1",
-        project_root.to_string_lossy().as_ref(),
+        "tracedecay.project-open.repository-locator.v2",
+        repository_locator.to_string_lossy().as_ref(),
     ))
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "PR12 primitive project locator digest",
     })
+}
+
+#[cfg(test)]
+mod locator_digest_tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
+            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn linked_worktrees_share_repository_locator_but_independent_repositories_do_not() {
+        let temporary = TempDir::new().expect("temporary root");
+        let primary = temporary.path().join("primary");
+        let linked = temporary.path().join("linked");
+        let independent = temporary.path().join("independent");
+        std::fs::create_dir_all(&primary).expect("primary root");
+        std::fs::create_dir_all(&independent).expect("independent root");
+
+        git(&primary, &["init", "-b", "main", "--quiet"]);
+        std::fs::write(primary.join("README.md"), "primary\n").expect("fixture");
+        git(&primary, &["add", "README.md"]);
+        git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/linked",
+                linked.to_str().expect("linked path"),
+                "HEAD",
+            ],
+        );
+        git(&independent, &["init", "-b", "main", "--quiet"]);
+
+        let primary_digest = locator_digest_for_project(&primary).expect("primary locator digest");
+        let linked_digest = locator_digest_for_project(&linked).expect("linked locator digest");
+        let independent_digest =
+            locator_digest_for_project(&independent).expect("independent locator digest");
+
+        assert_eq!(linked_digest, primary_digest);
+        assert_ne!(independent_digest, primary_digest);
+    }
 }
 
 #[cfg(test)]
