@@ -953,7 +953,26 @@ fn validate_query_attributes(
                         Token::Punct('('),
                         Token::Ident("test".to_string()),
                         Token::Punct(')'),
-                    ]
+                    ] || matches!(
+                        body,
+                        [
+                            Token::Ident(cfg),
+                            Token::Punct('('),
+                            Token::Ident(any),
+                            Token::Punct('('),
+                            Token::Ident(test),
+                            Token::Punct(','),
+                            Token::Ident(feature),
+                            Token::Punct('='),
+                            Token::StringLiteral(test_helpers),
+                            Token::Punct(')'),
+                            Token::Punct(')'),
+                        ] if cfg == "cfg"
+                            && any == "any"
+                            && test == "test"
+                            && feature == "feature"
+                            && test_helpers == "test-helpers"
+                    )
                 }
                 "test" | "from" => body.len() == 1,
                 "serde" => {
@@ -1443,6 +1462,51 @@ fn query_source_guard_rejects_import_path_and_macro_bypasses() {
         assert!(
             !violations.is_empty(),
             "query source guard missed database crate {database_crate}: {violations:?}"
+        );
+    }
+}
+
+#[test]
+fn query_source_guard_allows_exact_test_helper_cfg() {
+    let violations = query_source_violations(
+        r#"
+        #[cfg(any(test, feature = "test-helpers"))]
+        pub fn for_test() {}
+        "#,
+    );
+
+    assert!(
+        violations.is_empty(),
+        "exact test-helper cfg must remain available to integration tests: {violations:?}"
+    );
+}
+
+#[test]
+fn query_source_guard_rejects_other_cfg_forms() {
+    for (name, source) in [
+        (
+            "unrelated feature",
+            r#"#[cfg(feature = "test-helpers")] fn helper() {}"#,
+        ),
+        (
+            "arbitrary any",
+            r#"#[cfg(any(test, unix))] fn helper() {}"#,
+        ),
+        (
+            "additional feature",
+            r#"#[cfg(any(test, feature = "test-helpers", feature = "extra"))] fn helper() {}"#,
+        ),
+        (
+            "different combinator",
+            r#"#[cfg(all(test, feature = "test-helpers"))] fn helper() {}"#,
+        ),
+    ] {
+        let violations = query_source_violations(source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("not an exact allowlisted form")),
+            "query source guard accepted {name}: {violations:?}"
         );
     }
 }
