@@ -6,7 +6,6 @@
 
 mod detect;
 pub(crate) mod detector_kernel;
-mod parse;
 mod sanitize;
 mod structural_id;
 
@@ -20,11 +19,12 @@ pub(crate) use detect::{
     CodeSourceSanitizationV1, MemoryFactSanitizationV1, sanitize_code_source_bytes,
     sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
-pub use parse::{
+pub use tracedecay_capture::{
     ClaudeRecordParseErrorV1, MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     ParsedClaudeRecordV1, ParsedObservationRecordV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
+pub(crate) use tracedecay_capture::{ParseLimits, ParsedPolicyLimitViolation};
 pub use sanitize::{
     CLAUDE_SANITIZER_VERSION_V1, ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1,
     ClaudeSanitizerPolicyV1, OBSERVATION_SANITIZER_VERSION_V1, ObservationSanitizationOutcomeV1,

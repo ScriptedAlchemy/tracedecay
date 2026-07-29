@@ -35,7 +35,6 @@ use crate::sessions::source::{
     TranscriptCursorKey, TranscriptDiscoveryBounds, TranscriptSource, bound_path_list,
     collect_files_with_ext_bounded, path_byte_len,
 };
-mod canonical;
 mod canonical_projection;
 mod cursor;
 mod frames;
@@ -61,7 +60,9 @@ pub(crate) use source_records::{
 };
 
 #[cfg(test)]
-use cursor::{encode_claude_cursor_key, encode_claude_source_id};
+use tracedecay_capture::claude::{
+    encode_cursor_key as encode_claude_cursor_key, encode_source_id as encode_claude_source_id,
+};
 #[cfg(test)]
 use record_metadata::append_git_operation_metadata;
 #[cfg(test)]

@@ -7,12 +7,11 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId, SessionId,
 };
 
-use crate::accounting::parser::parse_timestamp;
-use crate::privacy::ObservationRecordParseErrorV1;
+use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
 
 const PROVIDER: &str = "claude";
 
-pub(super) fn stable_record_id(
+pub fn stable_record_id(
     native: &Value,
     session_id: &str,
     offset: u64,
@@ -26,7 +25,7 @@ pub(super) fn stable_record_id(
     provider_observation_id(&candidate).ok_or(ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-pub(super) fn normalize(
+pub fn normalize(
     native: &Value,
     session_id: &str,
     stable_record_id: ObservationId,
@@ -41,8 +40,7 @@ pub(super) fn normalize(
     let timestamp = native
         .get("timestamp")
         .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-        .and_then(|value| i64::try_from(value).ok());
+        .and_then(parse_rfc3339_timestamp);
     let mut facts = Vec::new();
 
     append_session_location_fact(&mut facts, native);

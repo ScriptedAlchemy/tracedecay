@@ -5484,6 +5484,7 @@ dependencies = [
  "tower",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-capture",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-host-integration",
@@ -5535,6 +5536,17 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-policy",
  "tracedecay-tool-catalog",
+]
+
+[[package]]
+name = "tracedecay-capture"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tracedecay-domain",
 ]
 
 [[package]]
