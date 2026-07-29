@@ -27,8 +27,8 @@ describe('the Work authority ledger', () => {
    * The gate's load-bearing claim, checked against the generated module rather
    * than against a sentence someone remembered to update.
    *
-   * When the PR14 backend adds a Work payload to `DashboardContractCatalogV1`
-   * and the contracts are regenerated, this test fails — which is the point. A
+   * When the backend adds a Work payload to `DashboardContractCatalogV1` and
+   * the contracts are regenerated, this test fails — which is the point. A
    * page that says "no read model exists" must not survive the read model
    * arriving.
    */
