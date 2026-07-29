@@ -357,12 +357,15 @@ pub(crate) async fn selected_registered_project_reader(
             ),
         )
     })?;
+    let scope = crate::mcp::scope::resolve_query_scope(&context, &requested_path)
+        .map_err(|error| error.into_route_failure().into_error())?;
     Ok(Some(crate::mcp::project_route::ResolvedProjectRoute {
         graph,
         owner: context,
         requested_root: requested_path,
         requested_git_common_dir: request.requested_git_common_dir,
         requested_branch: request.requested_branch,
+        scope,
     }))
 }
 

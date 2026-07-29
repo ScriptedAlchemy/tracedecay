@@ -18,6 +18,7 @@ pub(crate) struct ResolvedProjectRoute {
     pub(crate) requested_root: PathBuf,
     pub(crate) requested_git_common_dir: Option<PathBuf>,
     pub(crate) requested_branch: Option<String>,
+    pub(crate) scope: tracedecay_application::ResolvedScope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

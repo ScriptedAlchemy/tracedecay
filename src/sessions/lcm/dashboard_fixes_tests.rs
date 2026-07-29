@@ -76,8 +76,13 @@ impl DashboardFixture {
         }
         let memory_path = memory.database_path().display().to_string();
         let sessions_path = sessions.db_path().display().to_string();
+        let resolved_scope = crate::dashboard::scope::resolve_dashboard_scope(
+            &project_root,
+            Some(project_id.as_str()),
+        );
         let state = DashboardState {
             project_id: Some(project_id.as_str().to_string()),
+            resolved_scope,
             project_graph: None,
             project_graph_resolver: None,
             memory_owner: FactOwnerV1::Project { project_id },
