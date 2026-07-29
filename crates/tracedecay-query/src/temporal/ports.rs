@@ -477,8 +477,9 @@ fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortEr
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub enum TemporalSessionScopeFilterV1 {
+    #[default]
     #[serde(rename = "all")]
     All,
     #[serde(rename = "parents_only")]
@@ -487,26 +488,15 @@ pub enum TemporalSessionScopeFilterV1 {
     SubagentsOnly,
 }
 
-impl Default for TemporalSessionScopeFilterV1 {
-    fn default() -> Self {
-        Self::All
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub enum TemporalMessageTypeFilterV1 {
+    #[default]
     #[serde(rename = "all")]
     All,
     #[serde(rename = "direct_user")]
     DirectUser,
     #[serde(rename = "tool_result")]
     ToolResult,
-}
-
-impl Default for TemporalMessageTypeFilterV1 {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 /// Canonical semantic eligibility applied by the read port before candidates
@@ -766,18 +756,13 @@ pub struct KernelVersions {
     pub configuration_digest: BindingDigest,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TemporalParticipantAuthorization {
     #[serde(rename = "a")]
     Authorized,
+    #[default]
     #[serde(rename = "n")]
     Denied,
-}
-
-impl Default for TemporalParticipantAuthorization {
-    fn default() -> Self {
-        Self::Denied
-    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -2292,8 +2277,11 @@ mod tests {
 
     #[test]
     fn execution_control_deadlines_have_no_scheduler_state() {
-        let source = fs::read_to_string("crates/tracedecay-query/src/temporal/ports.rs")
-            .expect("read the temporal ports source");
+        let source = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/temporal/ports.rs"
+        ))
+        .expect("read the temporal ports source");
         let (production_source, _) = source
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("ports module has an inline test boundary");
@@ -4219,10 +4207,16 @@ mod tests {
 
     #[test]
     fn temporal_ports_and_cursor_are_runtime_and_sql_free() {
-        let ports = fs::read_to_string("crates/tracedecay-query/src/temporal/ports.rs")
-            .expect("ports");
-        let cursor = fs::read_to_string("crates/tracedecay-query/src/temporal/cursor.rs")
-            .expect("cursor");
+        let ports = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/temporal/ports.rs"
+        ))
+        .expect("ports");
+        let cursor = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/temporal/cursor.rs"
+        ))
+        .expect("cursor");
         let (ports_prod, _) = ports
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("ports tests");
