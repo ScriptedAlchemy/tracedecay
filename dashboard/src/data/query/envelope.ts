@@ -1,4 +1,3 @@
-import type { z } from 'zod';
 import { EnvelopeSchema, type WireDomainState, type WireEnvelope } from '../../contracts/wire.ts';
 import type { WireSchema } from './wireSchema.ts';
 

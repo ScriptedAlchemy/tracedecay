@@ -1,5 +1,4 @@
-//! Repository marker survival across moves, renames, and symlink aliases (split from
-//! `storage_resolver_test.rs`).
+//! Repository marker survival across moves, renames, and symlink aliases.
 
 use super::*;
 

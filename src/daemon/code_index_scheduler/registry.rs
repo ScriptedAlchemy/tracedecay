@@ -45,7 +45,7 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) worktree_id: WorktreeId,
     pub(super) pr9_query_authority: Option<(
         ManifestDigest,
-        Arc<crate::query::retrieval::Pr9QueryAuthorityV1>,
+        Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>,
     )>,
     pub(super) semantic_query_authority: Option<(
         ManifestDigest,
@@ -458,7 +458,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
-        authority: Arc<crate::query::retrieval::Pr9QueryAuthorityV1>,
+        authority: Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
         scope
             .validate()
@@ -532,7 +532,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(super) async fn pr9_query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
-    ) -> Option<Arc<crate::query::retrieval::Pr9QueryAuthorityV1>> {
+    ) -> Option<Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>> {
         let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
         for worktree in mounted.values() {

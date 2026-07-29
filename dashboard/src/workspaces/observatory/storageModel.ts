@@ -141,6 +141,8 @@ export function budgetPresentation(budget: StoreBudgetDimension): DimensionPrese
         summary: 'budget could not be determined',
         notes: [budget.reason],
       };
+    default:
+      return assertNever(budget);
   }
 }
 
@@ -175,6 +177,8 @@ export function growthPresentation(growth: StoreGrowthDimension): DimensionPrese
         summary: 'growth could not be determined',
         notes: [growth.reason],
       };
+    default:
+      return assertNever(growth);
   }
 }
 

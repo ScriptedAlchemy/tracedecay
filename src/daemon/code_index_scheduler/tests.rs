@@ -46,13 +46,13 @@ use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
 };
-use crate::query::retrieval::Pr9QueryAuthorityV1;
-use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
-use crate::query::retrieval::rerank::{
+use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
+use tracedecay_query::retrieval::Pr9QueryAuthorityV1;
+use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
 };
-use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 
 struct GitFixture {
     root: TempDir,
@@ -1139,7 +1139,7 @@ async fn bundled_pr9_profile_composes_live_code_index_lanes() {
         Pr9QueryAuthorityV1::new(
             accepted.profile().clone(),
             accepted.diversity().clone(),
-            ComponentRevision::new(crate::query::retrieval::PR9_RANKING_REVISION_V1)
+            ComponentRevision::new(tracedecay_query::retrieval::PR9_RANKING_REVISION_V1)
                 .expect("ranking revision"),
             keyring,
         )
@@ -1157,26 +1157,26 @@ async fn bundled_pr9_profile_composes_live_code_index_lanes() {
             authorization_revision: AuthorizationRevision::new("authorization.bundled-pr9.fixture")
                 .expect("authorization revision"),
             sanitizer_revision: SanitizerRevision::new(
-                crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
+                tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
             )
             .expect("sanitizer revision"),
             normalization_revision: QueryNormalizationRevision::new(
-                crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+                tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
             )
             .expect("normalization revision"),
             exact_rule_revision: ExactAdmissionRuleRevision::new(
-                crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
             )
             .expect("exact rules revision"),
             lexical_profile_revision: ComponentRevision::new(
-                crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
             )
             .expect("lexical profile revision"),
             lexical_score_domain: ScoreDomainId::new(
-                crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
             )
             .expect("lexical score domain"),
-            fuzzy_budget: crate::query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+            fuzzy_budget: tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
             graph_edge_kinds: vec![RelationEdgeKindV1::Calls],
             graph_max_depth: 1,
             page_size: 10,

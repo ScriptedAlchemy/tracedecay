@@ -38,16 +38,16 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
-use crate::query::retrieval::exact::{
+use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
     ExactLaneRetriever,
 };
-use crate::query::retrieval::graph::{GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever};
-use crate::query::retrieval::lexical::{
+use tracedecay_query::retrieval::graph::{GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
     LexicalLaneRetriever,
 };
-use crate::query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
+use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
 const CALLABLE_CODE_CURSOR_PREFIX: &str = "ccq1.";
@@ -72,13 +72,15 @@ pub(in crate::daemon) fn unpinned_latest_generation() -> CodeGenerationId {
 }
 
 pub(in crate::daemon) fn callable_query_sanitizer_revision() -> SanitizerRevision {
-    SanitizerRevision::new(crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)
+    SanitizerRevision::new(tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)
         .unwrap_or_else(|_| panic!("static sanitizer revision"))
 }
 
 pub(in crate::daemon) fn callable_query_normalization_revision() -> QueryNormalizationRevision {
-    QueryNormalizationRevision::new(crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1)
-        .unwrap_or_else(|_| panic!("static normalization revision"))
+    QueryNormalizationRevision::new(
+        tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+    )
+    .unwrap_or_else(|_| panic!("static normalization revision"))
 }
 
 fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
@@ -148,17 +150,17 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
         request: &tracedecay_domain::RetrievalRequest,
         query_view: &tracedecay_domain::EphemeralSanitizedQueryViewV1,
-        lanes: Vec<crate::query::retrieval::fusion::CompositionLaneInput>,
+        lanes: Vec<tracedecay_query::retrieval::fusion::CompositionLaneInput>,
         page_size: usize,
         cursor: Option<&tracedecay_domain::RetrievalCursor>,
     ) -> Result<
-        crate::query::retrieval::AuthorizedPr9FallbackV1,
-        crate::query::retrieval::Pr9QueryAuthorityErrorV1,
+        tracedecay_query::retrieval::AuthorizedPr9FallbackV1,
+        tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1,
     > {
         let authority = self
             .pr9_query_authority_for_scope(scope)
             .await
-            .ok_or(crate::query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable)?;
+            .ok_or(tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable)?;
         authority.compose(request, query_view, lanes, page_size, cursor)
     }
 
@@ -340,10 +342,10 @@ enum CallableCodeCursorError {
 }
 
 fn map_callable_cursor_authentication_error(
-    error: crate::query::retrieval::Pr9QueryAuthorityErrorV1,
+    error: tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1,
 ) -> CallableCodeCursorError {
-    use crate::query::retrieval::Pr9QueryAuthorityErrorV1;
-    use crate::query::retrieval::fusion::QueryDigestAuthenticationError;
+    use tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1;
+    use tracedecay_query::retrieval::fusion::QueryDigestAuthenticationError;
 
     match error {
         Pr9QueryAuthorityErrorV1::QueryAuthentication(
@@ -448,7 +450,7 @@ fn require_unexpired_callable_code_cursor(
 }
 
 fn authenticate_callable_code_cursor(
-    authority: &crate::query::retrieval::Pr9QueryAuthorityV1,
+    authority: &tracedecay_query::retrieval::Pr9QueryAuthorityV1,
     base: &RetrievalRequest,
     encoded: &OpaqueCursor,
 ) -> Result<AuthenticatedCallableCodeCursorV1, CallableCodeCursorError> {
@@ -482,7 +484,7 @@ fn reject_unresolved_cursor<T>(
 
 #[allow(clippy::too_many_arguments)]
 fn paginate_callable_code<T: Serialize>(
-    authority: &crate::query::retrieval::Pr9QueryAuthorityV1,
+    authority: &tracedecay_query::retrieval::Pr9QueryAuthorityV1,
     base: &RetrievalRequest,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
@@ -930,7 +932,7 @@ fn symbol_page(
 
 struct PreparedCallableQueryV1 {
     latest: LatestCompleteCodeIndexV1,
-    authority: Arc<crate::query::retrieval::Pr9QueryAuthorityV1>,
+    authority: Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>,
     base: RetrievalRequest,
 }
 
@@ -1220,7 +1222,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             };
             let authority = CentralExactAdmissionAuthorityV1::new(
                 ExactAdmissionRuleRevision::new(
-                    crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                    tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
                 )
                 .unwrap_or_else(|_| panic!("static exact rule revision")),
             );
@@ -1337,11 +1339,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .collect(),
                 fuzzy_budget: request.fuzzy_budget,
                 lexical_profile_revision: ComponentRevision::new(
-                    crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                    tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
                 )
                 .unwrap_or_else(|_| panic!("static lexical profile")),
                 score_domain: ScoreDomainId::new(
-                    crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                    tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
                 )
                 .unwrap_or_else(|_| panic!("static lexical score domain")),
                 budget: base.budget,

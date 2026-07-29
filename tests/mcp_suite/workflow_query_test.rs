@@ -208,6 +208,53 @@ async fn call(
     extract_json(&result)
 }
 
+#[tokio::test]
+async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
+    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
+    let (env, project_root) = common::IsolatedEnv::acquire().await;
+    let cg = TraceDecay::init(&project_root)
+        .await
+        .unwrap_or_else(|error| panic!("init project: {error}"));
+    let marker = tracedecay::storage::read_enrollment_marker(cg.project_root())
+        .unwrap_or_else(|error| panic!("read project identity: {error}"))
+        .unwrap_or_else(|| panic!("project enrollment marker"));
+    let project_id =
+        ProjectId::new(marker.project_id).unwrap_or_else(|error| panic!("project id: {error}"));
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        env.home().join(".tracedecay"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("registered session runtime: {error}"));
+    runtime
+        .drop_project_workflow_schema_for_test()
+        .await
+        .unwrap_or_else(|error| panic!("drop workflow schema: {error}"));
+
+    for args in [
+        json!({"session_id": SESSION_ID}),
+        json!({"run_id": RUN_ID}),
+        json!({"branch": "main"}),
+    ] {
+        let payload = call(&cg, &runtime, "tracedecay_workflows", args).await;
+        assert_eq!(payload["status"], "unavailable");
+        assert_eq!(
+            payload["error"]["reason"], "workflow_index_not_built",
+            "a missing workflow schema must take precedence over empty or missing results"
+        );
+        assert_eq!(payload["error"]["retryable"], true);
+        assert!(
+            payload.get("count").is_none(),
+            "an unavailable index must not claim a zero count"
+        );
+        assert!(
+            payload.get("runs").is_none(),
+            "an unavailable index must not claim an empty run list"
+        );
+    }
+}
+
 /// Ingests the on-disk fixture and drives the three `tracedecay_workflows`
 /// modes plus the git-scope list end to end.
 #[tokio::test]

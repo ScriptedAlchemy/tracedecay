@@ -55,33 +55,20 @@ impl DaemonWorkflowIndexReadService {
             .map_err(workflow_error)
     }
 
-    /// Names what is missing before querying, so an unbuilt index is never
-    /// reported as a built index that happens to be empty.
+    /// Reports a store without workflow-index tables as unavailable, so a
+    /// missing schema is never answered as a built index that happens to be
+    /// empty.
     ///
-    /// Order matters. The workflow index is the subject of the read, so its
-    /// absence wins even when correlation is also absent; reporting correlation
-    /// first would send a caller to rebuild git history when there is no
-    /// workflow index to correlate against.
-    async fn missing_prerequisite(
-        snapshot: &RegisteredWorkflowIndexSnapshot,
-        git_scoped: bool,
-    ) -> Result<Option<WorkflowIndexUnavailableReason>> {
-        if !snapshot
+    /// One probe covers git-scope reads too: `ensure_registered_schema_for_admission`
+    /// installs the git-correlation and workflow-index DDL in a single
+    /// transaction, so the correlation tables cannot be absent while these are
+    /// present.
+    async fn schema_missing(snapshot: &RegisteredWorkflowIndexSnapshot) -> Result<bool> {
+        snapshot
             .workflow_tables_present()
             .await
-            .map_err(workflow_error)?
-        {
-            return Ok(Some(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt));
-        }
-        if git_scoped
-            && !snapshot
-                .git_correlation_tables_present()
-                .await
-                .map_err(workflow_error)?
-        {
-            return Ok(Some(WorkflowIndexUnavailableReason::GitCorrelationNotBuilt));
-        }
-        Ok(None)
+            .map(|present| !present)
+            .map_err(workflow_error)
     }
 
     async fn execute_runs(
@@ -90,9 +77,10 @@ impl DaemonWorkflowIndexReadService {
     ) -> Result<WorkflowRunListOutcome> {
         let WorkflowRunListCommand { scope, limit } = command;
         let snapshot = self.snapshot().await?;
-        let git_scoped = matches!(scope, WorkflowRunScope::GitScope { .. });
-        if let Some(reason) = Self::missing_prerequisite(&snapshot, git_scoped).await? {
-            return Ok(WorkflowRunListOutcome::Unavailable(reason));
+        if Self::schema_missing(&snapshot).await? {
+            return Ok(WorkflowRunListOutcome::Unavailable(
+                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+            ));
         }
         let runs = match &scope {
             WorkflowRunScope::Session { session_id } => snapshot
@@ -116,10 +104,12 @@ impl DaemonWorkflowIndexReadService {
     ) -> Result<WorkflowRunDetailOutcome> {
         let WorkflowRunDetailCommand { run_id, limit } = command;
         let snapshot = self.snapshot().await?;
-        // Without this, an unbuilt index answers `NotFound`, which claims the
-        // index looked and the run is absent. It cannot know that yet.
-        if let Some(reason) = Self::missing_prerequisite(&snapshot, false).await? {
-            return Ok(WorkflowRunDetailOutcome::Unavailable(reason));
+        // Without this, a store with no schema answers `NotFound`, which claims
+        // the index looked and the run is absent. It cannot know that.
+        if Self::schema_missing(&snapshot).await? {
+            return Ok(WorkflowRunDetailOutcome::Unavailable(
+                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+            ));
         }
         let Some(run) = snapshot.run_for_id(&run_id).await.map_err(workflow_error)? else {
             return Ok(WorkflowRunDetailOutcome::NotFound);

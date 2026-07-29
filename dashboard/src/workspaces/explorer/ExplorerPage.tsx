@@ -97,12 +97,6 @@ interface Lane {
   readonly reportedTotal?: number | undefined;
 }
 
-const LANE_SOURCE: Record<LaneId, ExplorerSourceId> = {
-  code: 'code_graph',
-  sessions: 'sessions',
-  knowledge: 'knowledge',
-};
-
 function queryIsTerminal(state: ExplorerQueryRun['state']): boolean {
   switch (state) {
     case 'pending':

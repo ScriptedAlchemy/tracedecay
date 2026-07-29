@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query';
-import type { z } from 'zod';
 import { fetchLegacy, type LegacyResult } from './legacy.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { scopeKey, scopedUrl, useScope } from '../scope/store.ts';
