@@ -33,8 +33,12 @@ use serde::Serialize;
 pub use tracedecay_application::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
-    GitIntelligenceError, GitReadPort, is_canonical_repository_relative_path,
+    GitIntelligenceError, GitReadPort,
 };
+// Path-shape predicate shared with the adapter's own validation, not part of the
+// read contract. It was `pub(crate)` before the contracts moved to application,
+// so it stays crate-visible here rather than joining the root's public surface.
+pub(crate) use tracedecay_application::git::is_canonical_repository_relative_path;
 use tracedecay_domain::git::{
     GitBlameAvailabilityV1, GitBlameLineV1, GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1,
     GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitDegradationV1,
