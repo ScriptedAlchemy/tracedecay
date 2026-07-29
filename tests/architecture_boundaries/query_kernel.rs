@@ -6,8 +6,8 @@
 //! `crates/tracedecay-query/src/lib.rs`; and no generated or out-of-repository sources.
 
 use crate::manifest::{
-    cargo_source_layout, filesystem_rust_sources, git_tracked_paths,
-    inspect_physical_manifest_paths, physical_manifest_layout, query_allowed_packages,
+    filesystem_rust_sources, git_tracked_paths, inspect_physical_manifest_paths,
+    query_allowed_packages,
 };
 use crate::module_scanner::{
     SourceReference, Token, matching_delimiter, normalize_identifier, normalize_relative,
@@ -1714,34 +1714,12 @@ fn query_kernel_guard_accepts_only_conventional_reachable_modules() {
     );
 }
 
+/// The manifest preconditions this test used to assert now live in
+/// `manifest::workspace_manifest_contract_is_reported_independently`, so a
+/// manifest regression can no longer abort this scan before it runs.
 #[test]
 fn temporal_kernel_sources_respect_dependency_boundary() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let physical =
-        physical_manifest_layout(&repository).expect("inspect tracked physical Cargo manifests");
-    assert!(
-        physical.violations.is_empty(),
-        "workspace manifests violate driver-neutral dependency boundaries:\n{}",
-        physical
-            .violations
-            .iter()
-            .map(|violation| format!("  - {violation}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-
-    let layout = cargo_source_layout(&repository).expect("inspect Cargo workspace membership");
-    assert!(
-        layout.boundary_violations.is_empty(),
-        "workspace dependencies or targets violate query/runtime boundaries:\n{}",
-        layout
-            .boundary_violations
-            .iter()
-            .map(|violation| format!("  - {violation}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-
     let sources = query_kernel_sources(&repository).expect("resolve temporal kernel sources");
     assert!(!sources.is_empty(), "temporal kernel sources must exist");
     let violations =
