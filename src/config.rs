@@ -1094,7 +1094,7 @@ pub fn runtime_configuration_target_for_project_id(
 /// This is fail-closed: callers that must not invent authority (hooks,
 /// destructive branch administration) use it after the daemon has published a
 /// snapshot. Daemon project-open paths that need to cold-start a process use
-/// [`ensure_runtime_configuration_for_registered_database`] instead.
+/// [`open_runtime_configuration_for_registered_database`] instead.
 pub fn runtime_configuration_for_layout(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -1263,6 +1263,11 @@ async fn open_runtime_configuration_from_store(
     Ok(configuration)
 }
 
+/// Test-only convenience wrapper over
+/// [`open_runtime_configuration_for_registered_database`] that returns just the
+/// pinned snapshot. Production open paths keep the full
+/// [`OpenedRuntimeConfiguration`] bundle (snapshot + registered database).
+#[cfg(test)]
 pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
