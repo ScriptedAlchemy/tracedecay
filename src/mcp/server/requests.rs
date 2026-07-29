@@ -1701,7 +1701,7 @@ impl McpServer {
         }
     }
 
-    fn project_server_revoked_response(
+    pub(super) fn project_server_revoked_response(
         &self,
         id: &Value,
         tool_name: &str,

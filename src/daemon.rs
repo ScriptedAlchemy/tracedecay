@@ -4889,6 +4889,9 @@ async fn production_project_server(
                 server.revoke_project_server();
                 server.cancel_startup_transcript_ingest();
             }
+            for server in &owner_servers {
+                server.wait_for_project_server_response_drain().await;
+            }
             let project_servers = Arc::clone(store_administration.project_servers());
             let unhealthy_owner = key.owner.clone();
             let cleanup = tokio::spawn(async move {
@@ -4899,6 +4902,9 @@ async fn production_project_server(
                 for server in &removed {
                     server.revoke_project_server();
                     server.cancel_startup_transcript_ingest();
+                }
+                for server in &removed {
+                    server.wait_for_project_server_response_drain().await;
                 }
                 removed.len()
             });

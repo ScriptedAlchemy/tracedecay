@@ -357,6 +357,12 @@ impl McpServer {
 
             // Parse the incoming JSON
             let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(&line);
+            let revocable_tool_call = parsed.as_ref().ok().and_then(|request| {
+                (request.method == "tools/call").then_some(())?;
+                let id = request.id.clone()?;
+                let tool_name = request.params.as_ref()?.get("name")?.as_str()?.to_owned();
+                Some((id, tool_name))
+            });
             let request_activity =
                 request_lifecycle.and_then(crate::daemon::DaemonLifecycle::try_enter);
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
@@ -454,6 +460,19 @@ impl McpServer {
                 break;
             }
 
+            let project_response_guard =
+                if revocable_tool_call.is_some() && self.project_server_live.is_some() {
+                    Some(self.project_server_response_gate.read().await)
+                } else {
+                    None
+                };
+            let response = if let Some((id, tool_name)) = &revocable_tool_call {
+                self.project_server_revoked_response(id, tool_name)
+                    .or(response)
+            } else {
+                response
+            };
+
             // Drain and write any pending notifications (e.g., version warnings).
             {
                 let notifications: Vec<Value> = self
@@ -490,6 +509,7 @@ impl McpServer {
                     return Err(e.into());
                 }
             }
+            drop(project_response_guard);
             drop(request_activity);
             if rejecting_for_drain
                 || request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting())

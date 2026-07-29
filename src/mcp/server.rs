@@ -548,6 +548,11 @@ pub struct McpServer {
     /// Daemon-owned route liveness. A failed post-open health check revokes
     /// every tool on retained transports before cache retirement can await.
     project_server_live: Option<Arc<AtomicBool>>,
+    /// Linearizes a tool response write with project-server revocation. A
+    /// health failure flips `project_server_live` before waiting for the write
+    /// side, so later responses fail closed while an already-authorized write
+    /// is allowed to finish before revocation completes.
+    project_server_response_gate: tokio::sync::RwLock<()>,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -1093,6 +1098,7 @@ impl McpServer {
             application_surface_client: tokio::sync::OnceCell::new(),
             application_invocation_executor,
             project_server_live,
+            project_server_response_gate: tokio::sync::RwLock::new(()),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 
