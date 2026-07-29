@@ -968,15 +968,6 @@ pub(crate) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
-    register_semantic_activation_owner(
-        invocation,
-        project_root,
-        &graph,
-        scope.clone(),
-        &scout_configuration,
-    )
-    .await?;
-
     match invocation
         .feedback_runtime_registrar()
         .open_and_register(
@@ -1072,6 +1063,31 @@ pub(crate) async fn register_project_open_production_owners(
     // the per-host transport spool. Replay is project-scoped, not Git-scoped:
     // non-Git and unborn projects must drain their admitted envelopes too.
     crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(Arc::clone(&graph));
+
+    // Semantic restore can decode a large durable generation. Keep that
+    // capability-specific warm-up behind every independent production owner
+    // so diagnostics, tests, feedback, and LSP reads remain available while
+    // semantic retrieval truthfully reports generation_unavailable.
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "independent_owners_registered",
+    );
+    let semantic_activation_started = Instant::now();
+    register_semantic_activation_owner(
+        invocation,
+        project_root,
+        &graph,
+        scope.clone(),
+        &scout_configuration,
+    )
+    .await?;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "semantic_activation_registered",
+        elapsed_ms = semantic_activation_started.elapsed().as_millis(),
+    );
 
     let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle else {
         // Feedback and advisory evidence requires an exact Git branch, HEAD,
