@@ -78,24 +78,22 @@ fn parse_mode(args: &Value) -> Result<WorkflowMode> {
 }
 
 /// Reported when the index cannot answer, whether because no authority was
-/// retained or because the index has not been built yet. Each case is a state,
-/// so none of them renders as a successful empty list.
+/// retained or because the store carries no workflow schema. Both are states,
+/// so neither renders as a successful empty list.
 ///
-/// `reason` and `retryable` follow the typed-error shape the session-retrieval
-/// surface already uses, so a caller reads unavailability the same way here.
+/// `runs` and `count` are deliberately absent: a read that never reached an
+/// index has no count, and emitting `0` here would let a caller that only reads
+/// `count` mistake an unavailable index for an empty one.
 fn index_unavailable_payload(reason: WorkflowIndexUnavailableReason) -> Value {
     json!({
         "status": "unavailable",
-        "outcome": "unavailable",
         "message": reason.message(),
         "error": {
             "code": "workflow_index_unavailable",
             "message": reason.message(),
             "reason": reason.as_str(),
-            "retryable": reason.is_retryable(),
-        },
-        "runs": [],
-        "count": 0
+            "retryable": false,
+        }
     })
 }
 
@@ -192,7 +190,7 @@ fn run_not_found_payload(run_id: &str) -> Value {
 }
 
 /// Says which state was hit instead of a bare "no index" line, so the markdown
-/// reader learns whether to wait for ingest or to fix the mount.
+/// reader learns which mount to fix rather than assuming there are no runs.
 fn render_unavailable_md(message: &str) -> String {
     let mut md = Md::new();
     md.heading(2, "Workflow Runs");
@@ -448,26 +446,18 @@ mod tests {
     use super::*;
 
     /// Each unavailable state must be legible on the wire and must never look
-    /// like a run list that came back empty. `count` and `runs` stay present so
-    /// a caller reading only those does not crash, but `status` is the field
-    /// that decides, and it never says `ok` here.
+    /// like a run list that came back empty. A caller that reads only `count`
+    /// must find nothing to read rather than a zero it can mistake for a result.
     #[test]
     fn unavailable_payload_names_the_state_instead_of_reporting_zero_runs() {
-        for (reason, wire, retryable) in [
+        for (reason, wire) in [
             (
                 WorkflowIndexUnavailableReason::AuthorityNotRetained,
                 "authority_not_retained",
-                false,
             ),
             (
-                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
-                "workflow_index_not_built",
-                true,
-            ),
-            (
-                WorkflowIndexUnavailableReason::GitCorrelationNotBuilt,
-                "git_correlation_not_built",
-                true,
+                WorkflowIndexUnavailableReason::SchemaNotInstalled,
+                "schema_not_installed",
             ),
         ] {
             let payload = index_unavailable_payload(reason);
@@ -475,8 +465,9 @@ mod tests {
             assert_ne!(payload["status"], "ok");
             assert_eq!(payload["error"]["code"], "workflow_index_unavailable");
             assert_eq!(payload["error"]["reason"], wire);
-            assert_eq!(payload["error"]["retryable"], retryable);
-            assert_eq!(payload["count"], 0);
+            assert_eq!(payload["error"]["retryable"], false);
+            assert!(payload.get("count").is_none(), "no count without a read");
+            assert!(payload.get("runs").is_none(), "no runs without a read");
             // The message must carry the state, not a generic absence.
             let message = payload["message"].as_str().expect("message");
             assert!(!message.is_empty());
@@ -484,17 +475,17 @@ mod tests {
         }
     }
 
-    /// The unbuilt-index and unretained-authority states must not share a
-    /// message, or markdown readers cannot tell waiting from misconfiguration.
+    /// The missing-schema and unretained-authority states must not share a
+    /// message, or markdown readers cannot tell the two apart.
     #[test]
     fn unavailable_markdown_distinguishes_the_states() {
-        let not_built =
-            render_unavailable_md(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message());
+        let no_schema =
+            render_unavailable_md(WorkflowIndexUnavailableReason::SchemaNotInstalled.message());
         let no_authority =
             render_unavailable_md(WorkflowIndexUnavailableReason::AuthorityNotRetained.message());
-        assert_ne!(not_built, no_authority);
-        assert!(not_built.contains("has not been built"));
-        assert!(!not_built.contains('{'), "markdown must not leak JSON");
+        assert_ne!(no_schema, no_authority);
+        assert!(no_schema.contains("workflow index schema"));
+        assert!(!no_schema.contains('{'), "markdown must not leak JSON");
     }
 
     #[test]
