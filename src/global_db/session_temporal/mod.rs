@@ -47,7 +47,7 @@ use crate::query::temporal::ports::{
     TemporalParticipantManifest, TemporalRetrievalScope, TemporalSourceAccess, TemporalWatermarks,
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
-use crate::sessions::SessionMessageRecord;
+use tracedecay_store::SessionMessageRecord;
 
 pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub(crate) use self::direct::ResolvedDirectAnchor;
