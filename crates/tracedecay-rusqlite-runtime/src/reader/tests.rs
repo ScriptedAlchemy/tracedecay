@@ -224,15 +224,14 @@ fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
 #[test]
 fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
     let store = TestStore::new();
-    let (pressure_tx, pressure_rx) = tokio::sync::watch::channel(
-        crate::CheckpointPressure::BlockGeneral {
+    let (pressure_tx, pressure_rx) =
+        tokio::sync::watch::channel(crate::CheckpointPressure::BlockGeneral {
             wal: crate::CheckpointWal {
                 frames: 64,
                 bytes: 256 * 1024 * 1024,
             },
             blockers: crate::CheckpointBlockers::default(),
-        },
-    );
+        });
     let pool = ReaderPool::start_with_checkpoint_pressure(
         store.locator(),
         two_reader_budget(),
@@ -255,7 +254,10 @@ fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
             .unwrap();
         let mut snapshot = lease.begin_snapshot().unwrap();
         assert!(matches!(
-            snapshot.execute(health.clone(), &health_probe).unwrap().value(),
+            snapshot
+                .execute(health.clone(), &health_probe)
+                .unwrap()
+                .value(),
             Some(RuntimeReadResultV1::GraphQuickCheck { .. })
         ));
     }

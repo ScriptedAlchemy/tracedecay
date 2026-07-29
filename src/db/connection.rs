@@ -1653,15 +1653,12 @@ impl Database {
             "database health check started"
         );
         let started_at = std::time::Instant::now();
-        let snapshot =
-            self.inner
-                .conn
-                .health_read_snapshot()
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to begin database health snapshot: {e}"),
-                    operation: operation.to_string(),
-                })?;
+        let snapshot = self.inner.conn.health_read_snapshot().await.map_err(|e| {
+            TraceDecayError::Database {
+                message: format!("failed to begin database health snapshot: {e}"),
+                operation: operation.to_string(),
+            }
+        })?;
         let result = database_health(&snapshot, operation).await;
         let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::debug!(
