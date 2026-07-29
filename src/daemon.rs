@@ -2565,6 +2565,7 @@ struct DatabaseOwnerEntry<Server> {
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
     servers: HashMap<ProjectServerKey, DatabaseOwnerEntry<Server>>,
     aliases: HashMap<ProjectRouteKey, ProjectServerKey>,
+    synchronous_health: HashSet<ProjectServerKey>,
 }
 
 impl<Server> Default for DatabaseOwnerRegistry<Server> {
@@ -2572,6 +2573,7 @@ impl<Server> Default for DatabaseOwnerRegistry<Server> {
         Self {
             servers: HashMap::new(),
             aliases: HashMap::new(),
+            synchronous_health: HashSet::new(),
         }
     }
 }
@@ -2635,6 +2637,19 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         let entry = self.servers.remove(key)?;
         self.aliases.retain(|_, alias| alias != key);
         Some(entry.server)
+    }
+
+    fn quarantine_and_remove(&mut self, key: &ProjectServerKey) -> Option<Server> {
+        self.synchronous_health.insert(key.clone());
+        self.remove(key)
+    }
+
+    fn requires_synchronous_health(&self, key: &ProjectServerKey) -> bool {
+        self.synchronous_health.contains(key)
+    }
+
+    fn clear_synchronous_health(&mut self, key: &ProjectServerKey) {
+        self.synchronous_health.remove(key);
     }
 
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
@@ -4466,25 +4481,47 @@ async fn production_project_server(
     if let Some(attempts) = project_open_attempts {
         attempts.fetch_add(1, Ordering::Relaxed);
     }
-    let synchronous_post_open_health = store_administration
-        .requires_synchronous_health(canonical_project_path)
-        .await;
-    let (cg, deferred_post_open_health) = Box::pin(open_project_for_handshake(
+    let (initial_cg, initial_deferred_post_open_health) = Box::pin(open_project_for_handshake(
         canonical_project_path,
         handshake,
         store_administration,
-        !synchronous_post_open_health,
+        true,
     ))
     .await?;
-    if synchronous_post_open_health {
-        store_administration
-            .clear_synchronous_health(canonical_project_path)
-            .await;
-    }
+    let initial_key = ProjectServerKey::from_open_project(&initial_cg, handshake)?;
+    let synchronous_post_open_health = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .requires_synchronous_health(&initial_key);
+    let (cg, deferred_post_open_health, key) = if synchronous_post_open_health {
+        drop(initial_deferred_post_open_health);
+        initial_cg.close();
+        let (validated_cg, validated_deferred_post_open_health) =
+            Box::pin(open_project_for_handshake(
+                canonical_project_path,
+                handshake,
+                store_administration,
+                false,
+            ))
+            .await?;
+        let validated_key = ProjectServerKey::from_open_project(&validated_cg, handshake)?;
+        {
+            let mut servers = store_administration.project_servers().lock().await;
+            servers.clear_synchronous_health(&initial_key);
+            servers.clear_synchronous_health(&validated_key);
+        }
+        (
+            validated_cg,
+            validated_deferred_post_open_health,
+            validated_key,
+        )
+    } else {
+        (initial_cg, initial_deferred_post_open_health, initial_key)
+    };
     project_open_cancellation_checkpoint(cancellation)?;
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await?;
-    let key = ProjectServerKey::from_open_project(&cg, handshake)?;
     let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
     let runtime_configuration = cg
         .configuration_runtime()
@@ -4745,6 +4782,7 @@ async fn production_project_server(
     .with_code_index_publication_identity(code_index_publication_identity)
     .with_code_index_search_executor(code_index_search_executor)
     .with_code_index_search_authority(code_search_authority)
+    .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(application_invocation_executor)
     .with_startup_catch_up_enabled(runtime.startup_catch_up())
     .with_retained_project_graph_resolver(retained_project_graph_resolver(
@@ -4822,15 +4860,15 @@ async fn production_project_server(
         {
             route_registered.store(false, Ordering::Release);
             resolved.cancel_startup_transcript_ingest();
-            store_administration
-                .require_synchronous_health(canonical_project_path)
-                .await;
-            let removed = store_administration
-                .project_servers()
-                .lock()
-                .await
-                .remove(&key);
-            debug_assert!(removed.is_some());
+            let project_servers = Arc::clone(store_administration.project_servers());
+            let unhealthy_key = key.clone();
+            tokio::spawn(async move {
+                let removed = project_servers
+                    .lock()
+                    .await
+                    .quarantine_and_remove(&unhealthy_key);
+                debug_assert!(removed.is_some());
+            });
             return Err(error);
         }
         ensure_git_index_transactions_for_mutation_owners(

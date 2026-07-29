@@ -281,7 +281,6 @@ pub(super) struct StoreAdministration {
     >,
     gate: Arc<tokio::sync::Mutex<()>>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
-    synchronous_health_projects: Arc<tokio::sync::Mutex<HashSet<PathBuf>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
@@ -311,7 +310,6 @@ impl Default for StoreAdministration {
             session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
-            synchronous_health_projects: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -335,27 +333,6 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
-    pub(super) async fn requires_synchronous_health(&self, project_root: &Path) -> bool {
-        self.synchronous_health_projects
-            .lock()
-            .await
-            .contains(project_root)
-    }
-
-    pub(super) async fn require_synchronous_health(&self, project_root: &Path) {
-        self.synchronous_health_projects
-            .lock()
-            .await
-            .insert(project_root.to_path_buf());
-    }
-
-    pub(super) async fn clear_synchronous_health(&self, project_root: &Path) {
-        self.synchronous_health_projects
-            .lock()
-            .await
-            .remove(project_root);
-    }
-
     pub(super) fn project_routes(&self) -> crate::mcp::project_route::SharedHookProjectRouteCache {
         self.project_routes.clone()
     }

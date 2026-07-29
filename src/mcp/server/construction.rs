@@ -6,6 +6,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
@@ -74,6 +75,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -160,6 +162,7 @@ impl McpServerConstructionContext {
             retained_project_graph_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
+            project_server_live: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
@@ -235,6 +238,7 @@ impl McpServerConstructionContext {
             retained_project_graph_resolver: None,
             project_routes,
             application_invocation_executor: None,
+            project_server_live: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
@@ -278,6 +282,11 @@ impl McpServerConstructionContext {
         executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     ) -> Self {
         self.application_invocation_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_project_server_live(mut self, live: Arc<AtomicBool>) -> Self {
+        self.project_server_live = Some(live);
         self
     }
 
