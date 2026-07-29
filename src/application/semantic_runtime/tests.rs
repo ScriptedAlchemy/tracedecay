@@ -700,7 +700,7 @@ mod config_backend_tests {
     }
 
     #[tokio::test]
-    async fn passing_profile_activation_links_config_audit_and_runtime_receipt() {
+    async fn passing_fastembed_profile_activation_links_config_audit_and_runtime_receipt() {
         let target = pins('a');
         let transition = transition(None, target.clone());
         let backend = ConfigurationLinkedSemanticRuntimeBackendV1::new(
@@ -727,12 +727,22 @@ mod config_backend_tests {
         .unwrap();
 
         let receipt = backend.activate(&command).await.unwrap();
+        let activation_digest = receipt.receipt_digest.clone();
 
         assert_eq!(receipt.configuration, pin("configuration.revision.2", '9'));
+        assert_eq!(receipt.activated_generation, target.vector_generation_id);
+        let state = backend.status(&receipt.configuration).await.unwrap();
         assert!(matches!(
-            backend.status(&receipt.configuration).await.unwrap(),
-            SemanticRuntimeStateV1::Current { receipt: current } if current == receipt
+            &state,
+            SemanticRuntimeStateV1::Current { receipt: current } if current == &receipt
         ));
+        assert_eq!(
+            SemanticRuntimeStatusV1::new(Some(receipt.configuration.clone()), state).route(),
+            SemanticRuntimeRouteV1::Semantic {
+                generation: receipt.activated_generation,
+                activation_receipt_digest: activation_digest,
+            }
+        );
     }
 
     #[tokio::test]

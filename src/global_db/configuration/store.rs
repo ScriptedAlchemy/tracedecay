@@ -2609,6 +2609,106 @@ pub struct GlobalDbConfigurationControlStore<'db> {
     db: &'db RegisteredGlobalDb,
 }
 
+/// Repairs only the exact profile shape stored before activation gained an
+/// accepted-profile digest. The historical revision retains that selection;
+/// the forward child keeps download/resource intent but disables semantic
+/// influence until a newly evaluated profile can mint a current receipt.
+fn repair_pre_digest_semantic_configuration(
+    encoded: &str,
+) -> Result<Option<String>, ConfigurationError> {
+    if let Ok(current) = serde_json::from_str::<crate::config::SemanticConfig>(encoded) {
+        current.validate().map_err(|_| {
+            ConfigurationError::validation_message(
+                "semantic runtime configuration is invalid under the current schema",
+            )
+        })?;
+        return Ok(None);
+    }
+
+    let mut document = serde_json::from_str::<serde_json::Value>(encoded).map_err(|_| {
+        ConfigurationError::validation_message("semantic runtime configuration is not valid JSON")
+    })?;
+    let object = document.as_object_mut().ok_or_else(|| {
+        ConfigurationError::validation_message("semantic runtime configuration is not an object")
+    })?;
+    let active = object
+        .get("active_profile")
+        .filter(|value| !value.is_null());
+    let rollback = object
+        .get("rollback_profile")
+        .filter(|value| !value.is_null());
+    if active.is_none()
+        || rollback.is_some_and(|rollback| Some(rollback) == active)
+        || !active
+            .into_iter()
+            .chain(rollback)
+            .all(is_pre_digest_semantic_profile)
+    {
+        return Err(ConfigurationError::validation_message(
+            "semantic runtime configuration cannot be repaired without profile authority",
+        ));
+    }
+
+    object.insert("active_profile".to_owned(), serde_json::Value::Null);
+    object.insert("rollback_profile".to_owned(), serde_json::Value::Null);
+    let repaired =
+        serde_json::from_value::<crate::config::SemanticConfig>(document).map_err(|_| {
+            ConfigurationError::validation_message(
+                "semantic runtime configuration cannot be repaired under the current schema",
+            )
+        })?;
+    repaired.validate().map_err(|_| {
+        ConfigurationError::validation_message(
+            "semantic runtime configuration cannot be repaired under the current schema",
+        )
+    })?;
+    serde_json::to_string(&repaired).map(Some).map_err(|_| {
+        ConfigurationError::validation_message(
+            "semantic runtime configuration forward repair could not be encoded",
+        )
+    })
+}
+
+fn is_pre_digest_semantic_profile(value: &serde_json::Value) -> bool {
+    let Some(profile) = value.as_object() else {
+        return false;
+    };
+    let expected = ["artifact_digest", "artifact_path", "profile_id"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let actual = profile.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let Some(profile_id) = profile
+        .get("profile_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(artifact_digest) = profile
+        .get("artifact_digest")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(artifact_path) = profile
+        .get("artifact_path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let artifact_path = std::path::Path::new(artifact_path);
+    actual == expected
+        && !profile_id.trim().is_empty()
+        && profile_id.len() <= 128
+        && artifact_digest.len() == 64
+        && artifact_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && artifact_path.is_absolute()
+        && !artifact_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
 fn complete_snapshot_for_current_registry(
     snapshot: &ConfigurationSnapshotV1,
 ) -> Result<ConfigurationSnapshotV1, ConfigurationError> {
@@ -2637,6 +2737,13 @@ fn complete_snapshot_for_current_registry(
             );
         }
     }
+    let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
+        .map_err(ConfigurationError::validation)?;
+    if let Some(ConfigurationValueV1::Text(encoded)) = effective_values.get_mut(&semantic_key)
+        && let Some(repaired) = repair_pre_digest_semantic_configuration(encoded)?
+    {
+        *encoded = repaired;
+    }
     ConfigurationSnapshotV1::new(effective_values, provenance)
         .map_err(ConfigurationError::validation)
 }
@@ -2664,7 +2771,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             let outcome = async {
                 let current = current_state_from_transaction(&transaction).await?;
                 let base_snapshot = complete_snapshot_for_current_registry(&current.snapshot)?;
-                let registry_was_completed = base_snapshot != current.snapshot;
+                let snapshot_was_repaired = base_snapshot != current.snapshot;
                 let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
                     .map_err(ConfigurationError::validation)?;
                 let configured = match base_snapshot.effective_values.get(&key) {
@@ -2698,7 +2805,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 let canonical_binding = authority_bindings
                     .first()
                     .is_some_and(|candidate| exact_binding && candidate.binding_id == binding.binding_id);
-                if canonical_binding && !registry_was_completed {
+                if canonical_binding && !snapshot_was_repaired {
                     return Ok(current);
                 }
                 let change = match authority_bindings.first() {
@@ -4177,6 +4284,92 @@ mod tests {
             repaired.effective_values.get(&missing_key),
             Some(&registry.definition(&missing_key).unwrap().default_value),
         );
+    }
+
+    #[test]
+    fn forward_repair_disables_pre_digest_semantics_without_changing_install_intent() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
+        let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
+        let legacy = serde_json::json!({
+            "selected_model": crate::config::DEFAULT_FASTEMBED_MODEL_ID,
+            "auto_download": true,
+            "active_profile": {
+                "profile_id": "profile.semantic.legacy.v1",
+                "artifact_digest": "a".repeat(64),
+                "artifact_path": legacy_artifact_path
+            },
+            "rollback_profile": null,
+            "resources": crate::config::SemanticResourceCeilings::default()
+        });
+        let mut effective_values = current.effective_values;
+        let provenance = current.provenance;
+        effective_values.insert(
+            semantic_key.clone(),
+            ConfigurationValueV1::Text(serde_json::to_string(&legacy).unwrap()),
+        );
+        let legacy_snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+        let ConfigurationValueV1::Text(legacy_text) =
+            legacy_snapshot.effective_values.get(&semantic_key).unwrap()
+        else {
+            panic!("semantic setting must remain typed text");
+        };
+        assert!(
+            serde_json::from_str::<crate::config::SemanticConfig>(legacy_text).is_err(),
+            "fixture must reproduce the pre-accepted-profile-digest snapshot"
+        );
+
+        let repaired = complete_snapshot_for_current_registry(&legacy_snapshot).unwrap();
+
+        let ConfigurationValueV1::Text(repaired_text) =
+            repaired.effective_values.get(&semantic_key).unwrap()
+        else {
+            panic!("semantic setting must remain typed text");
+        };
+        let semantic =
+            serde_json::from_str::<crate::config::SemanticConfig>(repaired_text).unwrap();
+        semantic.validate().unwrap();
+        assert_eq!(
+            semantic.selected_model.as_deref(),
+            Some(crate::config::DEFAULT_FASTEMBED_MODEL_ID)
+        );
+        assert!(semantic.auto_download);
+        assert_eq!(
+            semantic.resources,
+            crate::config::SemanticResourceCeilings::default()
+        );
+        assert!(semantic.active_profile.is_none());
+        assert!(semantic.rollback_profile.is_none());
+    }
+
+    #[test]
+    fn forward_repair_rejects_unrecognized_semantic_configuration() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
+        let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
+        let mut effective_values = current.effective_values;
+        effective_values.insert(
+            semantic_key,
+            ConfigurationValueV1::Text(
+                serde_json::json!({
+                    "selected_model": crate::config::DEFAULT_FASTEMBED_MODEL_ID,
+                    "active_profile": {
+                        "profile_id": "profile.semantic.legacy.v1",
+                        "artifact_digest": "a".repeat(64),
+                        "artifact_path": legacy_artifact_path
+                    },
+                    "rollback_profile": null,
+                    "resources": crate::config::SemanticResourceCeilings::default(),
+                    "x": true
+                })
+                .to_string(),
+            ),
+        );
+        let malformed = ConfigurationSnapshotV1::new(effective_values, current.provenance).unwrap();
+
+        assert!(complete_snapshot_for_current_registry(&malformed).is_err());
     }
 
     fn migration_fixture() -> (
