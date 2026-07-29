@@ -28,6 +28,7 @@ pub(crate) async fn patch_config(
 ) -> ApiResult {
     let patch = serde_json::from_value::<AutomationConfigPatch>(patch)
         .map_err(|err| bad_request(&format!("invalid automation config patch: {err}")))?;
+    reject_job_command_enablement(&patch)?;
     reject_unselectable_backend(&patch)?;
     let global = UserConfig::load().automation;
     let current = load_project_or_error(&state).await?;
@@ -87,6 +88,17 @@ fn reject_unselectable_backend(
     if patch.backend == Some(AutomationBackend::ExternalCommand) {
         return Err(bad_request(
             &"automation backend external_command is not selectable yet; use disabled or codex_app_server",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_job_command_enablement(
+    patch: &AutomationConfigPatch,
+) -> std::result::Result<(), JsonError> {
+    if patch.allow_job_commands.is_some() {
+        return Err(bad_request(
+            &"allow_job_commands cannot be changed through dashboard HTTP; use explicit local operator configuration",
         ));
     }
     Ok(())
