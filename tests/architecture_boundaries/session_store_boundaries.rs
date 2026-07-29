@@ -20,7 +20,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::manifest::filesystem_rust_sources;
-use crate::module_scanner::tokenize;
+use crate::module_scanner::{Token, tokenize};
 use crate::query_kernel::{scan_extern_crate_bindings, scan_qualified_paths, scan_use_bindings};
 
 /// Session modules that reach persistence only through their own ports, with
@@ -45,6 +45,21 @@ const SESSION_FREE_GLOBAL_DB_MODULES: &[&str] = &["src/global_db/session_tempora
 
 /// The sole adapter allowed to build a workflow-index reader.
 const GUARDED_WORKFLOW_SNAPSHOT_ADAPTER: &str = "src/store/workflow.rs";
+
+/// The registered database no longer forwards to the session git-correlation
+/// domain; `crate::store::GlobalDbGitCorrelationStore` is the only entry point.
+const GIT_CORRELATION_FREE_GLOBAL_DB_MODULES: &[&str] = &["src/global_db/registered.rs"];
+
+/// Inherent `RegisteredGlobalDb` methods that existed only to forward into
+/// `crate::sessions::git_correlation`. Callers now hold the store adapter, so
+/// these names must not come back on the database itself.
+const RETIRED_GIT_CORRELATION_FACADES: &[&str] = &[
+    "git_correlation_index_health",
+    "git_record_span_observation",
+    "git_run_backfill",
+    "git_run_incremental_backfill",
+    "git_sessions_for_with_relation",
+];
 
 fn forbidden_prefix(path: &[String], prefixes: &[&[&str]]) -> Option<String> {
     prefixes
@@ -96,6 +111,37 @@ fn violations_for(modules: &[&str], prefixes: &[&[&str]]) -> BTreeSet<String> {
     violations
 }
 
+/// Resolves every root-crate source, asserting the set is non-empty so a
+/// resolution failure cannot turn a repository-wide guard into a vacuous pass.
+fn root_crate_sources() -> (PathBuf, BTreeSet<PathBuf>) {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("src")].into_iter().collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve root-crate Rust sources");
+    assert!(
+        !sources.is_empty(),
+        "root-crate sources must resolve, otherwise this guard proves nothing"
+    );
+    (repository, sources)
+}
+
+fn read_source(repository: &PathBuf, path: &PathBuf) -> String {
+    fs::read_to_string(repository.join(path))
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
+/// True when the source names `type::method` in code. This reads the token
+/// stream rather than the raw text so prose in a doc comment describing the
+/// call cannot register as a call site.
+fn calls_associated_item(source: &str, type_name: &str, method: &str) -> bool {
+    scan_qualified_paths(&tokenize(source))
+        .into_iter()
+        .any(|(_, path)| {
+            path.windows(2)
+                .any(|pair| pair[0] == type_name && pair[1] == method)
+        })
+}
+
 #[test]
 fn inverted_session_modules_do_not_name_the_registered_database() {
     let forbidden: &[&[&str]] = &[
@@ -120,21 +166,15 @@ fn inverted_session_modules_do_not_name_the_registered_database() {
 /// holds while the adapter stays the single caller.
 #[test]
 fn the_workflow_index_reader_is_built_only_behind_the_project_sessions_gate() {
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let roots = [PathBuf::from("src")].into_iter().collect::<BTreeSet<_>>();
-    let sources =
-        filesystem_rust_sources(&repository, &roots).expect("resolve root-crate Rust sources");
-    assert!(
-        !sources.is_empty(),
-        "root-crate sources must resolve, otherwise this guard proves nothing"
-    );
-
+    let (repository, sources) = root_crate_sources();
     let callers = sources
         .iter()
         .filter(|path| {
-            fs::read_to_string(repository.join(path))
-                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
-                .contains("RegisteredWorkflowIndexSnapshot::from_snapshot")
+            calls_associated_item(
+                &read_source(&repository, path),
+                "RegisteredWorkflowIndexSnapshot",
+                "from_snapshot",
+            )
         })
         .map(|path| path.display().to_string())
         .collect::<BTreeSet<_>>();
@@ -164,5 +204,42 @@ fn session_temporal_read_path_does_not_depend_on_the_sessions_module() {
         "the temporal read path must name shared session DTOs at their owning crate \
          (`tracedecay_store`), not through the `crate::sessions` re-export:\n{}",
         violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// `RegisteredGlobalDb` used to carry five inherent methods whose whole body was
+/// a call into `crate::sessions::git_correlation`. Each one let a caller reach
+/// correlation writes straight off the database handle, which is how the edge
+/// grew back the last time it was cut. The guard pins both halves: the database
+/// module cannot name the domain, and the retired method names cannot reappear
+/// as identifiers anywhere in the root crate.
+#[test]
+fn the_registered_database_does_not_regrow_git_correlation_facades() {
+    let forbidden: &[&[&str]] = &[&["crate", "sessions", "git_correlation"]];
+    let violations = violations_for(GIT_CORRELATION_FREE_GLOBAL_DB_MODULES, forbidden);
+    assert!(
+        violations.is_empty(),
+        "the registered database must not forward into the session git-correlation domain; route \
+         callers through `crate::store::GlobalDbGitCorrelationStore` instead:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+
+    let (repository, sources) = root_crate_sources();
+    let mut resurrected = BTreeSet::new();
+    for path in &sources {
+        for token in tokenize(&read_source(&repository, path)) {
+            let Token::Ident(name) = token else {
+                continue;
+            };
+            if RETIRED_GIT_CORRELATION_FACADES.contains(&name.as_str()) {
+                resurrected.insert(format!("{}: names `{name}`", path.display()));
+            }
+        }
+    }
+    assert!(
+        resurrected.is_empty(),
+        "these are retired `RegisteredGlobalDb` git-correlation pass-throughs; call the matching \
+         `GlobalDbGitCorrelationStore` method rather than restoring a facade:\n{}",
+        resurrected.into_iter().collect::<Vec<_>>().join("\n")
     );
 }
