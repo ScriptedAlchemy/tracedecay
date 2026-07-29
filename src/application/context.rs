@@ -172,6 +172,35 @@ impl ResolvedSessionIdentity {
     pub fn git_route(&self) -> Option<&ResolvedGitRoute> {
         self.git_route.as_ref()
     }
+
+    /// Resolves this session identity to the exact transport-neutral
+    /// application scope.
+    ///
+    /// Profile-owned identities deliberately fail closed because they do not
+    /// name a project, repository, or worktree. Callers must never fabricate
+    /// those fields from a path or the current working directory.
+    pub fn application_scope(
+        &self,
+    ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
+        let project_id = self
+            .project_id()
+            .ok_or(ApplicationScopeError::ProfileIdentityWithoutProject)?;
+        let git_route = self
+            .git_route()
+            .ok_or_else(|| ApplicationScopeError::MissingGitRoute {
+                project_id: project_id.as_str().to_owned(),
+            })?;
+        let reference =
+            tracedecay_domain::RefId::new(format!("refs/heads/{}", git_route.branch_id().as_str()))
+                .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
+        tracedecay_application::ResolvedScope::new(
+            project_id.clone(),
+            git_route.repository_id().clone(),
+            git_route.worktree_id().clone(),
+            Some(reference),
+        )
+        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+    }
 }
 
 macro_rules! digest {
@@ -428,26 +457,7 @@ impl RequestContext {
     pub fn application_scope(
         &self,
     ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
-        let project_id = self
-            .identity
-            .project_id()
-            .ok_or(ApplicationScopeError::ProfileIdentityWithoutProject)?;
-        let git_route =
-            self.identity
-                .git_route()
-                .ok_or_else(|| ApplicationScopeError::MissingGitRoute {
-                    project_id: project_id.as_str().to_owned(),
-                })?;
-        let reference =
-            tracedecay_domain::RefId::new(format!("refs/heads/{}", git_route.branch_id().as_str()))
-                .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-        tracedecay_application::ResolvedScope::new(
-            project_id.clone(),
-            git_route.repository_id().clone(),
-            git_route.worktree_id().clone(),
-            Some(reference),
-        )
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+        self.identity.application_scope()
     }
 
     /// Composes the capability, policy, and configuration digests into the
@@ -457,13 +467,11 @@ impl RequestContext {
     pub fn grant_snapshot_digest(
         &self,
     ) -> Result<tracedecay_domain::ManifestDigest, ApplicationScopeError> {
-        tracedecay_domain::canonical_sha256(&(
-            "tracedecay.root.grant-composition.v1",
-            self.capability_digest.as_bytes(),
-            self.policy_digest.as_bytes(),
-            self.configuration_digest.as_bytes(),
-        ))
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+        application_grant_digest(
+            self.capability_digest,
+            self.policy_digest,
+            self.configuration_digest,
+        )
     }
 
     /// Crosses this orchestration context into the application boundary type.
@@ -536,6 +544,92 @@ fn wall_clock_micros() -> i64 {
             .map_or(0, |duration| duration.as_micros()),
     )
     .unwrap_or(i64::MAX)
+}
+
+/// Composes the legacy capability, policy, and configuration revisions into
+/// the one immutable digest carried by an application capability grant.
+pub fn application_grant_digest(
+    capability: CapabilityDigest,
+    policy: PolicyDigest,
+    configuration: ConfigurationDigest,
+) -> Result<tracedecay_domain::ManifestDigest, ApplicationScopeError> {
+    tracedecay_domain::canonical_sha256(&(
+        "tracedecay.root.grant-composition.v1",
+        capability.as_bytes(),
+        policy.as_bytes(),
+        configuration.as_bytes(),
+    ))
+    .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+}
+
+/// Returns the current wall-clock observation used by application deadlines.
+pub fn application_observed_at() -> tracedecay_domain::UtcMicros {
+    tracedecay_domain::UtcMicros(wall_clock_micros())
+}
+
+/// Rechecks immutable application admission together with the live transport
+/// cancellation token retained by the root runtime.
+pub fn application_request_interruption(
+    context: &tracedecay_application::RequestContext,
+    cancellation: &CancellationToken,
+) -> Option<RequestInterruption> {
+    if cancellation.is_cancelled()
+        || matches!(
+            context.admission_at(application_observed_at()),
+            tracedecay_application::RequestAdmission::Cancelled
+        )
+    {
+        Some(RequestInterruption::Cancelled)
+    } else if !matches!(
+        context.admission_at(application_observed_at()),
+        tracedecay_application::RequestAdmission::Admitted
+    ) {
+        Some(RequestInterruption::DeadlineExceeded)
+    } else {
+        None
+    }
+}
+
+/// Runs one awaitable application step against the exact immutable deadline
+/// and the live cancellation token owned by the transport/runtime boundary.
+pub async fn run_application_request_interruptible<T, F>(
+    context: &tracedecay_application::RequestContext,
+    cancellation: &CancellationToken,
+    future: impl std::future::Future<Output = T>,
+    on_interruption: F,
+) -> Result<T, RequestInterruption>
+where
+    F: FnOnce(),
+{
+    if let Some(interruption) = application_request_interruption(context, cancellation) {
+        on_interruption();
+        return Err(interruption);
+    }
+
+    let terminal_at = context
+        .deadline()
+        .expires_at
+        .0
+        .min(context.grant().expires_at.0);
+    let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
+    let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
+    let cancelled = cancellation.cancelled();
+    tokio::pin!(cancelled);
+    let deadline = tokio::time::sleep(std::time::Duration::from_micros(remaining_micros));
+    tokio::pin!(deadline);
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        result = &mut future => Ok(result),
+        () = &mut cancelled => {
+            on_interruption();
+            Err(RequestInterruption::Cancelled)
+        }
+        () = &mut deadline => {
+            on_interruption();
+            Err(RequestInterruption::DeadlineExceeded)
+        }
+    }
 }
 
 /// Resolves the exact transport-neutral scope for one registered project
@@ -1084,6 +1178,34 @@ mod tests {
         assert_eq!(
             application.admission_at(UtcMicros(i64::MAX)),
             RequestAdmission::TimedOut
+        );
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn application_interruptible_observes_live_transport_cancellation() {
+        let legacy = project_context();
+        let scope = legacy.application_scope().unwrap();
+        let application = legacy.to_application(grant_for(&scope)).unwrap();
+        let cancellation = CancellationToken::new();
+        let trigger = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            trigger.cancel();
+        });
+
+        let result = run_application_request_interruptible(
+            &application,
+            &cancellation,
+            std::future::pending::<()>(),
+            || {},
+        )
+        .await;
+
+        assert_eq!(result, Err(RequestInterruption::Cancelled));
+        assert!(
+            !application.cancellation().is_cancelled(),
+            "the immutable admission snapshot stays unchanged while the live token cancels"
         );
     }
 

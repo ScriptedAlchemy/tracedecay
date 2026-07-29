@@ -4,16 +4,16 @@
 //! cancellation and deadline state. This adapter does not decode controls
 //! from client data or create a second publication authority.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::Instant,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use tracedecay_application::RequestContext;
 
 use crate::{
-    application::context::RequestContext,
+    application::context::{
+        CancellationToken, RequestInterruption, application_request_interruption,
+    },
     code_index::{
         production::{
             CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
@@ -32,21 +32,31 @@ pub type ProductionCodeIndexOwnerV1<P, S> = CodeIndexProductionOwnerV1<P, S>;
 /// extraction/chunking stage and before atomic publication.
 pub struct RequestContextCodeIndexControlV1<'a> {
     context: &'a RequestContext,
+    cancellation: &'a CancellationToken,
 }
 
 impl<'a> RequestContextCodeIndexControlV1<'a> {
-    pub fn new(context: &'a RequestContext) -> Self {
-        Self { context }
+    pub fn new(context: &'a RequestContext, cancellation: &'a CancellationToken) -> Self {
+        Self {
+            context,
+            cancellation,
+        }
     }
 }
 
 impl CodeIndexExecutionControlV1 for RequestContextCodeIndexControlV1<'_> {
     fn is_cancelled(&self) -> bool {
-        self.context.cancellation().is_cancelled()
+        matches!(
+            application_request_interruption(self.context, self.cancellation),
+            Some(RequestInterruption::Cancelled)
+        )
     }
 
     fn is_deadline_exceeded(&self) -> bool {
-        self.context.deadline().is_elapsed_at(Instant::now())
+        matches!(
+            application_request_interruption(self.context, self.cancellation),
+            Some(RequestInterruption::DeadlineExceeded)
+        )
     }
 }
 

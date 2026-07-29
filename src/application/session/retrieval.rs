@@ -2,21 +2,23 @@ use std::fmt;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tracedecay_application::RequestContext;
 use tracedecay_domain::{
     ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
     SessionId, TemporalModeV1,
 };
 
 use crate::application::context::{
-    PolicyDigest, RequestContext, ResolvedSessionIdentity, SessionOwner,
+    PolicyDigest, ResolvedSessionIdentity, SessionOwner, application_observed_at,
+    application_request_interruption, run_application_request_interruptible,
 };
 use crate::application::session::ports::{
     AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError, SessionTemporalExecutionPort,
 };
 use crate::application::session::types::{
     SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
-    SessionRetrievalOutcome, SessionRetrievalScope, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer,
+    SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 use crate::query::temporal::context::{ContextBudget, ContextError, VersionedTokenEstimator};
 use crate::query::temporal::cursor::CursorError;
@@ -294,16 +296,15 @@ where
     pub async fn retrieve(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         query: SessionTemporalQuery,
     ) -> SessionRetrievalOutcome<TemporalKernelResult> {
-        if context.cancellation().is_cancelled()
-            || context.deadline().is_elapsed_at(std::time::Instant::now())
-        {
+        if application_request_interruption(context, binding.cancellation()).is_some() {
             return SessionRetrievalOutcome::Cancelled;
         }
         let Ok(authorization) = SessionScopeAuthorizationRequest::new(
-            context.actor_id().clone(),
-            context.identity().clone(),
+            context.actor().clone(),
+            binding.identity().clone(),
             query.session_id.clone(),
             query.provider.clone(),
             query.temporal_mode,
@@ -313,14 +314,15 @@ where
         .map(|request| request.with_retrieval_scope(query.retrieval_scope.clone())) else {
             return SessionRetrievalOutcome::Unavailable;
         };
-        let grant = match self.authorizer.authorize(context, &authorization) {
+        let grant = match self.authorizer.authorize(context, binding, &authorization) {
             Ok(grant) => grant,
             Err(SessionAuthorizationError::Denied) => return SessionRetrievalOutcome::Denied,
             Err(
                 SessionAuthorizationError::WrongScope
                 | SessionAuthorizationError::WrongTarget
                 | SessionAuthorizationError::WrongAccess
-                | SessionAuthorizationError::UnresolvedGitRoute,
+                | SessionAuthorizationError::UnresolvedGitRoute
+                | SessionAuthorizationError::UnresolvedApplicationScope,
             ) => {
                 return SessionRetrievalOutcome::WrongScope;
             }
@@ -336,12 +338,13 @@ where
                 return SessionRetrievalOutcome::Unavailable;
             }
         };
-        if let Err(error) = grant.validate(context, &authorization) {
+        if let Err(error) = grant.validate(context, binding, &authorization) {
             return match error {
                 SessionAuthorizationError::WrongScope
                 | SessionAuthorizationError::WrongTarget
                 | SessionAuthorizationError::WrongAccess
-                | SessionAuthorizationError::UnresolvedGitRoute => {
+                | SessionAuthorizationError::UnresolvedGitRoute
+                | SessionAuthorizationError::UnresolvedApplicationScope => {
                     SessionRetrievalOutcome::WrongScope
                 }
                 SessionAuthorizationError::WrongContext | SessionAuthorizationError::Denied => {
@@ -353,14 +356,12 @@ where
                 | SessionAuthorizationError::Unavailable => SessionRetrievalOutcome::Unavailable,
             };
         }
-        if !within_request_budgets(context, &query)
+        if !within_request_budgets(binding, &query)
             || self.estimator.version() != query.context_budget.estimator_version
         {
             return SessionRetrievalOutcome::BudgetExhausted;
         }
-        if context.cancellation().is_cancelled()
-            || context.deadline().is_elapsed_at(std::time::Instant::now())
-        {
+        if application_request_interruption(context, binding.cancellation()).is_some() {
             return SessionRetrievalOutcome::Cancelled;
         }
 
@@ -370,17 +371,18 @@ where
         let filter_digest = digest_filters(&query);
         let request_digest = digest_request(
             context,
+            binding,
             &query,
             &grant,
             self.configuration,
             &root_digest,
             &grant_digest,
         );
-        let control = ExecutionControl::new(Some(context.deadline().instant())).with_work_limit(
-            usize::try_from(context.budgets().max_work_units()).unwrap_or(usize::MAX),
+        let control = ExecutionControl::new(Some(execution_deadline(context))).with_work_limit(
+            usize::try_from(binding.budgets().max_work_units()).unwrap_or(usize::MAX),
         );
         let cancellation_control = control.clone();
-        if context.cancellation().is_cancelled() {
+        if binding.cancellation().is_cancelled() || context.cancellation().is_cancelled() {
             control.cancel();
         }
         let snapshot_request = match crate::query::temporal::ports::TemporalSnapshotRequest::new(
@@ -407,7 +409,7 @@ where
                 .with_execution_control(control),
             Err(_) => return SessionRetrievalOutcome::Unavailable,
         };
-        let configuration_digest = sha256_binding(context.configuration_digest().as_bytes());
+        let configuration_digest = sha256_binding(binding.configuration_digest().as_bytes());
         let execution = AuthorizedTemporalExecutionRequest::new(
             snapshot_request,
             query.query.clone(),
@@ -424,11 +426,15 @@ where
             None => execution,
         };
         let expected_execution = execution.clone();
-        let Ok(result) = context
-            .run_interruptible(self.execution.execute(execution, &self.estimator), || {
+        let Ok(result) = run_application_request_interruptible(
+            context,
+            binding.cancellation(),
+            self.execution.execute(execution, &self.estimator),
+            || {
                 cancellation_control.cancel();
-            })
-            .await
+            },
+        )
+        .await
         else {
             return SessionRetrievalOutcome::Cancelled;
         };
@@ -442,8 +448,19 @@ where
     }
 }
 
-fn within_request_budgets(context: &RequestContext, query: &SessionTemporalQuery) -> bool {
-    let budgets = context.budgets();
+fn execution_deadline(context: &RequestContext) -> std::time::Instant {
+    let terminal_at = context
+        .deadline()
+        .expires_at
+        .0
+        .min(context.grant().expires_at.0);
+    let remaining_micros =
+        u64::try_from(terminal_at.saturating_sub(application_observed_at().0)).unwrap_or(0);
+    std::time::Instant::now() + std::time::Duration::from_micros(remaining_micros)
+}
+
+fn within_request_budgets(binding: &SessionRequestBinding, query: &SessionTemporalQuery) -> bool {
+    let budgets = binding.budgets();
     let limits = query.execution_limits;
     u64::try_from(query.limit).is_ok_and(|limit| limit <= budgets.max_results())
         && query.limit <= limits.hydration_limit
@@ -802,6 +819,7 @@ fn digest_policy(policy_digest: PolicyDigest) -> String {
 
 fn digest_request(
     context: &RequestContext,
+    binding: &SessionRequestBinding,
     query: &SessionTemporalQuery,
     grant: &crate::application::session::types::SessionAuthorizationGrant,
     configuration: SessionRetrievalConfiguration,
@@ -844,7 +862,7 @@ fn digest_request(
     let limits = query.execution_limits;
     sha256_json(&RequestBinding {
         format_version: 5,
-        actor_id: context.actor_id().as_str(),
+        actor_id: context.actor().as_str(),
         grant_id: grant.id().as_str(),
         grant_revision: grant.revision(),
         grant_capability_digest: hex::encode(grant.capability_digest().as_bytes()),
@@ -897,9 +915,9 @@ fn digest_request(
             limits.hydration_chunk_bytes,
         ],
         request_budgets: [
-            context.budgets().max_results(),
-            context.budgets().max_bytes(),
-            context.budgets().max_work_units(),
+            binding.budgets().max_results(),
+            binding.budgets().max_bytes(),
+            binding.budgets().max_work_units(),
         ],
         freshness_policy: match query.freshness_policy {
             SessionFreshnessPolicy::AllowStored => "allow_stored",
@@ -907,7 +925,7 @@ fn digest_request(
         },
         schema_version: configuration.schema_version,
         ranking_version: configuration.ranking_version,
-        configuration_version: hex::encode(context.configuration_digest().as_bytes()),
+        configuration_version: hex::encode(binding.configuration_digest().as_bytes()),
     })
 }
 
