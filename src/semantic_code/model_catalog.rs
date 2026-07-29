@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
+use super::root_adapter::DEFAULT_FASTEMBED_MODEL_ID;
 
 const CATALOG_SCHEMA_V1: &str = "tracedecay.fastembed.model-catalog.v1";
 

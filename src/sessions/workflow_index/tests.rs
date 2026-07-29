@@ -1,5 +1,4 @@
 use super::*;
-use crate::global_db::WorkflowScopeFilter;
 use crate::sessions::git_correlation::{
     SpanObservation, SpanSource, ensure_git_correlation_schema_in_transaction,
     record_span_observation_in_transaction,

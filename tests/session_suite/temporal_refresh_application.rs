@@ -1,20 +1,26 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 use tracedecay::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
 };
 use tracedecay::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
     SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
-    SessionRefreshTarget, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionRefreshTarget, SessionRequestBinding, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer,
 };
 use tracedecay::store::GlobalDbSessionTemporalStore;
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1, UtcMicros, WorktreeId,
@@ -23,6 +29,7 @@ use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
     SessionRefreshProgressV1, SessionRefreshStore, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::common::{LcmTestRuntime, open_lcm_db};
 
@@ -42,12 +49,14 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         SessionAuthorizationGrant::issue(
             AuthorizationGrantId::new("grant.refresh.application").unwrap(),
             1,
             context,
+            binding,
             request,
         )
     }
@@ -60,6 +69,7 @@ impl SessionScopeAuthorizer for DenyAuthorizer {
     fn authorize(
         &self,
         _context: &RequestContext,
+        _binding: &SessionRequestBinding,
         _request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         Err(SessionAuthorizationError::Denied)
@@ -99,16 +109,64 @@ fn configuration() -> SessionRefreshConfiguration {
     SessionRefreshConfiguration::new(PROJECTOR_VERSION, CONFIG_VERSION).unwrap()
 }
 
+#[derive(Clone)]
+struct TestRequestContext {
+    request: RequestContext,
+    binding: SessionRequestBinding,
+}
+
+impl TestRequestContext {
+    fn binding(&self) -> &SessionRequestBinding {
+        &self.binding
+    }
+
+    fn actor_id(&self) -> &ActorId {
+        self.request.actor()
+    }
+
+    fn identity(&self) -> &ResolvedSessionIdentity {
+        self.binding.identity()
+    }
+
+    fn capability_digest(&self) -> CapabilityDigest {
+        self.binding.capability_digest()
+    }
+
+    fn policy_digest(&self) -> PolicyDigest {
+        self.binding.policy_digest()
+    }
+
+    fn configuration_digest(&self) -> ConfigurationDigest {
+        self.binding.configuration_digest()
+    }
+
+    fn cancellation(&self) -> &CancellationToken {
+        self.binding.cancellation()
+    }
+
+    fn budgets(&self) -> RequestBudgets {
+        self.binding.budgets()
+    }
+}
+
+impl std::ops::Deref for TestRequestContext {
+    type Target = RequestContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
 fn project_context(
     actor: &str,
     request: &str,
     profile: &str,
     project: &str,
     root: &str,
-) -> RequestContext {
-    RequestContext::new(
-        ActorId::new(actor).unwrap(),
-        RequestId::new(request).unwrap(),
+) -> TestRequestContext {
+    request_context(
+        actor,
+        request,
         ResolvedSessionIdentity::for_project(
             ProfileId::new(profile).unwrap(),
             ProjectId::new(project).unwrap(),
@@ -120,50 +178,112 @@ fn project_context(
                 BranchId::new("branch.refresh-application").unwrap(),
             ),
         ),
-        CapabilityDigest::new(DIGEST),
-        PolicyDigest::new(DIGEST),
-        ConfigurationDigest::new(DIGEST),
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
-        CancellationToken::new(),
-        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+        CancellationToken::for_application_request(&RequestId::new(request).unwrap()),
+        UtcMicros(i64::MAX - 1),
     )
 }
 
-fn profile_context(actor: &str, request: &str, profile: &str, root: &str) -> RequestContext {
-    RequestContext::new(
-        ActorId::new(actor).unwrap(),
-        RequestId::new(request).unwrap(),
+fn profile_context(actor: &str, request: &str, profile: &str, root: &str) -> TestRequestContext {
+    request_context(
+        actor,
+        request,
         ResolvedSessionIdentity::for_profile(
             ProfileId::new(profile).unwrap(),
             SessionStoreId::new(format!("store.{profile}")).unwrap(),
             SessionRootId::new(root).unwrap(),
         ),
-        CapabilityDigest::new(DIGEST),
-        PolicyDigest::new(DIGEST),
-        ConfigurationDigest::new(DIGEST),
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
-        CancellationToken::new(),
-        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+        CancellationToken::for_application_request(&RequestId::new(request).unwrap()),
+        UtcMicros(i64::MAX - 1),
     )
 }
 
 fn context_with_controls(
-    template: &RequestContext,
+    template: &TestRequestContext,
     request: &str,
-    deadline: MonotonicDeadline,
+    expires_at: UtcMicros,
     cancellation: CancellationToken,
-) -> RequestContext {
-    RequestContext::new(
-        template.actor_id().clone(),
-        RequestId::new(request).unwrap(),
+) -> TestRequestContext {
+    request_context_with_digests(
+        template.actor_id().as_str(),
+        request,
         template.identity().clone(),
         template.capability_digest(),
         template.policy_digest(),
         template.configuration_digest(),
-        deadline,
         cancellation,
         template.budgets(),
+        expires_at,
     )
+}
+
+fn request_context(
+    actor: &str,
+    request: &str,
+    identity: ResolvedSessionIdentity,
+    cancellation: CancellationToken,
+    expires_at: UtcMicros,
+) -> TestRequestContext {
+    request_context_with_digests(
+        actor,
+        request,
+        identity,
+        CapabilityDigest::new(DIGEST),
+        PolicyDigest::new(DIGEST),
+        ConfigurationDigest::new(DIGEST),
+        cancellation,
+        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+        expires_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_context_with_digests(
+    actor: &str,
+    request: &str,
+    identity: ResolvedSessionIdentity,
+    capability: CapabilityDigest,
+    policy: PolicyDigest,
+    configuration: ConfigurationDigest,
+    cancellation: CancellationToken,
+    budgets: RequestBudgets,
+    expires_at: UtcMicros,
+) -> TestRequestContext {
+    let actor = ActorId::new(actor).unwrap();
+    let request_id = RequestId::new(request).unwrap();
+    let scope = identity.application_scope().unwrap();
+    let observed_at = application_observed_at();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.refresh.application.context").unwrap(),
+        1,
+        session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
+            .unwrap(),
+        actor.clone(),
+        observed_at,
+        UtcMicros(i64::MAX - 1),
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.session.refresh").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.session.refresh").unwrap()]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    let request = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        request_id,
+        Deadline::new(expires_at).unwrap(),
+        CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let binding = SessionRequestBinding::new(
+        identity,
+        capability,
+        policy,
+        configuration,
+        cancellation,
+        budgets,
+    );
+    TestRequestContext { request, binding }
 }
 
 fn frontier(observed: u64, committed: u64) -> SessionRefreshFrontierV1 {
@@ -306,12 +426,20 @@ async fn equivalent_requests_join_with_stable_digests_excluding_request_id() {
 
     let first = started(
         service
-            .begin_or_join(&first_context, target("session.refresh.equivalent", 4))
+            .begin_or_join(
+                &first_context,
+                first_context.binding(),
+                target("session.refresh.equivalent", 4),
+            )
             .await,
     );
     let joined = handle(
         service
-            .begin_or_join(&second_context, target("session.refresh.equivalent", 4))
+            .begin_or_join(
+                &second_context,
+                second_context.binding(),
+                target("session.refresh.equivalent", 4),
+            )
             .await,
     );
 
@@ -347,6 +475,7 @@ async fn query_only_mode_and_grain_share_one_projection_refresh() {
         service
             .begin_or_join(
                 &context,
+                context.binding(),
                 target_with_mode_and_grain(
                     session,
                     4,
@@ -360,6 +489,7 @@ async fn query_only_mode_and_grain_share_one_projection_refresh() {
         service
             .begin_or_join(
                 &context,
+                context.binding(),
                 target_with_mode_and_grain(
                     session,
                     4,
@@ -375,7 +505,7 @@ async fn query_only_mode_and_grain_share_one_projection_refresh() {
     assert_eq!(wake.calls(), 2);
 
     assert!(matches!(
-        service.cancel(&context, &joined).await,
+        service.cancel(&context, context.binding(), &joined).await,
         SessionRefreshOutcome::Cancelled(receipt)
             if receipt
                 .source_coverage()
@@ -385,7 +515,7 @@ async fn query_only_mode_and_grain_share_one_projection_refresh() {
                 == TemporalModeV1::Forensic
     ));
     assert!(matches!(
-        service.status(&context, &first).await,
+        service.status(&context, context.binding(), &first).await,
         SessionRefreshOutcome::Cancelled(receipt)
             if receipt
                 .source_coverage()
@@ -395,7 +525,7 @@ async fn query_only_mode_and_grain_share_one_projection_refresh() {
                 == TemporalModeV1::Current
     ));
     assert!(matches!(
-        service.status(&context, &joined).await,
+        service.status(&context, context.binding(), &joined).await,
         SessionRefreshOutcome::Cancelled(receipt)
             if receipt
                 .source_coverage()
@@ -427,13 +557,21 @@ async fn conflicting_target_is_busy_and_does_not_wake_scheduler() {
 
     assert!(matches!(
         service
-            .begin_or_join(&context, target("session.refresh.target", 4))
+            .begin_or_join(
+                &context,
+                context.binding(),
+                target("session.refresh.target", 4),
+            )
             .await,
         SessionRefreshOutcome::Started(_)
     ));
     assert_eq!(
         service
-            .begin_or_join(&context, target("session.refresh.target", 5))
+            .begin_or_join(
+                &context,
+                context.binding(),
+                target("session.refresh.target", 5),
+            )
             .await,
         SessionRefreshOutcome::Busy
     );
@@ -460,7 +598,11 @@ async fn wake_failure_leaves_recoverable_operation_that_joins_after_restart() {
             failing_wake.clone(),
             configuration(),
         );
-        started(service.begin_or_join(&context, target.clone()).await)
+        started(
+            service
+                .begin_or_join(&context, context.binding(), target.clone())
+                .await,
+        )
     };
 
     let recovery = session_temporal_store(&db)
@@ -478,11 +620,15 @@ async fn wake_failure_leaves_recoverable_operation_that_joins_after_restart() {
         healthy_wake.clone(),
         configuration(),
     );
-    let joined = handle(restarted.begin_or_join(&context, target).await);
+    let joined = handle(
+        restarted
+            .begin_or_join(&context, context.binding(), target)
+            .await,
+    );
     assert_eq!(joined.operation_id(), first.operation_id());
     assert_eq!(healthy_wake.calls(), 1);
     assert!(matches!(
-        restarted.status(&context, &joined).await,
+        restarted.status(&context, context.binding(), &joined).await,
         SessionRefreshOutcome::Running(None)
     ));
 }
@@ -512,24 +658,30 @@ async fn status_and_cancel_reauthorize_and_preserve_terminal_coverage() {
         configuration(),
     );
     let target = target("session.refresh.cancel", 0);
-    let accepted = started(allowed.begin_or_join(&context, target.clone()).await);
+    let accepted = started(
+        allowed
+            .begin_or_join(&context, context.binding(), target.clone())
+            .await,
+    );
     let progress =
         persist_initial_progress(&session_temporal_store(&db), target.session_id()).await;
 
     assert!(matches!(
-        allowed.status(&context, &accepted).await,
+        allowed
+            .status(&context, context.binding(), &accepted)
+            .await,
         SessionRefreshOutcome::Running(Some(found)) if found == progress
     ));
     assert_eq!(
-        denied.status(&context, &accepted).await,
+        denied.status(&context, context.binding(), &accepted).await,
         SessionRefreshOutcome::Denied
     );
     assert_eq!(
-        denied.cancel(&context, &accepted).await,
+        denied.cancel(&context, context.binding(), &accepted).await,
         SessionRefreshOutcome::Denied
     );
 
-    let cancelled = allowed.cancel(&context, &accepted).await;
+    let cancelled = allowed.cancel(&context, context.binding(), &accepted).await;
     let receipt = match cancelled {
         SessionRefreshOutcome::Cancelled(receipt) => receipt,
         other => panic!("expected durable cancellation, got {other:?}"),
@@ -537,7 +689,9 @@ async fn status_and_cancel_reauthorize_and_preserve_terminal_coverage() {
     assert_eq!(receipt.coverage(), progress.coverage());
     assert_eq!(wake.calls(), 2);
     assert!(matches!(
-        allowed.status(&context, &accepted).await,
+        allowed
+            .status(&context, context.binding(), &accepted)
+            .await,
         SessionRefreshOutcome::Cancelled(found) if found == receipt
     ));
 }
@@ -577,22 +731,26 @@ async fn project_and_profile_scopes_are_isolated_without_root_fallback() {
 
     let project = started(
         project_service
-            .begin_or_join(&project_context, target.clone())
+            .begin_or_join(&project_context, project_context.binding(), target.clone())
             .await,
     );
     let profile = started(
         profile_service
-            .begin_or_join(&profile_context, target)
+            .begin_or_join(&profile_context, profile_context.binding(), target)
             .await,
     );
 
     assert_ne!(project.join_digest(), profile.join_digest());
     assert_eq!(
-        project_service.status(&profile_context, &project).await,
+        project_service
+            .status(&profile_context, profile_context.binding(), &project)
+            .await,
         SessionRefreshOutcome::WrongScope
     );
     assert_eq!(
-        profile_service.status(&project_context, &profile).await,
+        profile_service
+            .status(&project_context, project_context.binding(), &profile)
+            .await,
         SessionRefreshOutcome::WrongScope
     );
 }
@@ -621,7 +779,7 @@ async fn status_maps_complete_and_failed_receipts_without_error_details() {
     let complete_target = target("session.refresh.complete", 0);
     let complete_handle = started(
         complete_service
-            .begin_or_join(&context, complete_target.clone())
+            .begin_or_join(&context, context.binding(), complete_target.clone())
             .await,
     );
     let complete_progress =
@@ -639,7 +797,9 @@ async fn status_maps_complete_and_failed_receipts_without_error_details() {
         .await
         .unwrap();
     assert!(matches!(
-        complete_service.status(&context, &complete_handle).await,
+        complete_service
+            .status(&context, context.binding(), &complete_handle)
+            .await,
         SessionRefreshOutcome::Complete(receipt)
             if receipt.coverage() == complete_progress.coverage()
     ));
@@ -654,7 +814,7 @@ async fn status_maps_complete_and_failed_receipts_without_error_details() {
     let failed_target = target("session.refresh.failed", 0);
     let failed_handle = started(
         failed_service
-            .begin_or_join(&context, failed_target.clone())
+            .begin_or_join(&context, context.binding(), failed_target.clone())
             .await,
     );
     let failed_progress = persist_initial_progress(&failed_store, failed_target.session_id()).await;
@@ -672,7 +832,9 @@ async fn status_maps_complete_and_failed_receipts_without_error_details() {
         .await
         .unwrap();
     assert!(matches!(
-        failed_service.status(&context, &failed_handle).await,
+        failed_service
+            .status(&context, context.binding(), &failed_handle)
+            .await,
         SessionRefreshOutcome::Failed(receipt)
             if receipt.coverage() == failed_progress.coverage()
                 && receipt.failure_code().unwrap().as_str() == "source_unavailable"
@@ -704,8 +866,16 @@ async fn concurrent_callers_share_one_operation_and_keep_caller_idempotency() {
         "project.tracedecay",
         "root.project",
     );
-    let first = service.begin_or_join(&first_context, target("session.refresh.concurrent", 0));
-    let second = service.begin_or_join(&second_context, target("session.refresh.concurrent", 0));
+    let first = service.begin_or_join(
+        &first_context,
+        first_context.binding(),
+        target("session.refresh.concurrent", 0),
+    );
+    let second = service.begin_or_join(
+        &second_context,
+        second_context.binding(),
+        target("session.refresh.concurrent", 0),
+    );
 
     let (first, second) = tokio::join!(first, second);
     assert!(
@@ -750,9 +920,13 @@ async fn cancel_before_first_progress_returns_durable_zero_coverage_receipt() {
         "root.project",
     );
     let target = target("session.refresh.cancel-empty", 4);
-    let accepted = started(service.begin_or_join(&context, target.clone()).await);
+    let accepted = started(
+        service
+            .begin_or_join(&context, context.binding(), target.clone())
+            .await,
+    );
 
-    let receipt = match service.cancel(&context, &accepted).await {
+    let receipt = match service.cancel(&context, context.binding(), &accepted).await {
         SessionRefreshOutcome::Cancelled(receipt) => receipt,
         other => panic!("expected durable zero-progress cancellation, got {other:?}"),
     };
@@ -801,11 +975,12 @@ async fn application_preserves_each_temporal_mode_in_terminal_source_coverage() 
             service
                 .begin_or_join(
                     &context,
+                    context.binding(),
                     target_with_mode(&format!("session.refresh.mode.{suffix}"), 4, mode),
                 )
                 .await,
         );
-        let receipt = match service.cancel(&context, &accepted).await {
+        let receipt = match service.cancel(&context, context.binding(), &accepted).await {
             SessionRefreshOutcome::Cancelled(receipt) => receipt,
             other => panic!("expected durable cancellation, got {other:?}"),
         };
@@ -841,27 +1016,39 @@ async fn expired_or_cancelled_requests_do_not_create_refresh_operations() {
     let expired = context_with_controls(
         &template,
         "request.refresh.expired",
-        MonotonicDeadline::at(Instant::now() - Duration::from_millis(1)),
-        CancellationToken::new(),
+        UtcMicros(0),
+        CancellationToken::for_application_request(
+            &RequestId::new("request.refresh.expired").unwrap(),
+        ),
     );
-    let cancellation = CancellationToken::new();
+    let cancellation = CancellationToken::for_application_request(
+        &RequestId::new("request.refresh.cancelled").unwrap(),
+    );
     cancellation.cancel();
     let cancelled = context_with_controls(
         &template,
         "request.refresh.cancelled",
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
+        UtcMicros(i64::MAX - 1),
         cancellation,
     );
 
     assert_eq!(
         service
-            .begin_or_join(&expired, target("session.refresh.expired", 0))
+            .begin_or_join(
+                &expired,
+                expired.binding(),
+                target("session.refresh.expired", 0),
+            )
             .await,
         SessionRefreshOutcome::DeadlineExceeded
     );
     assert_eq!(
         service
-            .begin_or_join(&cancelled, target("session.refresh.cancelled", 0))
+            .begin_or_join(
+                &cancelled,
+                cancelled.binding(),
+                target("session.refresh.cancelled", 0),
+            )
             .await,
         SessionRefreshOutcome::Aborted
     );
@@ -903,34 +1090,42 @@ async fn request_abort_and_deadline_do_not_claim_durable_operation_cancellation(
     );
     let handle = started(
         service
-            .begin_or_join(&context, target("session.refresh.interruption", 4))
+            .begin_or_join(
+                &context,
+                context.binding(),
+                target("session.refresh.interruption", 4),
+            )
             .await,
     );
     let expired = context_with_controls(
         &context,
         "request.refresh.status.expired",
-        MonotonicDeadline::at(Instant::now() - Duration::from_millis(1)),
-        CancellationToken::new(),
+        UtcMicros(0),
+        CancellationToken::for_application_request(
+            &RequestId::new("request.refresh.status.expired").unwrap(),
+        ),
     );
-    let cancellation = CancellationToken::new();
+    let cancellation = CancellationToken::for_application_request(
+        &RequestId::new("request.refresh.cancel.aborted").unwrap(),
+    );
     cancellation.cancel();
     let aborted = context_with_controls(
         &context,
         "request.refresh.cancel.aborted",
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
+        UtcMicros(i64::MAX - 1),
         cancellation,
     );
 
     assert_eq!(
-        service.status(&expired, &handle).await,
+        service.status(&expired, expired.binding(), &handle).await,
         SessionRefreshOutcome::DeadlineExceeded
     );
     assert_eq!(
-        service.cancel(&aborted, &handle).await,
+        service.cancel(&aborted, aborted.binding(), &handle).await,
         SessionRefreshOutcome::Aborted
     );
     assert!(matches!(
-        service.status(&context, &handle).await,
+        service.status(&context, context.binding(), &handle).await,
         SessionRefreshOutcome::Running(_)
     ));
 }
@@ -955,16 +1150,20 @@ async fn status_is_read_only_and_does_not_wake_the_daemon() {
     );
     let accepted = started(
         service
-            .begin_or_join(&context, target("session.refresh.read-only-status", 0))
+            .begin_or_join(
+                &context,
+                context.binding(),
+                target("session.refresh.read-only-status", 0),
+            )
             .await,
     );
 
     assert_eq!(
-        service.status(&context, &accepted).await,
+        service.status(&context, context.binding(), &accepted).await,
         SessionRefreshOutcome::Running(None)
     );
     assert_eq!(
-        service.status(&context, &accepted).await,
+        service.status(&context, context.binding(), &accepted).await,
         SessionRefreshOutcome::Running(None)
     );
     assert_eq!(wake.calls(), 1);

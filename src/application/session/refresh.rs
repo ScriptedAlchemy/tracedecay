@@ -1,6 +1,7 @@
 use std::fmt;
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::RequestContext;
 use tracedecay_domain::{
     RetrievalGrainV1, SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1,
     SessionRefreshSourceTargetV1, SessionSourceCoverageReceiptV1, SessionSourceCoverageV1,
@@ -15,10 +16,11 @@ use tracedecay_store::{
 };
 
 use crate::application::context::{
-    RequestContext, RequestInterruption, ResolvedSessionIdentity, SessionOwner,
+    RequestInterruption, ResolvedSessionIdentity, SessionOwner, application_request_interruption,
+    run_application_request_interruptible,
 };
 use crate::application::session::types::{
-    SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
+    SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant, SessionRequestBinding,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 
@@ -250,16 +252,17 @@ where
     pub async fn begin_or_join(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         target: SessionRefreshTarget,
     ) -> SessionRefreshOutcome {
-        if let Some(outcome) = request_interruption(context) {
+        if let Some(outcome) = request_interruption(context, binding) {
             return outcome;
         }
-        let grant = match authorize(&self.authorizer, context, &target) {
+        let grant = match authorize(&self.authorizer, context, binding, &target) {
             Ok(grant) => grant,
             Err(outcome) => return outcome,
         };
-        let digests = refresh_digests(context, &target, &grant, &self.configuration);
+        let digests = refresh_digests(context, binding, &target, &grant, &self.configuration);
         let Ok(source_id) = SessionSourceIdV1::new(format!(
             "{}:{}",
             target.session_id().as_str(),
@@ -293,6 +296,7 @@ where
         ));
         let receipt = match await_with_request_controls(
             context,
+            binding,
             self.store.begin_or_join_session_refresh(request),
         )
         .await
@@ -330,16 +334,18 @@ where
     pub async fn status(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
     ) -> SessionRefreshOutcome {
-        if let Some(outcome) = request_interruption(context) {
+        if let Some(outcome) = request_interruption(context, binding) {
             return outcome;
         }
-        if let Err(outcome) = self.authorize_handle(context, handle) {
+        if let Err(outcome) = self.authorize_handle(context, binding, handle) {
             return outcome;
         }
         let progress = match await_with_request_controls(
             context,
+            binding,
             self.store
                 .session_refresh_progress(SessionRefreshProgressRequestV1::new(
                     handle.operation_id.clone(),
@@ -361,7 +367,7 @@ where
                 None => progress,
             }
         });
-        match self.read_receipt(context, handle).await {
+        match self.read_receipt(context, binding, handle).await {
             Ok(Some(receipt)) => return terminal_outcome(receipt),
             Ok(None) => {}
             Err(outcome) => return outcome,
@@ -372,16 +378,18 @@ where
     pub async fn cancel(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
     ) -> SessionRefreshOutcome {
-        if let Some(outcome) = request_interruption(context) {
+        if let Some(outcome) = request_interruption(context, binding) {
             return outcome;
         }
-        if let Err(outcome) = self.authorize_handle(context, handle) {
+        if let Err(outcome) = self.authorize_handle(context, binding, handle) {
             return outcome;
         }
         let progress = match await_with_request_controls(
             context,
+            binding,
             self.store
                 .session_refresh_progress(SessionRefreshProgressRequestV1::new(
                     handle.operation_id.clone(),
@@ -394,7 +402,7 @@ where
             Ok(Err(_)) => return SessionRefreshOutcome::Unavailable,
             Err(outcome) => return outcome,
         };
-        match self.read_receipt(context, handle).await {
+        match self.read_receipt(context, binding, handle).await {
             Ok(Some(receipt)) => return terminal_outcome(receipt),
             Ok(None) => {}
             Err(outcome) => return outcome,
@@ -418,7 +426,12 @@ where
             Some(source_coverage) => request.with_source_coverage(source_coverage),
             None => request,
         };
-        match await_with_request_controls(context, self.store.cancel_session_refresh(request)).await
+        match await_with_request_controls(
+            context,
+            binding,
+            self.store.cancel_session_refresh(request),
+        )
+        .await
         {
             Ok(Ok(receipt)) => {
                 let _ = self.scheduler.wake();
@@ -428,7 +441,7 @@ where
                 SessionStoreError::InvalidRefreshState { .. }
                 | SessionStoreError::InvalidStateTransition { .. }
                 | SessionStoreError::ReceiptIdentityMismatch { .. },
-            )) => self.status(context, handle).await,
+            )) => self.status(context, binding, handle).await,
             Ok(Err(_)) => SessionRefreshOutcome::Unavailable,
             Err(outcome) => outcome,
         }
@@ -440,10 +453,17 @@ where
     fn authorize_handle(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
     ) -> Result<(), SessionRefreshOutcome> {
-        let grant = authorize(&self.authorizer, context, &handle.target)?;
-        let digests = refresh_digests(context, &handle.target, &grant, &self.configuration);
+        let grant = authorize(&self.authorizer, context, binding, &handle.target)?;
+        let digests = refresh_digests(
+            context,
+            binding,
+            &handle.target,
+            &grant,
+            &self.configuration,
+        );
         if digests.join != handle.join_digest || digests.caller != handle.caller_idempotency_digest
         {
             return Err(SessionRefreshOutcome::WrongScope);
@@ -454,10 +474,12 @@ where
     async fn read_receipt(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
     ) -> Result<Option<SessionRefreshReceiptV1>, SessionRefreshOutcome> {
         match await_with_request_controls(
             context,
+            binding,
             self.store
                 .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
                     handle.operation_id.clone(),
@@ -494,14 +516,15 @@ struct RefreshDigests {
 fn authorize<A>(
     authorizer: &A,
     context: &RequestContext,
+    binding: &SessionRequestBinding,
     target: &SessionRefreshTarget,
 ) -> Result<SessionAuthorizationGrant, SessionRefreshOutcome>
 where
     A: SessionScopeAuthorizer,
 {
     let request = SessionScopeAuthorizationRequest::new(
-        context.actor_id().clone(),
-        context.identity().clone(),
+        context.actor().clone(),
+        binding.identity().clone(),
         target.session_id.clone(),
         target.source_scope.clone(),
         target.temporal_mode,
@@ -510,10 +533,10 @@ where
     )
     .map_err(|_| SessionRefreshOutcome::Unavailable)?;
     let grant = authorizer
-        .authorize(context, &request)
+        .authorize(context, binding, &request)
         .map_err(map_authorization_error)?;
     grant
-        .validate(context, &request)
+        .validate(context, binding, &request)
         .map_err(map_authorization_error)?;
     Ok(grant)
 }
@@ -526,7 +549,10 @@ fn map_authorization_error(error: SessionAuthorizationError) -> SessionRefreshOu
         SessionAuthorizationError::WrongScope
         | SessionAuthorizationError::WrongTarget
         | SessionAuthorizationError::WrongAccess
-        | SessionAuthorizationError::UnresolvedGitRoute => SessionRefreshOutcome::WrongScope,
+        | SessionAuthorizationError::UnresolvedGitRoute
+        | SessionAuthorizationError::UnresolvedApplicationScope => {
+            SessionRefreshOutcome::WrongScope
+        }
         SessionAuthorizationError::Unavailable
         | SessionAuthorizationError::InvalidGrantId
         | SessionAuthorizationError::InvalidProviderScope
@@ -542,25 +568,28 @@ fn terminal_outcome(receipt: SessionRefreshReceiptV1) -> SessionRefreshOutcome {
     }
 }
 
-fn request_interruption(context: &RequestContext) -> Option<SessionRefreshOutcome> {
-    if context.cancellation().is_cancelled() {
-        Some(SessionRefreshOutcome::Aborted)
-    } else if context.deadline().is_elapsed_at(std::time::Instant::now()) {
-        Some(SessionRefreshOutcome::DeadlineExceeded)
-    } else {
-        None
+fn request_interruption(
+    context: &RequestContext,
+    binding: &SessionRequestBinding,
+) -> Option<SessionRefreshOutcome> {
+    match application_request_interruption(context, binding.cancellation()) {
+        Some(RequestInterruption::Cancelled) => Some(SessionRefreshOutcome::Aborted),
+        Some(RequestInterruption::DeadlineExceeded) => {
+            Some(SessionRefreshOutcome::DeadlineExceeded)
+        }
+        None => None,
     }
 }
 
 async fn await_with_request_controls<T>(
     context: &RequestContext,
+    binding: &SessionRequestBinding,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, SessionRefreshOutcome> {
-    if let Some(outcome) = request_interruption(context) {
+    if let Some(outcome) = request_interruption(context, binding) {
         return Err(outcome);
     }
-    context
-        .run_interruptible(future, || {})
+    run_application_request_interruptible(context, binding.cancellation(), future, || {})
         .await
         .map_err(|interruption| match interruption {
             RequestInterruption::Cancelled => SessionRefreshOutcome::Aborted,
@@ -622,12 +651,13 @@ fn source_coverage_for_target(
 
 fn refresh_digests(
     context: &RequestContext,
+    binding: &SessionRequestBinding,
     target: &SessionRefreshTarget,
     grant: &SessionAuthorizationGrant,
     configuration: &SessionRefreshConfiguration,
 ) -> RefreshDigests {
     let mut projection = CanonicalDigest::new("session-refresh-projection.v1");
-    digest_identity(&mut projection, context.identity());
+    digest_identity(&mut projection, binding.identity());
     projection.string("session", target.session_id.as_str());
     projection.optional_string("source", target.source_scope.as_deref());
     projection.u64(
@@ -646,7 +676,7 @@ fn refresh_digests(
     let projection = projection.finish();
 
     let mut join = CanonicalDigest::new("session-refresh-join.v1");
-    digest_identity(&mut join, context.identity());
+    digest_identity(&mut join, binding.identity());
     join.string("session", target.session_id.as_str());
     join.optional_string("source", target.source_scope.as_deref());
     join.string("temporal_mode", target.temporal_mode.as_str());
@@ -671,7 +701,7 @@ fn refresh_digests(
     let join = join.finish();
 
     let mut caller = CanonicalDigest::new("session-refresh-caller-idempotency.v1");
-    caller.string("actor", context.actor_id().as_str());
+    caller.string("actor", context.actor().as_str());
     caller.bytes("join_digest", join.as_bytes());
     RefreshDigests {
         caller: caller.finish(),

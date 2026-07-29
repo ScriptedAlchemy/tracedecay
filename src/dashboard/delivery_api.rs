@@ -9,13 +9,11 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use tracedecay_domain::ProjectId;
 use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
 
 use crate::application::git_reads::{
     GitReadAuthorityV1, GitReadOutcomeV1, GitReadRequestV1, GitReadResultV1, execute_git_read,
 };
-use crate::daemon::project_open_owners::resolved_scope_for_project;
 use crate::git_query::{GitQueryBounds, GitStatusSummaryV1};
 
 use super::DashboardState;
@@ -324,19 +322,12 @@ async fn read_git_projections(
     DeliveryProjectionV1<DeliveryGitStatusV1>,
     DeliveryProjectionV1<DeliveryCommitTimelineV1>,
 ) {
-    let Some(project_id) = state
-        .project_id
-        .as_deref()
-        .and_then(|value| ProjectId::new(value.to_owned()).ok())
-    else {
-        let reason = "the active dashboard state has no valid registered project identity";
-        return (
-            DeliveryProjectionV1::unavailable("registered project scope", reason),
-            DeliveryProjectionV1::unavailable("registered project scope", reason),
-        );
-    };
-    let Ok(scope) = resolved_scope_for_project(&state.project_root, &project_id) else {
-        let reason = "the active checkout could not resolve an exact repository/worktree scope";
+    let Some(scope) = state.resolved_scope.clone() else {
+        // The exact scope is resolved once at state construction; its absence
+        // is the explicit fail-closed state (missing registry, invalid
+        // project id, or an unresolvable exact root), never a reason to
+        // re-derive identity from paths per request.
+        let reason = "the active dashboard state has no exact resolved project scope";
         return (
             DeliveryProjectionV1::unavailable("resolved Git scope", reason),
             DeliveryProjectionV1::unavailable("resolved Git scope", reason),

@@ -324,6 +324,15 @@ pub trait HookFeedbackDeliveryPortV1<T> {
     fn deliver_legacy(&self, feedback: &T) -> HookFeedbackDeliveryOutcomeV1;
 }
 
+const fn route_for_rollback(
+    rollback: HookFeedbackRollbackSwitchV1,
+) -> Result<HookFeedbackDeliveryRouteV1, HookRuntimeErrorV1> {
+    if rollback.configuration_revision == 0 {
+        return Err(HookRuntimeErrorV1::InvalidControl);
+    }
+    Ok(rollback.route)
+}
+
 pub fn deliver_feedback_with_rollback<T, P>(
     rollback: HookFeedbackRollbackSwitchV1,
     feedback: &T,
@@ -332,12 +341,117 @@ pub fn deliver_feedback_with_rollback<T, P>(
 where
     P: HookFeedbackDeliveryPortV1<T> + ?Sized,
 {
-    if rollback.configuration_revision == 0 {
-        return Err(HookRuntimeErrorV1::InvalidControl);
-    }
-    Ok(match rollback.route {
+    Ok(match route_for_rollback(rollback)? {
         HookFeedbackDeliveryRouteV1::HookV2 => port.deliver_hook_v2(feedback),
         HookFeedbackDeliveryRouteV1::Legacy => port.deliver_legacy(feedback),
+    })
+}
+
+pub type HookDeliveryFutureV1<'a> =
+    Pin<Box<dyn Future<Output = HookFeedbackDeliveryOutcomeV1> + Send + 'a>>;
+
+/// Envelope-bound counterpart of [`HookFeedbackDeliveryPortV1`] for hook
+/// dispatch, where delivery crosses the local daemon boundary. Routes,
+/// outcomes, and the rollback switch are the synchronous port's; only the
+/// completion is deferred. Implementations own the transport and must finish
+/// inside `deadline`; they receive the validated content-free envelope and the
+/// owning application's typed payload, never a hook-authored command.
+pub trait AsyncHookFeedbackDeliveryPortV1<T> {
+    fn deliver_hook_v2<'a>(
+        &'a self,
+        envelope: &'a HookEventEnvelopeV2,
+        feedback: &'a T,
+        deadline: HookSynchronousDeadlineV1,
+    ) -> HookDeliveryFutureV1<'a>;
+
+    fn deliver_legacy<'a>(
+        &'a self,
+        envelope: &'a HookEventEnvelopeV2,
+        feedback: &'a T,
+        deadline: HookSynchronousDeadlineV1,
+    ) -> HookDeliveryFutureV1<'a>;
+}
+
+pub async fn deliver_feedback_with_rollback_async<T, P>(
+    envelope: &HookEventEnvelopeV2,
+    rollback: HookFeedbackRollbackSwitchV1,
+    feedback: &T,
+    deadline: HookSynchronousDeadlineV1,
+    port: &P,
+) -> Result<HookFeedbackDeliveryOutcomeV1, HookRuntimeErrorV1>
+where
+    P: AsyncHookFeedbackDeliveryPortV1<T> + ?Sized,
+{
+    Ok(match route_for_rollback(rollback)? {
+        HookFeedbackDeliveryRouteV1::HookV2 => {
+            port.deliver_hook_v2(envelope, feedback, deadline).await
+        }
+        HookFeedbackDeliveryRouteV1::Legacy => {
+            port.deliver_legacy(envelope, feedback, deadline).await
+        }
+    })
+}
+
+/// Typed hook feedback that can prove it was minted for the exact admitted
+/// envelope. The owning application keeps its identity derivation private, so
+/// this runtime never learns how a project, repository, or worktree is hashed.
+pub trait HookScopedFeedbackV1 {
+    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool;
+}
+
+/// What a completed synchronous hook may hand back to its host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookFeedbackDeliveryV1<T> {
+    pub feedback: Option<T>,
+    /// Present only when the port was actually asked to deliver.
+    pub outcome: Option<HookFeedbackDeliveryOutcomeV1>,
+}
+
+impl<T> HookFeedbackDeliveryV1<T> {
+    const fn withheld() -> Self {
+        Self {
+            feedback: None,
+            outcome: None,
+        }
+    }
+}
+
+const fn feedback_is_eligible(receipt: &HookAdmissionReceiptV1) -> bool {
+    matches!(receipt.immediate, HookImmediateAdmissionStateV1::Accepted)
+        && !receipt.deadline_exceeded
+}
+
+/// Close a completed synchronous hook by acknowledging its typed feedback
+/// through `port`. Feedback is withheld unless admission was accepted inside
+/// the synchronous budget, the payload proves it belongs to this envelope, and
+/// budget remains, so an over-budget or foreign-scope hook can never surface
+/// another scope's feedback. Acknowledgement failure withholds nothing already
+/// earned: the outcome is reported so callers can record it truthfully.
+pub async fn deliver_hook_feedback<T, P>(
+    envelope: &HookEventEnvelopeV2,
+    receipt: &HookAdmissionReceiptV1,
+    rollback: HookFeedbackRollbackSwitchV1,
+    feedback: Option<T>,
+    deadline: Option<HookSynchronousDeadlineV1>,
+    port: &P,
+) -> Result<HookFeedbackDeliveryV1<T>, HookRuntimeErrorV1>
+where
+    T: HookScopedFeedbackV1,
+    P: AsyncHookFeedbackDeliveryPortV1<T> + ?Sized,
+{
+    let Some(feedback) = feedback
+        .filter(|feedback| feedback_is_eligible(receipt) && feedback.matches_envelope(envelope))
+    else {
+        return Ok(HookFeedbackDeliveryV1::withheld());
+    };
+    let Some(deadline) = deadline else {
+        return Ok(HookFeedbackDeliveryV1::withheld());
+    };
+    let outcome =
+        deliver_feedback_with_rollback_async(envelope, rollback, &feedback, deadline, port).await?;
+    Ok(HookFeedbackDeliveryV1 {
+        feedback: Some(feedback),
+        outcome: Some(outcome),
     })
 }
 

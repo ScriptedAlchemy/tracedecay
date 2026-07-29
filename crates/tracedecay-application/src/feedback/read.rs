@@ -39,8 +39,33 @@ pub const FEEDBACK_EXPAND_USE_CASE_ID_V1: &str = "use-case.application.feedback.
 pub const FEEDBACK_LIST_CAPABILITY_ID_V1: &str = "capability.application.feedback.list";
 pub const FEEDBACK_LIST_USE_CASE_ID_V1: &str = "use-case.application.feedback.list";
 
+const MAX_FEEDBACK_HANDLE_BYTES_V1: usize = 256;
+
 pub type FeedbackReadPortFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
+
+/// Opaque daemon-minted handle accepted by the first feedback read invocation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackHandleRequestV1 {
+    pub request_handle: String,
+}
+
+impl FeedbackHandleRequestV1 {
+    pub fn new(request_handle: impl Into<String>) -> Result<Self, ApplicationContractError> {
+        let request_handle = request_handle.into();
+        if request_handle.is_empty()
+            || request_handle.trim() != request_handle
+            || request_handle.len() > MAX_FEEDBACK_HANDLE_BYTES_V1
+            || request_handle.chars().any(char::is_control)
+        {
+            return Err(ApplicationContractError::InvalidIdentifier {
+                field: "feedback request handle",
+            });
+        }
+        Ok(Self { request_handle })
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -621,4 +646,16 @@ fn evidence_envelope<T>(
         context.scope().clone(),
         packet,
     ))
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::FeedbackHandleRequestV1;
+
+    #[test]
+    fn invocation_handle_rejects_unbounded_or_noncanonical_feedback_reads() {
+        assert!(FeedbackHandleRequestV1::new("feedback.handle.v1").is_ok());
+        assert!(FeedbackHandleRequestV1::new(" feedback.handle.v1").is_err());
+        assert!(FeedbackHandleRequestV1::new("x".repeat(257)).is_err());
+    }
 }

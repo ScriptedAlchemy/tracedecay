@@ -333,6 +333,8 @@ pub(crate) enum DaemonInvocationPayload {
     },
     FeedbackGet {
         request_handle: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -416,6 +418,8 @@ pub(crate) enum DaemonInvocationPayload {
     Configuration {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: ConfigurationSurfaceRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -539,6 +543,7 @@ impl DaemonInvocationRequest {
             crate::application_surface::ApplicationSurfaceOperation::FeedbackGet => {
                 DaemonInvocationPayload::FeedbackGet {
                     request_handle,
+                    resolved_scope: None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -819,6 +824,7 @@ impl DaemonInvocationRequest {
             payload: DaemonInvocationPayload::Configuration {
                 surface_operation,
                 request,
+                resolved_scope: None,
                 observed_at,
                 deadline,
                 cancellation,
@@ -1030,6 +1036,17 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn with_delivery_route(mut self, route: Plan26DeliveryRouteV1) -> Self {
         self.delivery_route = Some(route);
+        self
+    }
+
+    pub(crate) fn with_resolved_scope(mut self, scope: Option<ResolvedScope>) -> Self {
+        match &mut self.payload {
+            DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }
+            | DaemonInvocationPayload::Configuration { resolved_scope, .. } => {
+                *resolved_scope = scope;
+            }
+            _ => {}
+        }
         self
     }
 
@@ -1360,6 +1377,7 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             }
             | DaemonInvocationPayload::FeedbackExpand {
                 request_handle,
@@ -1926,6 +1944,21 @@ impl DaemonFeedbackResult {
             payload: self.payload,
         }
     }
+}
+
+fn feedback_scope_matches(
+    expected: Option<&ResolvedScope>,
+    project_root: Option<&Path>,
+    owner: Option<&DaemonFeedbackInvocationOwner>,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let (Some(project_root), Some(owner)) = (project_root, owner) else {
+        return false;
+    };
+    crate::daemon::project_open_owners::resolved_scope_for_project(project_root, &owner.project_id)
+        .is_ok_and(|scope| &scope == expected)
 }
 
 async fn execute_feedback(
@@ -6629,10 +6662,21 @@ impl DaemonInvocationService {
             }
             DaemonInvocationPayload::FeedbackGet {
                 request_handle,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
+                if !feedback_scope_matches(
+                    resolved_scope.as_ref(),
+                    project_root,
+                    feedback_service.as_ref(),
+                ) {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    );
+                }
                 execute_feedback(
                     request_id,
                     feedback_service,
@@ -6883,10 +6927,21 @@ impl DaemonInvocationService {
             DaemonInvocationPayload::Configuration {
                 surface_operation,
                 request,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
             } => {
+                if !resolved_scope.as_ref().is_none_or(|scope| {
+                    configuration_runtime
+                        .as_ref()
+                        .is_some_and(|registered| &registered.scope == scope)
+                }) {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    );
+                }
                 execute_configuration(
                     request_id,
                     configuration_runtime,

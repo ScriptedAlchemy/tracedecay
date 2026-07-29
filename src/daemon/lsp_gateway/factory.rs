@@ -7,20 +7,19 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::capabilities::{
-    ClientCapabilities, GatewayCapabilities, SemanticCapability, UpstreamCapabilities,
+use tokio::runtime::Handle;
+use tracedecay_lsp::{
+    AdmittedRoot, AnalyzerCancellationPort, ClientCapabilities, ContextProjectionPort,
+    DaemonLspProtocolSession, DiagnosticSnapshotPort, FeedbackCyclePort, GatewayCapabilities,
+    MAX_CONTEXT_PROJECTION_KINDS, SemanticCapability, SemanticProviderPort, UpstreamCapabilities,
     negotiate_capabilities,
 };
-use super::context::{ContextProjectionPort, MAX_CONTEXT_PROJECTION_KINDS};
-use super::gateway::{AdmittedRoot, FeedbackCyclePort, SemanticProviderPort};
-use super::protocol::DaemonLspProtocolSession;
-use super::provider::{AnalyzerCancellationPort, DiagnosticSnapshotPort};
+
 use super::runtime_adapters::{
     CanonicalContextProjectionAuthority, CanonicalDiagnosticSnapshotAuthority,
     FeedbackCycleRuntimePort, LspAnalyzerCancellationAuthority, Pr12AnalyzerCancellationAdapter,
     Pr12ContextProjectionAdapter, Pr12DiagnosticSnapshotAdapter, Pr12FeedbackCycleAdapter,
 };
-use tokio::runtime::Handle;
 
 pub type DaemonLspProviderBundle = DaemonLspProviderFactory<
     Arc<dyn FeedbackCyclePort + Send + Sync>,

@@ -5430,12 +5430,10 @@ name = "tracedecay"
 version = "0.0.67"
 dependencies = [
  "amari-holographic",
- "ast-grep-core",
  "axum",
  "bincode",
  "cap-fs-ext",
  "cap-std",
- "cc",
  "clap",
  "criterion",
  "crossterm",
@@ -5480,17 +5478,21 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiktoken-rs",
- "tokensave-large-treesitters",
- "tokensave-medium-treesitters",
  "tokio",
  "tokio-stream",
  "toml",
  "tower",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-capture",
+ "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-hooks",
+ "tracedecay-host-integration",
+ "tracedecay-lsp",
+ "tracedecay-migrate",
  "tracedecay-policy",
+ "tracedecay-query",
  "tracedecay-rusqlite-parity",
  "tracedecay-rusqlite-runtime",
  "tracedecay-sqlite-parity-protocol",
@@ -5499,8 +5501,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
- "tree-sitter-hlsl",
- "tree-sitter-language",
  "ureq",
  "url",
  "walkdir",
@@ -5517,6 +5517,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
@@ -5535,6 +5536,40 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-policy",
  "tracedecay-tool-catalog",
+]
+
+[[package]]
+name = "tracedecay-capture"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-code-index"
+version = "0.1.0"
+dependencies = [
+ "ast-grep-core",
+ "cc",
+ "ignore",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "static_assertions",
+ "tempfile",
+ "thiserror",
+ "tokensave-large-treesitters",
+ "tokensave-medium-treesitters",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tree-sitter",
+ "tree-sitter-hlsl",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -5561,12 +5596,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-host-integration"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracedecay-domain",
+ "url",
+]
+
+[[package]]
+name = "tracedecay-migrate"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracedecay-domain",
+ "tracedecay-store",
+]
+
+[[package]]
 name = "tracedecay-policy"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-query"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.13.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "static_assertions",
+ "thiserror",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-policy",
+ "zeroize",
 ]
 
 [[package]]

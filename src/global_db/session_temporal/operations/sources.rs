@@ -9,9 +9,9 @@ use tracedecay_domain::{
     RetrievalAnchorTargetV2, UtcMicros,
 };
 
-use crate::sessions::lcm::{
-    raw,
-    types::{LcmError, LcmImmutableSummaryPublication, LcmSourceRef, LcmStorageKind},
+use crate::application::session::compatibility::projected_content_hash;
+use crate::sessions::lcm::types::{
+    LcmError, LcmImmutableSummaryPublication, LcmSourceRef, LcmStorageKind,
 };
 
 use super::{
@@ -415,7 +415,7 @@ fn compatibility_anchor_id(
 ) -> String {
     format!(
         "anchor_lcm_{}",
-        raw::sha256_hex(&format!(
+        projected_content_hash(&format!(
             "{provider}\0{session_id}\0{store_id}\0{content_hash}"
         ))
     )

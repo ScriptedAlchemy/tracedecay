@@ -14,6 +14,7 @@ struct PreparedToolCall {
 struct DispatchedToolCall {
     cg: Arc<TraceDecay>,
     selected_owner: Option<crate::global_db::ProjectRegistryContext>,
+    selected_scope: Option<tracedecay_application::ResolvedScope>,
     outcome: Result<ToolResult>,
     elapsed_us: Option<u64>,
 }
@@ -27,6 +28,28 @@ struct ToolTokenAccounting {
     raw_file_tokens: u64,
     response_tokens: u64,
     net_saved_tokens: u64,
+}
+
+pub(super) fn invocation_target_for_route(
+    route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
+) -> tracedecay_application::InvocationTarget {
+    route
+        .map(|route| tracedecay_application::InvocationTarget::Resolved(route.scope.clone()))
+        .unwrap_or(tracedecay_application::InvocationTarget::CurrentProject)
+}
+
+pub(super) fn accounting_project_root<'a>(
+    active_root: &'a Path,
+    selected_owner: Option<&'a crate::global_db::ProjectRegistryContext>,
+    selected_scope: Option<&tracedecay_application::ResolvedScope>,
+) -> Option<&'a Path> {
+    match (selected_owner, selected_scope) {
+        (None, None) => Some(active_root),
+        (Some(owner), Some(scope)) if owner.project.project_id == scope.project_id.as_str() => {
+            Some(Path::new(&owner.project.canonical_root))
+        }
+        _ => None,
+    }
 }
 
 struct ApplicationCancellationRegistration<'a> {
@@ -884,11 +907,16 @@ impl McpServer {
         application_invocation_executor: Option<
             &dyn crate::daemon_client::DaemonInvocationExecutor,
         >,
+        application_invocation_target: tracedecay_application::InvocationTarget,
         application_request_id: Option<tracedecay_application::RequestId>,
         application_deadline: Option<tracedecay_application::Deadline>,
         application_cancellation: Option<tracedecay_application::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
+        let workflow_index_reads = self
+            .registered_session_db
+            .as_ref()
+            .map(|database| DaemonWorkflowIndexReadService::new(Arc::clone(database)));
         let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
             self.identical_read_coalescer.claim(
                 engine_identity.to_string_lossy().as_ref(),
@@ -907,6 +935,10 @@ impl McpServer {
             self.scope_prefix(),
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_deref(),
+                project_registry_reads: self.project_registry_reads.as_deref(),
+                workflow_index_reads: workflow_index_reads
+                    .as_ref()
+                    .map(|service| service as &dyn WorkflowIndexReadPort),
                 accounting_db: self.accounting_db.as_deref(),
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
@@ -921,6 +953,7 @@ impl McpServer {
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_executor,
+                application_invocation_target,
                 dashboard_application_invocation_executor: self
                     .application_invocation_executor
                     .clone(),
@@ -988,6 +1021,7 @@ impl McpServer {
             None,
             None,
             None,
+            tracedecay_application::InvocationTarget::CurrentProject,
             None,
             None,
             None,
@@ -1022,6 +1056,7 @@ impl McpServer {
                 return DispatchedToolCall {
                     cg: active_cg,
                     selected_owner: None,
+                    selected_scope: None,
                     outcome: Err(error),
                     elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
                 };
@@ -1031,11 +1066,17 @@ impl McpServer {
             .selected_project
             .as_ref()
             .map(|selected| selected.owner.clone());
+        let selected_scope = routed
+            .selected_project
+            .as_ref()
+            .map(|selected| selected.scope.clone());
         let cg = routed.selected_project.as_ref().map_or_else(
             || Arc::clone(&active_cg),
             |selected| Arc::clone(&selected.graph),
         );
         let project_reader_preselected = routed.selected_project.is_some();
+        let application_invocation_target =
+            invocation_target_for_route(routed.selected_project.as_ref());
 
         self.begin_tool_dispatch(tool_name, &cg, project_reader_preselected, publish_activity)
             .await;
@@ -1073,6 +1114,7 @@ impl McpServer {
                 server_stats,
                 implicit_project_path,
                 application_invocation_executor,
+                application_invocation_target,
                 application_request_id.clone(),
                 application_deadline,
                 application_cancellation,
@@ -1081,6 +1123,7 @@ impl McpServer {
         DispatchedToolCall {
             cg,
             selected_owner,
+            selected_scope,
             outcome,
             elapsed_us: handler_start.map(|t| t.elapsed().as_micros() as u64),
         }
@@ -1282,7 +1325,7 @@ impl McpServer {
     #[allow(clippy::too_many_arguments)]
     fn spawn_success_analytics(
         &self,
-        cg: &TraceDecay,
+        accounting_project_root: &Path,
         tool_name: &str,
         request_id: &Value,
         analytics_arguments: &Value,
@@ -1310,7 +1353,8 @@ impl McpServer {
                 response_tokens,
                 net_saved_tokens,
             } = accounting;
-            let project_path_str = RegisteredGlobalDb::canonical_project_key(cg.project_root());
+            let project_path_str =
+                RegisteredGlobalDb::canonical_project_key(accounting_project_root);
             let tool_name_owned = tool_name.to_string();
             let ts = crate::tracedecay::current_timestamp();
             let client_name = self.client_name();
@@ -1318,7 +1362,7 @@ impl McpServer {
                 .then(|| semantic_failure_reason(result))
                 .flatten();
             let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
-                project_root: cg.project_root(),
+                project_root: accounting_project_root,
                 session_id: analytics_session_id.clone(),
                 tool_name,
                 outcome: analytics_outcome,
@@ -1371,6 +1415,7 @@ impl McpServer {
     async fn record_success_accounting(
         &self,
         cg: &TraceDecay,
+        accounting_project_root: &Path,
         tool_name: &str,
         request_id: &Value,
         analytics_arguments: &Value,
@@ -1380,7 +1425,7 @@ impl McpServer {
     ) {
         let accounting = self.apply_token_accounting(cg, tool_name, result).await;
         self.spawn_success_analytics(
-            cg,
+            accounting_project_root,
             tool_name,
             request_id,
             analytics_arguments,
@@ -1570,6 +1615,7 @@ impl McpServer {
         let DispatchedToolCall {
             cg,
             selected_owner,
+            selected_scope,
             outcome,
             elapsed_us,
         } = dispatch;
@@ -1578,16 +1624,24 @@ impl McpServer {
         match outcome {
             Ok(mut result) => {
                 Self::attach_tool_timing(&mut result, elapsed_us);
-                self.record_success_accounting(
-                    &cg,
-                    &tool_name,
-                    &request_id,
-                    &analytics_arguments,
-                    &analytics_session_id,
-                    elapsed_us,
-                    &mut result,
-                )
-                .await;
+                let accounting_project_root = accounting_project_root(
+                    cg.project_root(),
+                    selected_owner.as_ref(),
+                    selected_scope.as_ref(),
+                );
+                if let Some(accounting_project_root) = accounting_project_root {
+                    self.record_success_accounting(
+                        &cg,
+                        accounting_project_root,
+                        &tool_name,
+                        &request_id,
+                        &analytics_arguments,
+                        &analytics_session_id,
+                        elapsed_us,
+                        &mut result,
+                    )
+                    .await;
+                }
                 self.append_version_and_automation_notices(&cg, &mut result)
                     .await;
                 self.append_per_file_staleness_notice(&cg, &mut result)

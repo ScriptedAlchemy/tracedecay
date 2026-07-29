@@ -16,8 +16,8 @@ use super::detect::{
     SanitizationDetectorOriginV1, SanitizationFindingV1, SanitizationScanBoundaryV1, normalize_key,
     redact_sensitive_values,
 };
-use super::parse::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
 use super::structural_id::{StructuralIdProtectionError, protect_sensitive_structural_id};
+use super::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
 
 pub const CLAUDE_SANITIZER_VERSION_V1: &str = "privacy.claude-record.v1";
 pub const OBSERVATION_SANITIZER_VERSION_V1: &str = "privacy.observation-record.v1";

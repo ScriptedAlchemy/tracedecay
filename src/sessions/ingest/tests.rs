@@ -25,9 +25,11 @@ use super::project::{
     parse_git_log_commits, push_file_source, with_transcript_source_home,
 };
 use super::scheduler::{
-    DiscoveredIngestUnit, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY, admit_fair_ingest_units,
-    discover_ingest_units, finish_user_provider_coverage, ingest_sources_bounded,
-    merge_project_provider_backpressure, plan_user_provider_admission, read_ingest_frontier,
+    DiscoveredIngestUnit, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY, TransientIngestAuthority,
+    admit_fair_ingest_units, discover_ingest_units, finish_user_provider_coverage,
+    ingest_sources_bounded as ingest_sources_bounded_with_store,
+    merge_project_provider_backpressure, plan_user_provider_admission,
+    read_ingest_frontier as read_ingest_frontier_with_store,
 };
 use super::startup::{
     StartupUserIngestGuard, TranscriptIngestOutcome,
@@ -50,6 +52,37 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
+
+async fn ingest_sources_bounded(
+    db: &crate::global_db::RegisteredGlobalDb,
+    project_root: &Path,
+    project_id: &ProjectId,
+    sources: &[Box<dyn TranscriptSource>],
+    bounds: IngestPassBounds,
+    cancellation: &ObservationCancellation,
+) -> IngestPassOutcome {
+    let store = crate::store::GlobalDbTranscriptStore::new(db);
+    let authority = TransientIngestAuthority::new(
+        db.binding().shard_id.brain_id.clone(),
+        db.binding().shard_id.profile_id.clone(),
+        project_id,
+        sources,
+    );
+    ingest_sources_bounded_with_store(
+        &store,
+        &authority,
+        project_root,
+        sources,
+        bounds,
+        cancellation,
+    )
+    .await
+}
+
+async fn read_ingest_frontier(db: &crate::global_db::RegisteredGlobalDb, key: &str) -> Option<u64> {
+    let store = crate::store::GlobalDbTranscriptStore::new(db);
+    read_ingest_frontier_with_store(&store, key).await
+}
 
 #[tokio::test]
 async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_it() {
@@ -955,8 +988,9 @@ async fn file_provider_reserves_one_aggregate_byte_budget_across_paths() {
     let db = runtime
         .registered_database(HostAdmissionScope::Profile)
         .unwrap();
+    let store = crate::store::GlobalDbTranscriptStore::new(db);
 
-    try_ingest_file_source_bounded(db, &source, &project, 10)
+    try_ingest_file_source_bounded(&store, &source, &project, 10)
         .await
         .unwrap();
 

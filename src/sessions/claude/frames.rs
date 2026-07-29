@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_capture::claude::{normalize, stable_record_id};
 use tracedecay_domain::{ClaudeByteRangeV1, ObservationOrderingDomainV1};
 
 use crate::privacy::{
@@ -14,7 +15,6 @@ use crate::sessions::source::{
 };
 
 use super::PROVIDER;
-use super::canonical::{normalize, stable_record_id};
 use super::cursor::{claude_cursor_key, claude_observation_source_id, claude_source_id};
 
 /// Stable identity available before the durable cursor lookup.

@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
 
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
-    CheckSnapshotAnchorRefV1, CiFailureBranchEvidenceV1, CiFailureCoverageV1,
-    CiFailureGenerationEvidenceV1, CiFailureKindV1, CiFailureLocalizationResultV1,
-    CiFailureLocalizationStateV1, CiFailureParserIdentityV1, CiFailureRunIdentityV1,
-    CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass, FeedbackScopeV1, GitCommitIdentityV1,
-    GitCoverageV1, GitHeadStateV1, GitHubPullRequestIdV1, GitHubReviewCoverageV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1, GitHubReviewReadOperationV1,
-    GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorProvenanceRelationV2,
+    AnchorSourceGenerationV2, CapabilityId, CheckSnapshotAnchorRefV1, CiFailureBranchEvidenceV1,
+    CiFailureCoverageV1, CiFailureGenerationEvidenceV1, CiFailureKindV1,
+    CiFailureLocalizationResultV1, CiFailureLocalizationStateV1, CiFailureParserIdentityV1,
+    CiFailureRunIdentityV1, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass,
+    FeedbackScopeV1, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitHubPullRequestIdV1,
+    GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
+    GitHubReviewReadOperationV1, GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1,
+    GitHubStackLayerSnapshotV1, GitHubStackSnapshotV1, GitIndexCommitIntentV1,
+    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId,
+    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
     GitOperationStateV1, GitTopologyAnchorTargetV1, GitTopologyGenerationRefV1,
     GitTopologySourceRoleV1, IntegrationReceiptAnchorRefV1, ManifestDigest,
@@ -22,7 +24,8 @@ use tracedecay_domain::{
     RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
     ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2,
     RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, ShardId, UtcMicros,
-    VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, derive_git_topology_anchor_id,
+    VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, canonical_sha256,
+    derive_git_topology_anchor_id,
 };
 
 fn id<T>(value: &str) -> T
@@ -123,6 +126,20 @@ fn record(target: GitTopologyAnchorTargetV1) -> RetrievalAnchorRecordV2 {
     let owner = ObservationScopeV1::Project {
         project_id: id("project.fixture"),
     };
+    // A retained record must carry lineage to every ordered source the target
+    // declares, so the helper derives it rather than letting callers drift.
+    let source_anchors = target
+        .ordered_sources()
+        .iter()
+        .map(|source| {
+            AnchorLineageRefV2::new(
+                AnchorProvenanceRelationV2::Observed,
+                source.anchor_id.clone(),
+                owner.clone(),
+            )
+            .expect("ordered source lineage is canonical")
+        })
+        .collect();
     RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
         source_generation: AnchorSourceGenerationV2::GitTopology(target.generation()),
         target: RetrievalAnchorTargetV2::GitTopology(Box::new(target)),
@@ -137,7 +154,7 @@ fn record(target: GitTopologyAnchorTargetV1) -> RetrievalAnchorRecordV2 {
         },
         coverage: CoverageReportV1::default(),
         source_observations: vec![],
-        source_anchors: vec![],
+        source_anchors,
         authorization: authorization(),
         payload_access: PayloadAccessState::Eligible,
         retention_class: RetentionClass::new("retention.fixture").unwrap(),
@@ -364,5 +381,281 @@ fn pr11_preview_apply_and_integration_receipts_remain_exact_and_ordered() {
             preview_id: receipt.preview_id,
             commit_id: receipt.created_commit,
         }
+    );
+}
+
+fn github_stack_capability(state: GitHubStackCapabilityStateV1) -> GitHubStackCapabilitySnapshotV1 {
+    GitHubStackCapabilitySnapshotV1::new(
+        id("provider.github"),
+        id("project.fixture"),
+        id("repository.fixture"),
+        id("worktree.fixture"),
+        state,
+        id("projection.github-stack-capability.1"),
+        id("anchor.github-stack-capability.1"),
+    )
+    .expect("capability snapshot is canonical")
+}
+
+fn github_stack_layer(
+    provider_position: u32,
+    repository: &str,
+    pull_request: &str,
+    base_ref: &str,
+    head_ref: &str,
+    base_commit: &str,
+    head_commit: &str,
+    source_anchor: &str,
+) -> GitHubStackLayerSnapshotV1 {
+    let result = GitHubReviewIngressResultV1 {
+        provider: id("provider.github"),
+        scope: FeedbackScopeV1 {
+            project_id: id("project.fixture"),
+            repository_id: id(repository),
+            worktree_id: id("worktree.fixture"),
+            branch_ref: head_ref.to_owned(),
+            head_commit_id: id(head_commit),
+        },
+        pull_request_id: GitHubPullRequestIdV1::new(pull_request).unwrap(),
+        provider_base_commit_id: id(base_commit),
+        provider_head_commit_id: id(head_commit),
+        merge_base_commit_id: id(base_commit),
+        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+        outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
+        coverage: GitHubReviewCoverageV1::Complete,
+        items: vec![],
+        fetched_at: UtcMicros(1),
+    };
+    GitHubStackLayerSnapshotV1 {
+        provider_position,
+        pull_request: PullRequestSnapshotAnchorRefV1::from_ingress(&result, id(source_anchor))
+            .expect("pull request anchor is canonical"),
+        base_ref_id: id(base_ref),
+        head_ref_id: id(head_ref),
+        protection_digest: digest('a'),
+        ci_digest: digest('b'),
+        merge_queue_digest: digest('c'),
+    }
+}
+
+/// `main -> lower -> upper`: the strictly linear two-layer stack that an
+/// enabled provider capability is allowed to publish.
+fn linear_github_stack_layers() -> Vec<GitHubStackLayerSnapshotV1> {
+    vec![
+        github_stack_layer(
+            0,
+            "repository.fixture",
+            "pr.41",
+            "refs/heads/main",
+            "refs/heads/lower",
+            "commit.main",
+            "commit.lower",
+            "anchor.pr.41",
+        ),
+        github_stack_layer(
+            1,
+            "repository.fixture",
+            "pr.42",
+            "refs/heads/lower",
+            "refs/heads/upper",
+            "commit.lower",
+            "commit.upper",
+            "anchor.pr.42",
+        ),
+    ]
+}
+
+fn github_stack_snapshot(
+    capability: GitHubStackCapabilitySnapshotV1,
+    layers: Vec<GitHubStackLayerSnapshotV1>,
+) -> Result<GitHubStackSnapshotV1, tracedecay_domain::DomainError> {
+    GitHubStackSnapshotV1::new(
+        capability,
+        id::<PrivacyDomainBoundLocatorDigest>(digest('d').as_str()),
+        id("projection.github-stack.1"),
+        id("refs/heads/main"),
+        id("commit.main"),
+        layers,
+        id("anchor.github-stack.1"),
+    )
+}
+
+#[test]
+fn github_stack_targets_bind_exact_capability_generation_and_linear_snapshot_content() {
+    let capability = github_stack_capability(GitHubStackCapabilityStateV1::Enabled);
+    assert_eq!(
+        capability.generation(),
+        GitTopologyGenerationRefV1::GitHubStackCapability {
+            generation_id: id("projection.github-stack-capability.1"),
+            source_anchor_id: id("anchor.github-stack-capability.1"),
+            content_digest: capability.content_digest.clone(),
+        }
+    );
+
+    let snapshot = github_stack_snapshot(capability, linear_github_stack_layers()).unwrap();
+    let target = GitTopologyAnchorTargetV1::GitHubStackSnapshot(snapshot.clone());
+    let encoded = serde_json::to_value(&target).unwrap();
+    assert_eq!(encoded["kind"], "github_stack_snapshot");
+    assert_eq!(
+        serde_json::from_value::<GitTopologyAnchorTargetV1>(encoded).unwrap(),
+        target
+    );
+    assert_eq!(
+        target.generation(),
+        GitTopologyGenerationRefV1::GitHubStackSnapshot {
+            generation_id: id("projection.github-stack.1"),
+            source_anchor_id: id("anchor.github-stack.1"),
+            content_digest: snapshot.content_digest.clone(),
+            final_target_commit_id: id("commit.main"),
+        }
+    );
+    assert_eq!(
+        target
+            .ordered_sources()
+            .iter()
+            .map(|source| source.role)
+            .collect::<Vec<_>>(),
+        vec![
+            GitTopologySourceRoleV1::GitHubStackCapability,
+            GitTopologySourceRoleV1::GitHubStackSnapshot,
+            GitTopologySourceRoleV1::PullRequestObservation,
+            GitTopologySourceRoleV1::PullRequestObservation,
+        ],
+        "every stack layer keeps its own ordered pull-request observation"
+    );
+
+    let owner = ObservationScopeV1::Project {
+        project_id: id("project.fixture"),
+    };
+    let anchored = derive_git_topology_anchor_id(&owner, &target).unwrap();
+    let mut changed = snapshot.clone();
+    changed.generation_id = id("projection.github-stack.2");
+    changed.content_digest = canonical_sha256(&(
+        "tracedecay.github-stack.snapshot.v1",
+        &changed.capability,
+        &changed.provider_stack_id_digest,
+        &changed.generation_id,
+        &changed.final_target_ref_id,
+        &changed.final_target_commit_id,
+        &changed.layers,
+        &changed.source_anchor_id,
+    ))
+    .unwrap();
+    changed.validate().unwrap();
+    assert_ne!(
+        anchored,
+        derive_git_topology_anchor_id(
+            &owner,
+            &GitTopologyAnchorTargetV1::GitHubStackSnapshot(changed),
+        )
+        .unwrap(),
+        "a later provider observation is a new target, never a retarget"
+    );
+
+    let capability_target = GitTopologyAnchorTargetV1::GitHubStackCapability(
+        github_stack_capability(GitHubStackCapabilityStateV1::Enabled),
+    );
+    let snapshot_record = record(target);
+    let capability_record = record(capability_target);
+    assert!(
+        snapshot_record
+            .anchor_id()
+            .as_str()
+            .starts_with("retrieval.v3.")
+    );
+    assert_ne!(
+        snapshot_record.anchor_id(),
+        capability_record.anchor_id(),
+        "the capability observation and the stack snapshot are separate targets"
+    );
+
+    // What the store persists is this canonical record encoding, so it is the
+    // exact place to prove the anchor stayed payload-free.
+    let persisted = serde_json::to_string(&snapshot_record).unwrap();
+    for payload in [
+        "bodyText",
+        "body_digest",
+        "annotation",
+        "patch",
+        "diff_hunk",
+        "cursor",
+        "task_id",
+    ] {
+        assert!(
+            !persisted.contains(payload),
+            "a GitHub stack anchor never copies {payload} into the retained record"
+        );
+    }
+
+    let mut tampered = snapshot;
+    tampered.layers[1].pull_request.head_commit_id = id("commit.tampered");
+    assert!(tampered.validate().is_err());
+}
+
+#[test]
+fn github_stack_snapshot_rejects_non_enabled_capability_and_broken_topology() {
+    for state in [
+        GitHubStackCapabilityStateV1::Unavailable,
+        GitHubStackCapabilityStateV1::PrivatePreviewDisabled,
+        GitHubStackCapabilityStateV1::Degraded,
+    ] {
+        assert!(
+            github_stack_snapshot(github_stack_capability(state), linear_github_stack_layers())
+                .is_err(),
+            "only an enabled capability may publish a stack snapshot: {state:?}"
+        );
+    }
+
+    let enabled = || github_stack_capability(GitHubStackCapabilityStateV1::Enabled);
+    assert!(
+        github_stack_snapshot(enabled(), Vec::new()).is_err(),
+        "an enabled capability still needs at least one observed layer"
+    );
+
+    let mut detached_base = linear_github_stack_layers();
+    detached_base[1] = github_stack_layer(
+        1,
+        "repository.fixture",
+        "pr.42",
+        "refs/heads/other",
+        "refs/heads/upper",
+        "commit.other",
+        "commit.upper",
+        "anchor.pr.42",
+    );
+    assert!(
+        github_stack_snapshot(enabled(), detached_base).is_err(),
+        "a layer whose base leaves the stack breaks strict linearity"
+    );
+
+    let mut swapped_positions = linear_github_stack_layers();
+    swapped_positions[0].provider_position = 1;
+    swapped_positions[1].provider_position = 0;
+    assert!(
+        github_stack_snapshot(enabled(), swapped_positions).is_err(),
+        "provider position must equal the observed stack ordinal"
+    );
+
+    let mut foreign_repository = linear_github_stack_layers();
+    foreign_repository[1] = github_stack_layer(
+        1,
+        "repository.other",
+        "pr.42",
+        "refs/heads/lower",
+        "refs/heads/upper",
+        "commit.lower",
+        "commit.upper",
+        "anchor.pr.42",
+    );
+    assert!(
+        github_stack_snapshot(enabled(), foreign_repository).is_err(),
+        "an enabled stack stays inside one repository"
+    );
+
+    let mut foreign_final_target = linear_github_stack_layers();
+    foreign_final_target[0].base_ref_id = id("refs/heads/release");
+    assert!(
+        github_stack_snapshot(enabled(), foreign_final_target).is_err(),
+        "the lowest layer must sit on the declared final target"
     );
 }

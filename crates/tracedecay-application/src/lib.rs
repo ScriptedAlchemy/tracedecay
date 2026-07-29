@@ -18,12 +18,15 @@ pub mod feedback;
 pub mod framed_log;
 pub mod git;
 pub mod handlers;
+pub mod invocation;
 pub mod lsp_context_catalog;
+pub mod memory;
 pub mod observability;
 pub mod policy;
 pub mod result;
 pub mod retained_surfaces;
 pub mod retrieval;
+pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
 
@@ -37,6 +40,7 @@ pub use authorization::{
     SourceAuthorizationSnapshot,
 };
 pub use configuration::{
+    ConfigurationGetRequestV1, ConfigurationSetRequestV1,
     configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
     configuration_surface_operation,
 };
@@ -85,8 +89,10 @@ pub use external_source::{
     SourceSanitizationAuthorityV1,
 };
 pub use feedback::{
-    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
-    feedback_surface_operation,
+    FeedbackExpandRequestV1, FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1,
+    FeedbackHandleRequestV1, FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort,
+    FeedbackReadService, feedback_surface_catalog_contribution,
+    feedback_surface_handler_descriptors, feedback_surface_operation,
 };
 pub use framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, file_len, io_error, read_bounded,
@@ -94,18 +100,32 @@ pub use framed_log::{
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
 pub use git::{
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
+    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
-    GitIndexTransactionPortError, GitIndexTransactionService, git_index_catalog_contribution,
-    git_index_effect_class, git_index_handler_descriptors, git_surface_catalog_contribution,
-    git_surface_handler_descriptors,
+    GitIndexTransactionPortError, GitIndexTransactionService, GitIntelligenceError, GitReadPort,
+    git_index_catalog_contribution, git_index_effect_class, git_index_handler_descriptors,
+    git_surface_catalog_contribution, git_surface_handler_descriptors,
+    is_canonical_repository_relative_path,
 };
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
 };
+pub use invocation::{
+    ApplicationInvocation, ApplicationInvocationBinding, ApplicationInvocationContext,
+    ApplicationInvocationExecutor, ApplicationInvocationFuture, ApplicationRequest,
+    ApplicationResponse, ApplicationStream, ApplicationStreamResponse, InvocationCancellation,
+    InvocationError, InvocationTarget,
+};
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
+pub use memory::{
+    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1,
+    DerivedMemoryFeedbackHistoryRepairV1, DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1,
+    converge_derived_memory,
+};
 pub use observability::*;
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
@@ -157,6 +177,12 @@ pub use retrieval::{
     TestRetrievalPort, callable_code_catalog_contribution, callable_code_handler_descriptors,
     callable_code_operation, callable_code_operations, callable_code_request_schema,
     callable_code_result_schema,
+};
+pub use settings_preview::{
+    MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
+    UserSettingsPatchInputV1, UserSettingsPreviewErrorV1, UserSettingsPreviewV1,
+    UserSettingsValuesV1, parse_duration_label, prepare_user_settings_preview,
+    validate_project_settings_patch, validate_user_settings_values,
 };
 pub use source_edit::{
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,

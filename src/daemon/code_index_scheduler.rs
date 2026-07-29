@@ -748,12 +748,16 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// Tier-2 bounded-staleness clock: when truth was last reconciled.
     last_reconciled_at: Instant,
     /// Wall-clock companion to `last_reconciled_at` for read-model projection.
-    last_reconciled_at_micros: i64,
+    /// `None` until the first verified reconcile after open/restore.
+    last_reconciled_at_micros: Option<i64>,
     /// Tier-2 cheap prefilter: stat-level (path, mtime, size) signature of the
     /// present source candidates at last reconcile. A quiet repository whose
     /// signature is unchanged resets the staleness clock without paying the
     /// O(repo) read+hash capture.
     last_stat_signature: Option<String>,
+    /// Whether `git_metadata` / staleness clocks were established by a completed
+    /// reconcile against gix truth. Open/restore alone must not claim freshness.
+    verified_against_source: bool,
     /// A restored generation has not yet been reconciled against the current
     /// worktree bytes. It may remain available for rollback/history, but
     /// request admission must fail closed and schedule background truth.
@@ -849,6 +853,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
+        // Restoring a sealed generation authorizes serve-prior-generation, not a
+        // freshness claim. Cadence must verify against gix before tier-1/tier-2
+        // clocks may suppress reconciliation.
         let scheduler = Self {
             project_root,
             identity,
@@ -857,8 +864,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             policy,
             git_metadata,
             last_reconciled_at: Instant::now(),
-            last_reconciled_at_micros: now_micros().0,
+            last_reconciled_at_micros: None,
             last_stat_signature: None,
+            verified_against_source: false,
             freshness_unknown,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
@@ -1080,7 +1088,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.last_stat_signature = signature;
         self.freshness_unknown = false;
         self.last_reconciled_at = Instant::now();
-        self.last_reconciled_at_micros = now_micros().0;
+        self.last_reconciled_at_micros = Some(now_micros().0);
+        self.verified_against_source = true;
     }
 
     /// Admit only already-current immutable evidence. Expensive truth capture
@@ -1168,24 +1177,33 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     /// Freshness ladder run at query admission so external changes are caught
-    /// without a filesystem watcher. Returns `true` when a reconciliation ran.
+    /// without a filesystem watcher. Returns `Some(outcome)` when a
+    /// reconciliation ran, or `None` when the verified clocks suppress work.
     ///
+    /// - Unverified restore/open: always reconcile once before any suppression.
     /// - Tier 1 (git-mediated): `.git` metadata mtimes changed since the last
     ///   reconcile (commit/checkout/rebase/pull from any process) → reconcile.
     /// - Tier 2 (non-git mutations): the bounded-staleness threshold elapsed
     ///   (raw file writes, rsync, out-of-agent saves) → reconcile.
     /// - Tier 3 (identity backstop): reconciliation re-resolves identity, so a
     ///   served result is always attributed to its exact resolved identity.
-    pub fn ensure_fresh_for_query(&mut self) -> Result<bool, CodeIndexSchedulerErrorV1> {
+    pub fn ensure_fresh_for_query(
+        &mut self,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        if !self.verified_against_source {
+            // Open/restore sampled git metadata without verifying the sealed
+            // generation against gix truth. Serving that generation is allowed;
+            // suppressing cadence on open-time clocks is not.
+            return Ok(Some(self.reconcile_now()?));
+        }
         let git_changed = identity::GitMetadataFingerprintV1::capture(&self.project_root)
             .differs_from(&self.git_metadata);
         if git_changed {
             // Tier 1: a git-mediated mutation is authoritative evidence; reconcile.
-            self.reconcile_now()?;
-            return Ok(true);
+            return Ok(Some(self.reconcile_now()?));
         }
         if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
-            return Ok(false);
+            return Ok(None);
         }
         // Tier 2: the bounded-staleness window elapsed. Gate the O(repo)
         // read+hash capture behind a cheap stat-level signature so a quiet
@@ -1193,13 +1211,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         match self.worktree_stat_signature() {
             Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
                 self.last_reconciled_at = Instant::now();
-                self.last_reconciled_at_micros = now_micros().0;
-                Ok(false)
+                self.last_reconciled_at_micros = Some(now_micros().0);
+                Ok(None)
             }
-            _ => {
-                self.reconcile_now()?;
-                Ok(true)
-            }
+            _ => Ok(Some(self.reconcile_now()?)),
         }
     }
 
@@ -1208,8 +1223,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self.identity
     }
 
-    pub(super) const fn last_reconciled_at_micros(&self) -> i64 {
+    pub(super) const fn last_reconciled_at_micros(&self) -> Option<i64> {
         self.last_reconciled_at_micros
+    }
+
+    pub(super) const fn verified_against_source(&self) -> bool {
+        self.verified_against_source
     }
 
     pub(super) fn pending_hint_count(&self) -> Option<u64> {
@@ -1479,6 +1498,7 @@ mod overlay_ephemerality_tests;
 #[cfg(test)]
 mod tests;
 
+mod cadence;
 mod classification;
 pub(crate) mod identity;
 pub(in crate::daemon) mod pr9_runtime;
@@ -1489,6 +1509,10 @@ pub(crate) mod semantic_query_runtime;
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
 // stay stable for the daemon and MCP server that mount and query worktrees.
+pub(crate) use cadence::{
+    CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
+    CodeIndexEventToReadyReceiptV1,
+};
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;

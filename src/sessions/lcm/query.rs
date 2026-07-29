@@ -68,11 +68,9 @@ const RAW_ROLE_PENALTY_CASE: &str =
 /// there would silently drop legitimate same-session recall.
 const PER_SESSION_HIT_CAP: usize = 3;
 
-/// Fetch budget before the re-rank stage: over-fetch by the shared
-/// [`RERANK_OVERFETCH_FACTOR`](crate::sessions::message_noise::RERANK_OVERFETCH_FACTOR),
-/// bounded by [`MAX_PAGE_LIMIT`].
+/// Fetch budget before the re-rank stage, bounded by [`MAX_PAGE_LIMIT`].
 fn rerank_fetch_limit(limit: usize) -> usize {
-    crate::sessions::message_noise::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
+    crate::application::session::compatibility::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
 pub(crate) async fn expand_query(

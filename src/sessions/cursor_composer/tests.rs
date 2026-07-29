@@ -3,12 +3,12 @@ use super::capture::*;
 use super::ingest::snapshot_generation;
 #[cfg(unix)]
 use super::ingest::{directory_entry_is_real_dir, path_is_regular_file_no_follow};
-use super::observation::normalize_cursor_composer_envelope_observation;
 use super::sqlite::*;
 use super::store::*;
 use super::*;
 
 use serde_json::{Value, json};
+use tracedecay_capture::cursor_composer::normalize_cursor_composer_envelope_observation;
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 

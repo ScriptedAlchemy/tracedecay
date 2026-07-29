@@ -1866,12 +1866,17 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 }
 
 mod backfill;
+mod store;
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry,
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
     WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
 };
+pub use store::AnalyticsSessionTimestamp;
 pub(crate) use backfill::{run_backfill, run_incremental_backfill};
+pub(crate) use store::{
+    AnalyticsSessionTimestampSource, GitCorrelationStore, GitCorrelationWriteTxn,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

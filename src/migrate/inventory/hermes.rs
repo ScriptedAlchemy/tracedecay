@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::artifacts::file_size;
-use super::model::{
+use tracedecay_migrate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath, StoreArtifact,
     StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };

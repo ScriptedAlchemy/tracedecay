@@ -34,8 +34,9 @@ use crate::tracedecay::TraceDecay;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    SessionRefreshServicePort, SessionRetrievalServicePort, ToolCallRegistryOptions,
-    ToolRegistryMode, default_catalog_discovery_authority, explore_call_budget,
+    ProjectRegistryReadPort, SessionRefreshServicePort, SessionRetrievalServicePort,
+    ToolCallRegistryOptions, ToolRegistryMode, WorkflowIndexReadPort,
+    default_catalog_discovery_authority, explore_call_budget,
     get_catalog_filtered_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
 };
@@ -47,6 +48,7 @@ mod hook_dispatch;
 mod hook_writes;
 mod ledger;
 mod lifecycle;
+mod project_registry;
 mod protocol;
 mod read_coalescing;
 mod requests;
@@ -55,6 +57,10 @@ mod session_refresh;
 mod session_retrieval;
 mod staleness;
 mod tool_errors;
+mod workflow_index;
+
+pub(crate) use project_registry::DaemonProjectRegistryReadService;
+pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
@@ -399,6 +405,9 @@ pub struct McpServer {
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
     registry_db: Option<Arc<RegisteredGlobalDb>>,
+    /// Registry-read service handed to MCP handlers so they read registered
+    /// projects through a port instead of holding [`Self::registry_db`].
+    project_registry_reads: Option<Arc<dyn ProjectRegistryReadPort>>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
@@ -997,6 +1006,10 @@ impl McpServer {
                     None,
                 )) as Arc<dyn SessionRefreshServicePort>
             });
+        let project_registry_reads = registry_db.as_ref().map(|registry| {
+            Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
+                as Arc<dyn ProjectRegistryReadPort>
+        });
         let project_session_retrieval_calls = Arc::new(AtomicU64::new(0));
         let user_session_retrieval_calls = Arc::new(AtomicU64::new(0));
         let project_session_retrieval_service = session_db
@@ -1061,6 +1074,7 @@ impl McpServer {
             transcript_source_home,
             session_db,
             registry_db,
+            project_registry_reads,
             user_session_db,
             registered_session_db,
             registered_user_session_db,
@@ -1476,6 +1490,9 @@ mod hook_branch_writer_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod host_admission_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod query_scope_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests;

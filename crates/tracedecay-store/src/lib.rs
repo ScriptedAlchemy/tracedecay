@@ -4,11 +4,18 @@
 //! Connection ownership, transaction boundaries, recovery policy, and storage
 //! resolution remain with the application crate's authoritative store adapter.
 
+mod canonical_projection;
 pub mod configuration;
+pub mod cursor_dispatch;
 pub mod diagnostics;
 pub mod evidence_assembly;
 pub mod external_source;
+// The crash harness has to hold a live daemon inside a persistence boundary, so
+// it needs the filesystem and thread authority that these contracts refuse.
+// Keeping it outside `src/` is what makes that split structural rather than a
+// guard exception, while the cfg keeps it out of every ordinary build.
 #[cfg(tracedecay_observation_fault_harness)]
+#[path = "../test-support/fault_harness.rs"]
 pub mod fault_harness;
 pub mod git_index_transactions;
 pub mod memory;
@@ -19,6 +26,9 @@ pub mod runtime;
 pub mod session;
 pub mod transcript;
 
+pub use canonical_projection::{
+    canonical_fact_text, derive_canonical_projection, workflow_semantic_kind,
+};
 pub use configuration::{
     ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationRevisionRecordV1,
     ConfigurationRevisionStore, ConfigurationStoreError, ConfigurationStoreResult,
@@ -113,8 +123,9 @@ pub use memory::{
     authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
 };
 pub use observation::{
-    AnchoredObservationWrite, CursorAdvanceOutcome, ObservationCommitReceipt,
-    ObservationCoverageReason, ObservationCoverageV1, ObservationCursorAdvance,
+    AnchoredObservationWrite, CursorAdvanceOutcome, ObservationAdmissionPort,
+    ObservationCaptureSink, ObservationCommitReceipt, ObservationCoverageReason,
+    ObservationCoverageV1, ObservationCursorAdvance, ObservationCursorPort,
     ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationStoreResult, ObservationWrite,
     ObservedEvidenceAnchorResolution, RepositoryProvenanceAttachmentV1, StoredObservation,

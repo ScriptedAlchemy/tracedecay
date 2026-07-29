@@ -18,32 +18,24 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot};
 use tokio::task::AbortHandle;
 
+use tracedecay_lsp::{
+    AdmittedRoot, AnalyzerCancellationPort, CallHierarchyItem, ContextExpansionOutcome,
+    ContextExpansionRequest, ContextProjectionChange, ContextProjectionKind,
+    ContextProjectionOutcome, ContextProjectionPort, ContextProjectionRegistration,
+    ContextProjectionRequest, DiagnosticRefreshAdmission, DiagnosticRefreshIdentity,
+    DiagnosticSeverity, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, DiagnosticSource,
+    DocumentSymbol, FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse,
+    GatewayDiagnostic, GenerationDiagnostics, Hover, IncomingCall, LspLocation, LspPosition,
+    LspRange, LspRequestId, MAX_PENDING_REQUESTS, OutgoingCall, OverlaySnapshot,
+    ProcessLocalRequestSequence, RenameCandidateResult, RenameCandidateUnavailableReason,
+    SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
+    SignatureHelp, TRACEDECAY_CONTEXT_REVISION, TypeHierarchyItem, WorkspaceSymbol,
+};
+
 use crate::diagnostics::lsp::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
 };
 use crate::diagnostics::lsp::client::{LspDocument, LspSemanticRequest};
-use crate::request_identity::ProcessLocalRequestSequence;
-
-use super::context::{
-    ContextExpansionOutcome, ContextExpansionRequest, ContextProjectionChange,
-    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
-    ContextProjectionRegistration, ContextProjectionRequest, TRACEDECAY_CONTEXT_REVISION,
-};
-use super::diagnostics::{
-    DiagnosticSeverity, DiagnosticSource, GatewayDiagnostic, LspPosition, LspRange,
-};
-use super::gateway::{
-    AdmittedRoot, CallHierarchyItem, DocumentSymbol, FeedbackCyclePort, FeedbackCycleRequest,
-    FeedbackCycleResponse, Hover, IncomingCall, LspLocation, OutgoingCall, RenameCandidateResult,
-    RenameCandidateUnavailableReason, SemanticProviderOutcome, SemanticProviderPort,
-    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
-};
-use super::overlay::OverlaySnapshot;
-use super::provider::{
-    AnalyzerCancellationPort, DiagnosticRefreshAdmission, DiagnosticRefreshIdentity,
-    DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, GenerationDiagnostics,
-};
-use super::session::{LspRequestId, MAX_PENDING_REQUESTS};
 
 /// A Send future returned by an application-owned PR12 runtime authority.
 pub type LspRuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -1621,19 +1613,19 @@ impl Drop for Pr12ContextProjectionAdapter {
 mod tests {
     use super::*;
 
-    use super::super::context::{
-        ContextCoverage, ContextExpansionEnvelope, ContextExpansionScope, ContextFreshness,
-        ContextProducerState, ContextProjectionEnvelope, ContextProjectionIdentity,
-        ContextProjectionKind, ContextProjectionRegistration,
-    };
-    use super::super::gateway::GatewayResponse;
-    use super::super::rpc::{response_value, semantic_response_value};
     use serde_json::json;
     use std::collections::BTreeSet;
     use std::sync::atomic::AtomicBool;
-
+    use tracedecay_lsp::{
+        ContextCoverage, ContextExpansionEnvelope, ContextExpansionScope, ContextFreshness,
+        ContextProducerState, ContextProjectionEnvelope, ContextProjectionIdentity,
+    };
+    /// `tracedecay-lsp` serializes whatever detail this adapter supplies
+    /// verbatim, so this allowlist is the only thing keeping analyzer, graph,
+    /// and caller text off the wire. Every template must stay a fixed
+    /// operator-readable sentence with no identity, path, or transport text.
     #[test]
-    fn serialized_semantic_failures_use_only_static_optional_detail() {
+    fn semantic_failure_detail_templates_are_static_and_leak_nothing() {
         let templates = [
             LspSemanticOperationOutcome::ANALYZER_START_FAILED_DETAIL,
             LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL,
@@ -1643,21 +1635,14 @@ mod tests {
             LspSemanticOperationOutcome::ANALYZER_INVALID_RESPONSE_DETAIL,
             LspSemanticOperationOutcome::GRAPH_READ_FAILED_DETAIL,
         ];
+        assert_eq!(
+            templates.iter().collect::<BTreeSet<_>>().len(),
+            templates.len(),
+            "each failure class needs its own distinguishable template"
+        );
         for detail in templates {
-            let failure = response_value(
-                GatewayResponse::Partial {
-                    value: SemanticResponse::Hover(None),
-                    coverage: "fixed-coverage".to_owned(),
-                    detail: Some(detail.to_owned()),
-                },
-                semantic_response_value,
-            )
-            .expect_err("partial semantic response");
-            assert_eq!(failure.code, -32802);
-            assert_eq!(failure.data["retriggerRequest"], true);
-            assert_eq!(failure.data["detail"], detail);
-
-            let serialized = serde_json::to_string(&failure.data).expect("serialized error data");
+            let serialized =
+                serde_json::to_string(&json!({ "detail": detail })).expect("serialized error data");
             for forbidden in [
                 "bearer-secret",
                 "YWxpY2U6c2VjcmV0",
@@ -1672,23 +1657,17 @@ mod tests {
             ] {
                 assert!(
                     !serialized.contains(forbidden),
-                    "serialized caller detail leaked {forbidden}"
+                    "failure detail template leaked {forbidden}"
                 );
             }
+            assert!(
+                !detail.is_empty()
+                    && detail.len() <= 96
+                    && detail.is_ascii()
+                    && !detail.chars().any(char::is_control),
+                "failure detail template must stay a short static sentence: {detail}"
+            );
         }
-
-        let failure = response_value(
-            GatewayResponse::Partial {
-                value: SemanticResponse::Hover(None),
-                coverage: "fixed-coverage".to_owned(),
-                detail: None,
-            },
-            semantic_response_value,
-        )
-        .expect_err("partial semantic response");
-        assert_eq!(failure.code, -32802);
-        assert_eq!(failure.data["retriggerRequest"], true);
-        assert!(failure.data.get("detail").is_none());
     }
 
     struct Diagnostics;
@@ -1886,11 +1865,10 @@ mod tests {
         let adapter = Pr12ContextProjectionAdapter::new(Handle::current(), Arc::new(Context));
         let root = root();
         let request_id = LspRequestId::Number(4);
-        let request = ContextProjectionRequest {
-            kind: ContextProjectionKind::diagnostics(),
-            document_uri: Some("file:///root/a.rs".to_owned()),
-            document_content_digest: None,
-        };
+        let request = ContextProjectionRequest::new(
+            ContextProjectionKind::diagnostics(),
+            Some("file:///root/a.rs".to_owned()),
+        );
         assert_eq!(
             adapter.snapshot(&root, &request_id, &request),
             ContextProjectionOutcome::Pending

@@ -7,29 +7,35 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::{
     ActorId, ObservationScopeV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
-    TemporalModeV1, WorktreeId,
+    TemporalModeV1, UtcMicros, WorktreeId,
 };
 use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
 };
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
@@ -37,8 +43,9 @@ use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshOutcome, SessionRefreshSchedulerError,
     SessionRefreshSchedulerPort, SessionRefreshService, SessionRefreshTarget,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalQuery,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::RegisteredGlobalDb;
@@ -187,12 +194,14 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         SessionAuthorizationGrant::issue(
             AuthorizationGrantId::new("grant.pr8.benchmark").unwrap(),
             1,
             context,
+            binding,
             request,
         )
     }
@@ -223,6 +232,7 @@ struct PreparedRepetition {
     registered: Arc<RegisteredGlobalDb>,
     session: SessionId,
     context: RequestContext,
+    binding: SessionRequestBinding,
     complete_request: SessionRefreshCompletionRequestV1,
     rebuild_activate_ns: u64,
     durable_progress: SessionRefreshProgressV1,
@@ -691,7 +701,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         NoopWake,
         SessionRefreshConfiguration::new(PROJECTOR_VERSION, CONFIG_VERSION).unwrap(),
     );
-    let context = request_context(&format!("request.pr8.{repetition}"), &project_id);
+    let (context, binding) = request_context(&format!("request.pr8.{repetition}"), &project_id);
     let target = SessionRefreshTarget::new(
         SessionId::new(&session_id).unwrap(),
         Some("codex".to_owned()),
@@ -702,7 +712,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     .unwrap();
 
     let started = Instant::now();
-    let handle = match refresh.begin_or_join(&context, target).await {
+    let handle = match refresh.begin_or_join(&context, &binding, target).await {
         SessionRefreshOutcome::Started(handle) | SessionRefreshOutcome::Joined(handle) => handle,
         other => return Err(format!("unexpected refresh outcome: {other:?}")),
     };
@@ -759,6 +769,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         registered,
         session,
         context,
+        binding,
         complete_request,
         rebuild_activate_ns,
         durable_progress: progress,
@@ -814,6 +825,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
         retrieval
             .retrieve(
                 &prepared.context,
+                &prepared.binding,
                 query(RetrievalGrainV1::LogicalMessage, "pipeline"),
             )
             .await,
@@ -826,6 +838,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
         retrieval
             .retrieve(
                 &prepared.context,
+                &prepared.binding,
                 query(RetrievalGrainV1::Occurrence, "pipeline"),
             )
             .await,
@@ -923,28 +936,63 @@ fn require_retrieval_success<T: std::fmt::Debug>(
     }
 }
 
-fn request_context(request: &str, project_id: &ProjectId) -> RequestContext {
-    RequestContext::new(
-        ActorId::new("actor.pr8.benchmark").unwrap(),
-        RequestId::new(request).unwrap(),
-        ResolvedSessionIdentity::for_project(
-            ProfileId::new("profile.pr8.benchmark").unwrap(),
-            project_id.clone(),
-            SessionStoreId::new(format!("store.{}", project_id.as_str())).unwrap(),
-            SessionRootId::new("root.pr8.benchmark").unwrap(),
-            ResolvedGitRoute::new(
-                RepositoryId::new("repository.pr8.benchmark").unwrap(),
-                WorktreeId::new("worktree.pr8.benchmark").unwrap(),
-                BranchId::new("branch.pr8.benchmark").unwrap(),
-            ),
+fn request_context(
+    request: &str,
+    project_id: &ProjectId,
+) -> (RequestContext, SessionRequestBinding) {
+    let actor = ActorId::new("actor.pr8.benchmark").unwrap();
+    let request_id = RequestId::new(request).unwrap();
+    let identity = ResolvedSessionIdentity::for_project(
+        ProfileId::new("profile.pr8.benchmark").unwrap(),
+        project_id.clone(),
+        SessionStoreId::new(format!("store.{}", project_id.as_str())).unwrap(),
+        SessionRootId::new("root.pr8.benchmark").unwrap(),
+        ResolvedGitRoute::new(
+            RepositoryId::new("repository.pr8.benchmark").unwrap(),
+            WorktreeId::new("worktree.pr8.benchmark").unwrap(),
+            BranchId::new("branch.pr8.benchmark").unwrap(),
         ),
-        CapabilityDigest::new(DIGEST),
-        PolicyDigest::new(DIGEST),
-        ConfigurationDigest::new(DIGEST),
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
-        CancellationToken::new(),
-        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+    );
+    let scope = identity.application_scope().unwrap();
+    let capability = CapabilityDigest::new(DIGEST);
+    let policy = PolicyDigest::new(DIGEST);
+    let configuration = ConfigurationDigest::new(DIGEST);
+    let cancellation = CancellationToken::for_application_request(&request_id);
+    let budgets = RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap();
+    let observed_at = application_observed_at();
+    let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.pr8.benchmark.application").unwrap(),
+        1,
+        session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
+            .unwrap(),
+        actor.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.pr8.session-benchmark").unwrap()]),
+        DisclosureClass::Evidence,
     )
+    .unwrap();
+    let context = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        request_id.clone(),
+        Deadline::new(expires_at).unwrap(),
+        CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let binding = SessionRequestBinding::new(
+        identity,
+        capability,
+        policy,
+        configuration,
+        cancellation,
+        budgets,
+    );
+    (context, binding)
 }
 
 fn current_state_identity(root: &Path, workload_manifest_sha256: &str) -> BenchResult<Value> {

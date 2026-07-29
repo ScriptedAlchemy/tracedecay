@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
+use crate::application::session::compatibility::projected_content_hash;
 use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::message_storage_text;
@@ -351,6 +352,7 @@ pub(crate) async fn preflight(
 
 pub(crate) async fn compress(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
     request: LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
@@ -419,11 +421,12 @@ pub(crate) async fn compress(
         return Ok(response);
     }
 
-    compress_in_transaction(conn, request, &summarizer).await
+    compress_in_transaction(conn, publisher, request, &summarizer).await
 }
 
 async fn compress_in_transaction(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
 ) -> Result<LcmCompressionResponse, LcmError> {
@@ -432,7 +435,7 @@ async fn compress_in_transaction(
         return Ok(response);
     }
     if let Some(response) =
-        no_backlog_compression_response(conn, &request, summarizer, &context).await?
+        no_backlog_compression_response(conn, publisher, &request, summarizer, &context).await?
     {
         return Ok(response);
     }
@@ -443,7 +446,7 @@ async fn compress_in_transaction(
         return Ok(response);
     }
 
-    persist_and_replay_backlog_compression(conn, request, summarizer, context).await
+    persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context).await
 }
 
 async fn prepare_compression_context(
@@ -517,6 +520,7 @@ fn frontier_changed_response(
 
 async fn no_backlog_compression_response(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: &CompressionTransactionContext,
@@ -531,6 +535,7 @@ async fn no_backlog_compression_response(
     }
     if let Some(response) = condense_summary_nodes_if_ready(
         conn,
+        publisher,
         request,
         summarizer,
         &context.conversation_id,
@@ -681,6 +686,7 @@ fn auxiliary_summary_response(
 
 async fn persist_and_replay_backlog_compression(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: CompressionTransactionContext,
@@ -692,6 +698,7 @@ async fn persist_and_replay_backlog_compression(
     };
     let write_result = persist_compression_transaction_writes(
         conn,
+        publisher,
         CompressionTransactionWriteRequest {
             request: &request,
             conversation_id: &context.conversation_id,
@@ -783,6 +790,7 @@ async fn persist_and_replay_backlog_compression(
 
 async fn persist_compression_transaction_writes(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     write: CompressionTransactionWriteRequest<'_>,
 ) -> Result<CompressionTransactionWriteResult, LcmError> {
     let pass_limit = if write.forced_overflow_recovery {
@@ -816,8 +824,8 @@ async fn persist_compression_transaction_writes(
         );
         fallback_used |= pass_fallback_used;
 
-        let summary = dag::insert_summary_node_in_transaction(
-            conn,
+        let summary = dag::insert_summary_node(
+            publisher,
             summary_draft(
                 &write.request.provider,
                 write.conversation_id,
@@ -1563,6 +1571,7 @@ fn condensation_draft(
 
 async fn condense_summary_nodes_if_ready(
     conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     conversation_id: &str,
@@ -1611,8 +1620,8 @@ async fn condense_summary_nodes_if_ready(
         .collect::<Vec<_>>();
     let (summary_text, fallback_used) =
         rescuing_summary_text_from_texts(summary_text, &source_texts, source_tokens);
-    let summary = dag::insert_summary_node_in_transaction(
-        conn,
+    let summary = dag::insert_summary_node(
+        publisher,
         condensation_draft(
             &request.provider,
             conversation_id,
@@ -1825,7 +1834,7 @@ async fn ingest_active_messages(
         replay["role"] = Value::String(role.clone());
         replay["content"] = original_content.clone();
         let initial_metadata_json = active_message_metadata(message, &replay);
-        let expected_content_hash = raw::sha256_hex(&storage_text);
+        let expected_content_hash = projected_content_hash(&storage_text);
         if let Some(existing) = existing_state.as_ref() {
             let matches_stored_row = existing.ordinal == ordinal
                 && existing.content_hash == expected_content_hash
@@ -2135,7 +2144,7 @@ fn deterministic_message_id(
 ) -> String {
     format!(
         "active_{}",
-        raw::sha256_hex(&format!(
+        projected_content_hash(&format!(
             "{provider}\0{session_id}\0{idx}\0{role}\0{content}"
         ))
     )

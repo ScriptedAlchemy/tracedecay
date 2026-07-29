@@ -36,6 +36,18 @@ impl HostComponentRegistrationDelegate {
         lifecycle_root: &Path,
         operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     ) -> crate::errors::Result<Self> {
+        let tracedecay_bin =
+            crate::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        Self::new_with_tracedecay_bin(agent_id, home, lifecycle_root, operation, tracedecay_bin)
+    }
+
+    pub fn new_with_tracedecay_bin(
+        agent_id: &str,
+        home: &Path,
+        lifecycle_root: &Path,
+        operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
+        tracedecay_bin: String,
+    ) -> crate::errors::Result<Self> {
         let project_path = std::env::current_dir().unwrap_or_else(|_| home.to_path_buf());
         let integration = crate::agents::get_integration(agent_id)?;
         let registration_path = integration.primary_config_path(home);
@@ -43,8 +55,7 @@ impl HostComponentRegistrationDelegate {
             integration,
             context: crate::agents::InstallContext {
                 home: home.to_path_buf(),
-                tracedecay_bin: crate::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string()),
+                tracedecay_bin,
                 tool_permissions: crate::agents::expected_tool_perms(),
                 project_root: None,
                 dashboard: true,
@@ -202,42 +213,96 @@ impl HostComponentRegistrationDelegate {
         }
     }
 
-    fn competing_opencode_analyzer_claim(
+    /// Refuse the one genuinely undecidable case: a non-`TraceDecay` LSP key
+    /// whose command runs the `TraceDecay` binary. Ownership cannot be
+    /// resolved from the host document, so the lifecycle stops rather than
+    /// offering the operator a claim to confirm. An unreadable or unparseable
+    /// document stops here too instead of passing as clear.
+    fn refuse_ambiguous_opencode_analyzer(
         &self,
-    ) -> Option<crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1> {
-        if self.integration.id() != "opencode" {
-            return None;
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        if !self.requires_competing_analyzer_preflight(component_set) {
+            return Ok(());
         }
-        let Some(path) = &self.registration_path else {
-            return None;
+        let Some((config, _)) = self.opencode_registration_document()? else {
+            return Ok(());
         };
-        let Ok(bytes) = fs::read(path) else {
-            return None;
-        };
-        let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return None;
-        };
-        let evidence_digest = Sha256::digest(&bytes).into();
-        config
+        let aliased = config
             .get("lsp")
             .and_then(serde_json::Value::as_object)
-            .and_then(|servers| {
-                servers.iter().find_map(|(name, registration)| {
-                    if name == "tracedecay" {
-                        return None;
-                    }
-                    let aliases_tracedecay = registration
-                        .get("command")
-                        .is_some_and(|command| command.to_string().contains("tracedecay"));
-                    aliases_tracedecay.then(|| {
-                        crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1 {
-                            extension_id: name.clone(),
-                            capability: crate::agents::host_bundle_v2::HostCapabilityV1::Lsp,
-                            evidence_digest,
-                        }
-                    })
+            .is_some_and(|servers| {
+                servers.iter().any(|(name, registration)| {
+                    name != "tracedecay"
+                        && registration
+                            .get("command")
+                            .is_some_and(|command| command.to_string().contains("tracedecay"))
                 })
+            });
+        if aliased {
+            return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
+        }
+        Ok(())
+    }
+
+    /// Parse the host's own registration document once. An unreadable or
+    /// unparseable document is a refusal rather than "no conflict": discovery
+    /// that cannot see the surface must never report it as clear.
+    fn opencode_registration_document(
+        &self,
+    ) -> Result<Option<(serde_json::Value, [u8; 32])>, crate::agents::host_bundle_v2::HostBundleError>
+    {
+        if self.integration.id() != "opencode" {
+            return Ok(None);
+        }
+        let Some(path) = &self.registration_path else {
+            return Ok(None);
+        };
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure),
+        };
+        let config = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::InvalidObservedState)?;
+        Ok(Some((config, Sha256::digest(&bytes).into())))
+    }
+
+    /// Third-party analyzers already registered for a language this component
+    /// set's own analyzer would serve. OpenCode is the only host whose set
+    /// registers a custom analyzer; every other host's component set writes
+    /// TraceDecay-keyed entries that no third party can already own.
+    fn competing_opencode_analyzer_claims(
+        &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> Result<
+        Vec<crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1>,
+        crate::agents::host_bundle_v2::HostBundleError,
+    > {
+        if !self.requires_competing_analyzer_preflight(component_set) {
+            return Ok(Vec::new());
+        }
+        let Some((config, evidence_digest)) = self.opencode_registration_document()? else {
+            return Ok(Vec::new());
+        };
+        let tracedecay_extensions = opencode_tracedecay_extensions(component_set);
+        let Some(servers) = config.get("lsp").and_then(serde_json::Value::as_object) else {
+            return Ok(Vec::new());
+        };
+        Ok(servers
+            .iter()
+            .filter(|(name, _)| name.as_str() != "tracedecay")
+            .filter(|(_, registration)| {
+                claims_any_extension(registration, tracedecay_extensions.as_deref())
             })
+            .map(
+                |(name, _)| crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1 {
+                    extension_id: claim_identifier(name),
+                    capability: crate::agents::host_bundle_v2::HostCapabilityV1::Lsp,
+                    evidence_digest,
+                },
+            )
+            .collect())
     }
 
     fn registration_is_current(
@@ -436,6 +501,17 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         self.component_registration_revision(component_set)
     }
 
+    fn discover_competing_extension_claims(
+        &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+        _request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
+    ) -> Result<
+        Vec<crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1>,
+        crate::agents::host_bundle_v2::HostBundleError,
+    > {
+        self.competing_opencode_analyzer_claims(component_set)
+    }
+
     fn confirm_preview(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
@@ -458,11 +534,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         _request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        if self.requires_competing_analyzer_preflight(component_set)
-            && self.competing_opencode_analyzer_claim().is_some()
-        {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
-        }
+        self.refuse_ambiguous_opencode_analyzer(component_set)?;
         if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
             self.should_apply = false;
             return Ok(());
@@ -518,11 +590,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        if self.requires_competing_analyzer_preflight(component_set)
-            && self.competing_opencode_analyzer_claim().is_some()
-        {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
-        }
+        self.refuse_ambiguous_opencode_analyzer(component_set)?;
         if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
             if let Some(expected) = self.confirmed_registration_revision
                 && self.component_registration_revision(component_set)? != expected
@@ -688,6 +756,58 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         result?;
         self.restore_registration(component_set, request.operation_id)
     }
+}
+
+/// Languages the component set's own OpenCode analyzer registration declares.
+/// `None` means the projection declares no bounded extension list, so every
+/// other analyzer must be treated as overlapping.
+fn opencode_tracedecay_extensions(
+    component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+) -> Option<Vec<String>> {
+    let registration = component_set
+        .components
+        .iter()
+        .flat_map(|component| &component.contents)
+        .find(|asset| asset.relative_path.ends_with("opencode.registration.json"))?;
+    let document = serde_json::from_slice::<serde_json::Value>(&registration.bytes).ok()?;
+    Some(
+        document
+            .pointer("/lsp/tracedecay/extensions")?
+            .as_array()?
+            .iter()
+            .filter_map(|extension| extension.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// Whether a third-party analyzer registration claims a language TraceDecay's
+/// own analyzer would serve. An entry without a bounded `extensions` list
+/// claims by host default, which cannot be proven disjoint.
+fn claims_any_extension(registration: &serde_json::Value, tracedecay: Option<&[String]>) -> bool {
+    let Some(tracedecay) = tracedecay else {
+        return true;
+    };
+    let Some(extensions) = registration
+        .get("extensions")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return true;
+    };
+    extensions.iter().any(|extension| {
+        extension
+            .as_str()
+            .is_some_and(|extension| tracedecay.iter().any(|owned| owned == extension))
+    })
+}
+
+/// Host extension names are not TraceDecay identifiers. A name the lifecycle
+/// vocabulary cannot carry is still reported under a stable derived id so a
+/// real conflict is never dropped for being unrepresentable.
+fn claim_identifier(name: &str) -> String {
+    if crate::agents::host_bundle_v2::validate_identifier(name).is_ok() {
+        return name.to_string();
+    }
+    format!("opaque-{}", hex::encode(&Sha256::digest(name)[..8]))
 }
 
 fn write_registration_backup(

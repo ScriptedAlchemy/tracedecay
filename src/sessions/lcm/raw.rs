@@ -2,6 +2,9 @@ use std::path::Path;
 
 use serde_json::{Map, Value as JsonValue, json};
 
+pub use crate::application::session::compatibility::derived_text_for_index;
+pub(crate) use crate::application::session::compatibility::derived_text_for_snippet;
+use crate::application::session::compatibility::projected_content_hash;
 use crate::{
     db::engine::{Executor, QueryExecutor, Row, params},
     privacy::detector_kernel::{
@@ -10,10 +13,7 @@ use crate::{
     sessions::SessionMessageRecord,
 };
 
-use super::{
-    DERIVED_TRUNCATION_MARKER, LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind,
-    MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS, payload, security, util,
-};
+use super::{LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind, payload, security};
 
 pub(crate) const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
@@ -144,14 +144,6 @@ impl PayloadExternalizer<'_> {
     }
 }
 
-pub fn derived_text_for_index(raw: &str) -> String {
-    derived_text_with_cap(raw, MAX_DERIVED_TEXT_CHARS)
-}
-
-pub(crate) fn derived_text_for_snippet(raw: &str) -> String {
-    derived_text_with_cap(raw, MAX_DERIVED_SNIPPET_CHARS)
-}
-
 fn externalized_payload_placeholder(
     payload_ref: &super::LcmPayloadRef,
     field_path: &str,
@@ -178,18 +170,6 @@ fn externalized_payload_placeholder(
     )
 }
 
-fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
-    if raw.chars().count() <= max_chars {
-        return raw.to_string();
-    }
-
-    let marker_chars = DERIVED_TRUNCATION_MARKER.chars().count();
-    let budget = max_chars.saturating_sub(marker_chars);
-    let mut derived = raw.chars().take(budget).collect::<String>();
-    derived.push_str(DERIVED_TRUNCATION_MARKER);
-    derived
-}
-
 async fn upsert_inline_raw_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
@@ -198,7 +178,7 @@ async fn upsert_inline_raw_message(
 ) -> bool {
     let snippet = derived_text_for_snippet(text);
     let index = derived_text_for_index(text);
-    let content_hash = sha256_hex(text);
+    let content_hash = projected_content_hash(text);
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
@@ -237,24 +217,6 @@ async fn upsert_inline_raw_message(
     )
     .await
     .is_ok()
-}
-
-/// Mirrors a sanitized observation projection into the raw LCM store.
-///
-/// Observation payloads have already crossed the privacy boundary, so this
-/// path preserves the canonical projected text instead of reprocessing the
-/// provider payload or performing filesystem-backed externalization.
-pub(crate) async fn upsert_projected_raw_message(
-    conn: &(impl Executor + ?Sized),
-    message: &SessionMessageRecord,
-) -> bool {
-    upsert_inline_raw_message(
-        conn,
-        message,
-        &message.text,
-        message.metadata_json.as_deref(),
-    )
-    .await
 }
 
 fn externalized_payload_metadata(
@@ -1113,7 +1075,7 @@ fn sensitive_placeholder(pattern_name: &str, secret: &str) -> String {
         secret.len()
     )];
     if pattern_name != "password_assignment" {
-        let digest = sha256_hex(secret);
+        let digest = projected_content_hash(secret);
         parts.push(format!("sha256={}", &digest[..16]));
     }
     format!("{}]", parts.join("; "))
@@ -1180,10 +1142,6 @@ fn add_ingest_protection_metadata(metadata: &mut JsonValue, protection: &IngestP
     if let Some(object) = metadata.as_object_mut() {
         object.insert("ingest_protection".to_string(), JsonValue::Object(ingest));
     }
-}
-
-pub(crate) fn sha256_hex(content: &str) -> String {
-    util::sha256_hex(content.as_bytes())
 }
 
 #[cfg(test)]

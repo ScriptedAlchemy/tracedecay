@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use tracedecay_capture::cursor_composer::composer_todos_have_admittable_items;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
     ObservationSourceIdentityV1, ProjectId, ProviderId, SessionId,
@@ -24,7 +25,6 @@ use super::capture::{
     build_cursor_composer_envelope_capture_request_for_project, composer_envelope_todo_checkpoint,
     cursor_composer_envelope_source,
 };
-use super::observation::composer_todos_have_admittable_items;
 use super::sqlite::{
     BoundedSqliteValue, COMPOSER_KEY_SCAN_PAGE, ComposerProject, DEFAULT_COMPOSER_SWEEP_BYTES,
     MAX_COMPOSER_ENVELOPE_BYTES, MAX_COMPOSER_SQLITE_KEY_BYTES, composer_budget_bytes,
@@ -79,7 +79,7 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
 }
 
 pub(crate) fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
-    let identity = crate::sessions::source::sqlite_generation_identity(path).ok()?;
+    let identity = crate::db::sqlite_generation_identity(path).ok()?;
     ObservationSourceGenerationV1::new(identity).ok()
 }
 

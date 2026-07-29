@@ -73,8 +73,15 @@ fn is_own_worktree(root: &std::path::Path) -> bool {
 
 /// Trimmed stdout of a successful `git` run in `root`, or `None` when git is
 /// missing, the command failed, or it printed nothing.
+///
+/// `--no-optional-locks` keeps every probe strictly read-only. Plain
+/// `git status` refreshes the index stat cache and rewrites `.git/index` — a
+/// path [`watch_paths`] hands Cargo as a rebuild trigger — so probing the tree
+/// would arm the very trigger it reads. The flag suppresses only that
+/// incidental write; the reported status is unchanged.
 fn git_stdout(root: &std::path::Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(root)
         .args(args)
@@ -162,6 +169,33 @@ mod tests {
         git(dir.path(), &["checkout", "--", "tracked.txt"]);
         std::fs::write(dir.path().join("stray.txt"), "stray").expect("write untracked file");
         assert!(resolve(dir.path()).dirty, "an untracked file is dirty");
+    }
+
+    /// `watch_paths` hands `.git/index` to Cargo as a rebuild trigger, and any
+    /// build-script rerun recompiles the whole root crate. Probing identity
+    /// must therefore leave the index alone: a plain `git status` refreshes its
+    /// stat cache and rewrites it, which would arm that trigger on every build
+    /// that follows an edit.
+    #[test]
+    fn probing_identity_does_not_rewrite_the_index_it_watches() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        committed_repo(dir.path());
+        let index = dir.path().join(".git/index");
+        // A stale stat cache is what tempts git into rewriting the index.
+        std::fs::write(dir.path().join("tracked.txt"), "modified").expect("modify tracked file");
+        let before = std::fs::metadata(&index)
+            .and_then(|meta| meta.modified())
+            .expect("index mtime");
+
+        assert!(resolve(dir.path()).dirty, "the fixture must read as dirty");
+
+        let after = std::fs::metadata(&index)
+            .and_then(|meta| meta.modified())
+            .expect("index mtime");
+        assert_eq!(
+            before, after,
+            "resolve() rewrote .git/index, which watch_paths registers as a rebuild trigger"
+        );
     }
 
     /// A crate unpacked below an unrelated repository must not inherit that

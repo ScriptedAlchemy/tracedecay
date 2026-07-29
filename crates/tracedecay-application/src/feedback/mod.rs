@@ -39,9 +39,9 @@ pub use read::{
     FEEDBACK_GET_CAPABILITY_ID_V1, FEEDBACK_GET_USE_CASE_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
     FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackDiagnosticsReadRequestV1,
     FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1, FeedbackExpandResultV1,
-    FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackListRequestV1,
-    FeedbackListResultV1, FeedbackReadOperationsV1, FeedbackReadPort, FeedbackReadPortContext,
-    FeedbackReadPortFuture, FeedbackReadService,
+    FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackHandleRequestV1,
+    FeedbackListRequestV1, FeedbackListResultV1, FeedbackReadOperationsV1, FeedbackReadPort,
+    FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService,
 };
 pub use service::{
     FeedbackBudgetUsage, FeedbackCycleAdvisoryV1, FeedbackCycleControl,

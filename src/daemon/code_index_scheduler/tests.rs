@@ -43,8 +43,8 @@ use crate::semantic_code::{
 use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
 
 use super::{
-    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
-    SharedCodeIndexBytePoolV1,
+    CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
+    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
 };
 use crate::query::retrieval::Pr9QueryAuthorityV1;
 use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
@@ -2531,7 +2531,7 @@ fn threshold_expiry_reconciles_out_of_band_write_without_watcher() {
         .ensure_fresh_for_query()
         .expect("freshness ladder runs");
     assert!(
-        reconciled,
+        reconciled.is_some(),
         "an elapsed staleness bound reconciles at admission"
     );
 
@@ -2569,7 +2569,7 @@ fn threshold_expiry_without_change_skips_full_reconcile() {
         .ensure_fresh_for_query()
         .expect("freshness ladder runs");
     assert!(
-        !reconciled,
+        reconciled.is_none(),
         "an unchanged tree past the staleness bound must not reconcile"
     );
 
@@ -2634,7 +2634,7 @@ fn git_op_in_another_process_detected_via_metadata() {
         .ensure_fresh_for_query()
         .expect("freshness ladder runs");
     assert!(
-        reconciled,
+        reconciled.is_some(),
         "a .git-metadata change reconciles before the bound"
     );
 
@@ -2676,7 +2676,7 @@ fn identity_move_reconciles_and_never_mixes_identity() {
     let reconciled = scheduler
         .ensure_fresh_for_query()
         .expect("freshness ladder runs");
-    assert!(reconciled, "a HEAD move reconciles at admission");
+    assert!(reconciled.is_some(), "a HEAD move reconciles at admission");
 
     // Tier-3 backstop: identity re-resolved to the new revision.
     let commit_after = scheduler.identity().head_commit().cloned();
@@ -3988,4 +3988,159 @@ fn real_rebase_reconcile_matches_clean_scan() {
         rebased_generation.generation().snapshot().source_revision,
         clean_generation.generation().snapshot().source_revision
     );
+}
+
+/// Restoring a sealed generation must keep queries non-blocking AND schedule a
+/// verification reconcile. Open-time clocks alone must not suppress cadence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mount_with_retained_generation_verifies_cadence_promptly() {
+    let fixture = GitFixture::new(RETAINED_REVISION_0);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let first_generation = {
+        let mut scheduler = scheduler(&fixture, scoped_store, Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("seed generation")).generation_id
+    };
+
+    // Out-of-band edit after the sealed generation was written.
+    fixture.edit("src/lib.rs", "pub fn retained_revision() -> usize { 1 }\n");
+    git(fixture.path(), &["commit", "-qam", "stale-after-seal"]);
+
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount with retained generation");
+
+    // Serve-prior: the retained generation is queryable immediately.
+    let served_before = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("retained generation remains available");
+    assert_eq!(served_before, first_generation);
+
+    // Cadence: mount wake must verify against gix and publish the new content.
+    let refreshed = wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
+    assert_ne!(refreshed, first_generation);
+
+    let receipt = wait_for_event_to_ready(&registry).await;
+    assert!(
+        matches!(receipt.outcome, CodeIndexCadenceOutcomeV1::Published { .. }),
+        "stale retained generation must publish a refreshed generation"
+    );
+    registry.shutdown().await;
+}
+
+/// Content-identical reconcile after mount verification emits a no-op
+/// event-to-ready receipt (zero projection work) rather than a silent discard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mount_verification_noop_emits_event_to_ready_receipt() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    {
+        let mut scheduler = scheduler(&fixture, scoped_store, Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("seed generation"));
+    }
+
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount retained");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let receipt = wait_for_event_to_ready(&registry).await;
+    assert!(
+        receipt.is_noop(),
+        "unchanged retained content must emit a no-op event-to-ready receipt"
+    );
+    assert!(receipt.queue_delay_micros >= 0);
+    assert_eq!(receipt.trigger, CodeIndexCadenceTriggerV1::Mount);
+    registry.shutdown().await;
+}
+
+/// Busy admission preserves the prior generation and schedules a follow-up wake
+/// so serve-during-refresh cannot leave the index stale indefinitely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_admission_schedules_follow_up_cadence_wake() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount");
+    let expected = wait_for_initial_generation(&registry, fixture.path()).await;
+    let before_receipts = registry.event_to_ready_receipts().len();
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("lock acquired");
+
+    let latest = tokio::time::timeout(
+        Duration::from_millis(250),
+        registry.latest_complete_fresh(fixture.path()),
+    )
+    .await
+    .expect("must not wait on busy lock")
+    .expect("prior generation served");
+    assert_eq!(latest.generation.manifest().generation_id, expected);
+
+    release_tx.send(()).expect("release");
+    lock_thread.join().expect("join");
+
+    // Follow-up wake must produce another cadence receipt after the lock frees.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let receipts = registry.event_to_ready_receipts();
+        if receipts.len() > before_receipts
+            && receipts.iter().any(|receipt| {
+                receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp
+                    || receipt.trigger == CodeIndexCadenceTriggerV1::Mount
+                    || receipt.trigger == CodeIndexCadenceTriggerV1::QueryAdmission
+            })
+        {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("busy follow-up wake did not produce a cadence receipt");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    registry.shutdown().await;
+}
+
+async fn wait_for_event_to_ready(
+    registry: &CodeIndexSchedulerRegistryV1,
+) -> super::CodeIndexEventToReadyReceiptV1 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(receipt) = registry.latest_event_to_ready_receipt() {
+            return receipt;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for event-to-ready receipt");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

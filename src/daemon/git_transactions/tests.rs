@@ -1239,3 +1239,37 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     assert!(Arc::ptr_eq(&primary_owner.service, &primary));
     assert!(Arc::ptr_eq(&linked_owner.service, &linked));
 }
+
+/// Symlink alias of an already-mounted root must resolve to the same owner
+/// entry. Distinct filesystem identities remain rejected (see rebinding test).
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_owner_resolves_symlink_alias_to_the_canonical_mounted_root() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("project directory");
+    let alias_parent = tempfile::tempdir().expect("alias parent");
+    let alias = alias_parent.path().join("worktree-alias");
+    symlink(directory.path(), &alias).expect("worktree root symlink alias");
+    let database_path = directory.path().join("canonical-project.db");
+    rusqlite::Connection::open(&database_path).expect("canonical project database");
+    let registry = DaemonGitIndexTransactionServiceRegistry::default();
+    let project_id = id::<ProjectId>("project.alias.fixture");
+    let first = registry
+        .ensure_engine_test(
+            database_path.clone(),
+            directory.path().to_path_buf(),
+            project_id.clone(),
+            UtcMicros(30),
+        )
+        .await
+        .expect("mount through real root");
+    let second = registry
+        .ensure_engine_test(database_path, alias, project_id, UtcMicros(31))
+        .await
+        .expect("reuse through symlink alias");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "symlink alias must resolve to the same mounted owner as the canonical root"
+    );
+}

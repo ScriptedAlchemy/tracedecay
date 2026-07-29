@@ -51,20 +51,9 @@ pub(crate) use transcript::TranscriptPersistenceError;
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
-/// Scopes a `tracedecay_message_search` to the agent transcripts of one
-/// workflow run, mirroring `GitScopeFilter` as a search-only concern. The run's
-/// messages are the messages of its agents (rows in `workflow_agents`); see
-/// The session-message search applies this with an `EXISTS` pushdown.
-/// Serializes so the applied filter echoes cleanly into the payload.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct WorkflowScopeFilter {
-    /// The `wf_*` run whose agents' messages to keep.
-    pub run_id: String,
-    /// When set, narrows the scope to just this one agent of the run
-    /// (matched on `workflow_agents.agent_label`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_label: Option<String>,
-}
+/// Compatibility re-export: workflow search filters now live beside the
+/// workflow-index contracts in [`crate::sessions::workflow_index`].
+pub use crate::sessions::workflow_index::WorkflowScopeFilter;
 
 /// Internal query context for the session-message search fan-in.
 ///
@@ -129,6 +118,18 @@ pub struct AnalyticsEventRecord {
     pub hint_id: Option<String>,
     pub outcome: Option<String>,
     pub metadata_json: Option<String>,
+}
+
+impl crate::sessions::git_correlation::AnalyticsSessionTimestampSource for AnalyticsEventRecord {
+    fn as_analytics_session_timestamp(
+        &self,
+    ) -> Option<crate::sessions::git_correlation::AnalyticsSessionTimestamp> {
+        Some(crate::sessions::git_correlation::AnalyticsSessionTimestamp {
+            provider: self.provider.clone(),
+            session_id: self.session_id.clone()?,
+            timestamp: self.timestamp,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -883,11 +884,10 @@ fn analytics_scope_query(
 const SESSION_MESSAGE_SEARCH_MAX_FETCH: usize = 200;
 
 /// Stable inventory downrank for a BM25 result page: transcript inventory/
-/// listing messages and prose branch/worktree rosters (per the shared
-/// [`crate::sessions::message_noise`] classifier) are moved below substantive
-/// hits while preserving the relative BM25 order within each group. Applied
-/// before truncation so a downranked hit still surfaces when it is the only
-/// match. Mirrors the lcm/grep re-rank (`sessions::lcm::query::rerank_grep_hits`).
+/// listing messages and prose branch/worktree rosters are moved below
+/// substantive hits while preserving the relative BM25 order within each
+/// group. Applied before truncation so a downranked hit still surfaces when it
+/// is the only match. Mirrors the lcm/grep re-rank.
 fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
     if results.len() < 2 {
         return;
@@ -895,7 +895,7 @@ fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
     let mut substantive = Vec::with_capacity(results.len());
     let mut inventory = Vec::new();
     for result in results.drain(..) {
-        if crate::sessions::message_noise::is_inventory_text(&result.message.text) {
+        if crate::application::session::compatibility::is_inventory_text(&result.message.text) {
             inventory.push(result);
         } else {
             substantive.push(result);

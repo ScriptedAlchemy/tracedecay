@@ -1,23 +1,29 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 
 use tracedecay_domain::HydrationStateV1;
 
-use crate::{
-    db::engine::{Executor, QueryExecutor, Value, params},
-    global_db::session_temporal_operations,
-};
+use crate::application::session::compatibility::projected_content_hash;
+use crate::db::engine::{QueryExecutor, Value, params};
 
-use super::types::LcmImmutableSummaryPublication;
+use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use super::{
     LcmError, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmSummaryExpansion,
     LcmSummaryNode, LcmSummaryNodeDraft, raw,
 };
 
-pub(crate) async fn insert_summary_node_in_transaction(
-    conn: &impl Executor,
+pub(crate) trait LcmSummaryPublicationPort {
+    fn publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> impl Future<Output = Result<LcmSummaryPublicationReceipt, LcmError>>;
+}
+
+pub(crate) async fn insert_summary_node(
+    publisher: &impl LcmSummaryPublicationPort,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
-    let summary_hash = raw::sha256_hex(&draft.summary_text);
+    let summary_hash = projected_content_hash(&draft.summary_text);
     let node_id = summary_node_id(
         &draft.provider,
         &draft.session_id,
@@ -26,16 +32,14 @@ pub(crate) async fn insert_summary_node_in_transaction(
         &summary_hash,
     );
 
-    session_temporal_operations::publish_immutable_summary(
-        conn,
-        LcmImmutableSummaryPublication {
+    publisher
+        .publish_immutable_summary(LcmImmutableSummaryPublication {
             summary_id: node_id,
             predecessor_summary_id: None,
             draft,
-        },
-    )
-    .await
-    .map(|receipt| receipt.summary)
+        })
+        .await
+        .map(|receipt| receipt.summary)
 }
 
 pub(crate) async fn expand_summary_node(
@@ -256,7 +260,7 @@ pub fn summary_node_id(
         "source_refs": source_refs,
         "summary_hash": summary_hash,
     });
-    format!("sum_{}", raw::sha256_hex(&input.to_string()))
+    format!("sum_{}", projected_content_hash(&input.to_string()))
 }
 
 pub(crate) async fn load_summary_node(

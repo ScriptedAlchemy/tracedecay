@@ -130,6 +130,10 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
     let store_layout = cg.store_layout();
     Ok(DashboardState {
         project_id: store_layout.identity.project_id.clone(),
+        resolved_scope: super::scope::resolve_dashboard_scope(
+            cg.project_root(),
+            store_layout.identity.project_id.as_deref(),
+        ),
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: super::project_memory_owner(cg)?,
@@ -173,6 +177,9 @@ fn user_state(
     let mem_db = Arc::new(memory_db.clone());
     DashboardState {
         project_id: None,
+        // A profile-owned state has no exact project root; scope resolution
+        // fails closed rather than fabricating one from the profile path.
+        resolved_scope: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: tracedecay_domain::FactOwnerV1::Profile,

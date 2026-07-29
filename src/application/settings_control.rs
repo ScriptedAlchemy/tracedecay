@@ -15,9 +15,18 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
 
+use tracedecay_application::{
+    ProjectSettingsPatchInputV1, UserSettingsPatchInputV1, UserSettingsPreviewErrorV1,
+    prepare_user_settings_preview, validate_project_settings_patch, validate_user_settings_values,
+};
+
 use crate::application::configuration::DirectConfigurationMutation;
-use crate::config::{MIN_AUTO_TRACK_PR_POLL_SECS, PinnedRuntimeConfiguration};
+use crate::config::PinnedRuntimeConfiguration;
 use crate::user_config::{ConfigSaveError, UserConfig};
+
+pub use tracedecay_application::{
+    SettingsValidationIssueV1, UserSettingsPreviewV1, UserSettingsValuesV1,
+};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -57,12 +66,6 @@ pub struct TelemetrySettingsPatchV1 {
     pub timings: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct SettingsValidationIssueV1 {
-    pub field: String,
-    pub message: String,
-}
-
 #[derive(Clone, Debug)]
 pub struct ProjectSettingsPreviewV1 {
     pub expected_revision: ConfigurationRevisionId,
@@ -88,22 +91,6 @@ pub struct UserSettingsPatchV1 {
     pub watcher_debounce: Option<String>,
     #[serde(default)]
     pub extraction_timeout_secs: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UserSettingsPreviewV1 {
-    pub expected_revision: String,
-    pub previous: UserSettingsValuesV1,
-    pub candidate: UserSettingsValuesV1,
-    pub restart_recommended: bool,
-    pub changed: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UserSettingsValuesV1 {
-    pub upload_enabled: bool,
-    pub watcher_debounce: String,
-    pub extraction_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,48 +124,17 @@ pub fn preview_user_settings(
     let actual = current
         .revision_id()
         .map_err(|error| UserSettingsOperationErrorV1::Unavailable(error.to_string()))?;
-    if patch.expected_revision_id != actual {
-        return Err(UserSettingsOperationErrorV1::RevisionConflict {
-            expected: patch.expected_revision_id,
-            actual,
-        });
-    }
-    let mut issues = Vec::new();
-    if let Some(debounce) = &patch.watcher_debounce
-        && crate::user_config::parse_duration(debounce).is_none()
-    {
-        issues.push(issue(
-            "watcher_debounce",
-            "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
-        ));
-    }
-    if patch.extraction_timeout_secs == Some(0) {
-        issues.push(issue(
-            "extraction_timeout_secs",
-            "extraction_timeout_secs must be at least 1 second",
-        ));
-    }
-    if !issues.is_empty() {
-        return Err(UserSettingsOperationErrorV1::Validation(issues));
-    }
-    let previous = UserSettingsValuesV1::from(current);
-    let candidate = UserSettingsValuesV1 {
-        upload_enabled: patch.upload_enabled.unwrap_or(previous.upload_enabled),
-        watcher_debounce: patch
-            .watcher_debounce
-            .unwrap_or_else(|| previous.watcher_debounce.clone()),
-        extraction_timeout_secs: patch
-            .extraction_timeout_secs
-            .unwrap_or(previous.extraction_timeout_secs),
-    };
-    Ok(UserSettingsPreviewV1 {
-        expected_revision: actual,
-        restart_recommended: candidate.watcher_debounce != previous.watcher_debounce
-            || candidate.extraction_timeout_secs != previous.extraction_timeout_secs,
-        changed: candidate != previous,
-        previous,
-        candidate,
-    })
+    prepare_user_settings_preview(
+        &actual,
+        UserSettingsValuesV1::from(current),
+        UserSettingsPatchInputV1 {
+            expected_revision_id: patch.expected_revision_id,
+            upload_enabled: patch.upload_enabled,
+            watcher_debounce: patch.watcher_debounce,
+            extraction_timeout_secs: patch.extraction_timeout_secs,
+        },
+    )
+    .map_err(user_preview_error)
 }
 
 pub fn apply_user_settings(
@@ -200,7 +156,7 @@ pub fn apply_user_settings(
             "user settings preview is invalid".to_owned(),
         ));
     }
-    validate_user_values(&preview.candidate)?;
+    validate_user_settings_values(&preview.candidate).map_err(user_preview_error)?;
     preview.changed = preview.candidate != preview.previous;
     preview.restart_recommended = preview.candidate.watcher_debounce
         != preview.previous.watcher_debounce
@@ -338,24 +294,14 @@ fn user_receipt_identity(
     .map_err(|error| UserSettingsOperationErrorV1::Unavailable(error.to_string()))
 }
 
-fn validate_user_values(values: &UserSettingsValuesV1) -> Result<(), UserSettingsOperationErrorV1> {
-    let mut issues = Vec::new();
-    if crate::user_config::parse_duration(&values.watcher_debounce).is_none() {
-        issues.push(issue(
-            "watcher_debounce",
-            "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
-        ));
-    }
-    if values.extraction_timeout_secs == 0 {
-        issues.push(issue(
-            "extraction_timeout_secs",
-            "extraction_timeout_secs must be at least 1 second",
-        ));
-    }
-    if issues.is_empty() {
-        Ok(())
-    } else {
-        Err(UserSettingsOperationErrorV1::Validation(issues))
+fn user_preview_error(error: UserSettingsPreviewErrorV1) -> UserSettingsOperationErrorV1 {
+    match error {
+        UserSettingsPreviewErrorV1::Validation(issues) => {
+            UserSettingsOperationErrorV1::Validation(issues)
+        }
+        UserSettingsPreviewErrorV1::RevisionConflict { expected, actual } => {
+            UserSettingsOperationErrorV1::RevisionConflict { expected, actual }
+        }
     }
 }
 
@@ -427,29 +373,23 @@ pub fn preview_project_settings(
             actual: current.revision_id.as_str().to_owned(),
         });
     }
+    if let Err(issues) = validate_project_settings_patch(&ProjectSettingsPatchInputV1 {
+        include: patch.include.clone(),
+        exclude: patch.exclude.clone(),
+        max_file_size: patch.max_file_size,
+        auto_track_pr_poll_secs: patch
+            .sync
+            .as_ref()
+            .and_then(|sync| sync.auto_track_pr_poll_secs),
+    }) {
+        return Err(ProjectSettingsPreviewErrorV1::Validation(issues));
+    }
     let mut issues = Vec::new();
     if let Some(globs) = &patch.include {
         validate_globs("include", globs, &mut issues);
     }
     if let Some(globs) = &patch.exclude {
         validate_globs("exclude", globs, &mut issues);
-    }
-    if patch.max_file_size == Some(0) {
-        issues.push(issue(
-            "max_file_size",
-            "max_file_size must be at least 1 byte",
-        ));
-    }
-    if let Some(sync) = &patch.sync
-        && let Some(seconds) = sync.auto_track_pr_poll_secs
-        && seconds < MIN_AUTO_TRACK_PR_POLL_SECS
-    {
-        issues.push(issue(
-            "auto_track_pr_poll_secs",
-            &format!(
-                "auto_track_pr_poll_secs must be at least {MIN_AUTO_TRACK_PR_POLL_SECS} seconds"
-            ),
-        ));
     }
     if !issues.is_empty() {
         return Err(ProjectSettingsPreviewErrorV1::Validation(issues));
@@ -660,7 +600,7 @@ mod tests {
             extraction_timeout_secs: 0,
         };
         assert!(matches!(
-            validate_user_values(&values),
+            validate_user_settings_values(&values).map_err(user_preview_error),
             Err(UserSettingsOperationErrorV1::Validation(issues)) if issues.len() == 2
         ));
     }

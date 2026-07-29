@@ -497,3 +497,20 @@ fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
 fn read_linux_process_lifetime_peak_rss_bytes() -> Option<u64> {
     None
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_in_linux_quality_evaluation_records_process_resources() {
+        let window = LinuxProcessResourceWindowV1::begin()
+            .expect("Linux quality evaluation requires procfs and CLK_TCK");
+
+        let (_cpu_time_us, peak_rss_bytes) = window
+            .finish()
+            .expect("Linux quality evaluation records CPU and peak RSS");
+
+        assert!(peak_rss_bytes > 0);
+    }
+}

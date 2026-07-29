@@ -15,9 +15,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
 
 use super::{
-    CodeIndexBytePoolStatsV1, CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1,
-    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1,
-    SharedCodeIndexBytePoolV1, now_micros,
+    CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
+    CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
+    CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1,
+    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1, now_micros,
 };
 
 const MAX_CONCURRENT_BACKGROUND_RECONCILES: usize = 1;
@@ -53,6 +54,10 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     wake: Arc<tokio::sync::Notify>,
+    /// Unix micros of the earliest pending wake not yet consumed by a receipt.
+    pending_wake_micros: Arc<AtomicU64>,
+    /// Packed [`CodeIndexCadenceTriggerV1`] for the pending wake.
+    pending_wake_trigger: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
     reconcile_in_progress: Arc<AtomicBool>,
     active_generation_encoded_bytes: Arc<AtomicU64>,
@@ -72,6 +77,7 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     mount_admission: Arc<tokio::sync::Mutex<()>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
+    cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
     test_attribution_authorities: Arc<
         RwLock<
             BTreeMap<
@@ -98,8 +104,118 @@ impl CodeIndexSchedulerRegistryV1 {
                 MAX_CONCURRENT_BACKGROUND_RECONCILES,
             )),
             generation_publications,
+            cadence_telemetry: Arc::new(Mutex::new(CodeIndexCadenceTelemetryV1::default())),
             test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    fn pack_trigger(trigger: CodeIndexCadenceTriggerV1) -> u64 {
+        match trigger {
+            CodeIndexCadenceTriggerV1::Mount => 1,
+            CodeIndexCadenceTriggerV1::HookHint => 2,
+            CodeIndexCadenceTriggerV1::Overflow => 3,
+            CodeIndexCadenceTriggerV1::QueryAdmission => 4,
+            CodeIndexCadenceTriggerV1::BusyFollowUp => 5,
+        }
+    }
+
+    fn unpack_trigger(packed: u64) -> CodeIndexCadenceTriggerV1 {
+        match packed {
+            2 => CodeIndexCadenceTriggerV1::HookHint,
+            3 => CodeIndexCadenceTriggerV1::Overflow,
+            4 => CodeIndexCadenceTriggerV1::QueryAdmission,
+            5 => CodeIndexCadenceTriggerV1::BusyFollowUp,
+            _ => CodeIndexCadenceTriggerV1::Mount,
+        }
+    }
+
+    fn note_wake(
+        pending_wake_micros: &AtomicU64,
+        pending_wake_trigger: &AtomicU64,
+        wake: &tokio::sync::Notify,
+        trigger: CodeIndexCadenceTriggerV1,
+    ) {
+        let wake_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
+        let _ = pending_wake_micros.compare_exchange(
+            0,
+            wake_micros,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        pending_wake_trigger.store(Self::pack_trigger(trigger), Ordering::Release);
+        wake.notify_one();
+    }
+
+    fn record_reconcile_receipt(
+        telemetry: &Mutex<CodeIndexCadenceTelemetryV1>,
+        project_root: PathBuf,
+        pending_wake_micros: &AtomicU64,
+        pending_wake_trigger: &AtomicU64,
+        default_trigger: CodeIndexCadenceTriggerV1,
+        outcome: &CodeIndexReconcileOutcomeV1,
+    ) {
+        let ready_micros = now_micros().0;
+        let wake_micros = pending_wake_micros.swap(0, Ordering::AcqRel);
+        let trigger = if wake_micros == 0 {
+            default_trigger
+        } else {
+            Self::unpack_trigger(pending_wake_trigger.load(Ordering::Acquire))
+        };
+        let wake_micros = if wake_micros == 0 {
+            ready_micros
+        } else {
+            i64::try_from(wake_micros).unwrap_or(ready_micros)
+        };
+        let (cadence_outcome, overflow_reconciled) = match outcome {
+            CodeIndexReconcileOutcomeV1::Published(evidence) => (
+                CodeIndexCadenceOutcomeV1::Published {
+                    generation_id: evidence.generation_id.clone(),
+                    reextracted_files: evidence.reextracted_files,
+                    changed_chunks: evidence.changed_chunks,
+                    reused_chunks: evidence.reused_chunks,
+                },
+                evidence.overflow_reconciled,
+            ),
+            CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
+                snapshot_content_identity,
+                overflow_reconciled,
+            }) => (
+                CodeIndexCadenceOutcomeV1::Noop {
+                    snapshot_content_identity: snapshot_content_identity.clone(),
+                },
+                *overflow_reconciled,
+            ),
+        };
+        let receipt = CodeIndexEventToReadyReceiptV1::new(
+            project_root,
+            trigger,
+            wake_micros,
+            ready_micros,
+            cadence_outcome,
+            overflow_reconciled,
+        );
+        telemetry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(receipt);
+    }
+
+    #[cfg(test)]
+    pub(super) fn latest_event_to_ready_receipt(&self) -> Option<CodeIndexEventToReadyReceiptV1> {
+        self.cadence_telemetry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest()
+            .cloned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn event_to_ready_receipts(&self) -> Vec<CodeIndexEventToReadyReceiptV1> {
+        self.cadence_telemetry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .receipts()
+            .to_vec()
     }
 
     pub(crate) fn subscribe_generation_publications(
@@ -208,6 +324,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
+        // Serve any retained complete generation immediately so admission stays
+        // non-blocking, but never treat restore as a verified freshness claim.
         let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
@@ -220,9 +338,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&scheduler.shutting_down),
             )
         };
+        let pending_wake_micros = Arc::new(AtomicU64::new(0));
+        let pending_wake_trigger = Arc::new(AtomicU64::new(0));
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_wake = Arc::clone(&wake);
+        let worker_pending_wake_micros = Arc::clone(&pending_wake_micros);
+        let worker_pending_wake_trigger = Arc::clone(&pending_wake_trigger);
+        let worker_cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_semantic_evaluation_publication_gate =
             Arc::clone(&semantic_evaluation_publication_gate);
@@ -230,7 +353,6 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::clone(&self.background_reconcile_admission);
         let worker_generation_publications = self.generation_publications.clone();
         let worker_project_root = project_root.clone();
-        let initial_wake = Arc::clone(&wake);
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -264,11 +386,21 @@ impl CodeIndexSchedulerRegistryV1 {
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
                 }
-                if let Ok((Ok(CodeIndexReconcileOutcomeV1::Published(evidence)), _)) = &result {
-                    Self::publish_generation(
-                        &worker_generation_publications,
+                if let Ok((Ok(outcome), _)) = &result {
+                    if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
+                        Self::publish_generation(
+                            &worker_generation_publications,
+                            worker_project_root.clone(),
+                            evidence,
+                        );
+                    }
+                    Self::record_reconcile_receipt(
+                        &worker_cadence_telemetry,
                         worker_project_root.clone(),
-                        evidence,
+                        &worker_pending_wake_micros,
+                        &worker_pending_wake_trigger,
+                        CodeIndexCadenceTriggerV1::Mount,
+                        outcome,
                     );
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
@@ -294,7 +426,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 semantic_query_authority: None,
                 scheduler,
                 serving_generation,
-                wake,
+                wake: Arc::clone(&wake),
+                pending_wake_micros: Arc::clone(&pending_wake_micros),
+                pending_wake_trigger: Arc::clone(&pending_wake_trigger),
                 shutting_down,
                 reconcile_in_progress,
                 active_generation_encoded_bytes,
@@ -305,9 +439,15 @@ impl CodeIndexSchedulerRegistryV1 {
         if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
             let _ = hook(&latest.generation);
         }
-        // A restored generation remains immutable serving evidence, but current
-        // worktree truth still has to be proven without waiting for a query.
-        initial_wake.notify_one();
+        // Always schedule a background verification pass. Retained generations
+        // keep queries non-blocking, but open-time clocks must not suppress
+        // cadence indefinitely (the live stale-index defect).
+        Self::note_wake(
+            &pending_wake_micros,
+            &pending_wake_trigger,
+            &wake,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
         Ok(true)
     }
 
@@ -447,6 +587,17 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_path(path);
+        // Scheduler wake already fired; stamp the cadence clock for the receipt.
+        let _ = worktree.pending_wake_micros.compare_exchange(
+            0,
+            u64::try_from(now_micros().0).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        worktree.pending_wake_trigger.store(
+            Self::pack_trigger(CodeIndexCadenceTriggerV1::HookHint),
+            Ordering::Release,
+        );
         true
     }
 
@@ -473,6 +624,16 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_hook_paths(absolute);
+        let _ = worktree.pending_wake_micros.compare_exchange(
+            0,
+            u64::try_from(now_micros().0).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        worktree.pending_wake_trigger.store(
+            Self::pack_trigger(CodeIndexCadenceTriggerV1::HookHint),
+            Ordering::Release,
+        );
         true
     }
 
@@ -498,16 +659,82 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
     ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
         let canonical_root = project_root.canonicalize().ok()?;
-        let scheduler = {
+        let (scheduler, reconcile_in_progress, serving_generation) = {
             let mounted = self.mounted.lock().await;
-            Arc::clone(&mounted.get(&canonical_root)?.scheduler)
+            let worktree = mounted.get(&canonical_root)?;
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.reconcile_in_progress),
+                Arc::clone(&worktree.serving_generation),
+            )
         };
         tokio::task::spawn_blocking(move || {
-            let mut scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let refreshing = reconcile_in_progress.load(Ordering::Acquire);
+            let mut scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let latest = serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let (
+                        repository_id,
+                        worktree_id,
+                        source_reference,
+                        generation_id,
+                        content_identity,
+                        sealed,
+                    ) = latest.as_ref().map_or(
+                        (None, None, None, None, None, None),
+                        |latest| {
+                            let generation = &latest.generation;
+                            let snapshot = generation.snapshot();
+                            (
+                                Some(snapshot.repository.as_str().to_owned()),
+                                snapshot
+                                    .worktree
+                                    .as_ref()
+                                    .map(|worktree| worktree.as_str().to_owned()),
+                                snapshot
+                                    .reference
+                                    .as_ref()
+                                    .map(|reference| reference.as_str().to_owned()),
+                                Some(generation.manifest().generation_id.as_str().to_owned()),
+                                Some(snapshot.content_identity.as_str().to_owned()),
+                                Some(generation.manifest().seal.sealed_at.0),
+                            )
+                        },
+                    );
+                    return crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                        worktree_root: canonical_root.display().to_string(),
+                        repository_id,
+                        worktree_id,
+                        source_reference,
+                        latest_generation_id: generation_id,
+                        snapshot_content_identity: content_identity,
+                        sealed_at_micros: sealed,
+                        last_reconcile_micros: None,
+                        staleness_state: Some(
+                            if latest.is_some() {
+                                "refreshing"
+                            } else {
+                                "indexing"
+                            }
+                            .to_owned(),
+                        ),
+                        hook_hint_count: None,
+                        coverage: "partial_refresh_in_progress".to_owned(),
+                    };
+                }
+            };
             let reconciled = scheduler.ensure_fresh_for_query().is_ok();
-            let latest = reconciled.then(|| scheduler.latest_complete()).flatten();
+            let verified = scheduler.verified_against_source();
+            let latest = if reconciled {
+                scheduler.latest_complete()
+            } else {
+                None
+            };
             let hook_hint_count = scheduler.pending_hint_count();
             let (
                 repository_id,
@@ -536,6 +763,25 @@ impl CodeIndexSchedulerRegistryV1 {
                         Some(generation.manifest().seal.sealed_at.0),
                     )
                 });
+            let staleness_state = if !reconciled {
+                "unknown"
+            } else if refreshing {
+                if latest.is_some() {
+                    "refreshing"
+                } else {
+                    "indexing"
+                }
+            } else if !verified {
+                if latest.is_some() {
+                    "stale"
+                } else {
+                    "indexing"
+                }
+            } else if latest.is_some() {
+                "fresh"
+            } else {
+                "indexing"
+            };
             crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 repository_id,
@@ -544,20 +790,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 latest_generation_id: generation_id,
                 snapshot_content_identity: content_identity,
                 sealed_at_micros: sealed,
-                last_reconcile_micros: Some(scheduler.last_reconciled_at_micros()),
-                staleness_state: Some(
-                    if !reconciled {
-                        "unknown"
-                    } else if latest.is_some() {
-                        "fresh"
-                    } else {
-                        "indexing"
-                    }
-                    .to_owned(),
-                ),
+                last_reconcile_micros: scheduler.last_reconciled_at_micros(),
+                staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,
                 coverage: if !reconciled {
                     "unknown_reconcile_failed"
+                } else if !verified {
+                    "partial_unverified_restore"
                 } else if hook_hint_count.is_some() {
                     "complete"
                 } else {
@@ -584,12 +823,15 @@ impl CodeIndexSchedulerRegistryV1 {
         // ladder (gix status + hashing + build_and_publish) must never run while
         // the registry map is locked, or one worktree's reconcile would
         // serialize every other worktree's queries and stall the executor.
-        let (scheduler, serving_generation) = {
+        let (scheduler, serving_generation, wake, pending_wake_micros, pending_wake_trigger) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
             (
                 Arc::clone(&worktree.scheduler),
                 Arc::clone(&worktree.serving_generation),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.pending_wake_micros),
+                Arc::clone(&worktree.pending_wake_trigger),
             )
         };
         // Run the synchronous reconcile off the async executor. When the
@@ -597,11 +839,21 @@ impl CodeIndexSchedulerRegistryV1 {
         // complete immutable generation instead of joining the in-progress
         // refresh; the next request observes the newly published generation.
         let authority_root = project_root.clone();
+        let cadence_telemetry = Arc::clone(&self.cadence_telemetry);
         let (latest, publication) = tokio::task::spawn_blocking(move || {
             let mut scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
+                    // Serve prior generation without waiting, but schedule a
+                    // follow-up verification so busy refresh cannot strand
+                    // cadence indefinitely.
+                    Self::note_wake(
+                        &pending_wake_micros,
+                        &pending_wake_trigger,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::BusyFollowUp,
+                    );
                     return serving_generation
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -609,22 +861,47 @@ impl CodeIndexSchedulerRegistryV1 {
                         .map(|latest| (latest, None));
                 }
             };
-            let before = scheduler
-                .latest_complete()
-                .map(|latest| latest.generation.manifest().generation_id.clone());
-            let reconciled = scheduler.ensure_fresh_for_query().ok()?;
+            let wake_micros = now_micros().0;
+            let outcome = scheduler.ensure_fresh_for_query().ok()?;
             let latest = scheduler.latest_complete()?;
             *serving_generation
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
-            let publication = (reconciled
-                && before.as_ref() != Some(&latest.generation.manifest().generation_id))
-            .then(|| CodeIndexGenerationPublishedV1 {
-                project_root: project_root.clone(),
-                repository_id: latest.generation.snapshot().repository.clone(),
-                generation_id: latest.generation.manifest().generation_id.clone(),
-                snapshot_content_identity: latest.generation.snapshot().content_identity.clone(),
-                observation_time_micros: now_micros().0,
+            if let Some(outcome) = outcome.as_ref() {
+                // Prefer the earlier pending wake when one exists; otherwise this
+                // query-admission reconcile is its own event-to-ready sample.
+                let _ = pending_wake_micros.compare_exchange(
+                    0,
+                    u64::try_from(wake_micros).unwrap_or(u64::MAX),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                if pending_wake_trigger.load(Ordering::Acquire) == 0 {
+                    pending_wake_trigger.store(
+                        Self::pack_trigger(CodeIndexCadenceTriggerV1::QueryAdmission),
+                        Ordering::Release,
+                    );
+                }
+                Self::record_reconcile_receipt(
+                    &cadence_telemetry,
+                    project_root.clone(),
+                    &pending_wake_micros,
+                    &pending_wake_trigger,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                    outcome,
+                );
+            }
+            let publication = outcome.as_ref().and_then(|outcome| match outcome {
+                CodeIndexReconcileOutcomeV1::Published(evidence) => {
+                    Some(CodeIndexGenerationPublishedV1 {
+                        project_root: project_root.clone(),
+                        repository_id: evidence.repository_id.clone(),
+                        generation_id: evidence.generation_id.clone(),
+                        snapshot_content_identity: evidence.snapshot_content_identity.clone(),
+                        observation_time_micros: now_micros().0,
+                    })
+                }
+                CodeIndexReconcileOutcomeV1::Noop(_) => None,
             });
             Some((latest, publication))
         })

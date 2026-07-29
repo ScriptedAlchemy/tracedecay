@@ -389,11 +389,7 @@ fn compatibility_diagnostics_request(
     }))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FeedbackSurfaceRequest {
-    pub request_handle: String,
-}
+pub type FeedbackSurfaceRequest = tracedecay_application::feedback::FeedbackHandleRequestV1;
 
 /// Canonical explicit PR13 trigger. Project/root/scope/provider identities and
 /// the resulting read handle are all minted by the authenticated daemon.
@@ -413,19 +409,6 @@ impl FeedbackAdvisoryCycleSurfaceRequest {
             return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
         }
         Ok(())
-    }
-}
-
-impl FeedbackSurfaceRequest {
-    pub fn new(request_handle: String) -> Result<Self, ApplicationSurfaceAdapterError> {
-        if request_handle.is_empty()
-            || request_handle.trim() != request_handle
-            || request_handle.len() > MAX_REQUEST_HANDLE_BYTES
-            || request_handle.chars().any(char::is_control)
-        {
-            return Err(ApplicationSurfaceAdapterError::InvalidRequestHandle);
-        }
-        Ok(Self { request_handle })
     }
 }
 
@@ -754,11 +737,8 @@ pub enum CallableCodeSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationListSurfaceRequest {}
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationKeySurfaceRequest {
-    pub key: SettingKey,
-}
+pub type ConfigurationKeySurfaceRequest =
+    tracedecay_application::configuration::ConfigurationGetRequestV1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "operation")]
@@ -774,14 +754,8 @@ pub enum ConfigurationDirectMutationSurfaceRequest {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationSetSurfaceRequest {
-    pub layer: ConfigurationLayerIdV1,
-    pub key: SettingKey,
-    pub value: ConfigurationValueV1,
-    pub expected_revision: ConfigurationRevisionId,
-}
+pub type ConfigurationSetSurfaceRequest =
+    tracedecay_application::configuration::ConfigurationSetRequestV1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1486,6 +1460,89 @@ fn plan26_sse_stream_event<T>(event: &StreamEvent<T>) -> Option<(Plan26SseLifecy
     }
 }
 
+async fn http_operation_events_through_executor(
+    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    operation_id: &OperationId,
+    request_id: &RequestId,
+    controls: &HttpApplicationControls,
+    next_sequence: u64,
+) -> Response {
+    let context = match tracedecay_application::ApplicationInvocationContext::new(
+        request_id.clone(),
+        tracedecay_application::InvocationTarget::CurrentProject,
+        controls.deadline.clone(),
+        controls.cancellation.clone(),
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let request = match tracedecay_application::ApplicationRequest::operation_events(
+        operation_id.request_id().clone(),
+        256,
+        next_sequence.checked_sub(1),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let invocation = match tracedecay_application::ApplicationInvocation::new(context, request) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let response =
+        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation).await;
+    let tracedecay_application::ApplicationResponse::Stream(response) = (match response {
+        Ok(response) => response,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                operation_event_error_from_invocation(error),
+            );
+        }
+    }) else {
+        return operation_event_problem(request_id, OperationEventError::ResumeUnavailable);
+    };
+    sse_response(
+        request_id.clone(),
+        response.stream.frontier,
+        tokio_stream::iter(response.stream.events),
+    )
+    .into_response()
+}
+
+fn operation_event_error_from_invocation(
+    error: tracedecay_application::InvocationError,
+) -> OperationEventError {
+    match error {
+        tracedecay_application::InvocationError::Denied => {
+            OperationEventError::NotFoundOrNotAuthorized
+        }
+        tracedecay_application::InvocationError::Cancelled
+        | tracedecay_application::InvocationError::DeadlineExceeded => {
+            OperationEventError::RequestNotAdmitted
+        }
+        tracedecay_application::InvocationError::Conflict => OperationEventError::InvalidFrontier,
+        tracedecay_application::InvocationError::InvalidRequest
+        | tracedecay_application::InvocationError::Unavailable => {
+            OperationEventError::ResumeUnavailable
+        }
+    }
+}
+
 async fn http_operation_events(
     State(state): State<HttpOperationEventState>,
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
@@ -1522,6 +1579,18 @@ async fn http_operation_events(
             );
         }
     };
+    if query.resume_token.is_none()
+        && let Some(executor) = state.executor.as_deref()
+    {
+        return http_operation_events_through_executor(
+            executor,
+            &operation_id,
+            &request_id,
+            &controls,
+            query.next_sequence,
+        )
+        .await;
+    }
     let context = match resolve_authenticated_http_request_context(
         &state,
         &operation_id,
@@ -1665,6 +1734,88 @@ async fn http_operation_events(
     sse_response(correlation_id, frontier, observed_stream).into_response()
 }
 
+async fn http_operation_cancel_through_executor(
+    state: &HttpOperationEventState,
+    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
+    operation_id: &OperationId,
+    request_id: &RequestId,
+    controls: &HttpApplicationControls,
+    observed_at: UtcMicros,
+) -> Response {
+    let context = match tracedecay_application::ApplicationInvocationContext::new(
+        request_id.clone(),
+        tracedecay_application::InvocationTarget::CurrentProject,
+        controls.deadline.clone(),
+        controls.cancellation.clone(),
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let request = match tracedecay_application::ApplicationRequest::operation_cancel(
+        operation_id.request_id().clone(),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let invocation = match tracedecay_application::ApplicationInvocation::new(context, request) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
+    let response =
+        tracedecay_application::ApplicationInvocationExecutor::invoke(executor, invocation).await;
+    let tracedecay_application::ApplicationResponse::Cancellation(response) = (match response {
+        Ok(response) => response,
+        Err(error) => {
+            return operation_event_problem(
+                request_id,
+                operation_event_error_from_invocation(error),
+            );
+        }
+    }) else {
+        return operation_event_problem(request_id, OperationEventError::ResumeUnavailable);
+    };
+    if response.cancelled {
+        if let Some(cancellation) = state
+            .cancellations
+            .lock()
+            .ok()
+            .and_then(|active| active.get(operation_id.request_id()).cloned())
+        {
+            let _ = cancellation.cancel(observed_at);
+        }
+        (
+            StatusCode::ACCEPTED,
+            Json(HttpOperationCancelResponse {
+                status: "requested",
+            }),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::OK,
+            Json(HttpOperationCancelResponse {
+                status: "already_terminal",
+            }),
+        )
+            .into_response()
+    }
+}
+
 async fn http_operation_cancel(
     State(state): State<HttpOperationEventState>,
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
@@ -1700,6 +1851,17 @@ async fn http_operation_cancel(
             );
         }
     };
+    if let Some(executor) = state.executor.as_deref() {
+        return http_operation_cancel_through_executor(
+            &state,
+            executor,
+            &operation_id,
+            &request_id,
+            &controls,
+            observed_at,
+        )
+        .await;
+    }
     let context = match resolve_authenticated_http_request_context(
         &state,
         &operation_id,
@@ -2635,7 +2797,8 @@ pub fn parse_application_surface_request(
             let request: FeedbackSurfaceRequest = serde_json::from_value(value)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
             Ok(ApplicationSurfaceRequest::Feedback(
-                FeedbackSurfaceRequest::new(request.request_handle)?,
+                FeedbackSurfaceRequest::new(request.request_handle)
+                    .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?,
             ))
         }
         ApplicationSurfaceOperation::FeedbackAdvisoryCycle => {
@@ -2656,6 +2819,7 @@ pub async fn execute_application_surface(
     let result_contract = ResultContractRef::from_schema(&dispatched.invocation.result_schema);
     let binding_id = dispatched.invocation.binding_id.clone();
     let request_id = dispatched.request_id;
+    let surface = dispatched.surface;
     let delivery_route = plan26_delivery_route(dispatched.surface);
     let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
     let observed_at = current_micros()?;
@@ -2665,6 +2829,86 @@ pub async fn execute_application_surface(
     let cancellation = invocation.cancellation;
     let cancellation_context = cancellation.context();
     let request_deadline = deadline.clone();
+    let migrated_payload = match (&operation, &invocation.request) {
+        (
+            ApplicationSurfaceOperation::ConfigurationGet
+            | ApplicationSurfaceOperation::ConfigurationSet,
+            ApplicationSurfaceRequest::Configuration(request),
+        ) => Some(
+            serde_json::to_value(request)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+        ),
+        (
+            ApplicationSurfaceOperation::FeedbackGet,
+            ApplicationSurfaceRequest::Feedback(request),
+        ) => Some(
+            serde_json::to_value(request)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+        ),
+        _ => None,
+    };
+    if let Some(payload) = migrated_payload {
+        let Some(executor) = executor else {
+            return Ok(ApplicationSurfaceInvocationResult {
+                operation,
+                binding_id,
+                result: Err(ApplicationProblemEnvelope::new(
+                    result_contract,
+                    request_id,
+                    ApplicationProblem::unavailable(SafeDiagnostic::new(
+                        "application.transport.unavailable",
+                        "The daemon application transport is unavailable",
+                    )?),
+                )),
+                requested_format,
+            });
+        };
+        let binding = tracedecay_application::ApplicationInvocationBinding::new(
+            binding_id.clone(),
+            surface,
+            SurfaceOperationName::new(operation.as_str())?,
+            result_contract.clone(),
+            invocation.page,
+        )?;
+        let context = tracedecay_application::ApplicationInvocationContext::new(
+            request_id.clone(),
+            invocation.scope,
+            deadline,
+            cancellation,
+        )?;
+        let request = tracedecay_application::ApplicationRequest::surface(binding, payload)?;
+        let invocation = tracedecay_application::ApplicationInvocation::new(context, request)?;
+        let result = match tracedecay_application::ApplicationInvocationExecutor::invoke(
+            executor, invocation,
+        )
+        .await
+        {
+            Ok(response) => response.envelope().cloned().ok_or_else(|| {
+                ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new(
+                            "application.surface.invalid_response",
+                            "The daemon returned an invalid application response",
+                        )
+                        .expect("static invocation diagnostic is valid"),
+                    ),
+                )
+            }),
+            Err(error) => Err(ApplicationProblemEnvelope::new(
+                result_contract,
+                request_id,
+                invocation_contract_problem(error)?,
+            )),
+        };
+        return Ok(ApplicationSurfaceInvocationResult {
+            operation,
+            binding_id,
+            result,
+            requested_format,
+        });
+    }
     let request = match invocation.request {
         ApplicationSurfaceRequest::GitRead(request) => {
             crate::daemon::DaemonInvocationRequest::git_read(
@@ -3700,6 +3944,46 @@ fn invocation_problem(
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
         crate::daemon::DaemonInvocationProblem::Unavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.unavailable",
+                "The application service for this operation is unavailable",
+            )?)
+        }
+    })
+}
+
+fn invocation_contract_problem(
+    error: tracedecay_application::InvocationError,
+) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
+    Ok(match error {
+        tracedecay_application::InvocationError::Denied => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        tracedecay_application::InvocationError::Cancelled => {
+            ApplicationProblem::cancelled_before_admission()
+        }
+        tracedecay_application::InvocationError::DeadlineExceeded => {
+            ApplicationProblem::timed_out_before_admission()
+        }
+        tracedecay_application::InvocationError::InvalidRequest => {
+            ApplicationProblem::InvalidRequest {
+                diagnostic: SafeDiagnostic::new(
+                    "application.surface.invalid_request",
+                    "The daemon rejected the application request",
+                )?,
+                retry: RetryDirective::Never,
+                legal_actions: Vec::new(),
+            }
+        }
+        tracedecay_application::InvocationError::Conflict => ApplicationProblem::Conflict {
+            diagnostic: SafeDiagnostic::new(
+                "application.surface.conflict",
+                "The application request conflicts with current state",
+            )?,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        },
+        tracedecay_application::InvocationError::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(
                 "application.surface.unavailable",
                 "The application service for this operation is unavailable",

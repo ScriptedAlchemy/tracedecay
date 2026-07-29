@@ -312,8 +312,8 @@ impl tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority
                     error.to_string(),
                 )
             })?;
-        let identity = crate::sessions::source::sqlite_generation_identity(&self.canonical_path)
-            .map_err(|_| {
+        let identity =
+            crate::db::sqlite_generation_identity(&self.canonical_path).map_err(|_| {
                 tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied(
                     "could not verify initialized SQLite file identity".to_owned(),
                 )

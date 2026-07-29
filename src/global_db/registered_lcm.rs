@@ -3,6 +3,7 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 
 use crate::{
+    application::session::compatibility::projected_content_hash,
     db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params},
     sessions::{
         SessionMessageRecord,
@@ -11,11 +12,12 @@ use crate::{
             LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
             LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
             LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-            LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-            LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-            LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-            LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-            compression, dag, doctor, gc, payload, query, raw, schema,
+            LcmPayloadExpansion, LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage,
+            LcmRecentSession, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
+            LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef, LcmStatus,
+            LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+            LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
+            query, raw, schema,
         },
     },
 };
@@ -406,7 +408,7 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let summary_hash = raw::sha256_hex(&draft.summary_text);
+        let summary_hash = projected_content_hash(&draft.summary_text);
         let mut successor_id = crate::sessions::lcm::dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
@@ -417,7 +419,7 @@ impl RegisteredGlobalDb {
         if successor_id == node_id {
             successor_id = format!(
                 "sum_{}",
-                raw::sha256_hex(&format!(
+                projected_content_hash(&format!(
                     "{node_id}\0{}",
                     draft.metadata_json.as_deref().unwrap_or_default()
                 ))
@@ -548,9 +550,16 @@ impl RegisteredGlobalDb {
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        let response =
-            compression::compress(&transaction, storage_root, request, &mut payload_rollback)
-                .await?;
+        let publisher =
+            session_temporal_operations::GlobalDbLcmSummaryPublication::new(&transaction);
+        let response = compression::compress(
+            &transaction,
+            &publisher,
+            storage_root,
+            request,
+            &mut payload_rollback,
+        )
+        .await?;
         transaction.commit().await?;
         payload_rollback.disarm();
         Ok(response)
@@ -655,5 +664,38 @@ impl RegisteredGlobalDb {
         transaction.commit().await?;
         payload_rollback.disarm();
         Ok(())
+    }
+}
+
+/// The registered database is the transaction-and-filesystem adapter behind the
+/// narrow LCM authorities: it owns the write transaction plus payload rollback
+/// for admission, and the read snapshot each expansion is served from.
+impl payload::LcmRawMessagePort for RegisteredGlobalDb {
+    async fn ingest_raw_message(
+        &self,
+        storage_root: &Path,
+        message: &SessionMessageRecord,
+    ) -> Result<(), LcmError> {
+        self.lcm_ingest_raw_message(storage_root, message).await
+    }
+}
+
+impl payload::LcmPayloadAuthorityPort for RegisteredGlobalDb {
+    async fn expand_payload(
+        &self,
+        storage_root: &Path,
+        request: payload::LcmPayloadExpandRequest<'_>,
+    ) -> Result<LcmPayloadExpansion, LcmError> {
+        let snapshot = self.read_snapshot().await?;
+        payload::expand_payload(
+            &snapshot,
+            storage_root,
+            request.provider,
+            request.session_id,
+            request.payload_ref,
+            request.offset,
+            request.limit,
+        )
+        .await
     }
 }

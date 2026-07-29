@@ -186,7 +186,30 @@ the usability study. See
    PR12 transport/distribution acceptance.)*
 3. Finish PR13 Hook V2, Context Scout, advisory authorities, host lifecycle,
    Cursor extension, and daemon project-open registration. *(In flight; hook
-   wiring and FastEmbed acceptance wiring may be landing concurrently.)*
+   wiring and FastEmbed acceptance wiring may be landing concurrently. Landed
+   2026-07-29: the four Plan 27 host lifecycle/capability guards recorded as
+   unreachable on 2026-07-26 are production-reached — competing-extension
+   discovery now supplies the official component-set dry run and binds its
+   claims to the confirmed plan digest, Cursor Cloud and the other unadmitted
+   hosts return typed unavailable component sets instead of empty defaults,
+   Cline-family routes come from the embedded digest-bound evidence packet
+   rather than adapter-file resemblance, and the native edit/stop conformance
+   matrix is consumed by the host-bundle Doctor report even with nothing
+   installed. Focused local evidence only: `pr13_host_bundle_acceptance` 27
+   passed, `agents::host_bundle_registry` 20 passed, `agent_cmd::tests` 18 of 19
+   passed. That closes those four guards, not PR13 host acceptance — the
+   lifecycle dogfood, cross-platform runs, host-by-host rollback, feedback
+   rollback switch, Kimi Code/OpenCode conformance, and an end-to-end
+   Cline-family route proof are still unrun, and the Cursor Core
+   component-ownership conflict above stays open. The one failure inside the
+   touched territory, the `agent_cmd` binary's
+   `explicit_core_component_lifecycle_preserves_opencode_companions`, is a
+   pre-existing isolation flake — it passes alone and fails in parallel because
+   `which_tracedecay()` reads `PATH` and `CARGO_TARGET_DIR` while sibling tests
+   mutate the environment under a `HOST_ENV_LOCK` it does not take — and it
+   remains open until that lease is fixed separately;
+   `deferred_kimi_refresh_does_not_block_maintenance` and a daemonless-init
+   bootstrap test fail in untouched peer territory and are outside this slice.)*
 4. Mount incremental code and FastEmbed workers behind daemon-owned bounded
    scheduling while keeping project open and ordinary search non-blocking.
    *(Partially landed 2026-07-23: worktree-aware incremental indexing is

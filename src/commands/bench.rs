@@ -6,7 +6,8 @@ pub(crate) async fn handle_bench(
     path: Option<String>,
     max_nodes: usize,
 ) -> tracedecay::errors::Result<()> {
-    let project_path = tracedecay::config::resolve_path(path);
+    let resolved =
+        super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
     let queries_toml = queries
         .map(std::fs::read_to_string)
         .transpose()
@@ -14,7 +15,7 @@ pub(crate) async fn handle_bench(
             message: format!("failed to read query file: {error}"),
         })?;
     let result = daemon_tool_json(
-        Some(&project_path),
+        Some(&resolved.project_path),
         "tracedecay_admin_project",
         serde_json::json!({
             "action": "bench",

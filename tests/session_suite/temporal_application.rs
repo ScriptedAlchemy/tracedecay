@@ -1,22 +1,23 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracedecay::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
 };
 use tracedecay::application::session::{
     AuthorizationGrantId, AuthorizedTemporalExecutionRequest, SessionAccess,
     SessionAuthorizationError, SessionAuthorizationGrant, SessionDataFreshness,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalExecutionError, SessionTemporalExecutionPort, SessionTemporalExecutionReport,
-    SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalExecutionPort,
+    SessionTemporalExecutionReport, SessionTemporalQuery,
 };
 use tracedecay::query::temporal::context::{
     CompactContext, ContextBudget, TokenPolicy, VersionedTokenEstimator,
@@ -31,11 +32,16 @@ use tracedecay::query::temporal::resolution::{SummaryLineageRejection, SummaryOm
 use tracedecay::query::temporal::{
     TemporalKernelError, TemporalKernelRequest, TemporalKernelResult,
 };
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::{
     ActorId, CompactContextBundleV1, CompactContextOmissionV1, ContextOmissionReasonV1, ProjectId,
     RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSummaryIdV1,
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 
@@ -45,12 +51,14 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         SessionAuthorizationGrant::issue(
             AuthorizationGrantId::new("grant.temporal.application").unwrap(),
             7,
             context,
+            binding,
             request,
         )
     }
@@ -62,6 +70,7 @@ impl SessionScopeAuthorizer for DenyAuthorizer {
     fn authorize(
         &self,
         _context: &RequestContext,
+        _binding: &SessionRequestBinding,
         _request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         Err(SessionAuthorizationError::Denied)
@@ -78,12 +87,14 @@ impl SessionScopeAuthorizer for GrantAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         SessionAuthorizationGrant::issue(
             AuthorizationGrantId::new(self.id).unwrap(),
             self.revision,
             context,
+            binding,
             request,
         )
     }
@@ -95,6 +106,7 @@ impl SessionScopeAuthorizer for MismatchedGrantAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         let mismatched = SessionScopeAuthorizationRequest::new(
@@ -110,6 +122,7 @@ impl SessionScopeAuthorizer for MismatchedGrantAuthorizer {
             AuthorizationGrantId::new("grant.mismatched").unwrap(),
             1,
             context,
+            binding,
             &mismatched,
         )
     }
@@ -122,6 +135,7 @@ impl SessionScopeAuthorizer for ReplayedGrantAuthorizer {
     fn authorize(
         &self,
         _context: &RequestContext,
+        _binding: &SessionRequestBinding,
         _request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         Ok(self.0.clone())
@@ -134,15 +148,17 @@ impl SessionScopeAuthorizer for CancellingAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         let grant = SessionAuthorizationGrant::issue(
             AuthorizationGrantId::new("grant.cancel-during-authorization").unwrap(),
             1,
             context,
+            binding,
             request,
         )?;
-        context.cancellation().cancel();
+        binding.cancellation().cancel();
         Ok(grant)
     }
 }
@@ -153,6 +169,7 @@ impl SessionScopeAuthorizer for DelayingAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         std::thread::sleep(self.0);
@@ -160,6 +177,7 @@ impl SessionScopeAuthorizer for DelayingAuthorizer {
             AuthorizationGrantId::new("grant.deadline-during-authorization").unwrap(),
             1,
             context,
+            binding,
             request,
         )
     }
@@ -181,6 +199,7 @@ impl SessionScopeAuthorizer for CapturingAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         *self.target.lock().unwrap() = Some((
@@ -194,6 +213,7 @@ impl SessionScopeAuthorizer for CapturingAuthorizer {
             AuthorizationGrantId::new("grant.captured").unwrap(),
             1,
             context,
+            binding,
             request,
         )
     }
@@ -547,7 +567,59 @@ impl SessionTemporalExecutionPort for PendingExecutionPort {
     }
 }
 
-fn context(root: &str) -> RequestContext {
+#[derive(Clone)]
+struct TestRequestContext {
+    request: RequestContext,
+    binding: SessionRequestBinding,
+}
+
+impl TestRequestContext {
+    fn binding(&self) -> &SessionRequestBinding {
+        &self.binding
+    }
+
+    fn actor_id(&self) -> &ActorId {
+        self.request.actor()
+    }
+
+    fn identity(&self) -> &ResolvedSessionIdentity {
+        self.binding.identity()
+    }
+
+    fn capability_digest(&self) -> CapabilityDigest {
+        self.binding.capability_digest()
+    }
+
+    fn policy_digest(&self) -> PolicyDigest {
+        self.binding.policy_digest()
+    }
+
+    fn configuration_digest(&self) -> ConfigurationDigest {
+        self.binding.configuration_digest()
+    }
+
+    fn deadline(&self) -> &Deadline {
+        self.request.deadline()
+    }
+
+    fn cancellation(&self) -> &CancellationToken {
+        self.binding.cancellation()
+    }
+
+    fn budgets(&self) -> RequestBudgets {
+        self.binding.budgets()
+    }
+}
+
+impl std::ops::Deref for TestRequestContext {
+    type Target = RequestContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+fn context(root: &str) -> TestRequestContext {
     context_with(
         root,
         "request.temporal.application",
@@ -557,22 +629,22 @@ fn context(root: &str) -> RequestContext {
 }
 
 fn context_with_controls(
-    template: &RequestContext,
+    template: &TestRequestContext,
     request_id: &str,
-    deadline: MonotonicDeadline,
+    expires_at: UtcMicros,
     cancellation: CancellationToken,
     budgets: RequestBudgets,
-) -> RequestContext {
-    RequestContext::new(
-        template.actor_id().clone(),
-        RequestId::new(request_id).unwrap(),
+) -> TestRequestContext {
+    context_for_identity_with_controls(
+        template.actor_id().as_str(),
+        request_id,
         template.identity().clone(),
         template.capability_digest(),
         template.policy_digest(),
         template.configuration_digest(),
-        deadline,
         cancellation,
         budgets,
+        expires_at,
     )
 }
 
@@ -581,7 +653,7 @@ fn context_with(
     request_id: &str,
     budgets: RequestBudgets,
     configuration_digest: [u8; 32],
-) -> RequestContext {
+) -> TestRequestContext {
     context_with_policy(root, request_id, budgets, DIGEST, configuration_digest)
 }
 
@@ -591,7 +663,7 @@ fn context_with_policy(
     budgets: RequestBudgets,
     policy_digest: [u8; 32],
     configuration_digest: [u8; 32],
-) -> RequestContext {
+) -> TestRequestContext {
     context_with_auth_digests(
         root,
         request_id,
@@ -609,7 +681,7 @@ fn context_with_auth_digests(
     capability_digest: [u8; 32],
     policy_digest: [u8; 32],
     configuration_digest: [u8; 32],
-) -> RequestContext {
+) -> TestRequestContext {
     context_for_actor_with_auth_digests(
         "actor.cursor",
         root,
@@ -630,7 +702,7 @@ fn context_for_actor_with_auth_digests(
     capability_digest: [u8; 32],
     policy_digest: [u8; 32],
     configuration_digest: [u8; 32],
-) -> RequestContext {
+) -> TestRequestContext {
     context_for_identity(
         actor_id,
         request_id,
@@ -661,18 +733,69 @@ fn context_for_identity(
     capability_digest: [u8; 32],
     policy_digest: [u8; 32],
     configuration_digest: [u8; 32],
-) -> RequestContext {
-    RequestContext::new(
-        ActorId::new(actor_id).unwrap(),
-        RequestId::new(request_id).unwrap(),
+) -> TestRequestContext {
+    let request_id = RequestId::new(request_id).unwrap();
+    context_for_identity_with_controls(
+        actor_id,
+        request_id.as_str(),
         identity,
         CapabilityDigest::new(capability_digest),
         PolicyDigest::new(policy_digest),
         ConfigurationDigest::new(configuration_digest),
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
-        CancellationToken::new(),
+        CancellationToken::for_application_request(&request_id),
         budgets,
+        UtcMicros(application_observed_at().0.saturating_add(30_000_000)),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn context_for_identity_with_controls(
+    actor_id: &str,
+    request_id: &str,
+    identity: ResolvedSessionIdentity,
+    capability: CapabilityDigest,
+    policy: PolicyDigest,
+    configuration: ConfigurationDigest,
+    cancellation: CancellationToken,
+    budgets: RequestBudgets,
+    expires_at: UtcMicros,
+) -> TestRequestContext {
+    let actor = ActorId::new(actor_id).unwrap();
+    let request_id = RequestId::new(request_id).unwrap();
+    let scope = identity.application_scope().unwrap();
+    let observed_at = application_observed_at();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.temporal.application.context").unwrap(),
+        1,
+        session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
+            .unwrap(),
+        actor.clone(),
+        observed_at,
+        UtcMicros(i64::MAX - 1),
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.session.temporal-retrieval").unwrap()]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    let request = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        request_id,
+        Deadline::new(expires_at).unwrap(),
+        CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let binding = SessionRequestBinding::new(
+        identity,
+        capability,
+        policy,
+        configuration,
+        cancellation,
+        budgets,
+    );
+    TestRequestContext { request, binding }
 }
 
 fn query(text: &str) -> SessionTemporalQuery {
@@ -766,9 +889,22 @@ fn configuration() -> SessionRetrievalConfiguration {
     SessionRetrievalConfiguration::new(3, 5).unwrap()
 }
 
+async fn retrieve<A, P, E>(
+    service: &SessionRetrievalService<A, P, E>,
+    context: &TestRequestContext,
+    query: SessionTemporalQuery,
+) -> SessionRetrievalOutcome<TemporalKernelResult>
+where
+    A: SessionScopeAuthorizer,
+    P: SessionTemporalExecutionPort,
+    E: VersionedTokenEstimator + Sync,
+{
+    service.retrieve(context, context.binding(), query).await
+}
+
 async fn recorded_digest<A: SessionScopeAuthorizer>(
     authorizer: A,
-    context: RequestContext,
+    context: TestRequestContext,
     query: SessionTemporalQuery,
     estimator: Words,
     configuration: SessionRetrievalConfiguration,
@@ -780,14 +916,14 @@ async fn recorded_digest<A: SessionScopeAuthorizer>(
 
 async fn recorded_digests<A: SessionScopeAuthorizer>(
     authorizer: A,
-    context: RequestContext,
+    context: TestRequestContext,
     query: SessionTemporalQuery,
     estimator: Words,
     configuration: SessionRetrievalConfiguration,
 ) -> (String, String) {
     let port = FakeExecutionPort::empty();
     let service = SessionRetrievalService::new(authorizer, &port, estimator, configuration);
-    let _ = service.retrieve(&context, query).await;
+    let _ = retrieve(&service, &context, query).await;
     (
         port.request_digests.lock().unwrap()[0].clone(),
         port.access_digests.lock().unwrap()[0].clone(),
@@ -800,9 +936,9 @@ async fn canonical_request_digest_drifts_for_query_and_root_changes() {
     let service =
         SessionRetrievalService::new(AllowAuthorizer, &port, Words("words-v1"), configuration());
 
-    let first = service.retrieve(&context("root.one"), query("alpha")).await;
-    let second = service.retrieve(&context("root.one"), query("beta")).await;
-    let third = service.retrieve(&context("root.two"), query("alpha")).await;
+    let first = retrieve(&service, &context("root.one"), query("alpha")).await;
+    let second = retrieve(&service, &context("root.one"), query("beta")).await;
+    let third = retrieve(&service, &context("root.two"), query("alpha")).await;
 
     assert!(matches!(
         first,
@@ -842,9 +978,7 @@ async fn application_authorizes_and_validates_the_exact_retrieval_target() {
         ..QuerySpec::default()
     };
 
-    let outcome = service
-        .retrieve(&context("root.one"), query_from_spec(spec))
-        .await;
+    let outcome = retrieve(&service, &context("root.one"), query_from_spec(spec)).await;
 
     assert!(matches!(
         outcome,
@@ -871,9 +1005,7 @@ async fn application_authorizes_and_validates_the_exact_retrieval_target() {
         configuration(),
     );
     assert!(matches!(
-        rejected_service
-            .retrieve(&context("root.one"), query("alpha"))
-            .await,
+        retrieve(&rejected_service, &context("root.one"), query("alpha")).await,
         SessionRetrievalOutcome::WrongScope
     ));
     assert_eq!(rejected_port.calls.load(Ordering::SeqCst), 0);
@@ -898,7 +1030,7 @@ async fn application_binds_and_freezes_root_wide_retrieval_scope() {
     });
 
     assert!(matches!(
-        service.retrieve(&context("root.one"), query).await,
+        retrieve(&service, &context("root.one"), query).await,
         SessionRetrievalOutcome::CompleteZero { .. }
     ));
     assert!(matches!(
@@ -1361,19 +1493,19 @@ async fn denial_never_reaches_temporal_execution_or_payload_hydration() {
     );
 
     assert!(matches!(
-        service.retrieve(&context("root.one"), query("alpha")).await,
+        retrieve(&service, &context("root.one"), query("alpha")).await,
         SessionRetrievalOutcome::Denied
     ));
     assert!(matches!(
-        service
-            .retrieve(
-                &context("root.one"),
-                query_from_spec(QuerySpec {
-                    retrieval_scope: Some(SessionRetrievalScope::AllSessionsInAuthorizedRoot),
-                    ..QuerySpec::default()
-                }),
-            )
-            .await,
+        retrieve(
+            &service,
+            &context("root.one"),
+            query_from_spec(QuerySpec {
+                retrieval_scope: Some(SessionRetrievalScope::AllSessionsInAuthorizedRoot),
+                ..QuerySpec::default()
+            }),
+        )
+        .await,
         SessionRetrievalOutcome::Denied
     ));
     assert_eq!(port.calls.load(Ordering::SeqCst), 0);
@@ -1393,28 +1525,30 @@ async fn replayed_grant_cannot_escape_its_deadline_cancellation_or_budgets() {
     )
     .unwrap();
     let grant = AllowAuthorizer
-        .authorize(&issued_context, &authorization)
+        .authorize(&issued_context, issued_context.binding(), &authorization)
         .unwrap();
 
     let replay_contexts = [
         context_with_controls(
             &issued_context,
             "request.replay-deadline",
-            MonotonicDeadline::at(issued_context.deadline().instant() + Duration::from_secs(1)),
+            UtcMicros(issued_context.deadline().expires_at.0.saturating_add(1)),
             issued_context.cancellation().clone(),
             issued_context.budgets(),
         ),
         context_with_controls(
             &issued_context,
             "request.replay-cancellation",
-            issued_context.deadline(),
-            CancellationToken::new(),
+            issued_context.deadline().expires_at,
+            CancellationToken::for_application_request(
+                &RequestId::new("request.replay-cancellation").unwrap(),
+            ),
             issued_context.budgets(),
         ),
         context_with_controls(
             &issued_context,
             "request.replay-budgets",
-            issued_context.deadline(),
+            issued_context.deadline().expires_at,
             issued_context.cancellation().clone(),
             RequestBudgets::new(65, 64 * 1024 * 1024, 10_000).unwrap(),
         ),
@@ -1429,7 +1563,7 @@ async fn replayed_grant_cannot_escape_its_deadline_cancellation_or_budgets() {
             configuration(),
         );
         assert!(matches!(
-            service.retrieve(&replay_context, query("alpha")).await,
+            retrieve(&service, &replay_context, query("alpha")).await,
             SessionRetrievalOutcome::Denied
         ));
         assert_eq!(port.calls.load(Ordering::SeqCst), 0);
@@ -1446,9 +1580,7 @@ async fn cancellation_or_deadline_during_authorization_prevents_execution_constr
         configuration(),
     );
     assert!(matches!(
-        cancellation_service
-            .retrieve(&context("root.one"), query("alpha"))
-            .await,
+        retrieve(&cancellation_service, &context("root.one"), query("alpha")).await,
         SessionRetrievalOutcome::Cancelled
     ));
     assert_eq!(cancellation_port.calls.load(Ordering::SeqCst), 0);
@@ -1457,7 +1589,7 @@ async fn cancellation_or_deadline_during_authorization_prevents_execution_constr
     let deadline_context = context_with_controls(
         &template,
         "request.deadline-during-authorization",
-        MonotonicDeadline::at(Instant::now() + Duration::from_millis(1)),
+        UtcMicros(application_observed_at().0.saturating_add(1_000)),
         template.cancellation().clone(),
         template.budgets(),
     );
@@ -1469,12 +1601,10 @@ async fn cancellation_or_deadline_during_authorization_prevents_execution_constr
         configuration(),
     );
     assert!(matches!(
-        deadline_service
-            .retrieve(&deadline_context, query("alpha"))
-            .await,
+        retrieve(&deadline_service, &deadline_context, query("alpha")).await,
         SessionRetrievalOutcome::Cancelled
     ));
-    assert!(deadline_context.deadline().is_elapsed_at(Instant::now()));
+    assert!(application_observed_at() >= deadline_context.deadline().expires_at);
     assert_eq!(deadline_port.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1491,7 +1621,7 @@ async fn request_budget_preflight_rejects_before_execution() {
     );
 
     assert!(matches!(
-        service.retrieve(&constrained, query("alpha")).await,
+        retrieve(&service, &constrained, query("alpha")).await,
         SessionRetrievalOutcome::BudgetExhausted
     ));
     assert_eq!(port.calls.load(Ordering::SeqCst), 0);
@@ -1503,36 +1633,36 @@ async fn mode_cutoff_and_forged_cursor_are_bound_and_typed() {
     let service =
         SessionRetrievalService::new(AllowAuthorizer, &port, Words("words-v1"), configuration());
 
-    let _ = service
-        .retrieve(
-            &context("root.one"),
-            query_with_mode(
-                "alpha",
-                None,
-                TemporalModeV1::AsOf {
-                    cutoff: tracedecay_domain::UtcMicros(17),
-                },
-            ),
-        )
-        .await;
-    let _ = service
-        .retrieve(
-            &context("root.one"),
-            query_with_mode("alpha", None, TemporalModeV1::Evolution),
-        )
-        .await;
+    let _ = retrieve(
+        &service,
+        &context("root.one"),
+        query_with_mode(
+            "alpha",
+            None,
+            TemporalModeV1::AsOf {
+                cutoff: tracedecay_domain::UtcMicros(17),
+            },
+        ),
+    )
+    .await;
+    let _ = retrieve(
+        &service,
+        &context("root.one"),
+        query_with_mode("alpha", None, TemporalModeV1::Evolution),
+    )
+    .await;
     {
         let digests = port.request_digests.lock().unwrap();
         assert_ne!(digests[0], digests[1]);
     }
-    let _ = service.retrieve(&context("root.one"), query("alpha")).await;
+    let _ = retrieve(&service, &context("root.one"), query("alpha")).await;
     assert!(matches!(
-        service
-            .retrieve(
-                &context("root.one"),
-                query_with_mode("alpha", Some("forged".to_owned()), TemporalModeV1::Current),
-            )
-            .await,
+        retrieve(
+            &service,
+            &context("root.one"),
+            query_with_mode("alpha", Some("forged".to_owned()), TemporalModeV1::Current),
+        )
+        .await,
         SessionRetrievalOutcome::Denied
     ));
     let digests = port.request_digests.lock().unwrap();
@@ -1561,9 +1691,7 @@ async fn coverage_matrix_preserves_partial_locked_and_cancelled_outcomes() {
         configuration(),
     );
     assert!(matches!(
-        partial_service
-            .retrieve(&context("root.one"), query("alpha"))
-            .await,
+        retrieve(&partial_service, &context("root.one"), query("alpha")).await,
         SessionRetrievalOutcome::Partial { omitted: 2, .. }
     ));
 
@@ -1575,30 +1703,26 @@ async fn coverage_matrix_preserves_partial_locked_and_cancelled_outcomes() {
         configuration(),
     );
     assert!(matches!(
-        locked_service
-            .retrieve(&context("root.one"), query("locked"))
-            .await,
+        retrieve(&locked_service, &context("root.one"), query("locked")).await,
         SessionRetrievalOutcome::Locked
     ));
 
     let cancelled_context = context("root.one");
     cancelled_context.cancellation().cancel();
     assert!(matches!(
-        locked_service
-            .retrieve(&cancelled_context, query("alpha"))
-            .await,
+        retrieve(&locked_service, &cancelled_context, query("alpha")).await,
         SessionRetrievalOutcome::Cancelled
     ));
     assert!(matches!(
-        locked_service
-            .retrieve(
-                &cancelled_context,
-                query_from_spec(QuerySpec {
-                    retrieval_scope: Some(SessionRetrievalScope::AllSessionsInAuthorizedRoot),
-                    ..QuerySpec::default()
-                }),
-            )
-            .await,
+        retrieve(
+            &locked_service,
+            &cancelled_context,
+            query_from_spec(QuerySpec {
+                retrieval_scope: Some(SessionRetrievalScope::AllSessionsInAuthorizedRoot),
+                ..QuerySpec::default()
+            }),
+        )
+        .await,
         SessionRetrievalOutcome::Cancelled
     ));
     assert_eq!(locked_port.calls.load(Ordering::SeqCst), 1);
@@ -1612,50 +1736,40 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
 
     for text in ["deleted", "expired", "summary-deleted", "summary-expired"] {
         assert!(matches!(
-            service.retrieve(&context("root.one"), query(text)).await,
+            retrieve(&service, &context("root.one"), query(text)).await,
             SessionRetrievalOutcome::Deleted
         ));
     }
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-deleted"))
-            .await,
+        retrieve(&service, &context("root.one"), query("execution-deleted")).await,
         SessionRetrievalOutcome::Deleted
     ));
     for text in ["redacted", "summary-redacted"] {
         assert!(matches!(
-            service.retrieve(&context("root.one"), query(text)).await,
+            retrieve(&service, &context("root.one"), query(text)).await,
             SessionRetrievalOutcome::Redacted
         ));
     }
     for text in ["denied", "summary-denied"] {
         assert!(matches!(
-            service.retrieve(&context("root.one"), query(text)).await,
+            retrieve(&service, &context("root.one"), query(text)).await,
             SessionRetrievalOutcome::Denied
         ));
     }
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-redacted"))
-            .await,
+        retrieve(&service, &context("root.one"), query("execution-redacted")).await,
         SessionRetrievalOutcome::Redacted
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-denied"))
-            .await,
+        retrieve(&service, &context("root.one"), query("execution-denied")).await,
         SessionRetrievalOutcome::Denied
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("summary-locked"))
-            .await,
+        retrieve(&service, &context("root.one"), query("summary-locked")).await,
         SessionRetrievalOutcome::Locked
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("hydration-locked"))
-            .await,
+        retrieve(&service, &context("root.one"), query("hydration-locked")).await,
         SessionRetrievalOutcome::Locked
     ));
     for text in [
@@ -1679,7 +1793,7 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
         "cursor-invalid-key",
     ] {
         assert!(matches!(
-            service.retrieve(&context("root.one"), query(text)).await,
+            retrieve(&service, &context("root.one"), query(text)).await,
             SessionRetrievalOutcome::Unavailable
         ));
     }
@@ -1691,78 +1805,72 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
         "cursor-grain",
     ] {
         assert!(matches!(
-            service.retrieve(&context("root.one"), query(text)).await,
+            retrieve(&service, &context("root.one"), query(text)).await,
             SessionRetrievalOutcome::WrongScope
         ));
     }
     for text in ["cursor-malformed", "cursor-tampered", "cursor-sort-key"] {
         assert!(matches!(
-            service.retrieve(&context("root.one"), query(text)).await,
+            retrieve(&service, &context("root.one"), query(text)).await,
             SessionRetrievalOutcome::Denied
         ));
     }
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("budget-bytes"))
-            .await,
+        retrieve(&service, &context("root.one"), query("budget-bytes")).await,
         SessionRetrievalOutcome::BudgetExhausted
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("kernel-budget"))
-            .await,
+        retrieve(&service, &context("root.one"), query("kernel-budget")).await,
         SessionRetrievalOutcome::BudgetExhausted
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("kernel-cancelled"))
-            .await,
+        retrieve(&service, &context("root.one"), query("kernel-cancelled")).await,
         SessionRetrievalOutcome::Cancelled
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-wrong-scope"))
-            .await,
+        retrieve(
+            &service,
+            &context("root.one"),
+            query("execution-wrong-scope")
+        )
+        .await,
         SessionRetrievalOutcome::WrongScope
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-stale"))
-            .await,
+        retrieve(&service, &context("root.one"), query("execution-stale")).await,
         SessionRetrievalOutcome::Stale {
             freshness: SessionDataFreshness::Stored { generation_lag: 3 }
         }
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-unavailable"))
-            .await,
+        retrieve(
+            &service,
+            &context("root.one"),
+            query("execution-unavailable")
+        )
+        .await,
         SessionRetrievalOutcome::Unavailable
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-budget"))
-            .await,
+        retrieve(&service, &context("root.one"), query("execution-budget")).await,
         SessionRetrievalOutcome::BudgetExhausted
     ));
     assert!(matches!(
-        service
-            .retrieve(&context("root.one"), query("execution-cancelled"))
-            .await,
+        retrieve(&service, &context("root.one"), query("execution-cancelled")).await,
         SessionRetrievalOutcome::Cancelled
     ));
     assert!(matches!(
-        service
-            .retrieve(
-                &context("root.one"),
-                query_from_spec(QuerySpec {
-                    text: "stored-deleted",
-                    freshness_policy:
-                        tracedecay::application::session::SessionFreshnessPolicy::RequireFresh,
-                    ..QuerySpec::default()
-                }),
-            )
-            .await,
+        retrieve(
+            &service,
+            &context("root.one"),
+            query_from_spec(QuerySpec {
+                text: "stored-deleted",
+                freshness_policy:
+                    tracedecay::application::session::SessionFreshnessPolicy::RequireFresh,
+                ..QuerySpec::default()
+            }),
+        )
+        .await,
         SessionRetrievalOutcome::Deleted
     ));
 
@@ -1784,9 +1892,7 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
         configuration(),
     );
     assert!(matches!(
-        incomplete_service
-            .retrieve(&context("root.one"), query("alpha"))
-            .await,
+        retrieve(&incomplete_service, &context("root.one"), query("alpha")).await,
         SessionRetrievalOutcome::Unavailable
     ));
 }
@@ -1811,29 +1917,35 @@ async fn partial_freshness_and_cancellation_race_preserve_application_ownership(
         configuration(),
     );
     assert!(matches!(
-        partial_service
-            .retrieve(&context("root.one"), query("partial-cursor"))
-            .await,
+        retrieve(
+            &partial_service,
+            &context("root.one"),
+            query("partial-cursor")
+        )
+        .await,
         SessionRetrievalOutcome::Partial { .. }
     ));
     assert!(matches!(
-        partial_service
-            .retrieve(&context("root.one"), query("multiple-summary"))
-            .await,
+        retrieve(
+            &partial_service,
+            &context("root.one"),
+            query("multiple-summary")
+        )
+        .await,
         SessionRetrievalOutcome::Partial { omitted: 2, .. }
     ));
     assert!(matches!(
-        partial_service
-            .retrieve(
-                &context("root.one"),
-                query_from_spec(QuerySpec {
-                    text: "stored",
-                    freshness_policy:
-                        tracedecay::application::session::SessionFreshnessPolicy::RequireFresh,
-                    ..QuerySpec::default()
-                }),
-            )
-            .await,
+        retrieve(
+            &partial_service,
+            &context("root.one"),
+            query_from_spec(QuerySpec {
+                text: "stored",
+                freshness_policy:
+                    tracedecay::application::session::SessionFreshnessPolicy::RequireFresh,
+                ..QuerySpec::default()
+            }),
+        )
+        .await,
         SessionRetrievalOutcome::Stale {
             freshness: SessionDataFreshness::Stored { generation_lag: 2 }
         }
@@ -1853,9 +1965,7 @@ async fn partial_freshness_and_cancellation_race_preserve_application_ownership(
     });
 
     assert!(matches!(
-        pending_service
-            .retrieve(&pending_context, query("alpha"))
-            .await,
+        retrieve(&pending_service, &pending_context, query("alpha")).await,
         SessionRetrievalOutcome::Cancelled
     ));
     assert!(dropped_after_cancel.load(Ordering::SeqCst));

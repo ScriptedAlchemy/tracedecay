@@ -238,6 +238,15 @@ fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
     std::fs::metadata(PathBuf::from(path)).map_or(0, |metadata| metadata.len())
 }
 
+fn doctor_runtime_coverage(startup_health_only: bool) -> Option<serde_json::Value> {
+    startup_health_only.then(|| {
+        json!({
+            "status": "partial",
+            "reason": "startup_health_only",
+        })
+    })
+}
+
 async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
@@ -334,7 +343,8 @@ async fn doctor_runtime_value_inner(
             "read_only": true,
         },
     });
-    if startup_health_only {
+    if let Some(coverage) = doctor_runtime_coverage(startup_health_only) {
+        value["doctor_runtime"]["coverage"] = coverage;
         return value;
     }
 
@@ -493,16 +503,9 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     store_administration: &super::StoreAdministration,
     request: DoctorRuntimeRequest,
 ) -> Result<()> {
-    let mut value =
-        doctor_runtime_value(handshake, store_administration, request.startup_health_only).await;
-    if request.doctor_report_requested {
-        value["doctor_report"] = json!({
-            "kind": "unknown",
-            "reason": "doctor_report_owner_warming",
-            "table_growth_evidence": [],
-        });
-    }
-    let result = doctor_runtime_tool_result(value);
+    let result = doctor_runtime_tool_result(
+        doctor_runtime_value(handshake, store_administration, request.startup_health_only).await,
+    );
     write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
 }
 
@@ -515,7 +518,10 @@ mod doctor_runtime_route_tests {
 
     use rusqlite::Connection;
 
-    use super::{cold_doctor_runtime_value, doctor_runtime_request, doctor_runtime_store_paths};
+    use super::{
+        cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
+        doctor_runtime_store_paths,
+    };
     use crate::client_identity::DaemonClientIdentity;
     use crate::daemon::DaemonHandshake;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -668,6 +674,18 @@ mod doctor_runtime_route_tests {
         let mut wal_path = path.as_os_str().to_os_string();
         wal_path.push("-wal");
         std::fs::metadata(PathBuf::from(wal_path)).is_ok_and(|metadata| metadata.len() > 0)
+    }
+
+    #[test]
+    fn startup_health_coverage_is_explicitly_partial() {
+        assert_eq!(
+            doctor_runtime_coverage(true),
+            Some(serde_json::json!({
+                "status": "partial",
+                "reason": "startup_health_only",
+            }))
+        );
+        assert_eq!(doctor_runtime_coverage(false), None);
     }
 
     #[test]

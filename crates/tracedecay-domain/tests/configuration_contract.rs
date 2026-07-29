@@ -6,9 +6,9 @@ use tracedecay_domain::configuration::{
     ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
     ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1,
     CredentialReferenceId, CredentialReferenceMetadataV1, LEGACY_CONFIG_JSON_SETTING_KEYS_V1,
-    RuleEffect, ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey,
-    SourceBindingId, SourceKindV1, UserProfileId, WorktreePlacementModeV1,
-    resolve_restrictive_capabilities, safe_work_topology_policy_v1,
+    RuleEffect, SEMANTIC_RUNTIME_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1,
+    ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1, UserProfileId,
+    WorktreePlacementModeV1, resolve_restrictive_capabilities, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{
@@ -139,11 +139,12 @@ fn credential_metadata_has_no_plaintext_value_surface() {
 
 #[test]
 fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
-    assert_eq!(CONFIGURATION_SETTING_KEYS_V1.len(), 31);
+    assert_eq!(CONFIGURATION_SETTING_KEYS_V1.len(), 32);
     assert_eq!(
         LEGACY_CONFIG_JSON_SETTING_KEYS_V1.len(),
-        CONFIGURATION_SETTING_KEYS_V1.len() - 7
+        CONFIGURATION_SETTING_KEYS_V1.len() - 8
     );
+    assert!(CONFIGURATION_SETTING_KEYS_V1.contains(&SEMANTIC_RUNTIME_SETTING_KEY));
     assert!(
         CONFIGURATION_SETTING_KEYS_V1.contains(&PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1),
         "the Plan 20 proximity threshold must be part of the closed registry inventory"

@@ -2,9 +2,15 @@
 members = [
     "crates/tracedecay-api",
     "crates/tracedecay-application",
+    "crates/tracedecay-capture",
+    "crates/tracedecay-code-index",
     "crates/tracedecay-domain",
+    "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
+    "crates/tracedecay-lsp",
+    "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
+    "crates/tracedecay-query",
     "crates/tracedecay-rusqlite-parity",
     "crates/tracedecay-rusqlite-runtime",
     "crates/tracedecay-sqlite-parity-protocol",
@@ -157,49 +163,49 @@ token-counting = ["dep:tiktoken-rs"]
 
 # Lite tier (11 languages) — always compiled, no feature flag needed:
 # Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift
-lite = ["dep:tracedecay-medium-treesitters"]
+lite = ["tracedecay-code-index/lite"]
 
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
 
 # Language features backed by the bundled tree-sitter grammar crate.
-lang-dart = ["dep:tracedecay-medium-treesitters"]
-lang-pascal = ["dep:tracedecay-large-treesitters"]
-lang-php = ["dep:tracedecay-medium-treesitters"]
-lang-ruby = ["dep:tracedecay-medium-treesitters"]
-lang-bash = ["dep:tracedecay-medium-treesitters"]
-lang-protobuf = ["dep:tracedecay-large-treesitters"]
-lang-powershell = ["dep:tracedecay-large-treesitters"]
-lang-nix = ["dep:tracedecay-large-treesitters"]
-lang-vbnet = ["dep:tracedecay-large-treesitters"]
-lang-lua = ["dep:tracedecay-medium-treesitters"]
-lang-zig = ["dep:tracedecay-large-treesitters"]
-lang-objc = ["dep:tracedecay-large-treesitters"]
-lang-perl = ["dep:tracedecay-large-treesitters"]
-lang-batch = ["dep:tracedecay-large-treesitters"]
-lang-fortran = ["dep:tracedecay-large-treesitters"]
-lang-cobol = ["dep:tracedecay-large-treesitters"]
-lang-msbasic2 = ["dep:tracedecay-large-treesitters"]
-lang-gwbasic = ["dep:tracedecay-large-treesitters"]
-lang-qbasic = ["dep:tracedecay-large-treesitters"]
-lang-dockerfile = ["dep:tracedecay-large-treesitters"]
-lang-glsl = ["dep:tracedecay-large-treesitters"]
-lang-wgsl = []
-lang-hlsl = ["dep:tree-sitter-hlsl"]
-lang-metal = ["dep:tracedecay-large-treesitters"]
-lang-markdown = ["dep:tracedecay-large-treesitters"]
-lang-r = ["dep:tracedecay-large-treesitters"]
-lang-sql = ["dep:tracedecay-large-treesitters"]
-lang-julia = ["dep:tracedecay-large-treesitters"]
-lang-haskell = ["dep:tracedecay-large-treesitters"]
-lang-ocaml = ["dep:tracedecay-large-treesitters"]
-lang-clojure = ["dep:tracedecay-large-treesitters"]
-lang-erlang = ["dep:tracedecay-large-treesitters"]
-lang-elixir = ["dep:tracedecay-large-treesitters"]
-lang-fsharp = ["dep:tracedecay-large-treesitters"]
-lang-quint = ["dep:tracedecay-large-treesitters"]
-lang-toml = ["dep:tracedecay-large-treesitters"]
-lang-lean = ["dep:tracedecay-large-treesitters"]
+lang-dart = ["tracedecay-code-index/lang-dart"]
+lang-pascal = ["tracedecay-code-index/lang-pascal"]
+lang-php = ["tracedecay-code-index/lang-php"]
+lang-ruby = ["tracedecay-code-index/lang-ruby"]
+lang-bash = ["tracedecay-code-index/lang-bash"]
+lang-protobuf = ["tracedecay-code-index/lang-protobuf"]
+lang-powershell = ["tracedecay-code-index/lang-powershell"]
+lang-nix = ["tracedecay-code-index/lang-nix"]
+lang-vbnet = ["tracedecay-code-index/lang-vbnet"]
+lang-lua = ["tracedecay-code-index/lang-lua"]
+lang-zig = ["tracedecay-code-index/lang-zig"]
+lang-objc = ["tracedecay-code-index/lang-objc"]
+lang-perl = ["tracedecay-code-index/lang-perl"]
+lang-batch = ["tracedecay-code-index/lang-batch"]
+lang-fortran = ["tracedecay-code-index/lang-fortran"]
+lang-cobol = ["tracedecay-code-index/lang-cobol"]
+lang-msbasic2 = ["tracedecay-code-index/lang-msbasic2"]
+lang-gwbasic = ["tracedecay-code-index/lang-gwbasic"]
+lang-qbasic = ["tracedecay-code-index/lang-qbasic"]
+lang-dockerfile = ["tracedecay-code-index/lang-dockerfile"]
+lang-glsl = ["tracedecay-code-index/lang-glsl"]
+lang-wgsl = ["tracedecay-code-index/lang-wgsl"]
+lang-hlsl = ["tracedecay-code-index/lang-hlsl"]
+lang-metal = ["tracedecay-code-index/lang-metal"]
+lang-markdown = ["tracedecay-code-index/lang-markdown"]
+lang-r = ["tracedecay-code-index/lang-r"]
+lang-sql = ["tracedecay-code-index/lang-sql"]
+lang-julia = ["tracedecay-code-index/lang-julia"]
+lang-haskell = ["tracedecay-code-index/lang-haskell"]
+lang-ocaml = ["tracedecay-code-index/lang-ocaml"]
+lang-clojure = ["tracedecay-code-index/lang-clojure"]
+lang-erlang = ["tracedecay-code-index/lang-erlang"]
+lang-elixir = ["tracedecay-code-index/lang-elixir"]
+lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
+lang-quint = ["tracedecay-code-index/lang-quint"]
+lang-toml = ["tracedecay-code-index/lang-toml"]
+lang-lean = ["tracedecay-code-index/lang-lean"]
 test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
@@ -241,30 +247,33 @@ name = "storage_runtime_suite"
 path = "tests/storage_runtime_suite/main.rs"
 required-features = ["rusqlite-parity-helper"]
 
+# Plan 36 portability: symlink-alias snapshot capture (test-transport only).
+[[test]]
+name = "git_index_snapshot_root_canonicalization"
+path = "tests/git_index_snapshot_root_canonicalization.rs"
+required-features = ["test-transport"]
+
 [dependencies]
 axum = "0.8"
 tower = "0.5"
 tree-sitter = "0.26"
-tree-sitter-language = "0.1"
-# In-process structural-search engine. ast-grep-core is generic over a
-# tree-sitter `Language`; we wire the repo's own bundled grammars (via
-# `extraction::ts_provider`) into its `Language` trait, so no extra grammar
-# crates are pulled in and no external `ast-grep` binary is required. Pinned to
-# tree-sitter ^0.26.3, ABI-compatible with the 0.26 grammars this repo builds.
-ast-grep-core = "0.44"
 tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0" }
+tracedecay-capture = { path = "crates/tracedecay-capture", version = "0.1.0" }
+tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
+tracedecay-host-integration = { path = "crates/tracedecay-host-integration", version = "0.1.0" }
 tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
+tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
+tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
+tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
 tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
 tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
-tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -295,7 +304,6 @@ fs2 = "0.4"
 same-file = "1"
 reflink-copy = "0.1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-tree-sitter-hlsl = { version = "0.2.0", optional = true }
 amari-holographic = "0.23.0"
 regex = "1.12.3"
 shell-words = "1.1"
@@ -346,7 +354,6 @@ windows-sys = { version = "0.61", features = [
 
 [build-dependencies]
 logo-art = "0.2"
-cc = "1"
 
 [dev-dependencies]
 sha2 = "0.11"
@@ -359,6 +366,9 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 jsonschema = { version = "0.46.8", default-features = false }
 static_assertions = "1.1.0"
+# Test builds opt into the query kernel's `*_for_test` constructors; the
+# feature stays off for production builds.
+tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

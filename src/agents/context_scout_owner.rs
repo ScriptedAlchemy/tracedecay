@@ -93,7 +93,9 @@ impl ProjectContextScoutOwnerV1 {
         )
         .await?;
         let model = context_scout_model_assistant_from_project_config(model_config);
-        let runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model);
+        let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model);
+        let work_snapshot = store.work_snapshot(now, STARTUP_RECOVERY_LIMIT).await;
+        runtime.restore_startup(&work_snapshot).ok()?;
         let owner = Arc::new(Self {
             store,
             runtime: Mutex::new(runtime),
@@ -237,7 +239,7 @@ impl ProjectContextScoutOwnerV1 {
         self.runtime
             .lock()
             .await
-            .complete_delivery(&claim.entry, receipt)
+            .complete_delivery(claim, receipt)
             .await
             .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }

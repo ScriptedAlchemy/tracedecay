@@ -83,11 +83,12 @@ pub(crate) async fn handle_host_bundle_component_command(
         let Some(component_set) = component_set else {
             if explicitly_scoped {
                 return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "agent {agent_id:?} has no canonical first-party host component set"
-                    ),
+                    message: unsupported_host_component_set_message(agent_id),
                 });
             }
+            // A skipped host is a reported unavailable result, never a silent
+            // success for the sweep that contained it.
+            eprintln!("skipped: {}", unsupported_host_component_set_message(agent_id));
             continue;
         };
         if options.dry_run {
@@ -125,6 +126,19 @@ pub(crate) async fn handle_host_bundle_component_command(
     Ok(())
 }
 
+/// Truthful reason a host component set is unavailable, so a skipped or
+/// refused agent never reads as an empty success.
+fn unsupported_host_component_set_message(agent: &str) -> String {
+    match host_kind_for_agent(agent).ok().and_then(
+        tracedecay::agents::host_bundle_registry::unsupported_host_component_set_reason,
+    ) {
+        Some(reason) => format!(
+            "agent {agent:?} has no installable first-party host component set: {reason:?}"
+        ),
+        None => format!("agent {agent:?} has no canonical first-party host component set"),
+    }
+}
+
 fn canonical_host_component_set(
     agent: &str,
     component: Option<crate::cli::HostBundleComponentArg>,
@@ -132,10 +146,26 @@ fn canonical_host_component_set(
 ) -> tracedecay::errors::Result<
     Option<tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1>,
 > {
+    let tracedecay_bin =
+        tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    canonical_host_component_set_with_tracedecay_bin(agent, component, now_unix, &tracedecay_bin)
+}
+
+fn canonical_host_component_set_with_tracedecay_bin(
+    agent: &str,
+    component: Option<crate::cli::HostBundleComponentArg>,
+    now_unix: u64,
+    tracedecay_bin: &str,
+) -> tracedecay::errors::Result<
+    Option<tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1>,
+> {
     let host = match host_kind_for_agent(agent) {
         Ok(host) => host,
         Err(_) => return Ok(None),
     };
+    // An unsupported host has an empty default set and stays on its
+    // compatibility migration path. An explicitly requested component is a
+    // different question and must be refused with its typed reason below.
     let requested = component.map(host_bundle_component).map_or_else(
         || tracedecay::agents::host_bundle_registry::default_components(host),
         |component| vec![component],
@@ -143,8 +173,11 @@ fn canonical_host_component_set(
     if requested.is_empty() {
         return Ok(None);
     }
-    tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set(
-        host, &requested, now_unix,
+    tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
+        host,
+        &requested,
+        now_unix,
+        tracedecay_bin,
     )
     .map(Some)
     .map_err(|error| tracedecay::errors::TraceDecayError::Config {
@@ -227,7 +260,7 @@ fn apply_host_bundle_artifact_action_at(
     };
     let component_set = canonical_host_component_set(agent_id, Some(component), now_unix)?
         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: format!("agent {agent_id:?} has no canonical first-party host component set"),
+            message: unsupported_host_component_set_message(agent_id),
         })?;
     ensure_artifact_only_restore_boundary(agent_id, &component_set, home, lifecycle_root)?;
     let [entry] = component_set.component_set.components.as_slice() else {
@@ -386,6 +419,14 @@ fn dry_run_canonical_component_set(
         hex::encode(preview.artifact_state_revision),
         preview.confirmation_required
     );
+    for claim in &preview.competing_extension_claims {
+        eprintln!(
+            "  competing {:?} claim by {:?} (evidence {})",
+            claim.capability,
+            claim.extension_id,
+            hex::encode(claim.evidence_digest)
+        );
+    }
     for plan in preview.component_plans {
         eprintln!(
             "  {:?}: {} mutation(s), rollback={}",
@@ -436,6 +477,28 @@ fn apply_canonical_component_set(
     home: &Path,
     lifecycle_root: &Path,
 ) -> tracedecay::errors::Result<()> {
+    let tracedecay_bin =
+        tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    apply_canonical_component_set_with_tracedecay_bin(
+        agent_id,
+        operation,
+        component_set,
+        options,
+        home,
+        lifecycle_root,
+        &tracedecay_bin,
+    )
+}
+
+fn apply_canonical_component_set_with_tracedecay_bin(
+    agent_id: &str,
+    operation: HostBundleCliOperation,
+    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
+    options: &crate::cli::HostBundleCliOptions,
+    home: &Path,
+    lifecycle_root: &Path,
+    tracedecay_bin: &str,
+) -> tracedecay::errors::Result<()> {
     let request = component_set_request(
         component_set,
         operation,
@@ -449,11 +512,12 @@ fn apply_canonical_component_set(
         .map_err(host_bundle_error)?;
     let mut transaction =
         tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
-    let mut registration = CompatibilityAgentRegistrationDelegate::new(
+    let mut registration = CompatibilityAgentRegistrationDelegate::new_with_tracedecay_bin(
         agent_id,
         home,
         lifecycle_root,
         request.lifecycle.operation,
+        tracedecay_bin.to_string(),
     )?;
     let preview = transaction
         .preview(
@@ -463,6 +527,25 @@ fn apply_canonical_component_set(
             &mut registration,
         )
         .map_err(host_bundle_error)?;
+    // A full default install is otherwise treated as confirmed. A competing
+    // third-party claim is exactly the ambiguity that must not be resolved on
+    // the operator's behalf, so it demands an explicit `--yes`.
+    if !preview.competing_extension_claims.is_empty() && !options.yes {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "agent {agent_id:?} already has {} third-party extension claim(s) on a surface \
+                 this component set registers ({}); review `--dry-run` and re-run with `--yes` to \
+                 confirm this exact plan",
+                preview.competing_extension_claims.len(),
+                preview
+                    .competing_extension_claims
+                    .iter()
+                    .map(|claim| claim.extension_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
     let receipt = transaction
         .execute_confirmed(
             &component_set.component_set,
@@ -2280,9 +2363,10 @@ mod tests {
 
     use super::{
         AgentReinstallOutcome, CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
-        apply_canonical_component_set, broker_codex_daemon_automation_project,
-        canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
-        reinstall_agent_integrations,
+        apply_canonical_component_set, apply_canonical_component_set_with_tracedecay_bin,
+        broker_codex_daemon_automation_project, canonical_host_component_set,
+        canonical_host_component_set_with_tracedecay_bin, component_set_request,
+        finish_legacy_hermes_migration, reinstall_agent_integrations,
     };
 
     const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
@@ -2796,18 +2880,24 @@ mod tests {
     fn explicit_core_component_lifecycle_preserves_opencode_companions() {
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
+        let tracedecay_bin = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         let config_path = home.path().join(".config/opencode/opencode.json");
-        let context_set = canonical_host_component_set(
+        let context_set = canonical_host_component_set_with_tracedecay_bin(
             "opencode",
             Some(crate::cli::HostBundleComponentArg::ContextMcp),
             0,
+            &tracedecay_bin,
         )
         .unwrap()
         .unwrap();
-        let agent_set = canonical_host_component_set(
+        let agent_set = canonical_host_component_set_with_tracedecay_bin(
             "opencode",
             Some(crate::cli::HostBundleComponentArg::Agent),
             0,
+            &tracedecay_bin,
         )
         .unwrap()
         .unwrap();
@@ -2823,10 +2913,11 @@ mod tests {
         std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
         std::fs::write(&context_path, b"context-sentinel\n").unwrap();
         std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
-        let core_set = canonical_host_component_set(
+        let core_set = canonical_host_component_set_with_tracedecay_bin(
             "opencode",
             Some(crate::cli::HostBundleComponentArg::Core),
             0,
+            &tracedecay_bin,
         )
         .unwrap()
         .unwrap();
@@ -2842,13 +2933,14 @@ mod tests {
             HostBundleCliOperation::Repair,
             HostBundleCliOperation::Uninstall,
         ] {
-            apply_canonical_component_set(
+            apply_canonical_component_set_with_tracedecay_bin(
                 "opencode",
                 operation,
                 &core_set,
                 &options,
                 home.path(),
                 lifecycle.path(),
+                &tracedecay_bin,
             )
             .unwrap();
             let config: serde_json::Value =
@@ -2865,12 +2957,10 @@ mod tests {
             if operation == HostBundleCliOperation::Uninstall {
                 assert!(config["lsp"].get("tracedecay").is_none());
             } else {
-                let tracedecay_bin = tracedecay::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string());
                 assert_eq!(
                     config["lsp"]["tracedecay"]["command"],
                     serde_json::json!([
-                        tracedecay_bin,
+                        tracedecay_bin.clone(),
                         "lsp",
                         "bridge",
                         "--stdio",
@@ -3114,6 +3204,7 @@ mod tests {
             current_registration_revision: revision,
             artifact_state_revision: [8; 32],
             component_plans: Vec::new(),
+            competing_extension_claims: Vec::new(),
             confirmation_required: false,
         };
         registration

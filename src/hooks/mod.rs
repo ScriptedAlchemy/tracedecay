@@ -13,6 +13,7 @@ mod claude;
 mod codex;
 mod cursor;
 mod cursor_compact;
+mod daemon_ports;
 pub mod hint_outcomes;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

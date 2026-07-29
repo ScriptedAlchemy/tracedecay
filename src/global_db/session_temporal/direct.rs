@@ -2,7 +2,7 @@ use crate::db::engine::params;
 use tracedecay_domain::{RetrievalAnchorId, SessionId};
 
 use crate::application::session::SessionTemporalExecutionError;
-use crate::sessions::lcm::{LcmDescribeTarget, LcmExpandTarget};
+use crate::application::session::lcm::contracts::{LcmDescribeTarget, LcmExpandTarget};
 
 use super::sql::TemporalSqlRead;
 

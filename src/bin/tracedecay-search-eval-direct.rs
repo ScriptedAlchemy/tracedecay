@@ -8,8 +8,9 @@ use tracedecay::application::semantic_runtime::SemanticEvaluationProfileCandidat
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::search_eval::{
-    DirectEvaluationStatusV1, GenerateCandidateOutputsOptions, compare_direct,
-    generate_candidate_outputs, validate_direct_workload, write_generate_outputs,
+    DirectEvaluationStatusV1, DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions,
+    SearchEvalError, compare_direct, generate_candidate_outputs,
+    validate_default_activation_workload, validate_direct_workload, write_generate_outputs,
 };
 
 #[derive(Debug, Parser)]
@@ -69,7 +70,7 @@ fn main() -> ExitCode {
         Command::Validate {
             repo_root,
             workload,
-        } => match validate_direct_workload(&repo_root, workload.as_deref()) {
+        } => match validate_requested_workload(&repo_root, workload.as_deref()) {
             Ok(summary) => emit(&summary, ExitCode::SUCCESS),
             Err(error) => invalid("validate", error),
         },
@@ -118,6 +119,16 @@ fn main() -> ExitCode {
             candidate,
         } => evaluate_and_publish(project_root, candidate),
     }
+}
+
+fn validate_requested_workload(
+    repo_root: &std::path::Path,
+    workload: Option<&std::path::Path>,
+) -> Result<DirectWorkloadSummaryV1, SearchEvalError> {
+    workload.map_or_else(
+        || validate_default_activation_workload(repo_root),
+        |path| validate_direct_workload(repo_root, Some(path)),
+    )
 }
 
 fn evaluate_and_publish(project_root: PathBuf, candidate_path: PathBuf) -> ExitCode {
@@ -177,4 +188,22 @@ fn emit(value: &impl Serialize, exit: ExitCode) -> ExitCode {
         }
     }
     exit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_validation_uses_byte_pinned_activation_workload() {
+        let summary = validate_requested_workload(&PathBuf::from(env!("CARGO_MANIFEST_DIR")), None)
+            .expect("checked-in activation workload validates");
+
+        assert_eq!(summary.status, DirectEvaluationStatusV1::Pass);
+        assert_eq!(
+            summary.workload_digest,
+            "sha256:9c793070efc601a13e145c233dbc6fb859764ce9d24d64c636552c9e020db1ce"
+        );
+        assert_eq!(summary.profile_count, 3);
+    }
 }

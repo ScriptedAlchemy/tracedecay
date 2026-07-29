@@ -4,16 +4,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::HydrationStateV1;
 
-use crate::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
-use crate::sessions::lcm::{
+use crate::application::session::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
     LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessage, LcmRawMessageOverview, LcmSourceRef,
-    LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, payload,
+    LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
-
-use super::lcm_render::apply_canonical_content;
+use crate::application::session::lcm::render::apply_canonical_content;
+use crate::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
 
 macro_rules! field {
     ($row:expr, $column:expr) => {
@@ -452,7 +451,7 @@ async fn describe_external_payload(
     session_id: &str,
     payload_ref: &str,
 ) -> Result<LcmDescribeExternalPayload, LcmError> {
-    payload::validate_payload_ref(payload_ref)?;
+    validate_payload_ref(payload_ref)?;
     let payload = load_payload(snapshot, payload_ref).await?;
     if payload.provider != provider || payload.session_id != session_id {
         return Err(LcmError::PayloadNotFound);
@@ -749,7 +748,7 @@ async fn validate_expand_payload(
     session_id: &str,
     payload_ref: &str,
 ) -> Result<(), LcmError> {
-    payload::validate_payload_ref(payload_ref)?;
+    validate_payload_ref(payload_ref)?;
     let payload = load_payload(snapshot, payload_ref).await?;
     if payload.provider != provider || payload.session_id != session_id {
         return Err(LcmError::PayloadNotOwnedBySession);
