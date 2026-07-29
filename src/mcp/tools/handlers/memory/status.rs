@@ -57,7 +57,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_memory_status(
     ))
 }
 
-pub async fn handle_user_memory_tool(
+pub(crate) async fn handle_user_memory_tool(
     tool_name: &str,
     args: Value,
     registry: &DaemonSessionRuntimeRegistryV1,

@@ -910,7 +910,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
-    pub(crate) fn new(
+    fn new(
         graph: Arc<TraceDecay>,
         database: Database,
         observation_database: Arc<RegisteredGlobalDb>,

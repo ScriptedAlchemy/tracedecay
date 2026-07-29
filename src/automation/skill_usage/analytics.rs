@@ -53,7 +53,7 @@ pub async fn ingest_analytics_events(
     Ok(touched)
 }
 
-pub async fn ingest_project_analytics_events(
+pub(crate) async fn ingest_project_analytics_events(
     profile_root: &Path,
     project_root: &Path,
     global_db: Option<&RegisteredGlobalDb>,

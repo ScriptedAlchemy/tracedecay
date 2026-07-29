@@ -29,7 +29,7 @@ pub struct WorkflowStateItem {
     pub evidence: String,
 }
 
-pub async fn list_unfinished(
+pub(crate) async fn list_unfinished(
     db: &RegisteredGlobalDb,
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {

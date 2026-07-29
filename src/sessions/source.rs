@@ -347,7 +347,7 @@ pub trait TranscriptSource: Send + Sync {
 /// `max_new_bytes` bounds how much newly-appended content a byte-offset source
 /// will read in one call (used to keep per-prompt hot paths inside budget);
 /// pass `None` for an unbounded catch-up.
-pub async fn try_ingest_source(
+pub(crate) async fn try_ingest_source(
     db: &RegisteredGlobalDb,
     source: &dyn TranscriptSource,
     project_root: &Path,

@@ -88,7 +88,7 @@ fn verify_graph_generation(
 }
 
 impl ProductionProximityEvidenceAuthorityV1 {
-    pub fn new(
+    pub(crate) fn new(
         sessions: Arc<RegisteredGlobalDb>,
         graph: Arc<TraceDecay>,
         scope: FeedbackScopeV1,

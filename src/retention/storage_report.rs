@@ -203,7 +203,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
 /// authority. Registered projects and top-level profile directories are
 /// separate cursor phases so neither the registry query nor the filesystem
 /// census performs an unbounded profile-wide scan.
-pub async fn build_storage_report_page_from_registered_global_db(
+pub(crate) async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &crate::global_db::RegisteredGlobalDb,
     cursor: Option<&str>,

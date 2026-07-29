@@ -874,7 +874,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
 }
 
 /// Registers code-index-independent owners for one newly inserted project.
-pub(crate) async fn register_project_open_production_owners(
+async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
     project_root: &Path,
@@ -1170,7 +1170,7 @@ pub(crate) async fn register_project_open_production_owners(
 }
 
 /// Registers owners whose exact authority depends on a mounted code index.
-pub(crate) async fn register_project_open_dependent_owners(
+async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: ProjectOpenDependentOwnerState,

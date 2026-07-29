@@ -183,7 +183,7 @@ impl LcmGcReport {
     }
 }
 
-pub async fn referenced_payload_refs(
+pub(crate) async fn referenced_payload_refs(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
@@ -357,7 +357,7 @@ fn tombstone_placeholder(placeholder: &str) -> String {
     placeholder.to_string()
 }
 
-pub async fn payload_metadata_refs_for_scope(
+pub(crate) async fn payload_metadata_refs_for_scope(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
@@ -383,7 +383,7 @@ async fn payload_metadata_bytes(
     Ok(bytes)
 }
 
-pub async fn run_payload_gc(
+pub(crate) async fn run_payload_gc(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
@@ -968,7 +968,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     Ok(())
 }
 
-pub async fn rewrite_dangling_placeholders(
+pub(crate) async fn rewrite_dangling_placeholders(
     conn: &(impl Executor + ?Sized),
     dir: Option<&Path>,
     metadata_refs: &BTreeSet<String>,
