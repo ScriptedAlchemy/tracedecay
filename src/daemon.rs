@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -5248,6 +5248,33 @@ async fn write_routed_initialize_response(
     Ok(true)
 }
 
+const MAX_PENDING_PROJECT_OPEN_LINES: usize = 64;
+
+async fn await_project_owner_or_disconnect<T>(
+    transport: &mut impl McpTransport,
+    open: impl std::future::Future<Output = Result<T>>,
+) -> Result<Option<(T, VecDeque<String>)>> {
+    tokio::pin!(open);
+    let mut pending_lines = VecDeque::new();
+    loop {
+        tokio::select! {
+            result = &mut open => return result.map(|owner| Some((owner, pending_lines))),
+            incoming = transport.read_line() => {
+                let Some(line) = incoming? else {
+                    return Ok(None);
+                };
+                if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
+                    return Err(TraceDecayError::Config {
+                        message: "daemon client pipelined too many requests while the project owner was opening"
+                            .to_owned(),
+                    });
+                }
+                pending_lines.push_back(line);
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 async fn serve_broker_socket_client(
     stream: BrokerStream,
@@ -5357,8 +5384,16 @@ async fn serve_broker_socket_client(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match Box::pin(engine.project_server_for_request(&handshake)).await {
-            Ok(_) => branch_add_response(&engine.store_administration, &handshake, &request).await,
+        let response = match await_project_owner_or_disconnect(
+            &mut transport,
+            engine.project_server_for_request(&handshake),
+        )
+        .await
+        {
+            Ok(Some(_)) => {
+                branch_add_response(&engine.store_administration, &handshake, &request).await
+            }
+            Ok(None) => return Ok(()),
             Err(error) => JsonRpcResponse::error(
                 request.id.clone(),
                 ErrorCode::InternalError,
@@ -5469,9 +5504,22 @@ async fn serve_broker_socket_client(
         }
     }
     let user_session_request = projectless_user_session_request(&first_request_line);
+    let mut pending_project_open_lines = VecDeque::new();
     let server = if handshake.project_path.is_some() && !user_session_request {
-        match Box::pin(engine.project_server_for_request(&handshake)).await {
-            Ok(server) => Some(server),
+        match await_project_owner_or_disconnect(
+            &mut transport,
+            engine.project_server_for_request(&handshake),
+        )
+        .await
+        {
+            Ok(Some((server, pending_lines))) => {
+                pending_project_open_lines = pending_lines;
+                Some(server)
+            }
+            Ok(None) => {
+                drop(setup_activity);
+                return Ok(());
+            }
             Err(error) => {
                 drop(setup_activity);
                 write_project_open_error(&mut transport, &first_request_line, &error).await?;
@@ -5511,6 +5559,9 @@ async fn serve_broker_socket_client(
     let mut transport = ReplayTransport::new(transport);
     if !initialize_handled {
         transport.push_replay(first_request_line)?;
+    }
+    for line in pending_project_open_lines {
+        transport.push_replay(line)?;
     }
 
     if let Some(server) = server {
@@ -5675,19 +5726,23 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match Box::pin(portable_project_server_for_request(
-            lifecycle.clone(),
-            store_administration.clone(),
-            Arc::clone(&project_open_gates),
-            invocation.clone(),
-            http_application_registry.clone(),
-            &handshake,
-            #[cfg(test)]
-            project_open_attempts.clone(),
-        ))
+        let response = match await_project_owner_or_disconnect(
+            &mut transport,
+            portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry.clone(),
+                &handshake,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ),
+        )
         .await
         {
-            Ok(_) => branch_add_response(&store_administration, &handshake, &request).await,
+            Ok(Some(_)) => branch_add_response(&store_administration, &handshake, &request).await,
+            Ok(None) => return Ok(()),
             Err(error) => JsonRpcResponse::error(
                 request.id.clone(),
                 ErrorCode::InternalError,
@@ -5811,19 +5866,26 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     }
     let user_session_request = projectless_user_session_request(&first_request_line);
     if handshake.project_path.is_some() && !user_session_request {
-        let server = match Box::pin(portable_project_server_for_request(
-            lifecycle.clone(),
-            store_administration.clone(),
-            Arc::clone(&project_open_gates),
-            invocation.clone(),
-            http_application_registry,
-            &handshake,
-            #[cfg(test)]
-            project_open_attempts.clone(),
-        ))
+        let server = match await_project_owner_or_disconnect(
+            &mut transport,
+            portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry,
+                &handshake,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ),
+        )
         .await
         {
-            Ok(server) => server,
+            Ok(Some(server)) => server,
+            Ok(None) => {
+                drop(setup_activity);
+                return Ok(());
+            }
             Err(error) => {
                 drop(setup_activity);
                 write_project_open_error(&mut transport, &first_request_line, &error).await?;
@@ -5832,7 +5894,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         };
         drop(setup_activity);
         let initialize_handled = write_routed_initialize_response(
-            &server,
+            &server.0,
             &mut transport,
             &first_request_line,
             initialize_route.as_ref(),
@@ -5842,7 +5904,10 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         if !initialize_handled {
             transport.push_replay(first_request_line)?;
         }
-        Box::pin(server.run_daemon_connection_with_timings(
+        for line in server.1 {
+            transport.push_replay(line)?;
+        }
+        Box::pin(server.0.run_daemon_connection_with_timings(
             &mut transport,
             handshake.timings,
             lifecycle,
