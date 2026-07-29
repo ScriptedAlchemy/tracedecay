@@ -212,7 +212,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted catch_up is false; explicit catch_up=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional. project_scope=all_registered is accepted but deferred until PR15 multi-root retrieval.",
+        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted catch_up is false; explicit catch_up=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional. project_scope=all_registered is accepted but returns a typed deferred result: multi-root retrieval is not implemented.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -292,7 +292,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 },
                 "project_scope": {
                     "type": "string",
-                    "description": "Accepted compatibility selector. all_registered returns a typed PR15-deferred result without opening the registry or any project store. Cannot be combined with project_id, project_path, or project_selector.",
+                    "description": "Accepted compatibility selector. all_registered returns a typed deferred result without opening the registry or any project store. Cannot be combined with project_id, project_path, or project_selector.",
                     "enum": ["all_registered"]
                 },
                 "branch": git_scope::branch_schema("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),

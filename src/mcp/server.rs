@@ -127,7 +127,7 @@ pub(crate) enum CodeIndexSearchModeV1 {
     StrictSemantic,
 }
 
-/// Existing route admission required before MCP may invoke PR9 retrieval.
+/// Existing route admission required before MCP may invoke retrieval.
 /// Neither value may be derived from paths, profile labels, or query bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexSearchAuthorityV1 {
@@ -205,14 +205,14 @@ pub(crate) struct CodeIndexSearchDisplayV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexSearchCompletedV1 {
     pub(crate) code_generation: String,
-    /// Visible result page: PR9 bytes when semantic abstains, separately
+    /// Visible result page: canonical bytes when semantic abstains, separately
     /// recomposed accepted-profile candidates when semantic augments.
     pub(crate) ordered_candidates: Vec<tracedecay_domain::RankedCandidate>,
-    /// Exact canonical PR9 object produced under the mounted query authority.
+    /// Exact canonical object produced under the mounted query authority.
     /// Optional semantic work may report status but cannot mutate these bytes.
     pub(crate) pr9_fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
     /// Authorized generation-bound display metadata, kept outside the
-    /// canonical PR9 bytes so presentation cannot mutate ranking identity.
+    /// canonical bytes so presentation cannot mutate ranking identity.
     pub(crate) display_by_anchor:
         HashMap<tracedecay_domain::RetrievalAnchorId, CodeIndexSearchDisplayV1>,
     pub(crate) semantic: CodeIndexSemanticStatusV1,
@@ -427,7 +427,7 @@ pub struct McpServer {
     /// mint for `file.daemon.<digest>` file identity and the generation every
     /// diagnostic producer must publish under. `None` for direct servers.
     code_index_publication_identity: Option<CodeIndexPublicationIdentityResolver>,
-    /// Daemon-owned, authority-gated PR9/PR10 search bridge.
+    /// Daemon-owned, authority-gated search bridge.
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
