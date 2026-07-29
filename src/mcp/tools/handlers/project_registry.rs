@@ -137,3 +137,93 @@ pub(crate) async fn read_registered_project_context(
         None => Ok(ProjectRegistryContextOutcome::RegistryUnavailable),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// Answers every read with the missing-registry state while recording the
+    /// command, so a test can assert what MCP asked for without a registry.
+    #[derive(Default)]
+    struct RecordingPort {
+        listings: Mutex<Vec<ProjectRegistryListingCommand>>,
+        contexts: Mutex<Vec<ProjectRegistryContextCommand>>,
+    }
+
+    impl ProjectRegistryReadPort for RecordingPort {
+        fn list(&self, command: ProjectRegistryListingCommand) -> ProjectRegistryListingFuture<'_> {
+            self.listings.lock().expect("listings").push(command);
+            Box::pin(async { Ok(ProjectRegistryListingOutcome::RegistryUnavailable) })
+        }
+
+        fn context(
+            &self,
+            command: ProjectRegistryContextCommand,
+        ) -> ProjectRegistryContextFuture<'_> {
+            self.contexts.lock().expect("contexts").push(command);
+            Box::pin(async { Ok(ProjectRegistryContextOutcome::RegistryUnavailable) })
+        }
+    }
+
+    fn listing_command() -> ProjectRegistryListingCommand {
+        ProjectRegistryListingCommand {
+            active_project_root: PathBuf::from("/srv/checkout"),
+            scope: ProjectRegistryListingScope::Matching {
+                query: "checkout".to_string(),
+            },
+            limit: 7,
+        }
+    }
+
+    fn context_command() -> ProjectRegistryContextCommand {
+        ProjectRegistryContextCommand {
+            active_project_root: PathBuf::from("/srv/checkout"),
+            selector: ProjectRegistrySelector::ProjectId("project.checkout".to_string()),
+        }
+    }
+
+    /// An unmounted registry is a state. It must not answer as a registry that
+    /// exists and happens to hold nothing.
+    #[tokio::test]
+    async fn absent_port_reports_unavailable_rather_than_an_empty_listing() {
+        let outcome = list_registered_projects(None, listing_command())
+            .await
+            .expect("listing");
+        assert!(matches!(
+            outcome,
+            ProjectRegistryListingOutcome::RegistryUnavailable
+        ));
+
+        let outcome = read_registered_project_context(None, context_command())
+            .await
+            .expect("context");
+        assert!(matches!(
+            outcome,
+            ProjectRegistryContextOutcome::RegistryUnavailable
+        ));
+    }
+
+    /// The served project root and the caller's bounds cross the boundary
+    /// verbatim: MCP names routing intent, and the daemon resolves identity.
+    #[tokio::test]
+    async fn mounted_port_receives_the_served_root_and_caller_bounds() {
+        let port = RecordingPort::default();
+        list_registered_projects(Some(&port), listing_command())
+            .await
+            .expect("listing");
+        read_registered_project_context(Some(&port), context_command())
+            .await
+            .expect("context");
+
+        assert_eq!(
+            port.listings.lock().expect("listings").as_slice(),
+            &[listing_command()]
+        );
+        assert_eq!(
+            port.contexts.lock().expect("contexts").as_slice(),
+            &[context_command()]
+        );
+    }
+}
