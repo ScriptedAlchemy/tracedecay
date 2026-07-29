@@ -305,7 +305,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &ResolvedScope,
     ) -> Option<Arc<SemanticQueryAuthorityV1>> {
-        let mounted = self.mounted.lock().await;
+        let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
         for worktree in mounted.values() {
             if worktree.repository_id != scope.repository_id
