@@ -60,7 +60,13 @@ export function WorkPage() {
       // The surface's own reading, for the accessibility and visual gates: this
       // page has one state and it is not a partial render of a wired workspace.
       data-work-authority="uncontracted"
-      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-0"
+      // The shell owns `main#td-main` and its scroller; a workspace that
+      // scrolls does it in a labelled, focusable region of its own, which is
+      // the only internal scrolling Plan 11 licenses.
+      className="flex h-full min-w-0 flex-col overflow-auto"
+      tabIndex={0}
+      role="region"
+      aria-label="Work content"
     >
       <WorkspaceHeader
         path="work"
@@ -75,7 +81,7 @@ export function WorkPage() {
         }
       />
 
-      <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-4">
+      <div data-work-ledger className="min-w-0 flex-1 p-3 sm:p-4">
         <div className="mx-auto grid min-w-0 max-w-[1600px] gap-3 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-4">
           <div className="flex min-w-0 flex-col gap-3">
             <Panel legend="why this channel draws nothing">
@@ -97,8 +103,12 @@ export function WorkPage() {
             {WITHHELD_WORK.map((group) => (
               <Panel key={group.id} legend={group.legend} bodyClassName="p-0" elevation="well">
                 <div
+                  // Focusable and named: the ledger outruns 320px and 400% zoom
+                  // sideways, and a scroll container a keyboard cannot reach is
+                  // content nobody can read.
                   role="region"
                   aria-label={`${group.legend} table`}
+                  tabIndex={0}
                   className="min-w-0 overflow-x-auto"
                 >
                   <table className="w-full border-collapse text-2xs">
@@ -177,7 +187,7 @@ export function WorkPage() {
             </Panel>
           </aside>
         </div>
-      </main>
+      </div>
     </div>
   );
 }
