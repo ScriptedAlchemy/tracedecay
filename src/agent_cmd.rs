@@ -150,13 +150,9 @@ fn canonical_host_component_set(
         Ok(host) => host,
         Err(_) => return Ok(None),
     };
-    // An unsupported host has no set to install; it stays on its compatibility
-    // migration path rather than receiving a fabricated empty transaction.
-    if tracedecay::agents::host_bundle_registry::unsupported_host_component_set_reason(host)
-        .is_some()
-    {
-        return Ok(None);
-    }
+    // An unsupported host has an empty default set and stays on its
+    // compatibility migration path. An explicitly requested component is a
+    // different question and must be refused with its typed reason below.
     let requested = component.map(host_bundle_component).map_or_else(
         || tracedecay::agents::host_bundle_registry::default_components(host),
         |component| vec![component],
