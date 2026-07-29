@@ -75,11 +75,14 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
 
 #[tokio::test]
 async fn unregistered_selector_still_fails_closed_without_substitution() {
-    let (cg, dir, _authority) = init_indexed_repo().await;
+    let (cg, _dir, _authority) = init_indexed_repo().await;
     let context = registered_context(cg).await;
     let server = McpServer::new_with_registered_test_context(context, Vec::new()).await;
 
-    let sibling = dir.path().join("unregistered-sibling");
+    // The unregistered root must live OUTSIDE the registered repository: a
+    // path inside it legitimately converges to the registered worktree.
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    let sibling = outside.path().join("unregistered-sibling");
     std::fs::create_dir_all(&sibling).expect("sibling root exists on disk");
     let error = selected_registered_project_reader(
         "tracedecay_files".to_owned(),
@@ -99,13 +102,16 @@ async fn unregistered_selector_still_fails_closed_without_substitution() {
 
 #[tokio::test]
 async fn registered_but_unmounted_project_still_reports_unavailable() {
-    let (cg, dir, _authority) = init_indexed_repo().await;
+    let (cg, _dir, _authority) = init_indexed_repo().await;
     let runtime = super::writer_test_support::registered_runtime(&cg).await;
     // A second project known to the registry but never mounted: the resolver
     // has no graph for it, so the route reports unavailable rather than
-    // fabricating a graph or a scope.
-    let phantom_root = dir.path().join("registered-unmounted");
+    // fabricating a graph or a scope. Its root must live OUTSIDE the mounted
+    // repository: a path inside it would converge to the mounted worktree.
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    let phantom_root = outside.path().join("registered-unmounted");
     std::fs::create_dir_all(&phantom_root).expect("phantom root exists on disk");
+    let phantom_root = phantom_root.canonicalize().expect("canonical phantom root");
     runtime
         .upsert_code_project(
             "project.mcp-writer-unmounted",
