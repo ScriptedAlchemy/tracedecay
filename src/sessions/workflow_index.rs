@@ -18,9 +18,7 @@
 //! `tracedecay_workflows` query surface, build on the APIs defined here.
 
 use std::fmt::Write as _;
-pub use tracedecay_sessions::{
-    WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus,
-};
+pub use tracedecay_sessions::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
 
 use crate::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
@@ -380,12 +378,6 @@ impl RegisteredWorkflowIndexSnapshot {
         Self { snapshot }
     }
 
-    pub(crate) async fn from_port(
-        port: &impl WorkflowIndexPort,
-    ) -> Result<Self, WorkflowIndexError> {
-        port.open_workflow_index_snapshot().await
-    }
-
     async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
         if names.is_empty() {
             return Ok(true);
@@ -705,7 +697,7 @@ pub(crate) fn workflow_scope_exists_predicate(
 }
 
 mod port;
-pub(crate) use port::{WorkflowIndexPort, WorkflowIngestSink, WorkflowIngestWriteTxn};
+pub(crate) use port::{WorkflowIngestSink, WorkflowIngestWriteTxn};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

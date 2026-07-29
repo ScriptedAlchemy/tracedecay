@@ -1291,7 +1291,7 @@ impl HostAdmissionTestRuntimeV1 {
                 project_registry_reads: Some(&project_registry_reads),
                 workflow_index_reads: workflow_index_reads
                     .as_ref()
-                    .map(|service| service as &dyn crate::mcp::tools::WorkflowIndexReadPort),
+                    .map(|service| service as &dyn tracedecay_sessions::WorkflowIndexReadPort),
                 profile_root: Some(&self.profile_root),
                 implicit_project_path: Some(cg.project_root()),
                 session_authorities: self.mcp_session_authorities(),
