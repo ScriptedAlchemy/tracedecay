@@ -667,15 +667,15 @@ impl LatestCompleteCodeIndexV1 {
                 .collect(),
             freshness: freshness.clone(),
             exact_retriever_revision: ComponentRevision::new(
-                crate::query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1,
+                tracedecay_query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             lexical_retriever_revision: ComponentRevision::new(
-                crate::query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1,
+                tracedecay_query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             exact_score_domain: ScoreDomainId::new(
-                crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
+                tracedecay_query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         };
@@ -685,8 +685,10 @@ impl LatestCompleteCodeIndexV1 {
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
         let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
         let authority = CentralExactAdmissionAuthorityV1::new(
-            ExactAdmissionRuleRevision::new(crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1)
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            ExactAdmissionRuleRevision::new(
+                tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         );
         let exact = ExactLane::new(
             authority.clone(),
