@@ -338,6 +338,33 @@ fn code_index_signal_maps_each_state() {
     ));
 }
 
+#[test]
+fn synchronous_table_growth_is_bounded_by_observed_store_size() {
+    use tracedecay_application::storage::{StorageTelemetryReadV1, StoreKeyV1, StoreSizeSampleV1};
+
+    let sample = |bytes| StorageTelemetryReadV1::Observed {
+        sample: StoreSizeSampleV1 {
+            store: StoreKeyV1::new("sessions.db").unwrap(),
+            page_size_bytes: 4096,
+            page_count: bytes / 4096,
+            freelist_pages: 0,
+            observed_at: UtcMicros(1),
+        },
+    };
+
+    assert!(permits_synchronous_table_growth(&sample(
+        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
+    )));
+    assert!(!permits_synchronous_table_growth(&sample(
+        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES + 4096
+    )));
+    assert!(!permits_synchronous_table_growth(
+        &StorageTelemetryReadV1::Unknown {
+            store: StoreKeyV1::new("sessions.db").unwrap(),
+        }
+    ));
+}
+
 #[tokio::test]
 async fn code_index_adapter_returns_seeded_read() {
     let ctx = context();
