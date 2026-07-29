@@ -156,6 +156,7 @@ fn request(
 #[derive(Default)]
 struct FakeEncoder {
     seen: Vec<CodeSearchChunkId>,
+    batch_sizes: Vec<usize>,
     dimension_delta: isize,
     non_finite: bool,
 }
@@ -180,6 +181,15 @@ impl CanonicalChunkVectorEncoderV1 for FakeEncoder {
             values[0] = f32::NAN;
         }
         Ok(values)
+    }
+
+    fn encode_batch(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        self.batch_sizes.push(chunks.len());
+        chunks.iter().map(|chunk| self.encode(key, chunk)).collect()
     }
 }
 
@@ -236,6 +246,7 @@ fn publish_initial_generation() -> (
     )
     .expect("initial fake projection");
     assert_eq!(encoder.seen.len(), 3);
+    assert_eq!(encoder.batch_sizes, [3]);
 
     let mut store = FakeVectorGenerationStoreV1::new();
     let build_id = store

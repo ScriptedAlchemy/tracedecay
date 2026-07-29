@@ -747,6 +747,21 @@ where
         key: &tracedecay_domain::EmbeddingProjectionKeyV1,
         chunk: &CodeSearchChunkV1,
     ) -> Result<Vec<f32>, String> {
+        let mut vectors = self.encode_batch(key, std::slice::from_ref(&chunk))?;
+        if vectors.len() != 1 {
+            return Err("semantic projector returned a non-unit vector batch".to_owned());
+        }
+        Ok(vectors.pop().unwrap_or_else(|| panic!("unit vector batch")))
+    }
+
+    fn encode_batch(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
         if self.progress.cancelled() {
             return Err("semantic projection cancelled".to_owned());
         }
@@ -761,24 +776,55 @@ where
         if session.authority().projection().embedding_key() != key {
             return Err("semantic projection authority changed".to_owned());
         }
-        let text = chunk.sanitized_text.as_str().to_owned();
-        let batch = BoundedSanitizedTextBatchV1::try_new(
-            vec![text],
-            1,
-            chunk.sanitized_text.as_str().len(),
-        )
-        .map_err(|error| error.to_string())?;
-        let mut vectors = session
-            .embed_batch(&batch, self.progress.as_ref())
+        let max_texts = session.authority().max_batch_texts() as usize;
+        let max_bytes = session.authority().max_batch_bytes() as usize;
+        let mut encoded = Vec::with_capacity(chunks.len());
+        let mut cursor = 0;
+        while cursor < chunks.len() {
+            let mut end = cursor;
+            let mut batch_bytes = 0usize;
+            while end < chunks.len() && end - cursor < max_texts {
+                let text_bytes = chunks[end].sanitized_text.as_str().len();
+                if text_bytes > max_bytes {
+                    return Err(
+                        "semantic projection text exceeds the batch byte ceiling".to_owned()
+                    );
+                }
+                if end > cursor && batch_bytes.saturating_add(text_bytes) > max_bytes {
+                    break;
+                }
+                batch_bytes = batch_bytes.saturating_add(text_bytes);
+                end += 1;
+            }
+            if end == cursor {
+                return Err("semantic projection batch limits admit no input".to_owned());
+            }
+            let batch = BoundedSanitizedTextBatchV1::try_new(
+                chunks[cursor..end]
+                    .iter()
+                    .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+                    .collect(),
+                max_texts,
+                max_bytes,
+            )
             .map_err(|error| error.to_string())?;
-        if vectors.len() != 1 {
-            return Err("semantic projector returned a non-unit vector batch".to_owned());
+            let vectors = session
+                .embed_batch(&batch, self.progress.as_ref())
+                .map_err(|error| error.to_string())?;
+            if vectors.len() != end - cursor {
+                return Err(
+                    "semantic projector returned an unexpected vector batch size".to_owned(),
+                );
+            }
+            for vector in vectors {
+                vector.validate().map_err(|error| error.to_string())?;
+                encoded.push(vector.values);
+            }
+            self.completed_units = self.completed_units.saturating_add((end - cursor) as u64);
+            self.progress.set_completed_units(self.completed_units);
+            cursor = end;
         }
-        let vector = vectors.pop().unwrap_or_else(|| panic!("unit vector batch"));
-        vector.validate().map_err(|error| error.to_string())?;
-        self.completed_units = self.completed_units.saturating_add(1);
-        self.progress.set_completed_units(self.completed_units);
-        Ok(vector.values)
+        Ok(encoded)
     }
 }
 
