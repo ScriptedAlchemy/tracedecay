@@ -13,7 +13,7 @@
 //! first, which is exactly the order needed for port ranking.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
 
 /// Computes the strongly-connected components of the directed graph
 /// described by `adj`. Every node that appears as a key OR as a value
@@ -22,10 +22,11 @@ use std::hash::Hash;
 /// SCCs are emitted in reverse-topological order over the condensation:
 /// if SCC `A` depends on SCC `B`, `B` appears in the result before `A`.
 /// This matches Tarjan's natural emission order.
-#[allow(clippy::implicit_hasher)]
-pub fn tarjan_scc<N>(adj: &HashMap<N, HashSet<N>>) -> Vec<Vec<N>>
+pub fn tarjan_scc<N, S1, S2>(adj: &HashMap<N, HashSet<N, S2>, S1>) -> Vec<Vec<N>>
 where
     N: Eq + Hash + Clone,
+    S1: BuildHasher,
+    S2: BuildHasher,
 {
     // Gather every node mentioned, sources or targets, so unreachable
     // nodes still appear as singleton SCCs.
@@ -162,6 +163,8 @@ where
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::BuildHasherDefault;
 
     fn edge<N: Eq + Hash + Clone>(adj: &mut HashMap<N, HashSet<N>>, from: N, to: N) {
         adj.entry(from).or_default().insert(to);
@@ -231,6 +234,56 @@ mod tests {
         assert!(
             pos_c < pos_a,
             "c (leaf) should come before a (root); got {order:?}"
+        );
+    }
+
+    #[test]
+    fn deep_graph_is_stack_safe() {
+        const NODE_COUNT: usize = 20_000;
+        let mut adj: HashMap<usize, HashSet<usize>> = HashMap::new();
+        for node in 0..NODE_COUNT - 1 {
+            adj.entry(node).or_default().insert(node + 1);
+        }
+
+        let sccs = tarjan_scc(&adj);
+        assert_eq!(sccs.len(), NODE_COUNT);
+        assert!(sccs.iter().all(|component| component.len() == 1));
+    }
+
+    #[test]
+    fn non_default_hashers_produce_equivalent_components() {
+        type DeterministicState = BuildHasherDefault<DefaultHasher>;
+        let edges = [
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "a"),
+            ("c", "d"),
+            ("d", "e"),
+            ("e", "d"),
+            ("e", "f"),
+        ];
+        let mut default_adj: HashMap<&str, HashSet<&str>> = HashMap::new();
+        let mut deterministic_adj: HashMap<
+            &str,
+            HashSet<&str, DeterministicState>,
+            DeterministicState,
+        > = HashMap::default();
+        for (from, to) in edges {
+            default_adj.entry(from).or_default().insert(to);
+            deterministic_adj.entry(from).or_default().insert(to);
+        }
+
+        fn canonicalize(mut components: Vec<Vec<&str>>) -> Vec<Vec<&str>> {
+            for component in &mut components {
+                component.sort_unstable();
+            }
+            components.sort_unstable();
+            components
+        }
+
+        assert_eq!(
+            canonicalize(tarjan_scc(&default_adj)),
+            canonicalize(tarjan_scc(&deterministic_adj))
         );
     }
 }
