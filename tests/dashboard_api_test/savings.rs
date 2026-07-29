@@ -22,7 +22,6 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::SessionRecord;
-use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::CostTurn;
 
 struct Fixture {
