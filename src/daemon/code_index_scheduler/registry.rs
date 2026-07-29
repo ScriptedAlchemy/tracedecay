@@ -576,25 +576,29 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let scheduler = {
+        let (scheduler, pending_wake_micros, pending_wake_trigger) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
             };
-            Arc::clone(&worktree.scheduler)
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.pending_wake_micros),
+                Arc::clone(&worktree.pending_wake_trigger),
+            )
         };
         scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_path(path);
         // Scheduler wake already fired; stamp the cadence clock for the receipt.
-        let _ = worktree.pending_wake_micros.compare_exchange(
+        let _ = pending_wake_micros.compare_exchange(
             0,
             u64::try_from(now_micros().0).unwrap_or(u64::MAX),
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        worktree.pending_wake_trigger.store(
+        pending_wake_trigger.store(
             Self::pack_trigger(CodeIndexCadenceTriggerV1::HookHint),
             Ordering::Release,
         );
@@ -609,12 +613,16 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let scheduler = {
+        let (scheduler, pending_wake_micros, pending_wake_trigger) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
             };
-            Arc::clone(&worktree.scheduler)
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.pending_wake_micros),
+                Arc::clone(&worktree.pending_wake_trigger),
+            )
         };
         let absolute = rel_paths
             .iter()
@@ -624,13 +632,13 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .notify_hook_paths(absolute);
-        let _ = worktree.pending_wake_micros.compare_exchange(
+        let _ = pending_wake_micros.compare_exchange(
             0,
             u64::try_from(now_micros().0).unwrap_or(u64::MAX),
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        worktree.pending_wake_trigger.store(
+        pending_wake_trigger.store(
             Self::pack_trigger(CodeIndexCadenceTriggerV1::HookHint),
             Ordering::Release,
         );
