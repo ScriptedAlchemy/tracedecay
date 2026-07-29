@@ -5495,6 +5495,7 @@ dependencies = [
  "tracedecay-query",
  "tracedecay-rusqlite-parity",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-sessions",
  "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
  "tracedecay-tool-catalog",
@@ -5682,6 +5683,13 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-store",
  "tracedecay-tool-catalog",
+]
+
+[[package]]
+name = "tracedecay-sessions"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
