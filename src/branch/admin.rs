@@ -388,22 +388,15 @@ pub(super) fn rollback_published_branch_tracking(
 
 #[cfg(not(test))]
 fn ensure_no_open_store_holders(database_paths: &[PathBuf]) -> crate::errors::Result<()> {
-    #[cfg(not(test))]
     let options = crate::open_store_holders::OpenStoreHolderScanOptions {
         include_current_process: true,
         excluded_current_process_fds: std::collections::BTreeSet::new(),
     };
-    #[cfg(not(test))]
     let scan = crate::open_store_holders::scan_with_options(database_paths, &options).map_err(
         |error| crate::errors::TraceDecayError::Config {
             message: format!("failed to inspect open branch stores: {error}"),
         },
     )?;
-    #[cfg(test)]
-    let scan = {
-        let _ = database_paths;
-        crate::open_store_holders::OpenStoreHolderScan::Supported(Vec::new())
-    };
     match scan {
         crate::open_store_holders::OpenStoreHolderScan::Supported(holders)
             if holders.is_empty() =>
