@@ -11,7 +11,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
     CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord, SymbolRelationRecord,
@@ -29,11 +28,11 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, ExactAdmissionRuleRevision,
-    FreshnessVectorDigest, ManifestDigest, PrincipalId, QueryDigest, QueryNormalizationRevision,
-    RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalFailure,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverOutcome,
-    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId, SymbolOccurrenceId,
-    TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
+    FreshnessVectorDigest, ManifestDigest, PrincipalId, QueryNormalizationRevision,
+    RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalFailure, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId, SymbolOccurrenceId, TemporalModeV1,
+    UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -48,11 +47,11 @@ use tracedecay_query::retrieval::lexical::{
     LexicalLaneRetriever,
 };
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
+use tracedecay_query::retrieval::{
+    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1, inspect_prepared_query_cursor,
+};
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
-const CALLABLE_CODE_CURSOR_PREFIX: &str = "ccq1.";
-const CALLABLE_CODE_CURSOR_REVISION: u16 = 1;
-const CALLABLE_CODE_CURSOR_TTL_MICROS: i64 = 15 * 60 * 1_000_000;
 const MAX_GENERATION_RESOLUTION_WAIT: Duration = Duration::from_secs(30);
 
 /// The reserved [`CodeGenerationId`] a caller supplies to request ordinary
@@ -269,8 +268,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let resolution = async {
             if is_unpinned_latest(requested) {
                 if let Some(cursor) = page.cursor.as_ref() {
-                    let cursor = decode_callable_code_cursor(cursor).ok()?;
-                    self.generation_for(request.scope(), &cursor.payload.generation)
+                    let cursor = inspect_prepared_query_cursor(cursor.as_str()).ok()?;
+                    self.generation_for(request.scope(), &cursor.generation)
                         .await
                 } else {
                     self.latest_complete_fresh_for_scope(request.scope()).await
@@ -313,51 +312,7 @@ pub(in crate::daemon) fn maximum_retrieval_budget() -> RetrievalBudget {
     retrieval_budget(tracedecay_application::MAX_APPLICATION_PAGE_SIZE)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct CallableCodeCursorPayloadV1 {
-    revision: u16,
-    operation: String,
-    scope_digest: ManifestDigest,
-    generation: CodeGenerationId,
-    query_binding_digest: ManifestDigest,
-    candidate_set_digest: ManifestDigest,
-    authentication_key_id: RetrievalCursorKeyId,
-    next_offset: u32,
-    expires_at: UtcMicros,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct AuthenticatedCallableCodeCursorV1 {
-    payload: CallableCodeCursorPayloadV1,
-    authentication: QueryDigest,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CallableCodeCursorError {
-    Invalid,
-    Stale,
-    Unavailable,
-}
-
-fn map_callable_cursor_authentication_error(
-    error: tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1,
-) -> CallableCodeCursorError {
-    use tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1;
-    use tracedecay_query::retrieval::fusion::QueryDigestAuthenticationError;
-
-    match error {
-        Pr9QueryAuthorityErrorV1::QueryAuthentication(
-            QueryDigestAuthenticationError::KeyRevoked,
-        ) => CallableCodeCursorError::Stale,
-        Pr9QueryAuthorityErrorV1::QueryAuthentication(
-            QueryDigestAuthenticationError::KeyUnavailable,
-        )
-        | Pr9QueryAuthorityErrorV1::AuthorityUnavailable => CallableCodeCursorError::Unavailable,
-        _ => CallableCodeCursorError::Invalid,
-    }
-}
+type CallableCodeCursorError = PreparedQueryErrorV1;
 
 fn current_utc_micros() -> Result<UtcMicros, CallableCodeCursorError> {
     let elapsed = SystemTime::now()
@@ -382,91 +337,6 @@ fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Dura
     Some(remaining.min(MAX_GENERATION_RESOLUTION_WAIT))
 }
 
-fn cursor_authentication_view(
-    payload: &CallableCodeCursorPayloadV1,
-) -> Result<tracedecay_domain::EphemeralSanitizedQueryViewV1, CallableCodeCursorError> {
-    let canonical =
-        serde_json::to_string(payload).map_err(|_| CallableCodeCursorError::Unavailable)?;
-    tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
-        canonical,
-        callable_query_sanitizer_revision(),
-        callable_query_normalization_revision(),
-    )
-    .map_err(|_| CallableCodeCursorError::Unavailable)
-}
-
-fn encode_callable_code_cursor(
-    payload: CallableCodeCursorPayloadV1,
-    authentication: QueryDigest,
-) -> Result<OpaqueCursor, CallableCodeCursorError> {
-    let cursor = AuthenticatedCallableCodeCursorV1 {
-        payload,
-        authentication,
-    };
-    let bytes = serde_json::to_vec(&cursor).map_err(|_| CallableCodeCursorError::Unavailable)?;
-    OpaqueCursor::new(format!(
-        "{CALLABLE_CODE_CURSOR_PREFIX}{}",
-        hex::encode(bytes)
-    ))
-    .map_err(|_| CallableCodeCursorError::Unavailable)
-}
-
-fn decode_callable_code_cursor(
-    cursor: &OpaqueCursor,
-) -> Result<AuthenticatedCallableCodeCursorV1, CallableCodeCursorError> {
-    let encoded = cursor
-        .as_str()
-        .strip_prefix(CALLABLE_CODE_CURSOR_PREFIX)
-        .ok_or(CallableCodeCursorError::Invalid)?;
-    let bytes = hex::decode(encoded).map_err(|_| CallableCodeCursorError::Invalid)?;
-    if hex::encode(&bytes) != encoded {
-        return Err(CallableCodeCursorError::Invalid);
-    }
-    let decoded: AuthenticatedCallableCodeCursorV1 =
-        serde_json::from_slice(&bytes).map_err(|_| CallableCodeCursorError::Invalid)?;
-    if serde_json::to_vec(&decoded).map_err(|_| CallableCodeCursorError::Invalid)? != bytes
-        || decoded.payload.revision != CALLABLE_CODE_CURSOR_REVISION
-    {
-        return Err(CallableCodeCursorError::Invalid);
-    }
-    Ok(decoded)
-}
-
-fn callable_code_cursor_expiry(cursor: &OpaqueCursor) -> Option<UtcMicros> {
-    decode_callable_code_cursor(cursor)
-        .ok()
-        .map(|cursor| cursor.payload.expires_at)
-}
-
-fn require_unexpired_callable_code_cursor(
-    cursor: &AuthenticatedCallableCodeCursorV1,
-    now: UtcMicros,
-) -> Result<(), CallableCodeCursorError> {
-    if now.0 >= cursor.payload.expires_at.0 {
-        Err(CallableCodeCursorError::Stale)
-    } else {
-        Ok(())
-    }
-}
-
-fn authenticate_callable_code_cursor(
-    authority: &tracedecay_query::retrieval::Pr9QueryAuthorityV1,
-    base: &RetrievalRequest,
-    encoded: &OpaqueCursor,
-) -> Result<AuthenticatedCallableCodeCursorV1, CallableCodeCursorError> {
-    let cursor = decode_callable_code_cursor(encoded)?;
-    let view = cursor_authentication_view(&cursor.payload)?;
-    authority
-        .verify_authenticated_query(
-            &cursor.payload.authentication_key_id,
-            base,
-            &view,
-            &cursor.authentication,
-        )
-        .map_err(map_callable_cursor_authentication_error)?;
-    Ok(cursor)
-}
-
 fn reject_unresolved_cursor<T>(
     requested_page: &tracedecay_application::PageRequest,
     generation: &CodeGenerationId,
@@ -480,78 +350,6 @@ fn reject_unresolved_cursor<T>(
     } else {
         unavailable(query_finished_at())
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn paginate_callable_code<T: Serialize>(
-    authority: &tracedecay_query::retrieval::Pr9QueryAuthorityV1,
-    base: &RetrievalRequest,
-    context: &RetrievalPortContext<'_>,
-    operation: &'static str,
-    generation: &CodeGenerationId,
-    query_binding_digest: ManifestDigest,
-    mut page: CodeQueryPage<T>,
-    requested_page: &tracedecay_application::PageRequest,
-) -> Result<CodeQueryPage<T>, CallableCodeCursorError> {
-    page.total =
-        Some(u64::try_from(page.items.len()).map_err(|_| CallableCodeCursorError::Unavailable)?);
-    let candidate_set_digest =
-        canonical_sha256(&page.items).map_err(|_| CallableCodeCursorError::Unavailable)?;
-    let now = current_utc_micros()?;
-    let start = match requested_page.cursor.as_ref() {
-        Some(encoded) => {
-            let cursor = authenticate_callable_code_cursor(authority, base, encoded)?;
-            require_unexpired_callable_code_cursor(&cursor, now)?;
-            if cursor.payload.generation != *generation
-                || cursor.payload.candidate_set_digest != candidate_set_digest
-            {
-                return Err(CallableCodeCursorError::Stale);
-            }
-            if cursor.payload.operation != operation
-                || cursor.payload.scope_digest != context.request.scope().scope_digest
-                || cursor.payload.query_binding_digest != query_binding_digest
-            {
-                return Err(CallableCodeCursorError::Invalid);
-            }
-            usize::try_from(cursor.payload.next_offset)
-                .map_err(|_| CallableCodeCursorError::Invalid)?
-        }
-        None => 0,
-    };
-    if start > page.items.len() {
-        return Err(CallableCodeCursorError::Invalid);
-    }
-    let page_size =
-        usize::try_from(requested_page.page_size).map_err(|_| CallableCodeCursorError::Invalid)?;
-    let end = start.saturating_add(page_size).min(page.items.len());
-    let next_cursor = if end < page.items.len() {
-        let expires_at = UtcMicros(
-            now.0
-                .checked_add(CALLABLE_CODE_CURSOR_TTL_MICROS)
-                .ok_or(CallableCodeCursorError::Unavailable)?,
-        );
-        let payload = CallableCodeCursorPayloadV1 {
-            revision: CALLABLE_CODE_CURSOR_REVISION,
-            operation: operation.to_owned(),
-            scope_digest: context.request.scope().scope_digest.clone(),
-            generation: generation.clone(),
-            query_binding_digest,
-            candidate_set_digest,
-            authentication_key_id: authority.active_query_key_id(),
-            next_offset: u32::try_from(end).map_err(|_| CallableCodeCursorError::Unavailable)?,
-            expires_at,
-        };
-        let view = cursor_authentication_view(&payload)?;
-        let authentication = authority
-            .authenticate_query(base, &view)
-            .map_err(|_| CallableCodeCursorError::Unavailable)?;
-        Some(encode_callable_code_cursor(payload, authentication)?)
-    } else {
-        None
-    };
-    page.items = page.items.drain(start..end).collect();
-    page.next_cursor = next_cursor;
-    Ok(page)
 }
 
 fn base_request(
@@ -712,7 +510,8 @@ fn bounded_result<T>(
     page_state.expires_at = page
         .next_cursor
         .as_ref()
-        .and_then(callable_code_cursor_expiry);
+        .and_then(|cursor| inspect_prepared_query_cursor(cursor.as_str()).ok())
+        .map(|cursor| cursor.expires_at);
     let evidence = RetrievalEvidence {
         page: page_state,
         payload: Some(page),
@@ -932,8 +731,7 @@ fn symbol_page(
 
 struct PreparedCallableQueryV1 {
     latest: LatestCompleteCodeIndexV1,
-    authority: Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>,
-    base: RetrievalRequest,
+    query: PreparedQueryV1,
 }
 
 macro_rules! prepare_callable_query_or_return {
@@ -981,19 +779,17 @@ impl CodeIndexSchedulerRegistryV1 {
             .ok_or(CallableCodeCursorError::Unavailable)?;
         let base = base_request(context, &latest, temporal, authority.profile())
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
-        if let Some(cursor) = page.cursor.as_ref() {
-            authenticate_callable_code_cursor(authority.as_ref(), &base, cursor)?;
-        }
-        Ok(PreparedCallableQueryV1 {
-            latest,
+        let query = PreparedQueryV1::prepare(
             authority,
             base,
-        })
+            page.cursor.as_ref().map(OpaqueCursor::as_str),
+        )?;
+        Ok(PreparedCallableQueryV1 { latest, query })
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_direct_query<T: Serialize>(
+fn finish_direct_query<T: serde::Serialize>(
     prepared: &PreparedCallableQueryV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
@@ -1004,28 +800,48 @@ fn finish_direct_query<T: Serialize>(
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let finished_at = query_finished_at();
     let generation = prepared.latest.generation.manifest().generation_id.clone();
-    match paginate_callable_code(
-        prepared.authority.as_ref(),
-        &prepared.base,
-        context,
+    let bindings = PreparedQueryBindingsV1::new(
         operation,
-        &generation,
+        context.request.scope().scope_digest.clone(),
+        generation.clone(),
         query_binding_digest,
-        page,
-        requested_page,
-    ) {
-        Ok(page) => bounded_result(
-            page,
-            tracedecay_domain::RetrieverCoverage {
-                eligible,
-                examined: eligible,
-                excluded: 0,
-                capped: 0,
-                unknown: 0,
-            },
-            finished_at,
-            None,
-        ),
+    );
+    let pagination = bindings.and_then(|bindings| {
+        prepared
+            .query
+            .paginate(&bindings, page.items, requested_page.page_size, finished_at)
+    });
+    match pagination {
+        Ok(pagination) => {
+            let next_cursor = pagination
+                .next_cursor
+                .map(OpaqueCursor::new)
+                .transpose()
+                .map_err(|_| PreparedQueryErrorV1::Unavailable);
+            let Ok(next_cursor) = next_cursor else {
+                return rejected_cursor(finished_at, generation, PreparedQueryErrorV1::Unavailable);
+            };
+            let page = CodeQueryPage::new(
+                generation,
+                pagination.items,
+                Some(pagination.total),
+                next_cursor,
+                page.previous_cursor,
+            )
+            .unwrap_or_else(|_| panic!("prepared query creates a valid application page"));
+            bounded_result(
+                page,
+                tracedecay_domain::RetrieverCoverage {
+                    eligible,
+                    examined: eligible,
+                    excluded: 0,
+                    capped: 0,
+                    unknown: 0,
+                },
+                finished_at,
+                None,
+            )
+        }
         Err(error) => rejected_cursor(finished_at, generation, error),
     }
 }
@@ -1131,40 +947,65 @@ fn graph_page(
     .unwrap_or_else(|_| panic!("validated graph lane creates a valid page"))
 }
 
-fn lane_result<T, E>(
+#[allow(clippy::too_many_arguments)]
+fn finish_lane_query<T, E>(
+    prepared: &PreparedCallableQueryV1,
+    context: &RetrievalPortContext<'_>,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    requested_page: &tracedecay_application::PageRequest,
     outcome: RetrieverOutcome<RetrieverBatch<E>>,
-    finished_at: tracedecay_domain::UtcMicros,
-    generation: CodeGenerationId,
-    map: impl FnOnce(RetrieverBatch<E>) -> Result<CodeQueryPage<T>, CallableCodeCursorError>,
-) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    map: impl FnOnce(RetrieverBatch<E>) -> CodeQueryPage<T>,
+) -> RetrievalPortOutcome<CodeQueryPage<T>>
+where
+    T: serde::Serialize,
+{
+    let finished_at = query_finished_at();
     match outcome {
         RetrieverOutcome::Complete(batch) => {
             let coverage = batch.coverage;
-            match map(batch) {
-                Ok(page) => bounded_result(page, coverage, finished_at, None),
-                Err(error) => rejected_cursor(finished_at, generation, error),
-            }
+            finish_direct_query(
+                prepared,
+                context,
+                operation,
+                query_binding_digest,
+                map(batch),
+                requested_page,
+                coverage.eligible,
+            )
         }
         RetrieverOutcome::Partial { value, reason } => {
             let coverage = value.coverage;
-            match map(value) {
-                Ok(page) => bounded_result(
-                    page,
-                    coverage,
-                    finished_at,
-                    Some(match reason {
-                        RetrievalFailure::AuthorityUnavailable { .. } => {
-                            OmissionReason::Unavailable
-                        }
-                        RetrievalFailure::IncompatibleProjection { .. } => {
-                            OmissionReason::Unsupported
-                        }
-                        RetrievalFailure::StaleSource => OmissionReason::Stale,
-                        RetrievalFailure::InvalidRequest { .. }
-                        | RetrievalFailure::Internal { .. } => OmissionReason::Failed,
-                    }),
-                ),
-                Err(error) => rejected_cursor(finished_at, generation, error),
+            let outcome = finish_direct_query(
+                prepared,
+                context,
+                operation,
+                query_binding_digest,
+                map(value),
+                requested_page,
+                coverage.eligible,
+            );
+            let partial_reason = match reason {
+                RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
+                RetrievalFailure::IncompatibleProjection { .. } => OmissionReason::Unsupported,
+                RetrievalFailure::StaleSource => OmissionReason::Stale,
+                RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
+                    OmissionReason::Failed
+                }
+            };
+            match outcome {
+                RetrievalPortOutcome::Completed(evidence)
+                | RetrievalPortOutcome::Partial(evidence) => {
+                    let mut evidence = evidence;
+                    evidence.omissions.push(Omission {
+                        domain: EvidenceDomain::Symbol,
+                        count: coverage.eligible.saturating_sub(evidence.coverage.returned),
+                        reason: partial_reason,
+                    });
+                    evidence.coverage.completeness = CoverageCompleteness::Partial;
+                    RetrievalPortOutcome::Partial(evidence)
+                }
+                outcome => outcome,
             }
         }
         _ => unavailable(finished_at),
@@ -1181,38 +1022,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a ExactOccurrenceRequest,
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
-            let Some(latest) = self
-                .resolve_serving_generation(
-                    context.request,
-                    &request.scope.generation,
-                    &request.meta.page,
-                )
-                .await
-            else {
-                return reject_unresolved_cursor(&request.meta.page, &request.scope.generation);
-            };
+            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = query_finished_at();
-            let Some(cursor_authority) = self
-                .pr9_query_authority_for_scope(context.request.scope())
-                .await
-            else {
-                return unavailable(finished_at);
-            };
-            let Ok(base) = base_request(
-                &context,
-                &latest,
-                request.meta.temporal,
-                cursor_authority.profile(),
-            ) else {
-                return unavailable(finished_at);
-            };
-            if let Some(cursor) = request.meta.page.cursor.as_ref()
-                && let Err(error) =
-                    authenticate_callable_code_cursor(cursor_authority.as_ref(), &base, cursor)
-            {
-                return rejected_cursor(finished_at, served_generation, error);
-            }
+            let base = prepared.query.request();
             let Ok(query_view) = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
                 request.literal.clone(),
                 callable_query_sanitizer_revision(),
@@ -1247,23 +1061,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 return unavailable(finished_at);
             };
             let outcome = owners.exact.retrieve_exact(&lane_request);
-            let completed_at = finished_at;
             match outcome {
-                Ok(outcome) => {
-                    lane_result(outcome, completed_at, served_generation.clone(), |batch| {
-                        paginate_callable_code(
-                            cursor_authority.as_ref(),
-                            &base,
-                            &context,
-                            "code_exact_occurrence",
-                            &served_generation,
-                            query_binding_digest,
-                            exact_page(&latest, &served_generation, request, batch),
-                            &request.meta.page,
-                        )
-                    })
-                }
-                Err(_) => unavailable(completed_at),
+                Ok(outcome) => finish_lane_query(
+                    &prepared,
+                    &context,
+                    "code_exact_occurrence",
+                    query_binding_digest,
+                    &request.meta.page,
+                    outcome,
+                    |batch| exact_page(latest, &served_generation, request, batch),
+                ),
+                Err(_) => unavailable(finished_at),
             }
         })
     }
@@ -1274,38 +1082,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a PhraseSearchRequest,
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
-            let Some(latest) = self
-                .resolve_serving_generation(
-                    context.request,
-                    &request.scope.generation,
-                    &request.meta.page,
-                )
-                .await
-            else {
-                return reject_unresolved_cursor(&request.meta.page, &request.scope.generation);
-            };
+            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = query_finished_at();
-            let Some(cursor_authority) = self
-                .pr9_query_authority_for_scope(context.request.scope())
-                .await
-            else {
-                return unavailable(finished_at);
-            };
-            let Ok(base) = base_request(
-                &context,
-                &latest,
-                request.meta.temporal,
-                cursor_authority.profile(),
-            ) else {
-                return unavailable(finished_at);
-            };
-            if let Some(cursor) = request.meta.page.cursor.as_ref()
-                && let Err(error) =
-                    authenticate_callable_code_cursor(cursor_authority.as_ref(), &base, cursor)
-            {
-                return rejected_cursor(finished_at, served_generation, error);
-            }
+            let base = prepared.query.request();
             let whole_terms = request
                 .query
                 .as_str()
@@ -1365,23 +1146,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 return unavailable(finished_at);
             };
             let outcome = owners.lexical.retrieve_lexical(&lane_request);
-            let completed_at = finished_at;
             match outcome {
-                Ok(outcome) => {
-                    lane_result(outcome, completed_at, served_generation.clone(), |batch| {
-                        paginate_callable_code(
-                            cursor_authority.as_ref(),
-                            &base,
-                            &context,
-                            "code_phrase_search",
-                            &served_generation,
-                            query_binding_digest,
-                            lexical_page(&latest, &served_generation, request, batch),
-                            &request.meta.page,
-                        )
-                    })
-                }
-                Err(_) => unavailable(completed_at),
+                Ok(outcome) => finish_lane_query(
+                    &prepared,
+                    &context,
+                    "code_phrase_search",
+                    query_binding_digest,
+                    &request.meta.page,
+                    outcome,
+                    |batch| lexical_page(latest, &served_generation, request, batch),
+                ),
+                Err(_) => unavailable(finished_at),
             }
         })
     }
@@ -1392,38 +1167,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeRelationRequest,
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let Some(latest) = self
-                .resolve_serving_generation(
-                    context.request,
-                    &request.scope.generation,
-                    &request.meta.page,
-                )
-                .await
-            else {
-                return reject_unresolved_cursor(&request.meta.page, &request.scope.generation);
-            };
+            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = query_finished_at();
-            let Some(cursor_authority) = self
-                .pr9_query_authority_for_scope(context.request.scope())
-                .await
-            else {
-                return unavailable(finished_at);
-            };
-            let Ok(base) = base_request(
-                &context,
-                &latest,
-                request.meta.temporal,
-                cursor_authority.profile(),
-            ) else {
-                return unavailable(finished_at);
-            };
-            if let Some(cursor) = request.meta.page.cursor.as_ref()
-                && let Err(error) =
-                    authenticate_callable_code_cursor(cursor_authority.as_ref(), &base, cursor)
-            {
-                return rejected_cursor(finished_at, served_generation, error);
-            }
+            let base = prepared.query.request();
             let Ok(symbol) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
                 return unavailable(finished_at);
             };
@@ -1478,23 +1226,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 return unavailable(finished_at);
             };
             let outcome = owners.graph.retrieve_graph(&lane_request);
-            let completed_at = finished_at;
             match outcome {
-                Ok(outcome) => {
-                    lane_result(outcome, completed_at, served_generation.clone(), |batch| {
-                        paginate_callable_code(
-                            cursor_authority.as_ref(),
-                            &base,
-                            &context,
-                            "code_callees",
-                            &served_generation,
-                            query_binding_digest,
-                            graph_page(&latest, &served_generation, request, batch),
-                            &request.meta.page,
-                        )
-                    })
-                }
-                Err(_) => unavailable(completed_at),
+                Ok(outcome) => finish_lane_query(
+                    &prepared,
+                    &context,
+                    "code_callees",
+                    query_binding_digest,
+                    &request.meta.page,
+                    outcome,
+                    |batch| graph_page(latest, &served_generation, request, batch),
+                ),
+                Err(_) => unavailable(finished_at),
             }
         })
     }
@@ -2310,35 +2052,6 @@ fn navigation_symbol_query<'a>(
 mod tests {
     use super::*;
 
-    fn digest(label: &str) -> ManifestDigest {
-        canonical_sha256(&label).expect("fixture digest")
-    }
-
-    fn cursor(next_offset: u32, expires_at: UtcMicros) -> OpaqueCursor {
-        encode_callable_code_cursor(
-            CallableCodeCursorPayloadV1 {
-                revision: CALLABLE_CODE_CURSOR_REVISION,
-                operation: "code_exact_occurrence".to_owned(),
-                scope_digest: digest("scope"),
-                generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
-                query_binding_digest: digest("query"),
-                candidate_set_digest: digest("candidates"),
-                authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
-                    .expect("cursor key"),
-                next_offset,
-                expires_at,
-            },
-            QueryDigest::new(
-                tracedecay_domain::PrivacyDomainId::new("privacy.callable-page")
-                    .expect("privacy domain"),
-                1,
-                tracedecay_domain::QueryMac::new(format!("hmac-sha256:{}", "7".repeat(64)))
-                    .expect("query MAC"),
-            ),
-        )
-        .expect("cursor")
-    }
-
     fn page(items: Vec<&str>, total: u64) -> CodeQueryPage<String> {
         CodeQueryPage::new(
             CodeGenerationId::new("generation.callable-page").expect("generation"),
@@ -2400,8 +2113,8 @@ mod tests {
     #[test]
     fn bounded_result_treats_a_resumable_page_as_complete() {
         let mut page = page(vec!["one"], 3);
-        let expires_at = UtcMicros(1_000);
-        page.next_cursor = Some(cursor(1, expires_at));
+        page.next_cursor =
+            Some(OpaqueCursor::new("opaque.resumable").expect("bounded opaque cursor"));
         let outcome = bounded_result(
             page,
             tracedecay_domain::RetrieverCoverage {
@@ -2418,40 +2131,7 @@ mod tests {
         assert!(evidence.omissions.is_empty());
         assert_eq!(evidence.page.returned, 1);
         assert_eq!(evidence.page.total, Some(3));
-        assert_eq!(evidence.page.expires_at, Some(expires_at));
-    }
-
-    #[test]
-    fn callable_cursor_rejects_noncanonical_or_tampered_wire_values() {
-        let cursor = cursor(2, UtcMicros(1_000));
-        let decoded = decode_callable_code_cursor(&cursor).expect("canonical cursor");
-        assert_eq!(decoded.payload.next_offset, 2);
-        assert_eq!(decoded.payload.expires_at, UtcMicros(1_000));
-        assert_eq!(
-            require_unexpired_callable_code_cursor(&decoded, UtcMicros(1_000)),
-            Err(CallableCodeCursorError::Stale)
-        );
-
-        let mut tampered = cursor.as_str().to_owned();
-        tampered.push('0');
-        let tampered = OpaqueCursor::new(tampered).expect("bounded cursor");
-        assert_eq!(
-            decode_callable_code_cursor(&tampered),
-            Err(CallableCodeCursorError::Invalid)
-        );
-
-        let uppercase = OpaqueCursor::new(format!(
-            "{CALLABLE_CODE_CURSOR_PREFIX}{}",
-            cursor
-                .as_str()
-                .trim_start_matches(CALLABLE_CODE_CURSOR_PREFIX)
-                .to_ascii_uppercase()
-        ))
-        .expect("bounded cursor");
-        assert_eq!(
-            decode_callable_code_cursor(&uppercase),
-            Err(CallableCodeCursorError::Invalid)
-        );
+        assert_eq!(evidence.page.expires_at, None);
     }
 
     #[test]
