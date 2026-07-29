@@ -843,6 +843,35 @@ fn database_owner_registry_removal_retires_every_route_alias() {
 }
 
 #[test]
+fn failed_core_upgrade_retires_the_rekeyed_owner_without_quarantine() {
+    let old = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_id: Some("upgrade-failure".to_owned()),
+            store_root: PathBuf::from("/store/upgrade-failure"),
+            graph_db_path: PathBuf::from("/store/upgrade-failure/main.db"),
+        },
+        scope_prefix: None,
+    };
+    let mut new = old.clone();
+    new.owner.graph_db_path = PathBuf::from("/store/upgrade-failure/feature.db");
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project"),
+        scope_prefix: None,
+    };
+    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
+    registry.insert_route(route.clone(), old.clone(), Arc::new(1));
+
+    assert!(registry.rekey(&old, &new));
+    assert_eq!(registry.remove_owner(&new.owner).len(), 1);
+    assert!(registry.get_route(&route).is_none());
+    assert!(!registry.requires_synchronous_health(&new.owner));
+}
+
+#[test]
 fn failed_deferred_health_quarantines_only_the_exact_store_owner() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
