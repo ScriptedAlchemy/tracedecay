@@ -256,7 +256,15 @@ impl GraphPhysicalAttachmentFactory {
             }
         };
         start_hook(AttachmentWorkerStartStage::BeforeReaders);
-        let readers_result = ReaderPool::start(reader_locator, reader_budget, reader_executor);
+        let checkpoint_pressure = writer
+            .as_ref()
+            .map(|writer| writer.checkpoint_handle().pressure_subscription());
+        let readers_result = ReaderPool::start_with_checkpoint_pressure(
+            reader_locator,
+            reader_budget,
+            reader_executor,
+            checkpoint_pressure,
+        );
         start_hook(AttachmentWorkerStartStage::AfterReaders);
         let readers = match readers_result {
             Ok(readers) => readers,

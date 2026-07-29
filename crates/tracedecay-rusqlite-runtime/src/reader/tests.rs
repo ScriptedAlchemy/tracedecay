@@ -222,6 +222,48 @@ fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
 }
 
 #[test]
+fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
+    let store = TestStore::new();
+    let (pressure_tx, pressure_rx) = tokio::sync::watch::channel(
+        crate::CheckpointPressure::BlockGeneral {
+            wal: crate::CheckpointWal {
+                frames: 64,
+                bytes: 256 * 1024 * 1024,
+            },
+            blockers: crate::CheckpointBlockers::default(),
+        },
+    );
+    let pool = ReaderPool::start_with_checkpoint_pressure(
+        store.locator(),
+        two_reader_budget(),
+        CountExecutor,
+        Some(pressure_rx),
+    )
+    .unwrap();
+    let general = request(&store.binding, OperationPriorityV1::Foreground);
+    let general_probe = Probe::for_request(&general);
+    assert!(matches!(
+        pool.acquire(&general, &general_probe, Duration::from_millis(20)),
+        Err(ReaderAcquireError::Saturated { .. })
+    ));
+
+    let health = request(&store.binding, OperationPriorityV1::Health);
+    let health_probe = Probe::for_request(&health);
+    let outcome = pool
+        .execute(&health, &health_probe, Duration::from_millis(20))
+        .unwrap();
+    assert!(healthy(&outcome));
+
+    pressure_tx
+        .send(crate::CheckpointPressure::Open)
+        .expect("reader holds pressure receiver");
+    let outcome = pool
+        .execute(&general, &general_probe, Duration::from_millis(20))
+        .unwrap();
+    assert!(healthy(&outcome));
+}
+
+#[test]
 fn reserved_health_reader_reports_exact_store_size_pragmas() {
     let store = TestStore::new();
     let pool = ReaderPool::start(

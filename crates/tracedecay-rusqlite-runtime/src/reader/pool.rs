@@ -15,6 +15,7 @@ use tracedecay_store::{
     RuntimeReadRequestV1, RuntimeRequestProbeV1, SaturationScopeV1, StorageRuntimeContractErrorV1,
     StoreRuntimeBindingV1, UnavailableReasonV1,
 };
+use tokio::sync::watch;
 
 use super::{
     ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, ReaderWorkerError,
@@ -23,6 +24,7 @@ use super::{
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlReadSnapshot, MigrationSqlRows, MigrationSqlStatement,
 };
+use crate::CheckpointPressure;
 
 const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
@@ -166,6 +168,7 @@ struct PoolInner<E: ReaderQueryExecutor> {
     budget: ReaderBudgetV1,
     idle_burst_retire: Duration,
     executor: E,
+    checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
     state: Mutex<PoolState>,
     capacity_changed: Condvar,
 }
@@ -229,6 +232,15 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         budget: ReaderBudgetV1,
         executor: E,
     ) -> Result<Self, ReaderStartError> {
+        Self::start_with_checkpoint_pressure(locator, budget, executor, None)
+    }
+
+    pub(crate) fn start_with_checkpoint_pressure(
+        locator: ExistingReaderLocator,
+        budget: ReaderBudgetV1,
+        executor: E,
+        checkpoint_pressure: Option<watch::Receiver<CheckpointPressure>>,
+    ) -> Result<Self, ReaderStartError> {
         budget
             .validate()
             .map_err(ReaderStartError::InvalidReaderBudget)?;
@@ -238,6 +250,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             idle_burst_retire: Duration::from_millis(budget.idle_burst_retire_ms),
             budget,
             executor,
+            checkpoint_pressure,
             state: Mutex::new(PoolState {
                 lifecycle: ReaderPoolState::Ready,
                 health_admission_open: true,
@@ -455,6 +468,32 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 return Err(ReaderAcquireError::Interrupted {
                     reason: UnavailableReasonV1::Draining,
                 });
+            }
+            if lane == ReaderLane::General
+                && self
+                    .inner
+                    .checkpoint_pressure
+                    .as_ref()
+                    .is_some_and(|pressure| {
+                        matches!(
+                            &*pressure.borrow(),
+                            CheckpointPressure::BlockGeneral { .. }
+                        )
+                    })
+            {
+                let elapsed = started.elapsed();
+                if elapsed >= max_wait {
+                    return Err(ReaderAcquireError::Saturated {
+                        scope: SaturationScopeV1::ReaderPool,
+                    });
+                }
+                let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+                let (_state, _) = self
+                    .inner
+                    .capacity_changed
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                continue;
             }
             if let Some(worker) = state.available(lane).pop_front() {
                 match lane {
