@@ -2665,6 +2665,17 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.synchronous_health.remove(owner);
     }
 
+    fn servers_for_owner(&self, owner: &StoreOwnerKey) -> Vec<Server>
+    where
+        Server: Clone,
+    {
+        self.servers
+            .iter()
+            .filter(|(key, _)| &key.owner == owner)
+            .map(|(_, entry)| entry.server.clone())
+            .collect()
+    }
+
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
         debug_assert!(self.servers.contains_key(&key));
         if let Some(entry) = self.servers.get_mut(&key) {
@@ -4861,21 +4872,23 @@ async fn production_project_server(
         // code-index, semantic, LSP, advisory, HTTP, and edit owners finish
         // mounting. Mutation executors remain absent until their authorization
         // is complete.
-        let marked_core_ready = store_administration
-            .project_servers()
-            .lock()
-            .await
-            .mark_ready(&key);
-        if !marked_core_ready {
-            return Err(TraceDecayError::Config {
-                message: "project server disappeared before core publication completed".to_owned(),
-            });
-        }
+        let owner_servers = {
+            let mut servers = store_administration.project_servers().lock().await;
+            if !servers.mark_ready(&key) {
+                return Err(TraceDecayError::Config {
+                    message: "project server disappeared before core publication completed"
+                        .to_owned(),
+                });
+            }
+            servers.servers_for_owner(&key.owner)
+        };
         if let Some(database) = deferred_post_open_health
             && let Err(error) = database.repair_fts_after_open().await
         {
-            resolved.revoke_project_server();
-            resolved.cancel_startup_transcript_ingest();
+            for server in &owner_servers {
+                server.revoke_project_server();
+                server.cancel_startup_transcript_ingest();
+            }
             let project_servers = Arc::clone(store_administration.project_servers());
             let unhealthy_owner = key.owner.clone();
             let cleanup = tokio::spawn(async move {
