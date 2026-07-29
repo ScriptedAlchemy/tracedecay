@@ -18,10 +18,15 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 const REPOSITORY_SOURCE_ROOTS: &[&str] = &["src", "tests", "examples", "benches"];
+/// Exact contract dependencies of the query kernel.
+///
+/// The query kernel reaches `tracedecay-application` only through
+/// `tracedecay-code-index`; that transitive edge is pinned by
+/// `compile_isolation::query_reaches_application_only_through_code_index` and
+/// must never appear here as a direct dependency.
 const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "hex",
     "hmac",
-    "schemars",
     "serde",
     "serde_json",
     "sha2",
@@ -30,10 +35,128 @@ const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "tracedecay-code-index",
     "tracedecay-domain",
     "tracedecay-policy",
-    "tracedecay-store",
-    "tracedecay-tool-catalog",
-    "url",
     "zeroize",
+];
+/// Exact contract dependencies per workspace member manifest.
+///
+/// Every workspace member except the root manifest must appear here:
+/// [`contract_allowed_packages`] is fail-closed, so a new crate cannot inherit
+/// another crate's allowlist by omission. Each entry lists exactly the
+/// dependency, dev-dependency, and build-dependency package names Cargo reports
+/// for that manifest; [`validate_contract_package_dependencies`] rejects both
+/// undeclared dependencies and allowlist entries that are not dependencies.
+const CONTRACT_PACKAGE_ALLOWLISTS: &[(&str, &[&str])] = &[
+    (
+        "crates/tracedecay-api/Cargo.toml",
+        &[
+            "axum",
+            "futures-util",
+            "serde",
+            "serde_json",
+            "thiserror",
+            "tracedecay-application",
+            "tracedecay-tool-catalog",
+        ],
+    ),
+    (
+        "crates/tracedecay-application/Cargo.toml",
+        &[
+            "schemars",
+            "serde",
+            "serde_json",
+            "thiserror",
+            "tracedecay-domain",
+            "tracedecay-policy",
+            "tracedecay-tool-catalog",
+        ],
+    ),
+    (
+        "crates/tracedecay-code-index/Cargo.toml",
+        &[
+            "ast-grep-core",
+            "cc",
+            "ignore",
+            "serde",
+            "serde_json",
+            "sha2",
+            "static_assertions",
+            "tempfile",
+            "thiserror",
+            "tokensave-large-treesitters",
+            "tokensave-medium-treesitters",
+            "tracedecay-application",
+            "tracedecay-domain",
+            "tree-sitter",
+            "tree-sitter-hlsl",
+            "tree-sitter-language",
+        ],
+    ),
+    (
+        "crates/tracedecay-domain/Cargo.toml",
+        &[
+            "schemars",
+            "serde",
+            "serde_json",
+            "sha2",
+            "thiserror",
+            "url",
+        ],
+    ),
+    (
+        "crates/tracedecay-hooks/Cargo.toml",
+        &[
+            "serde",
+            "serde_json",
+            "thiserror",
+            "tracedecay-application",
+            "tracedecay-domain",
+        ],
+    ),
+    (
+        "crates/tracedecay-policy/Cargo.toml",
+        &["serde", "serde_json", "tracedecay-domain"],
+    ),
+    ("crates/tracedecay-query/Cargo.toml", QUERY_ALLOWED_PACKAGES),
+    (
+        "crates/tracedecay-rusqlite-parity/Cargo.toml",
+        &[
+            "hex",
+            "rusqlite",
+            "serde_json",
+            "sha2",
+            "tempfile",
+            "tracedecay-sqlite-parity-protocol",
+            "url",
+        ],
+    ),
+    (
+        "crates/tracedecay-rusqlite-runtime/Cargo.toml",
+        &[
+            "proptest",
+            "rusqlite",
+            "serde",
+            "serde_json",
+            "sha2",
+            "tempfile",
+            "tokio",
+            "tracedecay-application",
+            "tracedecay-domain",
+            "tracedecay-store",
+            "tracedecay-tool-catalog",
+        ],
+    ),
+    (
+        "crates/tracedecay-sqlite-parity-protocol/Cargo.toml",
+        &["hex", "serde", "serde_json", "sha2", "tempfile"],
+    ),
+    (
+        "crates/tracedecay-store/Cargo.toml",
+        &["serde", "serde_json", "thiserror", "tracedecay-domain"],
+    ),
+    (
+        "crates/tracedecay-tool-catalog/Cargo.toml",
+        &["schemars", "serde", "serde_json", "sha2", "thiserror"],
+    ),
 ];
 #[cfg(unix)]
 const TEST_WORKSPACE_MANIFESTS: &[&str] = &["Cargo.toml", "crates/tracedecay-domain/Cargo.toml"];
@@ -272,12 +395,12 @@ fn validate_query_dependency_aliases(
             ));
         }
         let normalized_alias = normalize_identifier(alias);
-        let Some(expected_package) = allowed_package_for_query_root(&normalized_alias) else {
+        let Some(expected_package) = allowed_package_for_contract_root(&normalized_alias) else {
             continue;
         };
         if normalize_identifier(&dependency.name) != normalize_identifier(expected_package) {
             violations.insert(format!(
-                "dependency alias {alias} maps allowlisted query root {normalized_alias} to non-allowlisted package {}",
+                "dependency alias {alias} maps allowlisted contract root {normalized_alias} to non-allowlisted package {}",
                 dependency.name
             ));
         }
@@ -346,7 +469,13 @@ fn validate_contract_package_dependencies(
     dependencies: &[CargoDependency],
     violations: &mut BTreeSet<String>,
 ) {
-    let allowed_packages = contract_allowed_packages(manifest_path);
+    let Some(allowed_packages) = contract_allowed_packages(manifest_path) else {
+        violations.insert(format!(
+            "{} has no contract dependency allowlist; declare one in CONTRACT_PACKAGE_ALLOWLISTS",
+            manifest_path.display()
+        ));
+        return;
+    };
     for dependency in dependencies {
         let alias = dependency.rename.as_deref().unwrap_or(&dependency.name);
         let normalized_alias = normalize_identifier(alias);
@@ -357,9 +486,11 @@ fn validate_contract_package_dependencies(
             normalize_identifier(allowed) == normalized_alias
                 && normalize_identifier(allowed) == normalize_identifier(&dependency.name)
         }) || dependency.rename.as_deref().is_some_and(|alias| {
-            ALLOWED_ROOT_PACKAGE_ALIASES.iter().any(|(allowed_alias, package)| {
-                alias == *allowed_alias && dependency.name == *package
-            })
+            ALLOWED_ROOT_PACKAGE_ALIASES
+                .iter()
+                .any(|(allowed_alias, package)| {
+                    alias == *allowed_alias && dependency.name == *package
+                })
         });
         if !package_allowed || !alias_matches_package {
             violations.insert(format!(
@@ -369,6 +500,52 @@ fn validate_contract_package_dependencies(
             ));
         }
     }
+
+    let declared: BTreeSet<String> = dependencies
+        .iter()
+        .map(|dependency| normalize_identifier(&dependency.name))
+        .collect();
+    for allowed in allowed_packages {
+        if !declared.contains(&normalize_identifier(allowed)) {
+            violations.insert(format!(
+                "{} allowlists {allowed}, which the manifest does not depend on",
+                manifest_path.display()
+            ));
+        }
+    }
+}
+
+fn dependency_fixture(name: &str) -> CargoDependency {
+    serde_json::from_value(serde_json::json!({ "name": name, "rename": None::<String> }))
+        .expect("dependency fixture")
+}
+
+#[test]
+fn contract_dependency_allowlists_are_fail_closed_and_exact() {
+    let mut undeclared = BTreeSet::new();
+    validate_contract_package_dependencies(
+        Path::new("crates/tracedecay-not-yet-declared/Cargo.toml"),
+        &[dependency_fixture("serde")],
+        &mut undeclared,
+    );
+    assert!(
+        undeclared
+            .iter()
+            .any(|violation| violation.contains("no contract dependency allowlist")),
+        "a workspace member without a declared allowlist must not inherit another crate's: {undeclared:?}"
+    );
+
+    let mut stale = BTreeSet::new();
+    validate_contract_package_dependencies(
+        Path::new("crates/tracedecay-policy/Cargo.toml"),
+        &[dependency_fixture("tracedecay-domain")],
+        &mut stale,
+    );
+    assert!(
+        stale.iter().any(|violation| violation
+            .contains("allowlists serde, which the manifest does not depend on")),
+        "allowlist entries without a matching dependency must be reported: {stale:?}"
+    );
 }
 
 #[test]
@@ -407,76 +584,22 @@ fn root_manifest_rejects_libsql_runtime_dependencies() {
     );
 }
 
-fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {
-    match manifest_path.to_str() {
-        Some("crates/tracedecay-code-index/Cargo.toml") => &[
-            "ast-grep-core",
-            "cc",
-            "ignore",
-            "serde",
-            "serde_json",
-            "sha2",
-            "static_assertions",
-            "tempfile",
-            "thiserror",
-            "tokensave-large-treesitters",
-            "tokensave-medium-treesitters",
-            "tracedecay-application",
-            "tracedecay-domain",
-            "tree-sitter",
-            "tree-sitter-hlsl",
-            "tree-sitter-language",
-        ],
-        Some("crates/tracedecay-api/Cargo.toml") => &[
-            "axum",
-            "futures-util",
-            "serde",
-            "serde_json",
-            "thiserror",
-            "tracedecay-application",
-            "tracedecay-tool-catalog",
-        ],
-        Some("crates/tracedecay-hooks/Cargo.toml") => &[
-            "serde",
-            "serde_json",
-            "thiserror",
-            "tracedecay-application",
-            "tracedecay-domain",
-            "tracedecay-tool-catalog",
-        ],
-        Some("crates/tracedecay-rusqlite-parity/Cargo.toml") => &[
-            "hex",
-            "rusqlite",
-            "serde_json",
-            "sha2",
-            "tempfile",
-            "tracedecay-sqlite-parity-protocol",
-            "url",
-        ],
-        Some("crates/tracedecay-rusqlite-runtime/Cargo.toml") => &[
-            "proptest",
-            "rusqlite",
-            "serde",
-            "serde_json",
-            "sha2",
-            "tempfile",
-            "tokio",
-            "tracedecay-application",
-            "tracedecay-domain",
-            "tracedecay-store",
-            "tracedecay-tool-catalog",
-        ],
-        Some("crates/tracedecay-sqlite-parity-protocol/Cargo.toml") => {
-            &["hex", "serde", "serde_json", "sha2", "tempfile"]
-        }
-        _ => QUERY_ALLOWED_PACKAGES,
-    }
+pub(crate) fn query_allowed_packages() -> &'static [&'static str] {
+    QUERY_ALLOWED_PACKAGES
 }
 
-fn allowed_package_for_query_root(root: &str) -> Option<&'static str> {
-    QUERY_ALLOWED_PACKAGES
+fn contract_allowed_packages(manifest_path: &Path) -> Option<&'static [&'static str]> {
+    let manifest = manifest_path.to_str()?;
+    CONTRACT_PACKAGE_ALLOWLISTS
         .iter()
-        .copied()
+        .find(|(allowlisted, _)| *allowlisted == manifest)
+        .map(|(_, packages)| *packages)
+}
+
+fn allowed_package_for_contract_root(root: &str) -> Option<&'static str> {
+    CONTRACT_PACKAGE_ALLOWLISTS
+        .iter()
+        .flat_map(|(_, packages)| packages.iter().copied())
         .find(|package| normalize_identifier(package) == root)
 }
 

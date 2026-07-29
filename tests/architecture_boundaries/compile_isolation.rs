@@ -207,6 +207,46 @@ fn query_dependencies_are_explicit_and_root_free() {
     assert!(!direct.contains("tracedecay"));
 }
 
+/// `tracedecay-query` depends on `tracedecay-code-index`, which depends on
+/// `tracedecay-application`. The decision is that this application edge is
+/// accepted transitively — the kernel needs code-index language and historical
+/// contracts, and code-index legitimately owns its application ports — but the
+/// kernel must never acquire a direct application dependency, and code-index
+/// must remain the only hop that carries it. Query source paths are guarded
+/// separately by
+/// `query_kernel::query_source_guard_refuses_direct_application_layer_paths`.
+#[test]
+fn query_reaches_application_only_through_code_index() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-query");
+    assert!(
+        !direct.contains("tracedecay-application"),
+        "tracedecay-query must not depend on tracedecay-application directly"
+    );
+    assert!(
+        direct.contains("tracedecay-code-index"),
+        "tracedecay-code-index is the admitted carrier of the application edge"
+    );
+    assert!(
+        dependency_closure(&metadata, "tracedecay-query").contains("tracedecay-application"),
+        "the transitive application edge is the condition this guard documents; \
+         remove the guard rather than let it pass vacuously"
+    );
+
+    let carriers = direct
+        .iter()
+        .filter(|dependency| {
+            dependency_closure(&metadata, dependency.as_str()).contains("tracedecay-application")
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        carriers,
+        BTreeSet::from(["tracedecay-code-index".to_owned()]),
+        "exactly one query dependency may carry tracedecay-application"
+    );
+}
+
 #[test]
 fn root_uses_query_facade_instead_of_inline_sources() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -369,6 +409,44 @@ fn session_lcm_publication_and_rendering_do_not_reach_back_into_global_db() {
         adapter.contains("impl<E> LcmSummaryPublicationPort for GlobalDbLcmSummaryPublication"),
         "global_db must retain the concrete transaction-backed publication adapter"
     );
+}
+
+#[test]
+fn transcript_ingest_core_uses_store_and_admission_ports() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        "src/sessions/source.rs",
+        "src/sessions/ingest/scheduler.rs",
+        "src/sessions/ingest/user_provider.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(path)).expect("read transcript ingest core");
+        for forbidden in ["RegisteredGlobalDb", "GlobalDbTranscriptStore"] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} must not depend on concrete global database storage: {forbidden}"
+            );
+        }
+    }
+
+    let claude = std::fs::read_to_string(root.join("src/sessions/claude_observation.rs"))
+        .expect("read Claude observation coordinator");
+    let claude_production = claude
+        .split_once("#[cfg(test)]")
+        .expect("Claude test module boundary")
+        .0;
+    for forbidden in ["RegisteredGlobalDb", "HostAdmissionFacade"] {
+        assert!(
+            !claude_production.contains(forbidden),
+            "Claude production ingest must use ports: {forbidden}"
+        );
+    }
+    assert!(claude_production.contains("ObservationCaptureAdmissionPort"));
+    assert!(claude_production.contains("TranscriptCursorAdmissionPort"));
+
+    let adapter = std::fs::read_to_string(root.join("src/store/global_db.rs"))
+        .expect("read global database transcript adapter");
+    assert!(adapter.contains("impl TranscriptIngestStore for GlobalDbTranscriptStore"));
+    assert!(adapter.contains("record_session_ingest_activity"));
 }
 
 #[test]
