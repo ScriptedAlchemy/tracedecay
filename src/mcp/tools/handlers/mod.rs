@@ -481,28 +481,6 @@ pub async fn handle_tool_call(
     .await
 }
 
-pub(crate) async fn handle_tool_call_with_registry(
-    cg: &TraceDecay,
-    tool_name: &str,
-    args: Value,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
-    global_db: Option<&RegisteredGlobalDb>,
-) -> Result<ToolResult> {
-    Box::pin(handle_tool_call_with_registry_and_implicit_project(
-        cg,
-        tool_name,
-        args,
-        server_stats,
-        scope_prefix,
-        ToolCallRegistryOptions {
-            global_db,
-            ..Default::default()
-        },
-    ))
-    .await
-}
-
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
     pub global_db: Option<&'a RegisteredGlobalDb>,
@@ -2153,7 +2131,7 @@ mod tests {
         .unwrap();
         let registry = SelectorRegistry::open().await;
 
-        let err = handle_tool_call_with_registry(
+        let err = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_grep",
             json!({
@@ -2162,7 +2140,10 @@ mod tests {
             }),
             None,
             None,
-            Some(registry.database.as_ref()),
+            ToolCallRegistryOptions {
+                global_db: Some(registry.database.as_ref()),
+                ..Default::default()
+            },
         )
         .await
         .unwrap_err();
