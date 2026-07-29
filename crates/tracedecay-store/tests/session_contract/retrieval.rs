@@ -1,6 +1,3 @@
-// Contract-test adapters keep the trait's `impl Future` signature shape
-// explicit; the bodies are the async implementation.
-#![allow(clippy::manual_async_fn)]
 use super::common::*;
 use super::*;
 
@@ -164,38 +161,34 @@ fn cursor_pagination_requires_a_key_frozen_with_the_watermarks() {
 }
 
 impl SessionRetrievalStore for InMemorySessionPorts {
-    fn freeze_session_temporal_snapshot_supported(
+    async fn freeze_session_temporal_snapshot_supported(
         &self,
         _permit: SessionSnapshotFreezePermit,
         request: SessionTemporalSnapshotRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionTemporalSnapshotV1>> + Send {
-        async move {
-            yield_once().await;
-            Ok(SessionTemporalSnapshotV1::new(
-                request.session_id().clone(),
-                UtcMicros(99),
-                SessionFrozenWatermarksV1::new(generation(7), 51, 47, 43),
-                self.session_temporal_capabilities().clone(),
-            ))
-        }
+    ) -> SessionStoreResult<SessionTemporalSnapshotV1> {
+        yield_once().await;
+        Ok(SessionTemporalSnapshotV1::new(
+            request.session_id().clone(),
+            UtcMicros(99),
+            SessionFrozenWatermarksV1::new(generation(7), 51, 47, 43),
+            self.session_temporal_capabilities().clone(),
+        ))
     }
 
-    fn retrieve_session_temporal_page_supported(
+    async fn retrieve_session_temporal_page_supported(
         &self,
         _permit: SessionTemporalPageRetrievePermit,
         request: SessionTemporalRetrievalRequestV1,
-    ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send {
-        async move {
-            yield_once().await;
-            SessionRetrievalPageV1::new(
-                request.snapshot().clone(),
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-                TemporalCoverageCountsV1::default(),
-                None,
-            )
-        }
+    ) -> SessionStoreResult<SessionRetrievalPageV1> {
+        yield_once().await;
+        SessionRetrievalPageV1::new(
+            request.snapshot().clone(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            TemporalCoverageCountsV1::default(),
+            None,
+        )
     }
 }

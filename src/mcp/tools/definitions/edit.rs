@@ -6,13 +6,12 @@ use super::{def, def_rw};
 use crate::mcp::tools::ToolDefinition;
 
 fn source_edit_schema(mut schema: Value) -> Value {
-    let root = schema
-        .as_object_mut()
-        .expect("source edit input schema must be an object");
-    let properties = root
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-        .expect("source edit input schema must define object properties");
+    let Some(root) = schema.as_object_mut() else {
+        unreachable!("source edit input schema must be an object");
+    };
+    let Some(properties) = root.get_mut("properties").and_then(Value::as_object_mut) else {
+        unreachable!("source edit input schema must define object properties");
+    };
     properties.insert(
         "idempotency_key".to_owned(),
         json!({

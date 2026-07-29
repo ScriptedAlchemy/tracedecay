@@ -491,7 +491,10 @@ fn source_for<'a>(
             .map_err(|_| config_error(format!("API migration source is not UTF-8: {path}")))?;
         sources.insert(path.to_owned(), source);
     }
-    Ok(sources.get(path).expect("source inserted"))
+    sources
+        .get(path)
+        .map(String::as_str)
+        .ok_or_else(|| config_error(format!("API migration source missing after insert: {path}")))
 }
 
 fn node_definition_span(source: &str, node: &Node) -> Result<(usize, usize)> {

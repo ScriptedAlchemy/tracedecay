@@ -1767,6 +1767,7 @@ impl tracedecay_application::AffectedTestsRetrievalPort for TraceDecayAffectedTe
 }
 
 /// How many tables the storage detail lines name before summarising the rest.
+#[cfg(test)]
 const STORAGE_TABLE_DETAIL_LIMIT: usize = 10;
 
 /// Renders per-table byte attribution for the graph store.
@@ -1775,6 +1776,7 @@ const STORAGE_TABLE_DETAIL_LIMIT: usize = 10;
 /// table holds the bytes can be reproduced through the product. A read the
 /// runtime cannot serve reports that it could not be sampled, never an absent
 /// or zero line that would read as "no table holds any bytes".
+#[cfg(test)]
 fn largest_table_details(tables: crate::errors::Result<Vec<(String, u64)>>) -> Vec<String> {
     let mut tables = match tables {
         Ok(tables) => tables,

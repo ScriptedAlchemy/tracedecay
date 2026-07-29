@@ -168,7 +168,7 @@ async fn legacy_single_db_plan_is_read_only_and_apply_preserves_source_graph() {
             .any(|fact| fact.content == "legacy durable fact"),
         "the preserved source graph lost its legacy fact"
     );
-    drop(memory);
+    let _ = memory;
     db.close();
 }
 
@@ -1142,7 +1142,7 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
             facts.iter().any(|fact| fact.content == expected),
             "recovered branch '{name}' lost its unique fact"
         );
-        drop(memory);
+        let _ = memory;
         db.close();
     }
 }

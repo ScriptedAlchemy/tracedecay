@@ -217,6 +217,7 @@ pub(super) fn def_git_hunks() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 fn feedback_surface_definition(
     name: &str,
     title: &str,
@@ -290,6 +291,7 @@ pub(super) fn def_git_apply() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_diagnostics() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_diagnostics",
@@ -299,6 +301,7 @@ pub(super) fn def_feedback_diagnostics() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_get() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_get",
@@ -308,6 +311,7 @@ pub(super) fn def_feedback_get() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_expand() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_expand",
@@ -317,6 +321,7 @@ pub(super) fn def_feedback_expand() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_list() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_list",
@@ -487,6 +492,7 @@ pub(super) fn context_scout_control_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+#[cfg(test)]
 pub(super) fn def_feedback_impact() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_impact",
@@ -496,6 +502,7 @@ pub(super) fn def_feedback_impact() -> ToolDefinition {
     )
 }
 
+#[cfg(test)]
 pub(super) fn def_affected_tests() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_affected_tests",

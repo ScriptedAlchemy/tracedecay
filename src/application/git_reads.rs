@@ -89,6 +89,8 @@ pub enum GitReadUnavailableReasonV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+// Boxing Complete would ripple through admission/match sites; size gap is accepted.
+#[allow(clippy::large_enum_variant)]
 pub enum GitReadOutcomeV1 {
     Complete {
         scope: ResolvedScope,
@@ -110,6 +112,8 @@ pub enum HistoricalGitReadUnavailableReasonV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
+// Boxing Complete would ripple through admission/match sites; size gap is accepted.
+#[allow(clippy::large_enum_variant)]
 pub enum HistoricalGitReadOutcomeV1 {
     Complete {
         scope: ResolvedScope,

@@ -1319,9 +1319,16 @@ async fn project_scoped_api_gateway(
                     .into_response();
             }
         };
-        let operation = tail
-            .strip_prefix("feedback/")
-            .expect("feedback read path was validated");
+        let Some(operation) = tail.strip_prefix("feedback/") else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "bad_request",
+                    "detail": "invalid project-scoped feedback path",
+                })),
+            )
+                .into_response();
+        };
         let rewritten = format!("/{operation}{query}");
         return match rewritten.parse::<Uri>() {
             Ok(uri) => {

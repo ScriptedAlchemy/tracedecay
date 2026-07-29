@@ -59,12 +59,6 @@ pub struct BranchDiagnostics {
 }
 
 impl TraceDecay {
-    /// Driver-neutral project-database reader for crate-internal read layers.
-    /// Honors whatever branch database `open` selected.
-    pub(crate) fn dashboard_connection(&self) -> crate::db::DatabaseEngineConnection {
-        self.db.engine_conn()
-    }
-
     pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
         std::sync::Arc::new(self.db.clone())
     }

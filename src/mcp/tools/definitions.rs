@@ -20,6 +20,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
 pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 163;
+#[cfg(test)]
 pub(crate) const UNADVERTISED_HANDLE_GATED_TOOL_NAMES: &[&str] = &[
     "tracedecay_feedback_diagnostics",
     "tracedecay_feedback_get",

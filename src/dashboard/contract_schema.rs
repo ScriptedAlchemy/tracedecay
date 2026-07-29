@@ -97,9 +97,9 @@ pub fn render_dashboard_contract_schema() -> Result<String, serde_json::Error> {
 }
 
 fn assert_registered_route_responses_are_contracted(schema: &serde_json::Value) {
-    let definitions = schema["$defs"]
-        .as_object()
-        .expect("dashboard contracts must expose schema definitions");
+    let Some(definitions) = schema["$defs"].as_object() else {
+        panic!("dashboard contracts must expose schema definitions");
+    };
     for route in registered_route_contracts() {
         let response = (route.response_schema_name)();
         assert!(

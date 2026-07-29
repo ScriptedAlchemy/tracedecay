@@ -129,7 +129,7 @@ impl LocalCodeStoreAuthorityV1 {
         if !matches!(&shard_id.scope, StoreShardScopeV1::Code { .. }) {
             return Err(
                 LocalStoreRuntimeResolverConfigurationErrorV1::CodeAuthorityIsNotCodeShard {
-                    shard_id,
+                    shard_id: Box::new(shard_id),
                 },
             );
         }
@@ -145,12 +145,16 @@ impl LocalCodeStoreAuthorityV1 {
 /// This is deliberately separate from resolution unavailability: a duplicate
 /// typed authority is a daemon wiring bug, not a reason to choose an arbitrary
 /// path at runtime.
+///
+/// Shard identities are boxed so `Result<_, Self>` stays under Clippy's
+/// `result_large_err` threshold; the boxed value remains the exact typed
+/// authority identity used for fail-closed equality.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LocalStoreRuntimeResolverConfigurationErrorV1 {
     DuplicateProjectAuthority { project_id: ProjectId },
-    DuplicateCodeAuthority { shard_id: StoreShardIdV1 },
-    CodeAuthorityIsNotCodeShard { shard_id: StoreShardIdV1 },
-    CodeAuthorityRetirementMismatch { shard_id: StoreShardIdV1 },
+    DuplicateCodeAuthority { shard_id: Box<StoreShardIdV1> },
+    CodeAuthorityIsNotCodeShard { shard_id: Box<StoreShardIdV1> },
+    CodeAuthorityRetirementMismatch { shard_id: Box<StoreShardIdV1> },
 }
 
 /// Infrastructure-only resolver for the local profile-sharded layout.
@@ -226,7 +230,9 @@ impl LocalStoreRuntimeResolverV1 {
         }
         if code_authorities.contains_key(&shard_id) {
             return Err(
-                LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateCodeAuthority { shard_id },
+                LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateCodeAuthority {
+                    shard_id: Box::new(shard_id),
+                },
             );
         }
         code_authorities.insert(shard_id, authority);
@@ -249,7 +255,7 @@ impl LocalStoreRuntimeResolverV1 {
             }
             Some(_) => Err(
                 LocalStoreRuntimeResolverConfigurationErrorV1::CodeAuthorityRetirementMismatch {
-                    shard_id: shard_id.clone(),
+                    shard_id: Box::new(shard_id.clone()),
                 },
             ),
         }

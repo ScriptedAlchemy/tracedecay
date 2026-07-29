@@ -71,13 +71,15 @@ fn status_envelope(
 ) -> DashboardEnvelopeV1<FeedbackObservationReadModelV1> {
     let scope = scope_from_state(state);
     let Ok(payload) = projected else {
+        let Some(empty_payload) = FeedbackObservationReadModelV1::project(&[]) else {
+            unreachable!("empty feedback observation projection is canonical");
+        };
         return DashboardEnvelopeV1::new(
             scope,
             DashboardDomainStateV1::Unknown,
             DashboardCoverageV1::unknown(),
             DashboardFreshnessV1::unknown(),
-            FeedbackObservationReadModelV1::project(&[])
-                .expect("empty feedback observation projection is canonical"),
+            empty_payload,
         )
         .with_legal_actions(vec![DashboardLegalActionRefV1::new(
             DashboardLegalActionKindV1::Refresh,

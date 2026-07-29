@@ -431,7 +431,7 @@ fn hash_file_bounded(path: &Path, expected_bytes: u64) -> Result<String, String>
         .map_err(|error| format!("could not open payload '{}': {error}", path.display()))?;
     let mut hash = Sha256::new();
     let mut read_bytes = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = file
             .read(&mut buffer)
@@ -488,7 +488,7 @@ fn copy_file_bounded(
     })?;
     let mut hash = Sha256::new();
     let mut copied = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = source_file.read(&mut buffer).map_err(|error| {
             format!(

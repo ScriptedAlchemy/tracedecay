@@ -13,7 +13,7 @@ use super::read_model::{
     DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
     DashboardLegalActionRefV1, scope_from_state,
 };
-use super::util::{JsonError, http_detail};
+use super::util::JsonError;
 use crate::application::configuration::{
     DirectConfigurationMutation, UserSettingsAuthorityError, UserSettingsMutationV1,
     UserSettingsSnapshotV1,
@@ -630,24 +630,6 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn validate_globs(field: &str, globs: &[String], errors: &mut Vec<Value>) {
-    for pattern in globs {
-        if pattern.trim().is_empty() {
-            errors.push(validation_error(
-                field,
-                &format!("{field} patterns must not be empty"),
-            ));
-            continue;
-        }
-        if let Err(err) = glob::Pattern::new(pattern) {
-            errors.push(validation_error(
-                field,
-                &format!("invalid glob pattern '{pattern}': {err}"),
-            ));
-        }
-    }
-}
-
 fn validation_error(field: &str, message: &str) -> Value {
     json!({ "field": field, "message": message })
 }
@@ -751,13 +733,6 @@ fn serde_error_field(message: &str) -> Option<String> {
             let end = rest.find('`')?;
             Some(rest[..end].to_string())
         })
-}
-
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
-    )
 }
 
 fn configuration_unavailable(_err: &impl ToString) -> JsonError {

@@ -196,6 +196,7 @@ impl SessionTemporalQuery {
         self.compatibility_filter_digest.as_deref()
     }
 
+    #[allow(dead_code)] // retained for session retrieval semantic filter inspection
     pub(crate) fn semantic_filter(&self) -> &TemporalCandidateFilterV1 {
         &self.semantic_filter
     }

@@ -91,14 +91,6 @@ impl TraceDecay {
         self.db.storage_page_counts().await
     }
 
-    pub(crate) async fn storage_table_bytes(&self) -> Result<Vec<(String, u64)>> {
-        self.db.storage_table_bytes().await
-    }
-
-    pub(crate) async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
-        self.db.run_incremental_vacuum(pages).await
-    }
-
     pub(crate) fn configuration_runtime(
         &self,
     ) -> &Arc<crate::application::configuration::ProjectConfigurationRuntime> {

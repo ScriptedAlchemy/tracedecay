@@ -44,7 +44,7 @@ pub(crate) struct DoctorRemediationApplyRequestV1 {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationPayloadV1 {
     Operation {
-        operation: DoctorRemediationOperationV1,
+        operation: Box<DoctorRemediationOperationV1>,
     },
     Unavailable {
         reason: DoctorRemediationDispatchErrorV1,
@@ -138,7 +138,9 @@ fn response(
                 } else {
                     DashboardFreshnessV1::unknown()
                 },
-                DoctorRemediationPayloadV1::Operation { operation },
+                DoctorRemediationPayloadV1::Operation {
+                    operation: Box::new(operation),
+                },
             ))
         }
         Err(error) => {

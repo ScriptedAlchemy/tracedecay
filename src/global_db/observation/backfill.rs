@@ -289,6 +289,7 @@ async fn attach_legacy_observation_anchor(
             .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     for collision in alias_collisions {
         tracing::warn!(
+            alias_kind = ?collision.alias.kind(),
             existing_anchor_id = collision.existing_anchor_id.as_str(),
             candidate_anchor_id = collision.candidate_anchor_id.as_str(),
             "anchor backfill preserved alias binding; candidate stays reachable by id only"

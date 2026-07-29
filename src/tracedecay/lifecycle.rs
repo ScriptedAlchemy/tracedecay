@@ -489,20 +489,6 @@ impl TraceDecay {
         .await
     }
 
-    async fn resolve_store_layout_for_project_read_only(
-        project_root: &Path,
-        open_options: &TraceDecayOpenOptions,
-    ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_with_identity_migration(
-            project_root,
-            open_options,
-            false,
-            None,
-            true,
-        )
-        .await
-    }
-
     pub(crate) async fn resolve_registered_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -1519,6 +1505,7 @@ impl TraceDecay {
         }
     }
 
+    #[cfg(not(any(test, feature = "test-transport")))]
     async fn open_read_only_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -2952,17 +2939,6 @@ fn push_existing_store_artifact(
         schema_version,
         updated_at: Some(updated_at),
     });
-}
-
-/// Deletes the database and its WAL/SHM sidecars.
-fn delete_db_files(db_path: &std::path::Path) {
-    let _ = std::fs::remove_file(db_path);
-    // WAL and SHM files use the same base name with different extensions
-    let mut wal = db_path.to_path_buf();
-    wal.set_extension("db-wal");
-    let _ = std::fs::remove_file(&wal);
-    wal.set_extension("db-shm");
-    let _ = std::fs::remove_file(&wal);
 }
 
 /// Build an actionable error without replacing any member of the `SQLite`

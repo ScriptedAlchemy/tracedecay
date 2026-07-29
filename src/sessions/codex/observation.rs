@@ -330,6 +330,7 @@ fn codex_observation_record_supported(value: &Value) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn normalize_codex_observation(
     native: &Value,
     session_id: &str,

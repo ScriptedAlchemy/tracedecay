@@ -419,6 +419,7 @@ fn nonnegative_token_count(
         .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_observation_row(
     row: &HermesRow,

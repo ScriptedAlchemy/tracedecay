@@ -174,23 +174,43 @@ enum ProfileGitHubReadOnlyCredentialAuthorityV1 {
     },
 }
 
-fn profile_github_read_only_credential_authorities() -> &'static Mutex<
-    BTreeMap<(UserProfileId, String, String), ProfileGitHubReadOnlyCredentialAuthorityV1>,
-> {
-    static AUTHORITIES: OnceLock<
-        Mutex<
-            BTreeMap<(UserProfileId, String, String), ProfileGitHubReadOnlyCredentialAuthorityV1>,
-        >,
-    > = OnceLock::new();
+type ProfileGitHubReadOnlyCredentialAuthorityMapV1 =
+    BTreeMap<(UserProfileId, String, String), ProfileGitHubReadOnlyCredentialAuthorityV1>;
+type ProfileGitHubReadOnlyCredentialAuthoritiesLockV1 =
+    Mutex<ProfileGitHubReadOnlyCredentialAuthorityMapV1>;
+type RegisteredGitHubReadOnlyCredentialAuthorityMapV1 =
+    BTreeMap<(String, String), RegisteredGitHubReadOnlyCredentialAuthorityV1>;
+type RegisteredGitHubReadOnlyCredentialAuthoritiesLockV1 =
+    Mutex<RegisteredGitHubReadOnlyCredentialAuthorityMapV1>;
+
+fn profile_github_read_only_credential_authorities()
+-> &'static ProfileGitHubReadOnlyCredentialAuthoritiesLockV1 {
+    static AUTHORITIES: OnceLock<ProfileGitHubReadOnlyCredentialAuthoritiesLockV1> =
+        OnceLock::new();
     AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 fn registered_github_read_only_credential_authorities()
--> &'static Mutex<BTreeMap<(String, String), RegisteredGitHubReadOnlyCredentialAuthorityV1>> {
-    static AUTHORITIES: OnceLock<
-        Mutex<BTreeMap<(String, String), RegisteredGitHubReadOnlyCredentialAuthorityV1>>,
-    > = OnceLock::new();
+-> &'static RegisteredGitHubReadOnlyCredentialAuthoritiesLockV1 {
+    static AUTHORITIES: OnceLock<RegisteredGitHubReadOnlyCredentialAuthoritiesLockV1> =
+        OnceLock::new();
     AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn registered_github_read_only_credential_generation_matches_v1(
+    repository_owner: &str,
+    repository_name: &str,
+    authority: &Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
+    generation: u64,
+) -> bool {
+    let Ok(authorities) = registered_github_read_only_credential_authorities().lock() else {
+        return false;
+    };
+    authorities
+        .get(&(repository_owner.to_owned(), repository_name.to_owned()))
+        .is_some_and(|registered| {
+            Arc::ptr_eq(&registered.authority, authority) && registered.generation == generation
+        })
 }
 
 fn next_github_credential_generation_v1() -> u64 {
@@ -625,6 +645,7 @@ impl GitHubReadOnlyCredentialV1 {
         &self,
         permission: GitHubReadPermissionV1,
     ) -> GitHubCredentialAuthorizationV1 {
+        let mounted_generation = self.generation();
         match &self.kind {
             GitHubReadOnlyCredentialKindV1::Anonymous => GitHubCredentialAuthorizationV1::Anonymous,
             GitHubReadOnlyCredentialKindV1::VerifiedPrivate {
@@ -633,7 +654,14 @@ impl GitHubReadOnlyCredentialV1 {
                 repository_name,
                 active,
                 ..
-            } if active.load(Ordering::Acquire) => {
+            } if active.load(Ordering::Acquire)
+                && registered_github_read_only_credential_generation_matches_v1(
+                    repository_owner,
+                    repository_name,
+                    authority,
+                    mounted_generation,
+                ) =>
+            {
                 match authority.resolve(repository_owner, repository_name) {
                     GitHubReadOnlyCredentialAuthorityOutcomeV1::Verified {
                         secret,
