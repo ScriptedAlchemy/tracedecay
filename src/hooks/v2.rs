@@ -127,7 +127,7 @@ pub(crate) fn publish_daemon_bindings(
                 repository_id,
                 worktree_id,
                 worktree_epoch,
-                binding_token: domain_hash32(project_key, host.as_key()),
+                binding_token: domain_hash32(project_key, host.hook_key()),
                 capabilities,
             },
         };
@@ -139,7 +139,7 @@ pub(crate) fn publish_daemon_bindings(
             .map_err(|error| crate::errors::TraceDecayError::Config {
                 message: format!(
                     "failed to publish {} Hook V2 binding: {error}",
-                    host.as_key()
+                    host.hook_key()
                 ),
             })?;
     }
@@ -744,7 +744,7 @@ fn append_for_replay(
     binding: &HookScopeBindingV1,
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
-    let root = data_root.join("hook-v2-spool").join(host.as_key());
+    let root = data_root.join("hook-v2-spool").join(host.hook_key());
     if std::fs::create_dir_all(&root).is_err() {
         return SpoolAppendOutcomeV1::Unavailable;
     }

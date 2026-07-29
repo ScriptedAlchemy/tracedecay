@@ -52,7 +52,7 @@ pub use spool::{
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{NativeHostIdentityV1, UtcMicros};
 
 pub const HOOK_EVENT_SCHEMA_VERSION: u16 = 2;
 pub const MAX_HOOK_PAYLOAD_BYTES: usize = 16 * 1024;
@@ -65,42 +65,10 @@ pub const MAX_REPLAY_BATCH_RECORDS: u16 = 64;
 pub const MAX_REPLAY_BATCH_BYTES: u32 = 256 * 1024;
 pub const MAX_SUGGESTION_BYTES: usize = 4 * 1024;
 
-/// Stock host surfaces plus Kimi/OpenCode native plugin adapters and explicit
-/// Cline-family dispositions. Split variants preserve provider-specific
-/// evidence; one family label must never widen another provider's capability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookHostV1 {
-    ClaudeCode,
-    Codex,
-    CursorDesktop,
-    CursorCloud,
-    Hermes,
-    Kiro,
-    KimiCode,
-    OpenCode,
-    Cline,
-    RooCode,
-    Kilo,
-}
-
-impl HookHostV1 {
-    pub const fn as_key(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude",
-            Self::Codex => "codex",
-            Self::CursorDesktop => "cursor-desktop",
-            Self::CursorCloud => "cursor-cloud",
-            Self::Hermes => "hermes",
-            Self::Kiro => "kiro",
-            Self::KimiCode => "kimi",
-            Self::OpenCode => "opencode",
-            Self::Cline => "cline",
-            Self::RooCode => "roo-code",
-            Self::Kilo => "kilo",
-        }
-    }
-}
+/// Canonical native host identity used by hook decoding, configuration, and
+/// persisted spool state. The alias preserves the Hook V2 API name while
+/// preventing a second host vocabulary from drifting from the domain catalog.
+pub type HookHostV1 = NativeHostIdentityV1;
 
 /// Event families that a host hook itself may emit in PR13.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

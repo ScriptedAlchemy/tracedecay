@@ -70,6 +70,39 @@ fn native_identities_preserve_provider_specific_hosts() {
 }
 
 #[test]
+fn native_hook_keys_preserve_exact_provider_variants() {
+    let identities = [
+        NativeHostIdentityV1::ClaudeCode,
+        NativeHostIdentityV1::CursorDesktop,
+        NativeHostIdentityV1::CursorCloud,
+        NativeHostIdentityV1::Codex,
+        NativeHostIdentityV1::Hermes,
+        NativeHostIdentityV1::Kiro,
+        NativeHostIdentityV1::Cline,
+        NativeHostIdentityV1::RooCode,
+        NativeHostIdentityV1::Kilo,
+        NativeHostIdentityV1::KimiCode,
+        NativeHostIdentityV1::OpenCode,
+    ];
+    assert_eq!(
+        identities.map(NativeHostIdentityV1::hook_key),
+        [
+            "claude",
+            "cursor-desktop",
+            "cursor-cloud",
+            "codex",
+            "hermes",
+            "kiro",
+            "cline",
+            "roo-code",
+            "kilo",
+            "kimi",
+            "opencode",
+        ]
+    );
+}
+
+#[test]
 fn activation_and_registration_never_invent_unsupported_routes() {
     for host in [HostKindV1::CursorCloud, HostKindV1::ClineFamily] {
         let descriptor = host.descriptor();

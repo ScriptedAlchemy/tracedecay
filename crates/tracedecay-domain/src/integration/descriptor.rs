@@ -37,6 +37,26 @@ impl NativeHostIdentityV1 {
             Self::OpenCode => HostKindV1::OpenCode,
         }
     }
+
+    /// Stable key used by native hook configuration and spool storage.
+    ///
+    /// Hosts sharing one CLI selector retain distinct keys so their native
+    /// identities cannot alias in persisted hook state.
+    pub const fn hook_key(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::CursorDesktop => "cursor-desktop",
+            Self::CursorCloud => "cursor-cloud",
+            Self::Codex => "codex",
+            Self::Hermes => "hermes",
+            Self::Kiro => "kiro",
+            Self::Cline => "cline",
+            Self::RooCode => "roo-code",
+            Self::Kilo => "kilo",
+            Self::KimiCode => "kimi",
+            Self::OpenCode => "opencode",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
