@@ -2487,11 +2487,8 @@ impl ProjectOpenTasks {
     }
 
     async fn shutdown(&self) -> bool {
-        self.shutdown_with_deadline(
-            DAEMON_TASK_ABORT_DEADLINE,
-            DAEMON_TASK_ABORT_DEADLINE,
-        )
-        .await
+        self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)
+            .await
     }
 
     async fn shutdown_with_deadline(
@@ -4817,8 +4814,7 @@ async fn production_project_server(
             .mark_ready(&key);
         if !marked_core_ready {
             return Err(TraceDecayError::Config {
-                message: "project server disappeared before core publication completed"
-                    .to_owned(),
+                message: "project server disappeared before core publication completed".to_owned(),
             });
         }
         if let Some(database) = deferred_post_open_health
@@ -6189,13 +6185,10 @@ async fn open_project_for_handshake(
     };
     match open_result {
         Ok(cg) => {
-            let deferred_post_open_health =
-                defer_post_open_health.then(|| cg.db().clone());
+            let deferred_post_open_health = defer_post_open_health.then(|| cg.db().clone());
             Ok((cg, deferred_post_open_health))
         }
-        Err(open_err)
-            if defer_post_open_health && is_readonly_database_error(&open_err) =>
-        {
+        Err(open_err) if defer_post_open_health && is_readonly_database_error(&open_err) => {
             match crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
                 project_path,
                 open_options,
