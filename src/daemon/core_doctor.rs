@@ -489,7 +489,10 @@ mod doctor_runtime_route_tests {
 
     use rusqlite::Connection;
 
-    use super::{cold_doctor_runtime_value, doctor_runtime_request, doctor_runtime_store_paths};
+    use super::{
+        cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
+        doctor_runtime_store_paths,
+    };
     use crate::client_identity::DaemonClientIdentity;
     use crate::daemon::DaemonHandshake;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
