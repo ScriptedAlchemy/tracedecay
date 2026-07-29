@@ -19,7 +19,6 @@ mod ingest_byte_budget;
 mod jsonl_observation_admission;
 pub mod kiro;
 pub mod lcm;
-pub(crate) mod message_noise;
 pub mod providers;
 pub mod session_temporal_benchmark;
 pub mod shared;

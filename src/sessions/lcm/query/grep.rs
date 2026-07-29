@@ -1,3 +1,8 @@
+use crate::application::session::compatibility::{
+    RelatedMessageCopyIdentity, dedupe_related_message_copies, is_inventory_text,
+};
+use crate::sessions::SessionMessageType;
+
 use super::*;
 
 pub(super) fn contains_cjk(value: &str) -> bool {
@@ -165,14 +170,14 @@ fn rerank_grep_hits(
 /// Cheap, deterministic heuristic: is this hit a transcript inventory/listing
 /// tool call, an otherwise path-list-dominated message, or a prose branch/
 /// worktree roster rather than substantive conversation? Delegates to the
-/// shared [`message_noise`](crate::sessions::message_noise) classifier so the
-/// lcm/grep and global message-search re-ranks agree. Summary nodes are curated
-/// prose, never raw inventory, so they are exempt.
+/// shared application classifier so the lcm/grep and global message-search
+/// re-ranks agree. Summary nodes are curated prose, never raw inventory, so
+/// they are exempt.
 fn hit_is_inventory(hit: &LcmGrepHit) -> bool {
     if hit.kind != "raw_message" {
         return false;
     }
-    crate::sessions::message_noise::is_inventory_text(&hit.snippet)
+    is_inventory_text(&hit.snippet)
 }
 
 pub(super) async fn raw_grep_hits(
@@ -449,11 +454,8 @@ fn push_raw_grep_filters(
         filters.push("r.timestamp <= ?".to_string());
         values.push(Value::Integer(end_time));
     }
-    if let Some(predicate) = crate::sessions::message_noise::message_type_predicate_sql(
-        "r",
-        false,
-        retrieval_filters.message_type,
-    ) {
+    if let Some(predicate) = message_type_predicate_sql("r", false, retrieval_filters.message_type)
+    {
         filters.push(predicate);
     }
     push_grep_relationship_scope_filter(
@@ -504,6 +506,35 @@ fn push_summary_grep_filters(
         filters,
     );
     push_grep_git_scope_filter(request, "n.session_id", filters, values);
+}
+
+fn message_type_predicate_sql(
+    alias: &str,
+    has_kind_column: bool,
+    message_type: SessionMessageType,
+) -> Option<String> {
+    if matches!(message_type, SessionMessageType::All) {
+        return None;
+    }
+    let kind_clause = if has_kind_column {
+        format!(" OR lower(COALESCE({alias}.kind, '')) IN ('tool_result', 'tool_output')")
+    } else {
+        String::new()
+    };
+    let tool_result = format!(
+        "({alias}.role = 'tool'{kind_clause} \
+         OR CASE WHEN json_valid(COALESCE({alias}.metadata_json, '')) \
+              THEN EXISTS (SELECT 1 FROM json_each({alias}.metadata_json, '$.tool_events') event \
+                           WHERE json_extract(event.value, '$.type') = 'tool_result') \
+              ELSE 0 END)"
+    );
+    Some(match message_type {
+        SessionMessageType::All => unreachable!(),
+        SessionMessageType::DirectUser => {
+            format!("({alias}.role = 'user' AND NOT {tool_result})")
+        }
+        SessionMessageType::ToolResult => tool_result,
+    })
 }
 
 fn push_grep_relationship_scope_filter(
@@ -597,14 +628,12 @@ fn raw_hit_candidate_from_row(
 }
 
 fn dedupe_related_raw_hits(candidates: Vec<RawGrepCandidate>) -> Vec<LcmGrepHit> {
-    crate::sessions::message_noise::dedupe_related_message_copies(candidates, |candidate| {
-        crate::sessions::message_noise::RelatedMessageCopyIdentity {
-            provider: &candidate.hit.provider,
-            family_session_id: &candidate.family_session_id,
-            session_id: &candidate.hit.session_id,
-            is_subagent: candidate.is_subagent,
-            content: &candidate.content,
-        }
+    dedupe_related_message_copies(candidates, |candidate| RelatedMessageCopyIdentity {
+        provider: &candidate.hit.provider,
+        family_session_id: &candidate.family_session_id,
+        session_id: &candidate.hit.session_id,
+        is_subagent: candidate.is_subagent,
+        content: &candidate.content,
     })
     .into_iter()
     .map(|candidate| candidate.hit)
