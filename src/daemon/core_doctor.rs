@@ -369,42 +369,54 @@ async fn doctor_runtime_value_inner(
                 .unwrap_or_else(|_| database.db_path().to_path_buf())
                 == canonical_session_path
         });
-    value["session_temporal_health"] = match session_db.as_ref() {
-        Some(db) => {
-            match timeout(Duration::from_secs(8), db.session_temporal_doctor_health()).await {
-                Ok(report) => doctor_runtime_temporal_report(report),
-                Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
-            }
-        }
-        None if session_path.is_file() => {
-            doctor_runtime_temporal_unavailable("session_store_unavailable")
-        }
-        None => doctor_runtime_temporal_unavailable("session_store_missing"),
-    };
-    value["cursor_session_ingest"] = match session_db.as_ref() {
-        Some(db) => match db.cursor_session_ingest_health().await {
-            Ok(health) => serde_json::to_value(health).unwrap_or_else(|error| {
+    if let Some(db) = session_db.as_ref() {
+        let health_budget = Duration::from_secs(8);
+        let (temporal, cursor_ingest, placeholder_paths) = tokio::join!(
+            timeout(health_budget, db.session_temporal_doctor_health()),
+            timeout(health_budget, db.cursor_session_ingest_health()),
+            timeout(
+                health_budget,
+                doctor_literal_workspace_placeholder_paths(db, 10)
+            ),
+        );
+        value["session_temporal_health"] = match temporal {
+            Ok(report) => doctor_runtime_temporal_report(report),
+            Err(_) => doctor_runtime_temporal_unavailable("session_health_timed_out"),
+        };
+        value["cursor_session_ingest"] = match cursor_ingest {
+            Ok(Ok(health)) => serde_json::to_value(health).unwrap_or_else(|error| {
                 json!({
                     "status": "unavailable",
                     "reason": "session_ingest_serialization_failed",
                     "message": error.to_string(),
                 })
             }),
-            Err(error) => json!({
+            Ok(Err(error)) => json!({
                 "status": "unavailable",
                 "reason": "session_ingest_query_failed",
                 "message": error,
             }),
-        },
-        None => json!({
+            Err(_) => json!({
+                "status": "unavailable",
+                "reason": "session_ingest_timed_out",
+            }),
+        };
+        value["cursor_session_placeholder_paths"] = match placeholder_paths {
+            Ok(paths) => json!(paths),
+            Err(_) => json!([]),
+        };
+    } else {
+        value["session_temporal_health"] = if session_path.is_file() {
+            doctor_runtime_temporal_unavailable("session_store_unavailable")
+        } else {
+            doctor_runtime_temporal_unavailable("session_store_missing")
+        };
+        value["cursor_session_ingest"] = json!({
             "status": "unavailable",
             "reason": "session_store_unavailable",
-        }),
-    };
-    value["cursor_session_placeholder_paths"] = match session_db.as_ref() {
-        Some(db) => json!(doctor_literal_workspace_placeholder_paths(db, 10).await),
-        None => json!([]),
-    };
+        });
+        value["cursor_session_placeholder_paths"] = json!([]);
+    }
     let semantic_configuration = graph
         .configuration_runtime()
         .client()
