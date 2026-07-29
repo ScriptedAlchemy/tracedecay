@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use tracedecay_capture::claude as canonical;
 
 #[test]
 fn live_session_discovery_excludes_large_unrelated_history() {
