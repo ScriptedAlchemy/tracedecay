@@ -468,6 +468,7 @@ fn doctor_semantic_runtime_status(
         .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
 
+#[cfg(test)]
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
     // Owned stores are never path-opened as a fallback. Without the daemon's
     // retained runtime authority Doctor reports explicit unavailability.
