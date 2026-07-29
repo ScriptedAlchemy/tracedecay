@@ -2663,15 +2663,27 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     where
         F: FnOnce(&Server) -> bool,
     {
+        self.swap_ready_if(key, replacement, matches).is_some()
+    }
+
+    fn swap_ready_if<F>(
+        &mut self,
+        key: &ProjectServerKey,
+        replacement: Server,
+        matches: F,
+    ) -> Option<Server>
+    where
+        F: FnOnce(&Server) -> bool,
+    {
         let Some(entry) = self.servers.get_mut(key) else {
-            return false;
+            return None;
         };
         if !entry.ready || !matches(&entry.server) {
-            return false;
+            return None;
         }
-        entry.server = replacement;
+        let displaced = std::mem::replace(&mut entry.server, replacement);
         entry.last_used = Instant::now();
-        true
+        Some(displaced)
     }
 
     #[cfg(test)]
@@ -5002,6 +5014,7 @@ async fn production_project_server(
         });
         let quarantine_on_upgrade_failure = AtomicBool::new(false);
         let session_capabilities_published = AtomicBool::new(false);
+        let mut published_full_candidate = None;
         let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
             if let Some(database) = deferred_post_open_health
                 && let Err(error) = database.repair_fts_after_open().await
@@ -5183,6 +5196,7 @@ async fn production_project_server(
                     message: "project server changed during session capability upgrade".to_owned(),
                 });
             }
+            published_full_candidate = Some(Arc::clone(&full_candidate));
             session_capabilities_published.store(true, Ordering::Release);
             log_daemon_event(
                 "project_open_phase",
@@ -5329,37 +5343,85 @@ async fn production_project_server(
             Ok(full_server) => resolved = full_server,
             Err(error) => {
                 let failed_key = current_key.lock().await.clone();
-                let mut removed = {
+                let retain_core = !quarantine_on_upgrade_failure.load(Ordering::Acquire)
+                    && !cancellation.is_cancelled()
+                    && failed_key == key;
+                let (core_retained, failed_full_server) = if retain_core {
                     let mut servers = store_administration.project_servers().lock().await;
-                    if quarantine_on_upgrade_failure.load(Ordering::Acquire) {
-                        servers.quarantine_and_remove_owner(&failed_key.owner)
-                    } else {
-                        servers.remove_owner(&failed_key.owner)
+                    match published_full_candidate.as_ref() {
+                        Some(failed_full_server) => {
+                            let displaced =
+                                servers.swap_ready_if(&key, Arc::clone(&resolved), |current| {
+                                    Arc::ptr_eq(current, failed_full_server)
+                                });
+                            (displaced.is_some(), displaced)
+                        }
+                        None => (
+                            servers
+                                .get_ready(&key)
+                                .is_some_and(|current| Arc::ptr_eq(current, &resolved)),
+                            None,
+                        ),
                     }
+                } else {
+                    (false, None)
                 };
-                if session_capabilities_published.load(Ordering::Acquire)
-                    && removed.iter().all(|server| !Arc::ptr_eq(server, &resolved))
-                {
-                    removed.push(Arc::clone(&resolved));
+                if core_retained {
+                    if let Some(failed_full_server) = failed_full_server {
+                        failed_full_server.revoke_project_server_responses();
+                        failed_full_server.cancel_startup_transcript_ingest();
+                        schedule_project_server_retirement(
+                            store_administration,
+                            vec![failed_full_server],
+                            None,
+                        )
+                        .await;
+                    }
+                    log_daemon_event(
+                        "project_open_phase",
+                        &[
+                            ("project", canonical_project_path.display().to_string()),
+                            ("phase", "full_upgrade_degraded".to_owned()),
+                            ("error", error.to_string()),
+                            (
+                                "elapsed_ms",
+                                project_open_started.elapsed().as_millis().to_string(),
+                            ),
+                        ],
+                    );
+                } else {
+                    let mut removed = {
+                        let mut servers = store_administration.project_servers().lock().await;
+                        if quarantine_on_upgrade_failure.load(Ordering::Acquire) {
+                            servers.quarantine_and_remove_owner(&failed_key.owner)
+                        } else {
+                            servers.remove_owner(&failed_key.owner)
+                        }
+                    };
+                    if session_capabilities_published.load(Ordering::Acquire)
+                        && removed.iter().all(|server| !Arc::ptr_eq(server, &resolved))
+                    {
+                        removed.push(Arc::clone(&resolved));
+                    }
+                    for server in &removed {
+                        server.revoke_project_server_responses();
+                        server.cancel_startup_transcript_ingest();
+                    }
+                    debug_assert!(
+                        !removed.is_empty(),
+                        "failed core upgrade must retire its published owner"
+                    );
+                    // Request execution may itself need the owner writer held by
+                    // this open attempt. The tracked retirement starts draining
+                    // after this closure returns and releases that writer.
+                    schedule_project_server_retirement(
+                        store_administration,
+                        removed,
+                        Some(Arc::clone(&route_registered)),
+                    )
+                    .await;
+                    return Err(error);
                 }
-                for server in &removed {
-                    server.revoke_project_server_responses();
-                    server.cancel_startup_transcript_ingest();
-                }
-                debug_assert!(
-                    !removed.is_empty(),
-                    "failed core upgrade must retire its published owner"
-                );
-                // Request execution may itself need the owner writer held by
-                // this open attempt. The tracked retirement starts draining
-                // after this closure returns and releases that writer.
-                schedule_project_server_retirement(
-                    store_administration,
-                    removed,
-                    Some(Arc::clone(&route_registered)),
-                )
-                .await;
-                return Err(error);
             }
         }
     }
