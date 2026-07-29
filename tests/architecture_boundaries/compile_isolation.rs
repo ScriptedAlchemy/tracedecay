@@ -477,9 +477,10 @@ fn session_temporal_rendering_does_not_import_the_session_lcm_tree() {
         );
     }
 
-    let renderer =
-        std::fs::read_to_string(root.join("src/global_db/session_temporal/registered_lcm_render.rs"))
-            .expect("read registered LCM renderer");
+    let renderer = std::fs::read_to_string(
+        root.join("src/global_db/session_temporal/registered_lcm_render.rs"),
+    )
+    .expect("read registered LCM renderer");
     assert!(
         renderer.contains("use crate::application::session::lcm::render::apply_canonical_content;"),
         "the registered renderer must apply the application-owned canonical shaping"
@@ -488,6 +489,40 @@ fn session_temporal_rendering_does_not_import_the_session_lcm_tree() {
         renderer.contains("ReadSnapshot"),
         "the registered renderer keeps snapshot ownership; remove this guard if that changes"
     );
+}
+
+#[test]
+fn lcm_store_uses_narrow_authorities_with_global_db_adapters() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let payload = std::fs::read_to_string(root.join("src/sessions/lcm/payload.rs"))
+        .expect("read session LCM payload store");
+    for required in [
+        "pub trait LcmRawMessagePort",
+        "pub trait LcmPayloadAuthorityPort",
+    ] {
+        assert!(
+            payload.contains(required),
+            "the session LCM payload store must declare its narrow authority: {required}"
+        );
+    }
+    assert!(
+        !payload.contains("RegisteredGlobalDb"),
+        "the session LCM payload store must not name the concrete registered database"
+    );
+
+    let adapter = std::fs::read_to_string(root.join("src/global_db/registered_lcm.rs"))
+        .expect("read registered LCM adapter");
+    for required in [
+        "impl payload::LcmRawMessagePort for RegisteredGlobalDb",
+        "impl payload::LcmPayloadAuthorityPort for RegisteredGlobalDb",
+        "self.read_snapshot()",
+        "begin_write_transaction()",
+    ] {
+        assert!(
+            adapter.contains(required),
+            "global_db must retain the SQL and filesystem transaction adapter: {required}"
+        );
+    }
 }
 
 #[test]

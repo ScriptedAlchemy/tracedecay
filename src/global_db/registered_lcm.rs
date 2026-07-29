@@ -12,11 +12,12 @@ use crate::{
             LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
             LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
             LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-            LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-            LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-            LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-            LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-            compression, dag, doctor, gc, payload, query, raw, schema,
+            LcmPayloadExpansion, LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage,
+            LcmRecentSession, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
+            LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef, LcmStatus,
+            LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+            LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
+            query, raw, schema,
         },
     },
 };
@@ -663,5 +664,38 @@ impl RegisteredGlobalDb {
         transaction.commit().await?;
         payload_rollback.disarm();
         Ok(())
+    }
+}
+
+/// The registered database is the transaction-and-filesystem adapter behind the
+/// narrow LCM authorities: it owns the write transaction plus payload rollback
+/// for admission, and the read snapshot each expansion is served from.
+impl payload::LcmRawMessagePort for RegisteredGlobalDb {
+    async fn ingest_raw_message(
+        &self,
+        storage_root: &Path,
+        message: &SessionMessageRecord,
+    ) -> Result<(), LcmError> {
+        self.lcm_ingest_raw_message(storage_root, message).await
+    }
+}
+
+impl payload::LcmPayloadAuthorityPort for RegisteredGlobalDb {
+    async fn expand_payload(
+        &self,
+        storage_root: &Path,
+        request: payload::LcmPayloadExpandRequest<'_>,
+    ) -> Result<LcmPayloadExpansion, LcmError> {
+        let snapshot = self.read_snapshot().await?;
+        payload::expand_payload(
+            &snapshot,
+            storage_root,
+            request.provider,
+            request.session_id,
+            request.payload_ref,
+            request.offset,
+            request.limit,
+        )
+        .await
     }
 }
