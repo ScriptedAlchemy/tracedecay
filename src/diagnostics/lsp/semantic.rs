@@ -6,7 +6,7 @@ use lsp_types::PrepareRenameResponse;
 use serde_json::{Value, json};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
-use url::Url;
+use tracedecay_lsp::analyzer::{LanguageSemanticRoute, PolyglotSemanticProvider};
 
 use crate::application::context::CancellationToken;
 use crate::daemon::lsp_gateway::{
@@ -25,7 +25,7 @@ use crate::types::{Edge, EdgeKind, Node, NodeKind};
 const MAX_GRAPH_SEMANTIC_ITEMS: usize = 64;
 
 #[derive(Clone)]
-pub struct Pr12ProductionSemanticAuthorities {
+pub struct ProductionSemanticAuthorities {
     pub semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     pub cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
     pub analyzer_available: bool,
@@ -51,13 +51,13 @@ pub fn graph_semantic_capabilities() -> BTreeSet<SemanticCapability> {
     .collect()
 }
 
-/// Builds the concrete PR12 semantic and cancellation trait objects consumed
-/// by `application::lsp_runtime::pr12_lsp_session_factory`.
+/// Builds the concrete semantic and cancellation trait objects consumed by
+/// the production LSP session factory.
 ///
 /// The returned semantic provider first uses the retained stdio analyzer when
 /// installed and otherwise serves the canonical project graph directly. It
 /// also falls back to that graph when an analyzer lacks a standard method.
-pub async fn pr12_production_semantic_authorities(
+pub async fn production_semantic_authorities(
     runtime: Handle,
     diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
     graph_database: Database,
@@ -65,7 +65,7 @@ pub async fn pr12_production_semantic_authorities(
     workspace_root: PathBuf,
     root_uri: impl Into<String>,
     timeouts: LspRefreshTimeouts,
-) -> Result<Pr12ProductionSemanticAuthorities> {
+) -> Result<ProductionSemanticAuthorities> {
     let root_uri = root_uri.into();
     let (upstream_routes, project_root) = {
         let mut broker = diagnostic_broker.lock().await;
@@ -93,7 +93,7 @@ pub async fn pr12_production_semantic_authorities(
         project_root,
         root_uri,
     ));
-    let fallback = pr12_semantic_authorities_from_parts(runtime.clone(), None, Arc::clone(&graph));
+    let fallback = semantic_authorities_from_parts(runtime.clone(), None, Arc::clone(&graph));
     if upstream_routes.is_empty() {
         return Ok(fallback);
     }
@@ -102,11 +102,8 @@ pub async fn pr12_production_semantic_authorities(
     let mut cancellation = vec![Arc::clone(&fallback.cancellation)];
     let mut semantic_capabilities = fallback.semantic_capabilities.clone();
     for (adapter, upstream) in upstream_routes {
-        let authority = pr12_semantic_authorities_from_parts(
-            runtime.clone(),
-            Some(upstream),
-            Arc::clone(&graph),
-        );
+        let authority =
+            semantic_authorities_from_parts(runtime.clone(), Some(upstream), Arc::clone(&graph));
         semantic_capabilities.extend(authority.semantic_capabilities.iter().copied());
         cancellation.push(Arc::clone(&authority.cancellation));
         routes.push(LanguageSemanticRoute::new(
@@ -115,7 +112,7 @@ pub async fn pr12_production_semantic_authorities(
         ));
     }
 
-    Ok(Pr12ProductionSemanticAuthorities {
+    Ok(ProductionSemanticAuthorities {
         semantics: Arc::new(PolyglotSemanticProvider::new(routes, fallback.semantics)),
         cancellation: Arc::new(CompositeSemanticCancellation { cancellation }),
         analyzer_available: true,
@@ -137,90 +134,11 @@ impl LspAnalyzerCancellationAuthority for CompositeSemanticCancellation {
     }
 }
 
-struct LanguageSemanticRoute {
-    extensions: BTreeSet<String>,
-    provider: Arc<dyn SemanticProviderPort + Send + Sync>,
-}
-
-impl LanguageSemanticRoute {
-    fn new(
-        extensions: impl IntoIterator<Item = impl Into<String>>,
-        provider: Arc<dyn SemanticProviderPort + Send + Sync>,
-    ) -> Self {
-        Self {
-            extensions: extensions
-                .into_iter()
-                .map(Into::into)
-                .map(|extension: String| extension.to_ascii_lowercase())
-                .collect(),
-            provider,
-        }
-    }
-}
-
-struct PolyglotSemanticProvider {
-    routes: Vec<LanguageSemanticRoute>,
-    fallback: Arc<dyn SemanticProviderPort + Send + Sync>,
-}
-
-impl PolyglotSemanticProvider {
-    fn new(
-        routes: Vec<LanguageSemanticRoute>,
-        fallback: Arc<dyn SemanticProviderPort + Send + Sync>,
-    ) -> Self {
-        Self { routes, fallback }
-    }
-
-    fn provider_for(
-        &self,
-        request: &SemanticRequest,
-    ) -> &Arc<dyn SemanticProviderPort + Send + Sync> {
-        let Some(extension) = semantic_request_extension(request) else {
-            return &self.fallback;
-        };
-        let mut matching = self
-            .routes
-            .iter()
-            .filter(|route| route.extensions.contains(&extension));
-        let Some(route) = matching.next() else {
-            return &self.fallback;
-        };
-        if matching.next().is_some() {
-            return &self.fallback;
-        }
-        &route.provider
-    }
-}
-
-impl SemanticProviderPort for PolyglotSemanticProvider {
-    fn request(
-        &self,
-        root: &AdmittedRoot,
-        request_id: &LspRequestId,
-        request: &SemanticRequest,
-    ) -> SemanticProviderOutcome<SemanticResponse> {
-        self.provider_for(request)
-            .request(root, request_id, request)
-    }
-}
-
-fn semantic_request_extension(request: &SemanticRequest) -> Option<String> {
-    let uri = Url::parse(request.document_uri()?).ok()?;
-    if uri.scheme() != "file" {
-        return None;
-    }
-    uri.to_file_path()
-        .ok()?
-        .extension()?
-        .to_str()
-        .map(str::to_ascii_lowercase)
-}
-
-pub fn pr12_semantic_authorities_from_parts(
+pub fn semantic_authorities_from_parts(
     runtime: Handle,
     upstream: Option<Arc<StdioLspSemanticAuthority>>,
     graph: Arc<DatabaseGraphSemanticAuthority>,
-) -> Pr12ProductionSemanticAuthorities {
+) -> ProductionSemanticAuthorities {
     let analyzer_available = upstream.is_some();
     let rename = upstream.as_ref().map(|upstream| {
         Pr12SemanticProviderAdapter::shared(
@@ -252,13 +170,17 @@ pub fn pr12_semantic_authorities_from_parts(
     if analyzer_available {
         semantic_capabilities.insert(SemanticCapability::RenameCandidate);
     }
-    Pr12ProductionSemanticAuthorities {
+    ProductionSemanticAuthorities {
         semantics,
         cancellation,
         analyzer_available,
         semantic_capabilities,
     }
 }
+
+pub use ProductionSemanticAuthorities as Pr12ProductionSemanticAuthorities;
+pub use production_semantic_authorities as pr12_production_semantic_authorities;
+pub use semantic_authorities_from_parts as pr12_semantic_authorities_from_parts;
 
 struct SemanticCancellationGroup {
     provider: Arc<StdioGraphSemanticProvider>,

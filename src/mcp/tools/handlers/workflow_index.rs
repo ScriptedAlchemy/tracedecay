@@ -4,128 +4,22 @@
 //! store and the shard-scope gate in front of it. Handlers in this tree
 //! therefore name a [`WorkflowIndexReadPort`] instead of a `RegisteredGlobalDb`.
 //!
-//! Rows cross the boundary as their owning authority serializes them, so the
-//! rendered payload is unchanged by the indirection.
+//! Typed workflow models cross the boundary; MCP serializes them only while
+//! building the response payload.
 
-use std::future::Future;
-use std::pin::Pin;
+pub(crate) use tracedecay_sessions::{
+    WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState as WorkflowIndexUnavailableReason,
+    WorkflowRunDetail as WorkflowRunDetailView, WorkflowRunDetailFuture, WorkflowRunDetailOutcome,
+    WorkflowRunDetailRequest as WorkflowRunDetailCommand, WorkflowRunListFuture,
+    WorkflowRunListOutcome, WorkflowRunListRequest as WorkflowRunListCommand, WorkflowRunScope,
+};
 
-use serde_json::Value;
+use crate::errors::{Result, TraceDecayError};
 
-use crate::errors::Result;
-use crate::sessions::git_correlation::GitScopeFilter;
-
-/// Which runs a list read covers. The selectors are mutually exclusive, so the
-/// handler resolves exactly one before asking.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WorkflowRunScope {
-    /// Runs spawned by one user thread.
-    Session { session_id: String },
-    /// Runs reachable from a git ref. The filter is already validated, so the
-    /// daemon never re-parses caller strings.
-    GitScope { filter: GitScopeFilter },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct WorkflowRunListCommand {
-    pub(crate) scope: WorkflowRunScope,
-    pub(crate) limit: usize,
-}
-
-/// One run and its agents. `limit` bounds the agent page; the run lookup itself
-/// is a single row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct WorkflowRunDetailCommand {
-    pub(crate) run_id: String,
-    pub(crate) limit: usize,
-}
-
-/// One agent row plus the label the caller drills on. `row` is the agent
-/// exactly as its owning authority serializes it, so MCP renders it verbatim
-/// and only reads `agent_label` to select.
-#[derive(Clone, Debug)]
-pub(crate) struct WorkflowAgentView {
-    pub(crate) agent_label: String,
-    pub(crate) row: Value,
-}
-
-/// A run and its agents observed at one database generation. Both come from a
-/// single port call so a concurrent ingest cannot split them across snapshots.
-#[derive(Clone, Debug)]
-pub(crate) struct WorkflowRunDetailView {
-    pub(crate) run: Value,
-    pub(crate) agents: Vec<WorkflowAgentView>,
-}
-
-/// Why the workflow index could not answer. Each variant is a distinct state
-/// that a caller must be able to tell apart from a built index that holds
-/// nothing, so neither may render as a successful empty result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WorkflowIndexUnavailableReason {
-    /// The daemon retained no project-session authority for this request, so
-    /// there is no index to consult. Another mount is required, not a retry.
-    AuthorityNotRetained,
-    /// The store opened without workflow-index tables.
-    ///
-    /// One reason covers git-scope reads too. Admission installs the
-    /// git-correlation and workflow-index DDL in the same transaction, so a
-    /// store cannot hold one set and lack the other; there is no separate
-    /// "correlation not built" state to report.
-    WorkflowIndexNotBuilt,
-}
-
-impl WorkflowIndexUnavailableReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::AuthorityNotRetained => "authority_not_retained",
-            Self::WorkflowIndexNotBuilt => "workflow_index_not_built",
-        }
+fn workflow_read_error(error: tracedecay_sessions::WorkflowReadError) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: error.to_string(),
     }
-
-    /// Whether the same request can succeed later without the caller changing
-    /// anything. Admission reinstalls the workflow DDL on the next mount, so an
-    /// absent index resolves on its own; an unretained authority does not.
-    pub(crate) const fn is_retryable(self) -> bool {
-        matches!(self, Self::WorkflowIndexNotBuilt)
-    }
-
-    pub(crate) const fn message(self) -> &'static str {
-        match self {
-            Self::AuthorityNotRetained => "registered project session database is unavailable",
-            Self::WorkflowIndexNotBuilt => {
-                "the workflow index has not been built for this project yet"
-            }
-        }
-    }
-}
-
-/// Closed set of list results.
-#[derive(Clone, Debug)]
-pub(crate) enum WorkflowRunListOutcome {
-    Runs(Vec<Value>),
-    Unavailable(WorkflowIndexUnavailableReason),
-}
-
-/// Closed set of run-detail results.
-#[derive(Clone, Debug)]
-pub(crate) enum WorkflowRunDetailOutcome {
-    Run(WorkflowRunDetailView),
-    /// The index is built and holds no run under this id. Distinct from an
-    /// unbuilt index, which cannot know whether the run exists.
-    NotFound,
-    Unavailable(WorkflowIndexUnavailableReason),
-}
-
-pub(crate) type WorkflowRunListFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<WorkflowRunListOutcome>> + Send + 'a>>;
-pub(crate) type WorkflowRunDetailFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<WorkflowRunDetailOutcome>> + Send + 'a>>;
-
-/// The one path MCP handlers use to read the workflow index.
-pub(crate) trait WorkflowIndexReadPort: Send + Sync {
-    fn runs(&self, command: WorkflowRunListCommand) -> WorkflowRunListFuture<'_>;
-
-    fn run(&self, command: WorkflowRunDetailCommand) -> WorkflowRunDetailFuture<'_>;
 }
 
 /// Lists runs through `port`, reporting the typed unavailable state when no
@@ -135,7 +29,7 @@ pub(crate) async fn list_workflow_runs(
     command: WorkflowRunListCommand,
 ) -> Result<WorkflowRunListOutcome> {
     match port {
-        Some(port) => port.runs(command).await,
+        Some(port) => port.runs(command).await.map_err(workflow_read_error),
         None => Ok(WorkflowRunListOutcome::Unavailable(
             WorkflowIndexUnavailableReason::AuthorityNotRetained,
         )),
@@ -149,7 +43,7 @@ pub(crate) async fn read_workflow_run(
     command: WorkflowRunDetailCommand,
 ) -> Result<WorkflowRunDetailOutcome> {
     match port {
-        Some(port) => port.run(command).await,
+        Some(port) => port.run(command).await.map_err(workflow_read_error),
         None => Ok(WorkflowRunDetailOutcome::Unavailable(
             WorkflowIndexUnavailableReason::AuthorityNotRetained,
         )),
@@ -175,7 +69,7 @@ mod tests {
             self.lists.lock().expect("lists").push(command);
             Box::pin(async {
                 Ok(WorkflowRunListOutcome::Unavailable(
-                    WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+                    WorkflowIndexUnavailableReason::IndexNotBuilt,
                 ))
             })
         }
@@ -184,7 +78,7 @@ mod tests {
             self.details.lock().expect("details").push(command);
             Box::pin(async {
                 Ok(WorkflowRunDetailOutcome::Unavailable(
-                    WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+                    WorkflowIndexUnavailableReason::IndexNotBuilt,
                 ))
             })
         }
@@ -192,13 +86,11 @@ mod tests {
 
     fn list_command() -> WorkflowRunListCommand {
         WorkflowRunListCommand {
-            scope: WorkflowRunScope::GitScope {
-                filter: GitScopeFilter {
-                    branch: Some("main".to_string()),
-                    worktree: None,
-                    commit: None,
-                },
-            },
+            scope: WorkflowRunScope::GitScope(WorkflowGitScope {
+                branch: Some("main".to_string()),
+                worktree: None,
+                commit: None,
+            }),
             limit: 7,
         }
     }
@@ -243,15 +135,15 @@ mod tests {
     fn unavailable_reasons_are_distinct_on_the_wire() {
         let reasons = [
             WorkflowIndexUnavailableReason::AuthorityNotRetained,
-            WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+            WorkflowIndexUnavailableReason::IndexNotBuilt,
         ];
         let wire = reasons.map(WorkflowIndexUnavailableReason::as_str);
         assert_eq!(wire, ["authority_not_retained", "workflow_index_not_built"]);
         assert!(!WorkflowIndexUnavailableReason::AuthorityNotRetained.is_retryable());
-        assert!(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.is_retryable());
+        assert!(WorkflowIndexUnavailableReason::IndexNotBuilt.is_retryable());
         assert_ne!(
             WorkflowIndexUnavailableReason::AuthorityNotRetained.message(),
-            WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message()
+            WorkflowIndexUnavailableReason::IndexNotBuilt.message()
         );
     }
 

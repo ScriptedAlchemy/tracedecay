@@ -407,19 +407,12 @@ export function settingsRevisionId(current: SettingsEditor, scope: SettingsScope
   }
 }
 
-export function planProjectSettingsChange(
-  payload: SettingsPayloadV1,
-  values: ProjectSettingsValues,
-): SettingsChangePlan<ProjectSettingsChangeSet> {
-  return planProjectChangeAgainst(buildSettingsEditor(payload), values);
-}
-
 /**
  * The project change a draft represents against a known-current snapshot.
  *
- * Split from the payload-level entry point so the state machine can replan
- * without re-parsing: replanning is how a confirmation is checked against the
- * review it was given for.
+ * Planning against a snapshot rather than a payload is what lets the state
+ * machine replan without re-parsing: replanning is how a confirmation is
+ * checked against the review it was given for.
  */
 export function planProjectChangeAgainst(
   current: SettingsEditor | null,
@@ -469,13 +462,6 @@ export function planProjectChangeAgainst(
   return Object.keys(patch).length === 0
     ? { outcome: 'unchanged', expectedRevisionId: current.projectExpectedRevisionId }
     : { outcome: 'ready', expectedRevisionId: current.projectExpectedRevisionId, patch };
-}
-
-export function planUserSettingsChange(
-  payload: SettingsPayloadV1,
-  values: UserSettingsValues,
-): SettingsChangePlan<UserSettingsChangeSet> {
-  return planUserChangeAgainst(buildSettingsEditor(payload), values);
 }
 
 /** The user-scope counterpart of `planProjectChangeAgainst`. */

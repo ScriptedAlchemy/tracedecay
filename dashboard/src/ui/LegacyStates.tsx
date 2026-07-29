@@ -49,7 +49,15 @@ function failureKind(result: Exclude<LegacyResult<unknown>, { outcome: 'ok' }>):
 
 /** Crafted truthful states (plan 11a): one sentence of what this state means
  * here plus the next action, not a bare chip. Workspace-specific sentences
- * come from the caller; these are the designed defaults per state. */
+ * come from the caller; these are the designed defaults per state.
+ *
+ * Partial on purpose. Every state listed has one next action that holds
+ * wherever it appears — start the daemon, authenticate, update the build,
+ * retry. `unavailable` has none: what to do about a source that cannot serve
+ * depends on which source and on the reason it reported, both of which reach
+ * the chip as its detail. A generic sentence here would either restate the
+ * chip or invent a remedy this surface cannot know, so the state renders as
+ * chip plus reported reason and nothing is added. */
 const STATE_GUIDANCE: Partial<Record<DomainStateKind, { sentence: string; action: string }>> = {
   loading: { sentence: 'Reading from the daemon.', action: 'This resolves on its own.' },
   offline: {

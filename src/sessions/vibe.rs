@@ -15,8 +15,21 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
+use tracedecay_capture::vibe as vibe_capture;
+use tracedecay_domain::{
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProviderId,
+    RetentionClass, SessionId,
+};
+use tracedecay_store::observation::ObservationCoverageReason;
 
+use crate::application::host_admission::HostAdmissionFacade;
+use crate::application::observation::ObservationCancellation;
+use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::SessionMessageRecord;
+use crate::sessions::jsonl_observation_admission::{
+    JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
+    admit_jsonl_observations,
+};
 use crate::sessions::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
@@ -27,7 +40,8 @@ use crate::sessions::snapshot_observation::{
 };
 use crate::sessions::source::{
     FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
-    TranscriptDiscoveryBounds, TranscriptSource, path_byte_len, stream_new_jsonl,
+    TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
+    path_byte_len, stream_new_jsonl,
 };
 
 const PROVIDER: &str = "vibe";
@@ -44,6 +58,12 @@ const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMet
 pub struct VibeSource {
     session_root: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VibeCaptureOutcome {
+    pub(crate) bytes_consumed: u64,
+    pub(crate) deferred: bool,
 }
 
 impl VibeSource {
@@ -72,6 +92,21 @@ impl VibeSource {
     pub fn for_user_scope(mut self, registered_roots: Vec<PathBuf>) -> Self {
         self.user_registered_roots = Some(registered_roots);
         self
+    }
+
+    fn scoped_meta(&self, path: &Path, project_root: &Path) -> Option<VibeMeta> {
+        let meta = read_meta(&path.parent()?.join("meta.json"))?;
+        if let Some(roots) = &self.user_registered_roots {
+            if roots
+                .iter()
+                .any(|root| path_belongs_to_project(&meta.working_directory, root))
+            {
+                return None;
+            }
+        } else if !path_belongs_to_project(&meta.working_directory, project_root) {
+            return None;
+        }
+        Some(meta)
     }
 
     /// Eligible `messages.jsonl` only, newest-first under `max_files`, with
@@ -130,18 +165,7 @@ impl TranscriptSource for VibeSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
-        let meta_path = path.parent()?.join("meta.json");
-        let meta = read_meta(&meta_path)?;
-        if let Some(roots) = &self.user_registered_roots {
-            if roots
-                .iter()
-                .any(|root| path_belongs_to_project(&meta.working_directory, root))
-            {
-                return None;
-            }
-        } else if !path_belongs_to_project(&meta.working_directory, project_root) {
-            return None;
-        }
+        let meta = self.scoped_meta(path, project_root)?;
 
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let mut messages = Vec::new();
@@ -173,6 +197,126 @@ impl TranscriptSource for VibeSource {
             new_cursor: new.new_cursor,
         })
     }
+}
+
+pub(crate) async fn capture_vibe_observations(
+    facade: &HostAdmissionFacade<'_>,
+    source: &VibeSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<VibeCaptureOutcome> {
+    let discovery = source.discover_transcript_paths(
+        project_root,
+        TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
+    );
+    let mut outcome = VibeCaptureOutcome {
+        deferred: discovery.is_truncated(),
+        ..VibeCaptureOutcome::default()
+    };
+    let mut remaining = max_new_bytes.unwrap_or(u64::MAX);
+    for path in discovery.paths {
+        if cancellation.is_cancelled() {
+            outcome.deferred = true;
+            break;
+        }
+        if remaining == 0 {
+            outcome.deferred = true;
+            break;
+        }
+        let progress = capture_vibe_path(
+            facade,
+            source,
+            &path,
+            project_root,
+            scope.clone(),
+            max_new_bytes.map(|_| remaining),
+            cancellation,
+        )
+        .await?;
+        outcome.bytes_consumed = outcome
+            .bytes_consumed
+            .saturating_add(progress.bytes_consumed);
+        outcome.deferred |= progress.source_deferred;
+        remaining = remaining.saturating_sub(progress.bytes_consumed);
+    }
+    Ok(outcome)
+}
+
+async fn capture_vibe_path(
+    facade: &HostAdmissionFacade<'_>,
+    source: &VibeSource,
+    path: &Path,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<JsonlObservationAdmissionProgress> {
+    let Some(meta) = source.scoped_meta(path, project_root) else {
+        return Ok(JsonlObservationAdmissionProgress {
+            bytes_consumed: 0,
+            source_deferred: false,
+        });
+    };
+    let provider = ProviderId::new(PROVIDER)
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    let session_id = SessionId::new(&meta.session_id)
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    let observation_source = ObservationSourceIdentityV1::for_provider(provider, session_id)
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    let retention = RetentionClass::new("transcript.vibe.v1")
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    let request = JsonlObservationAdmissionRequest::new(
+        PROVIDER,
+        path,
+        facade,
+        observation_source,
+        scope,
+        retention,
+    )
+    .with_max_new_bytes(max_new_bytes)
+    .with_cancellation(cancellation.clone());
+    let session_id = meta.session_id;
+    let model = meta.model;
+
+    admit_jsonl_observations(
+        request,
+        |_| (),
+        move |_, bytes, range, _| {
+            let native_record_id = vibe_capture::native_record_id(&session_id, range)
+                .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+            match parse_normalized_observation_record_v1(
+                bytes,
+                range,
+                ObservationOrderingDomainV1::FileBytes,
+                |native| {
+                    vibe_capture::normalize_observation(
+                        &native,
+                        &session_id,
+                        model.as_deref(),
+                        native_record_id.clone(),
+                        range,
+                    )
+                },
+            ) {
+                Ok(parsed) => Ok(JsonlFrameAdmission::durable(parsed, native_record_id)),
+                Err(ObservationRecordParseErrorV1::Empty) => Ok(JsonlFrameAdmission::non_durable(
+                    ObservationCoverageReason::BlankFrame,
+                )),
+                Err(
+                    ObservationRecordParseErrorV1::TooLarge
+                    | ObservationRecordParseErrorV1::CanonicalEnvelopeTooLarge,
+                ) => Ok(JsonlFrameAdmission::non_durable(
+                    ObservationCoverageReason::OversizedFrame,
+                )),
+                Err(_) => Ok(JsonlFrameAdmission::non_durable(
+                    ObservationCoverageReason::MalformedFrame,
+                )),
+            }
+        },
+    )
+    .await
 }
 
 /// Fixed metadata charge per directory entry (mirrors discovery walk accounting).

@@ -18,6 +18,7 @@ use tracedecay_hooks::{
     HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1,
     HookFeedbackRollbackSwitchV1, HookRuntimeErrorV1, deliver_feedback_with_rollback,
 };
+use tracedecay_lsp::DaemonLspProviderBundle;
 
 use crate::agents::host_bundle_v2::{
     HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostKindV1,
@@ -28,7 +29,7 @@ use crate::application::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
     Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26HookScoutPhaseV1,
 };
-use crate::daemon::lsp_gateway::{DaemonLspProviderBundle, Pr12LspSessionFactory};
+use crate::daemon::lsp_gateway::DaemonLspSessionFactory;
 
 use super::runtime::{
     Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1, Pr13AdvisoryCycleRequestV1,
@@ -328,7 +329,7 @@ pub struct Pr13AdvisoryHostDeliveryRegistrationV1 {
     pub scope: ResolvedScope,
     pub feedback_owner: Arc<ConcretePr12FeedbackOwner>,
     pub publication_store: ProjectFeedbackStore,
-    pub lsp_session_factory: Arc<Pr12LspSessionFactory>,
+    pub lsp_session_factory: Arc<DaemonLspSessionFactory>,
     pub hook_delivery_port:
         Arc<dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync>,
     pub source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
@@ -642,7 +643,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
 pub fn mount_pr13_advisory_host_delivery<GR, GA, CS, CE, PE, PC>(
     scope: ResolvedScope,
     registration: &Pr13AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC>,
-    lsp_session_factory: Arc<Pr12LspSessionFactory>,
+    lsp_session_factory: Arc<DaemonLspSessionFactory>,
     hook_delivery_port: Arc<
         dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
     >,
@@ -662,7 +663,7 @@ pub fn mount_pr13_advisory_host_delivery<GR, GA, CS, CE, PE, PC>(
 pub fn register_pr13_advisory_daemon_startup<GR, GA, CS, CE, PE, PC>(
     input: Pr13AdvisoryRuntimeOpenV1,
     providers: Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
-    lsp_session_factory: Arc<Pr12LspSessionFactory>,
+    lsp_session_factory: Arc<DaemonLspSessionFactory>,
     hook_delivery_port: Arc<
         dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
     >,

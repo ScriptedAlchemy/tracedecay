@@ -20,6 +20,7 @@ use tracedecay_application::{
     SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
+use tracedecay_lsp::{FramePoll, FrameSend};
 use tracedecay_tool_catalog::{
     BindingId, BindingSurface, CatalogSnapshotV1, FeatureId, ProfileId, SchemaRef,
     SurfaceOperationName,
@@ -956,10 +957,7 @@ impl DaemonLspSessionClient {
         })
     }
 
-    pub async fn try_send_client_frame(
-        &mut self,
-        frame: &str,
-    ) -> crate::errors::Result<crate::lsp_bridge::FrameSend> {
+    pub async fn try_send_client_frame(&mut self, frame: &str) -> crate::errors::Result<FrameSend> {
         let request_id = self.next_request_id()?;
         let response = self
             .invoke(crate::daemon::DaemonInvocationRequest::lsp_frame(
@@ -973,19 +971,17 @@ impl DaemonLspSessionClient {
                 backpressured,
                 closed,
             } => Ok(if closed {
-                crate::lsp_bridge::FrameSend::Closed
+                FrameSend::Closed
             } else if backpressured {
-                crate::lsp_bridge::FrameSend::Backpressured
+                FrameSend::Backpressured
             } else {
-                crate::lsp_bridge::FrameSend::Sent
+                FrameSend::Sent
             }),
             outcome => Err(invocation_outcome_error(outcome)),
         }
     }
 
-    pub async fn poll_daemon_frame(
-        &mut self,
-    ) -> crate::errors::Result<crate::lsp_bridge::FramePoll> {
+    pub async fn poll_daemon_frame(&mut self) -> crate::errors::Result<FramePoll> {
         let request_id = self.next_request_id()?;
         let response = self
             .invoke(crate::daemon::DaemonInvocationRequest::lsp_poll(
@@ -996,9 +992,9 @@ impl DaemonLspSessionClient {
         match response.outcome {
             crate::daemon::DaemonInvocationOutcome::LspFrame { frame, closed } => {
                 Ok(match (frame, closed) {
-                    (Some(frame), _) => crate::lsp_bridge::FramePoll::Frame(frame.into_bytes()),
-                    (None, true) => crate::lsp_bridge::FramePoll::Closed,
-                    (None, false) => crate::lsp_bridge::FramePoll::Pending,
+                    (Some(frame), _) => FramePoll::Frame(frame.into_bytes()),
+                    (None, true) => FramePoll::Closed,
+                    (None, false) => FramePoll::Pending,
                 })
             }
             outcome => Err(invocation_outcome_error(outcome)),

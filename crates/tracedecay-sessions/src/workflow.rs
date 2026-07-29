@@ -135,7 +135,28 @@ pub struct WorkflowRunDetailRequest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowIndexState {
+    AuthorityNotRetained,
     IndexNotBuilt,
+}
+
+impl WorkflowIndexState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorityNotRetained => "authority_not_retained",
+            Self::IndexNotBuilt => "workflow_index_not_built",
+        }
+    }
+
+    pub const fn is_retryable(self) -> bool {
+        matches!(self, Self::IndexNotBuilt)
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::AuthorityNotRetained => "registered project session database is unavailable",
+            Self::IndexNotBuilt => "the workflow index has not been built for this project yet",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -219,6 +240,14 @@ mod tests {
             unbuilt,
             WorkflowRunListOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
         ));
+    }
+
+    #[test]
+    fn workflow_unavailable_states_preserve_mount_authority() {
+        assert_ne!(
+            WorkflowIndexState::AuthorityNotRetained,
+            WorkflowIndexState::IndexNotBuilt
+        );
     }
 
     #[test]

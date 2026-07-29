@@ -20,6 +20,7 @@ const EXPECTED_LABELS: Record<DomainStateKind, string> = {
   unauthorized: 'Unauthorized',
   redacted: 'Redacted',
   conflicting: 'Conflicting',
+  unavailable: 'Source unavailable',
   offline: 'Offline',
   unknown: 'Unknown',
   cancelled: 'Cancelled',
@@ -32,8 +33,8 @@ const EXPECTED_LABELS: Record<DomainStateKind, string> = {
 const ENTRIES = Object.entries(EXPECTED_LABELS) as [DomainStateKind, string][];
 
 describe('StateChip', () => {
-  it('covers exactly 17 domain states', () => {
-    expect(ENTRIES).toHaveLength(17);
+  it('covers exactly 18 domain states', () => {
+    expect(ENTRIES).toHaveLength(18);
   });
 
   it.each(ENTRIES)('renders icon + label for "%s"', (kind, label) => {
@@ -49,6 +50,37 @@ describe('StateChip', () => {
     expect(screen.getByText(label)).toBeTruthy();
 
     cleanup();
+  });
+
+  /**
+   * The two near-neighbours a reader must never confuse: a reachable authority
+   * reporting that one source cannot answer, and nothing being reachable at
+   * all. They share a hue deliberately — both mean no reading arrived — so the
+   * separation has to be carried by label, glyph and `data-state`. Asserting
+   * the shared lamp alongside them is the point: if the colour were ever made
+   * to do the work, this test would still hold the chip to saying it in a form
+   * that survives colour blindness and monochrome.
+   */
+  it('tells a source that cannot answer apart from an unreachable daemon', () => {
+    const chipFor = (kind: DomainStateKind) => {
+      const { container } = render(<StateChip kind={kind} />);
+      const chip = container.querySelector(`[data-state="${kind}"]`);
+      expect(chip, `chip for ${kind}`).not.toBeNull();
+      const glyph = chip!.querySelector('svg');
+      const lamp = chip!.querySelector('span[aria-hidden]');
+      expect(glyph, `icon for ${kind}`).not.toBeNull();
+      expect(lamp, `lamp for ${kind}`).not.toBeNull();
+      return { label: chip!.textContent, glyph: glyph!.innerHTML, lamp: lamp!.className };
+    };
+
+    const unavailable = chipFor('unavailable');
+    const offline = chipFor('offline');
+    cleanup();
+
+    expect(unavailable.label).toBe('Source unavailable');
+    expect(offline.label).toBe('Offline');
+    expect(unavailable.glyph).not.toBe(offline.glyph);
+    expect(unavailable.lamp).toBe(offline.lamp);
   });
 
   it('renders an optional detail suffix alongside the label', () => {

@@ -12,13 +12,18 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::{
     DirectorySyncPolicy, append_durable, file_len, read_bounded,
     remote::capture::{
-        AdmittedRemoteCaptureV1, RemoteAuthorityReachabilityV1, RemoteCaptureDispositionV1,
-        RemoteCapturePersistenceErrorV1, RemoteCapturePortV1, RemoteCaptureReceiptV1,
-        RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
+        AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePersistenceErrorV1,
+        RemoteCapturePortV1, RemoteCaptureReceiptV1, RemoteCaptureSequenceV1,
+        RemoteWriterAuthorityV1,
+    },
+    remote::replay::{
+        RemoteReplayCommitReceiptV1, RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1,
+        RemoteReplayStateV1, RemoteReplayTransitionV1,
     },
 };
 use tracedecay_domain::{
-    BrainNodeId, DurableObservationV1, EntityId, ManifestDigest, UtcMicros, canonical_sha256,
+    BrainNodeId, CurrentRemoteAuthorityStateV1, DurableObservationV1, EntityId, ManifestDigest,
+    UtcMicros, canonical_sha256,
 };
 
 const FRAME_MAGIC: &[u8; 8] = b"TDRSPL02";
@@ -37,10 +42,10 @@ pub struct RemoteSpoolEncryptionError {
 }
 
 pub trait RemoteAuthorityReachabilityPortV1: Send + Sync {
-    fn current_writer_reachability(
+    fn current_writer_authority(
         &self,
         writer: &RemoteWriterAuthorityV1,
-    ) -> Result<RemoteAuthorityReachabilityV1, RemoteCapturePersistenceErrorV1>;
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +116,19 @@ impl PersistedRemoteCaptureV2 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DurableSpoolRecordV2 {
-    Pending { capture: PersistedRemoteCaptureV2 },
+    Pending {
+        capture: PersistedRemoteCaptureV2,
+    },
+    Transition {
+        transition: RemoteReplayTransitionV1,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersistedSpoolEventV2 {
+    capture: PersistedRemoteCaptureV2,
+    state: RemoteReplayStateV1,
+    receipt: Option<RemoteReplayCommitReceiptV1>,
 }
 
 pub struct RemoteCaptureSpool {
@@ -158,7 +175,8 @@ impl RemoteCaptureSpool {
         Ok(self
             .snapshot()?
             .into_values()
-            .map(|capture| (capture.event_id.clone(), capture.admitted()))
+            .filter(|event| event.state == RemoteReplayStateV1::Pending)
+            .map(|event| (event.capture.event_id.clone(), event.capture.admitted()))
             .collect())
     }
 
@@ -173,7 +191,7 @@ impl RemoteCaptureSpool {
         let capture = PersistedRemoteCaptureV2::from_admitted(command)?;
         let snapshot = self.snapshot()?;
         if let Some(existing) = snapshot.get(&capture.event_id) {
-            if existing == &capture {
+            if existing.capture == capture {
                 return Ok(receipt(
                     &capture,
                     RemoteCaptureDispositionV1::AlreadyPending,
@@ -194,17 +212,42 @@ impl RemoteCaptureSpool {
         ))
     }
 
-    fn snapshot(&self) -> Result<BTreeMap<String, PersistedRemoteCaptureV2>, RemoteSpoolError> {
-        let mut captures = BTreeMap::new();
+    fn snapshot(&self) -> Result<BTreeMap<String, PersistedSpoolEventV2>, RemoteSpoolError> {
+        let mut events = BTreeMap::new();
         for record in self.read_records()? {
-            let DurableSpoolRecordV2::Pending { capture } = record;
-            if capture.event_id != derive_persisted_event_id(&capture)?
-                || captures.insert(capture.event_id.clone(), capture).is_some()
-            {
-                return Err(RemoteSpoolError::Corruption);
+            match record {
+                DurableSpoolRecordV2::Pending { capture } => {
+                    if capture.event_id != derive_persisted_event_id(&capture)?
+                        || events
+                            .insert(
+                                capture.event_id.clone(),
+                                PersistedSpoolEventV2 {
+                                    capture,
+                                    state: RemoteReplayStateV1::Pending,
+                                    receipt: None,
+                                },
+                            )
+                            .is_some()
+                    {
+                        return Err(RemoteSpoolError::Corruption);
+                    }
+                }
+                DurableSpoolRecordV2::Transition { transition } => {
+                    transition
+                        .validate()
+                        .map_err(|_| RemoteSpoolError::Corruption)?;
+                    let event = events
+                        .get_mut(&transition.event_id)
+                        .ok_or(RemoteSpoolError::Corruption)?;
+                    if event.state != transition.from {
+                        return Err(RemoteSpoolError::Corruption);
+                    }
+                    event.state = transition.to;
+                    event.receipt = transition.receipt;
+                }
             }
         }
-        Ok(captures)
+        Ok(events)
     }
 
     fn read_records(&self) -> Result<Vec<DurableSpoolRecordV2>, RemoteSpoolError> {
@@ -245,12 +288,60 @@ impl RemoteCaptureSpool {
     }
 }
 
+impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
+    fn state(
+        &self,
+        event_id: &str,
+    ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
+        let snapshot = self.snapshot().map_err(map_persistence_error)?;
+        let event = snapshot
+            .get(event_id)
+            .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
+        Ok(RemoteReplaySpoolStateV1 {
+            state: event.state,
+            receipt: event.receipt.clone(),
+        })
+    }
+
+    fn transition(
+        &self,
+        transition: RemoteReplayTransitionV1,
+    ) -> Result<(), RemoteCapturePersistenceErrorV1> {
+        let _guard = self
+            .write_guard
+            .lock()
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
+        transition
+            .validate()
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        let snapshot = self.snapshot().map_err(map_persistence_error)?;
+        let event = snapshot
+            .get(&transition.event_id)
+            .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
+        if event.state != transition.from {
+            return Err(RemoteCapturePersistenceErrorV1::Corruption);
+        }
+        if let Some(receipt) = &transition.receipt {
+            if receipt.event_id != event.capture.event_id
+                || !receipt
+                    .writer_fence
+                    .same_mutable_shard(&event.capture.writer.authority.fence)
+                || receipt.commit_sequence == 0
+            {
+                return Err(RemoteCapturePersistenceErrorV1::Corruption);
+            }
+        }
+        self.append(&DurableSpoolRecordV2::Transition { transition })
+            .map_err(map_persistence_error)
+    }
+}
+
 impl RemoteCapturePortV1 for RemoteCaptureSpool {
-    fn current_writer_reachability(
+    fn current_writer_authority(
         &self,
         writer: &RemoteWriterAuthorityV1,
-    ) -> Result<RemoteAuthorityReachabilityV1, RemoteCapturePersistenceErrorV1> {
-        self.reachability.current_writer_reachability(writer)
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
+        self.reachability.current_writer_authority(writer)
     }
 
     fn capture_pending(
@@ -311,25 +402,26 @@ fn receipt(
 }
 
 fn validate_next_sequence(
-    snapshot: &BTreeMap<String, PersistedRemoteCaptureV2>,
+    snapshot: &BTreeMap<String, PersistedSpoolEventV2>,
     capture: &PersistedRemoteCaptureV2,
 ) -> Result<(), RemoteSpoolError> {
     let previous = snapshot
         .values()
         .filter(|candidate| {
-            candidate.enrollment_id == capture.enrollment_id
-                && candidate.node_id == capture.node_id
-                && candidate.writer == capture.writer
+            candidate.capture.enrollment_id == capture.enrollment_id
+                && candidate.capture.node_id == capture.node_id
+                && candidate.capture.writer == capture.writer
         })
-        .max_by_key(|candidate| candidate.sequence.sequence);
+        .max_by_key(|candidate| candidate.capture.sequence.sequence);
     match previous {
         None if capture.sequence.sequence == 1 && capture.sequence.previous_event_id.is_none() => {
             Ok(())
         }
         Some(previous)
-            if capture.sequence.sequence == previous.sequence.sequence.saturating_add(1)
+            if capture.sequence.sequence
+                == previous.capture.sequence.sequence.saturating_add(1)
                 && capture.sequence.previous_event_id.as_deref()
-                    == Some(previous.event_id.as_str()) =>
+                    == Some(previous.capture.event_id.as_str()) =>
         {
             Ok(())
         }
@@ -438,10 +530,10 @@ mod tests {
         AuthorityEpoch, BrainId, ComponentVersion, EntityVersionId, ObservationId,
         ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
         ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-        PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RefId, RepositoryId,
-        RepositoryStateSnapshotId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, ShardId,
-        WorktreeId,
+        PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RefId,
+        RemoteAuthorityUnavailableReasonV1, RepositoryId, RepositoryStateSnapshotId,
+        RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, WorktreeId,
     };
 
     use super::*;
@@ -481,11 +573,14 @@ mod tests {
     struct Offline;
 
     impl RemoteAuthorityReachabilityPortV1 for Offline {
-        fn current_writer_reachability(
+        fn current_writer_authority(
             &self,
             _writer: &RemoteWriterAuthorityV1,
-        ) -> Result<RemoteAuthorityReachabilityV1, RemoteCapturePersistenceErrorV1> {
-            Ok(RemoteAuthorityReachabilityV1::Unreachable)
+        ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
+            Ok(CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                observed_at: UtcMicros(1),
+            })
         }
     }
 
@@ -516,13 +611,17 @@ mod tests {
                 reference: Some(RefId::new("refs/heads/main").unwrap()),
                 snapshot_id: RepositoryStateSnapshotId::new("snapshot.remote-test").unwrap(),
             },
-            fence: tracedecay_domain::RemoteWriterFenceV1 {
-                brain_id: BrainId::new("brain.remote-test").unwrap(),
-                shard_id: ShardId::new("shard.remote-test").unwrap(),
-                generation_id: ProjectionGenerationId::new("generation.remote-test").unwrap(),
-                placement_revision: EntityVersionId::new("placement.remote-test").unwrap(),
-                authority_epoch: AuthorityEpoch(1),
-                authority_node_id: BrainNodeId::new("node.remote-test").unwrap(),
+            authority: tracedecay_domain::CurrentRemoteAuthorityV1 {
+                fence: tracedecay_domain::RemoteWriterFenceV1 {
+                    brain_id: BrainId::new("brain.remote-test").unwrap(),
+                    shard_id: ShardId::new("shard.remote-test").unwrap(),
+                    generation_id: ProjectionGenerationId::new("generation.remote-test").unwrap(),
+                    placement_revision: EntityVersionId::new("placement.remote-test").unwrap(),
+                    authority_epoch: AuthorityEpoch(1),
+                    authority_node_id: BrainNodeId::new("node.remote-test").unwrap(),
+                },
+                credential_revision: 1,
+                observed_at: UtcMicros(1),
             },
         }
     }
@@ -646,5 +745,41 @@ mod tests {
             !String::from_utf8_lossy(&bytes).contains("sanitized-1"),
             "canonical observation leaked outside encryption"
         );
+    }
+
+    #[test]
+    fn replay_transition_and_receipt_survive_reopen() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let capture = command(1, None);
+        let capture_receipt = capture_spool.capture_pending(&capture).unwrap();
+        let replay_receipt = RemoteReplayCommitReceiptV1 {
+            event_id: capture_receipt.event_id.clone(),
+            writer_fence: capture.writer.authority.fence.clone(),
+            commit_sequence: 7,
+        };
+        RemoteReplaySpoolPortV1::transition(
+            &capture_spool,
+            RemoteReplayTransitionV1 {
+                event_id: capture_receipt.event_id.clone(),
+                from: RemoteReplayStateV1::Pending,
+                to: RemoteReplayStateV1::Admitted,
+                replay_attempt: 1,
+                observed_at: UtcMicros(20),
+                finding: None,
+                receipt: Some(replay_receipt.clone()),
+            },
+        )
+        .unwrap();
+
+        let reopened = spool(&root);
+        assert_eq!(
+            reopened.state(&capture_receipt.event_id).unwrap(),
+            RemoteReplaySpoolStateV1 {
+                state: RemoteReplayStateV1::Admitted,
+                receipt: Some(replay_receipt),
+            }
+        );
+        assert!(reopened.pending().unwrap().is_empty());
     }
 }

@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Black-box capture dispatch tests for the runtime harness."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+from benchmarks.runtime.schema import read_jsonl, validate_report
+
+
+ROOT = Path(__file__).resolve().parents[3]
+RUNNER = ROOT / "benchmarks" / "runtime" / "run.py"
+
+
+def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import signal
+            import socket
+            import sys
+            import time
+            from pathlib import Path
+
+            record = os.environ.get("TRACEDECAY_TEST_INVOCATIONS")
+            if record:
+                with Path(record).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(sys.argv[1:]) + "\\n")
+
+            if sys.argv[1:3] == ["daemon", "run"]:
+                socket_path = Path(sys.argv[sys.argv.index("--socket") + 1])
+                socket_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    socket_path.unlink()
+                except FileNotFoundError:
+                    pass
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                server.bind(str(socket_path))
+                server.listen()
+                signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+                while True:
+                    connection, _ = server.accept()
+                    connection.close()
+
+            if sys.argv[1:2] == ["init"]:
+                raise SystemExit(0)
+
+            if sys.argv[1:2] == ["tool"]:
+                if {tool_exit}:
+                    print("forced tool failure", file=sys.stderr)
+                    raise SystemExit({tool_exit})
+                print(json.dumps({{
+                    "structuredContent": {{
+                        "symbols": [{{"name": "fixture_catalog"}}]
+                    }},
+                    "_meta": {{"duration_us": 123}}
+                }}, sort_keys=True))
+                raise SystemExit(0)
+
+            raise SystemExit("unexpected command")
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def run_runner(
+    *arguments: os.PathLike[str] | str,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, os.fspath(RUNNER), *(os.fspath(value) for value in arguments)],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+
+
+class CaptureDispatchTest(unittest.TestCase):
+    def test_capture_runs_owned_daemon_and_writes_valid_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "fake-tracedecay"
+            make_fake_binary(binary)
+            output = root / "artifacts" / "capture.json"
+            invocations = root / "invocations.jsonl"
+            environment = os.environ.copy()
+            environment["TRACEDECAY_TEST_INVOCATIONS"] = os.fspath(invocations)
+
+            result = run_runner(
+                "capture",
+                "--binary",
+                binary,
+                "--output",
+                output,
+                environment=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIs(validate_report(report), report)
+            samples = read_jsonl(output.with_suffix(".samples.jsonl"))
+            self.assertEqual(len(samples), 1)
+            self.assertEqual(samples[0]["outcome"]["status"], "success")
+            self.assertTrue(samples[0]["lifecycle"]["daemon_survived"])
+            receipt = json.loads(
+                output.with_suffix(".policy.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(receipt["policy_id"], "runtime-acceptance-v1")
+            self.assertEqual(
+                receipt["artifact_sha256"],
+                hashlib.sha256(output.read_bytes()).hexdigest(),
+            )
+            commands = [
+                json.loads(line)
+                for line in invocations.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(any(command[:1] == ["init"] for command in commands))
+            self.assertTrue(any(command[:2] == ["daemon", "run"] for command in commands))
+            tool_command = next(command for command in commands if command[:1] == ["tool"])
+            payload = json.loads(tool_command[tool_command.index("--args") + 1])
+            self.assertEqual(payload["name"], "fixture_catalog")
+
+    def test_capture_rejects_binary_that_does_not_match_prepared_fixture(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            prepared_binary = root / "prepared-binary"
+            other_binary = root / "other-binary"
+            make_fake_binary(prepared_binary)
+            make_fake_binary(other_binary)
+            other_binary.write_text(
+                other_binary.read_text(encoding="utf-8") + "\n# different\n",
+                encoding="utf-8",
+            )
+            prepared = root / "prepared"
+            prepare_result = run_runner(
+                "prepare",
+                "--binary",
+                prepared_binary,
+                "--output",
+                prepared,
+            )
+            self.assertEqual(prepare_result.returncode, 0, prepare_result.stderr)
+            output = root / "capture.json"
+
+            result = run_runner(
+                "capture",
+                "--binary",
+                other_binary,
+                "--prepared",
+                prepared,
+                "--output",
+                output,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not match", result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_capture_records_command_failure_and_exits_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "failing-tracedecay"
+            make_fake_binary(binary, tool_exit=23)
+            output = root / "capture.json"
+
+            result = run_runner(
+                "capture",
+                "--binary",
+                binary,
+                "--output",
+                output,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("tool command failed", result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_prepare_creates_complete_immutable_fixture_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "fake-tracedecay"
+            make_fake_binary(binary)
+            prepared = root / "prepared"
+
+            result = run_runner(
+                "prepare",
+                "--binary",
+                binary,
+                "--output",
+                prepared,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((prepared / "evidence" / "prepared.json").is_file())
+            self.assertTrue((prepared / "home" / "workspace" / "runtime-fixture").is_dir())
+            self.assertTrue((prepared / "bin" / "tracedecay").is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()

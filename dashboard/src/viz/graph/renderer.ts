@@ -61,6 +61,20 @@ export interface FieldRenderer {
   resize(): void;
   /** Re-sample the theme tokens and re-derive anything baked from them. */
   retheme(): void;
+  /**
+   * The layers this renderer draws WebGL into, so the one thing that can stop
+   * a drawn field from being a field — the GPU dropping its context — can be
+   * watched where it actually happens.
+   *
+   * Sigma stacks several canvases over the container and only some of them are
+   * WebGL (labels, hover decoration and pointer capture ride 2d), so the set is
+   * taken from the renderer's own layer map and each layer is asked which
+   * context it holds — no layer name is assumed and nothing reads the
+   * container's children. Captured at construction because {@link kill} empties
+   * that map, and a restore is dispatched at the canvas of the renderer that
+   * died.
+   */
+  readonly webGlCanvases: readonly HTMLCanvasElement[];
   kill(): void;
 }
 
@@ -197,7 +211,12 @@ export function createFieldRenderer({
   });
   sigma.on('clickStage', () => onStageClick());
 
+  const webGlCanvases = Object.values(sigma.getCanvases()).filter(
+    (canvas) => webGlContextOf(canvas) !== null,
+  );
+
   return {
+    webGlCanvases,
     refresh: () => {
       sigma.refresh();
     },
@@ -237,14 +256,69 @@ export function createFieldRenderer({
  * stack returns null here rather than throwing inside the renderer. */
 export function hasWebGl(): boolean {
   if (typeof document === 'undefined') return false;
+  return webGlContextOf(document.createElement('canvas')) !== null;
+}
+
+/**
+ * The WebGL context a canvas holds, or null when it holds another kind.
+ *
+ * A question rather than a mutation on any canvas Sigma has already made:
+ * `getContext` hands back the existing context for a matching id and null for a
+ * mismatched one, so the 2d layers answer null without being disturbed. One
+ * rule for both readings of it — whether this browser can draw at all, and
+ * whether this is a layer that draws.
+ */
+function webGlContextOf(canvas: HTMLCanvasElement): RenderingContext | null {
   try {
-    const probe = document.createElement('canvas');
-    const context =
-      probe.getContext('webgl2') ??
-      probe.getContext('webgl') ??
-      probe.getContext('experimental-webgl');
-    return context !== null;
+    return (
+      canvas.getContext('webgl2') ??
+      canvas.getContext('webgl') ??
+      canvas.getContext('experimental-webgl')
+    );
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** What the GPU did to a drawn field, told to whoever can state it. */
+export interface WebGlContextHandlers {
+  /** The context is gone; nothing on these canvases is a reading any more. */
+  onLost: () => void;
+  /** The browser gave the context back; the field can be composed again. */
+  onRestored: () => void;
+}
+
+/**
+ * Watch a renderer's WebGL layers for a context lost — or restored — by the
+ * GPU stack, which is the one failure that arrives AFTER a successful draw.
+ *
+ * The release is deliberately not the renderer's `kill`. A lost context has to
+ * take the renderer with it (Sigma's own window listener would otherwise
+ * measure a container that has gone), yet the restore that brings the field
+ * back is dispatched at the canvas of the renderer that died — so this watch
+ * outlives it and belongs to whoever owns the surface, not to one composition.
+ */
+export function watchWebGlContext(
+  canvases: readonly HTMLCanvasElement[],
+  handlers: WebGlContextHandlers,
+): () => void {
+  const lost = (event: Event): void => {
+    // Unconditional, and before anything else: the default action of
+    // `webglcontextlost` is to abandon the context for good, so without this
+    // the browser never attempts a restore and `webglcontextrestored` can
+    // never arrive.
+    event.preventDefault();
+    handlers.onLost();
+  };
+  const restored = (): void => handlers.onRestored();
+  for (const canvas of canvases) {
+    canvas.addEventListener('webglcontextlost', lost);
+    canvas.addEventListener('webglcontextrestored', restored);
+  }
+  return () => {
+    for (const canvas of canvases) {
+      canvas.removeEventListener('webglcontextlost', lost);
+      canvas.removeEventListener('webglcontextrestored', restored);
+    }
+  };
 }

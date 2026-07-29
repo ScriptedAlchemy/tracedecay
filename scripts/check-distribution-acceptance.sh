@@ -99,7 +99,6 @@ assert_required_assets() {
     "src/application/feedback/cycle_runtime.rs"
     "src/application/primitives/runtime.rs"
     "src/daemon/lsp_gateway/mod.rs"
-    "src/lsp_bridge.rs"
     "src/query/retrieval/semantic/service.rs"
     "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
@@ -335,7 +334,6 @@ run_self_test() {
     src/application/feedback/cycle_runtime.rs \
     src/application/primitives/runtime.rs \
     src/daemon/lsp_gateway/mod.rs \
-    src/lsp_bridge.rs \
     src/query/retrieval/semantic/service.rs \
     src/query/retrieval/semantic/tests.rs \
     src/semantic_code/fastembed_adapter.rs \

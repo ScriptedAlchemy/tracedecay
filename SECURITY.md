@@ -18,8 +18,6 @@ Only the current major release line is supported. All minor and patch versions w
 | 6.x (current) | Yes — all minor and patch releases |
 | < 6 | No |
 
-**No vulnerabilities have been reported or discovered to date.**
-
 When a vulnerability is found, the fix is shipped as a new release — there are no backports to older major versions. Fixes are not applied in place to existing binaries. **If you run tracedecay in production automation (CI pipelines, scheduled agents, server-side MCP deployments), keep it updated to the latest release** so any future fix reaches you immediately via `tracedecay upgrade`.
 
 ## Security Model
@@ -41,22 +39,49 @@ The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate trac
 
 ### Network access
 
-tracedecay makes **no inbound network connections**. It never binds a port or listens for traffic. The MCP server communicates exclusively over stdio.
+The MCP process communicates with its host over stdio, but TraceDecay also has
+explicitly local listeners:
+
+- `tracedecay dashboard` and the `tracedecay_dashboard` MCP tool can start an
+  HTTP dashboard on `127.0.0.1`, `localhost`, or `[::1]`. Requests must carry
+  a loopback `Host` naming the bound port. Browser requests that include an
+  `Origin` must use the same dashboard origin. The dashboard has no remote-user
+  authentication and is intended only for a trusted, single-user local
+  environment. HTTP clients cannot enable automation pre-run shell commands;
+  `allow_job_commands` requires explicit local operator configuration.
+- The daemon uses an owner-only Unix socket where supported. Its TCP fallback
+  is restricted to a loopback address and requires the daemon authentication
+  preface. The daemon's application HTTP adapter binds an ephemeral
+  `127.0.0.1` port and requires both its bearer token and exact local origin.
+
+These controls limit network reachability; they do not isolate TraceDecay from
+other processes running as the same operating-system user.
 
 Outbound connections are limited to:
 
 | Destination | Purpose | Auth | Failure mode |
 |-------------|---------|------|-------------|
-| `api.github.com` | Check for new releases | None (public API) | Silently ignored |
+| `api.github.com` | Check for releases and, for explicitly configured review sources, verify and perform repository reads | Public requests by default; optional read-only credential from the OS keyring | Public checks are best effort; configured private access fails closed when credentials or permissions cannot be verified |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
+| `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
 | `tracedecay-counter.enzinol.workers.dev` | Aggregate tracedecayd counter (endpoint keeps its pre-rename name) | None | Silently ignored |
 | `raw.githubusercontent.com` | Fetch model pricing from [LiteLLM](https://github.com/BerriAI/litellm) | None (public file) | Falls back to embedded pricing |
 
-All best-effort network calls use short timeouts (1-5 seconds) and never block the CLI or MCP server. The pricing fetch (5s timeout) only runs during `tracedecay cost` and is cached for 24 hours at `~/.tracedecay/pricing.json`.
+The pricing fetch only runs during `tracedecay cost` and is cached for 24
+hours at `~/.tracedecay/pricing.json`. Semantic model downloads use a private
+TraceDecay cache, verify catalog-pinned lengths and SHA-256 digests before
+publication, and can be disabled with `HF_HUB_OFFLINE`.
 
-### No credentials or secrets
+### Credentials and secrets
 
-tracedecay does not require, store, or transmit any credentials, API keys, tokens, or passwords. All external API calls target public, unauthenticated endpoints.
+TraceDecay does not require credentials for its default local and public
+repository behavior. A user may explicitly configure a private GitHub review
+source with `access = "os_keyring"` and keyring service/account locators. The
+secret remains in the operating-system keyring; configuration stores only its
+locator. The daemon reads it into zeroizing memory, sends it only to GitHub
+over HTTPS, and mounts the source only after verifying an exact read-only
+permission set. Missing, ambiguous, write-capable, or unverifiable credentials
+fail closed.
 
 ### MCP server tools
 
@@ -84,7 +109,12 @@ Also redact credential-bearing git remotes, database overrides such as `TRACEDEC
 
 - `tracedecay_run_affected_tests` — compiles and runs the project's own test suite via a `cargo` subprocess (bounded by a configurable wall-clock timeout, default 300 s, and a per-invocation test cap)
 
-The edit tools target a single file with a unique anchor and re-index in place. They never run shell commands you didn't supply, and the server still **cannot** access the network on behalf of the AI agent. Every editing and state-mutating tool is single-file or single-record scoped — there is no bulk-delete or recursive-write primitive.
+The edit tools target a single file with a unique anchor and re-index in place.
+They never run shell commands you did not supply. Network-capable operations
+are limited to the documented release, pricing, semantic-model, telemetry, and
+configured GitHub review paths above. Every editing and state-mutating tool is
+single-file or single-record scoped — there is no bulk-delete or
+recursive-write primitive.
 
 > Note: file edits are applied by the agent on your behalf through your agent's own tool-approval flow. Treat tracedecay's edit tools with the same caution as your agent's built-in file-write tools.
 

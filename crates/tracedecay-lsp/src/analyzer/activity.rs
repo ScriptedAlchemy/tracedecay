@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::client::LspDocument;
+use super::adapters::LspAdapterDefinition;
+use super::client::LspDocument;
+use super::error::AnalyzerResult;
 
 pub fn active_languages_for_files(
     project_root: &Path,
@@ -31,7 +32,7 @@ pub async fn documents_for_adapter(
     project_root: &Path,
     adapter: &LspAdapterDefinition,
     files: Vec<String>,
-) -> crate::errors::Result<Vec<LspDocument>> {
+) -> AnalyzerResult<Vec<LspDocument>> {
     let mut documents = Vec::new();
     for file in files {
         if !matches_adapter_extension(adapter, &file) {
@@ -107,7 +108,7 @@ pub fn adapter_workspace_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostics::lsp::adapters::DiagnosticMode;
+    use crate::analyzer::adapters::DiagnosticMode;
 
     #[tokio::test]
     async fn documents_for_adapter_requires_a_matching_root_marker()

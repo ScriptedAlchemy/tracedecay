@@ -177,10 +177,6 @@ pub struct CanonicalLateHydration<'a, S> {
     source: &'a mut S,
 }
 
-/// Compatibility name retained for callers that predate the production
-/// authority naming. It is the same canonical executor, not a test double.
-pub type DeterministicLateHydration<'a, S> = CanonicalLateHydration<'a, S>;
-
 struct SystemHydrationExecutionControl {
     started: Instant,
 }

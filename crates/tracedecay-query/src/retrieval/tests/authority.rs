@@ -42,7 +42,7 @@ fn authority_with_keyring(keyring: RetrievalCursorKeyringV1) -> Pr9QueryAuthorit
     .expect("authority")
 }
 
-fn empty_pr9_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInput> {
+fn empty_foreground_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInput> {
     composition_lanes(vec![
         (
             RetrieverKind::ExactLiteral,
@@ -60,15 +60,15 @@ fn empty_pr9_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInput> {
 }
 
 #[test]
-fn authenticated_pr9_fallback_is_byte_stable_and_carries_only_pr9_lanes() {
+fn authenticated_foreground_fallback_is_byte_stable_and_lane_bounded() {
     let authority = authority();
     let request = request();
     let query = query_view();
     let first = authority
-        .compose(&request, &query, empty_pr9_lanes(), 8, None)
+        .compose(&request, &query, empty_foreground_lanes(), 8, None)
         .expect("compose");
     let second = authority
-        .compose(&request, &query, empty_pr9_lanes(), 8, None)
+        .compose(&request, &query, empty_foreground_lanes(), 8, None)
         .expect("repeat compose");
 
     assert_eq!(first, second);
@@ -102,7 +102,7 @@ fn semantic_handoff_reuses_the_authenticated_query_and_fallback() {
     let authority = authority();
     let request = request();
     let authorized = authority
-        .compose(&request, &query_view(), empty_pr9_lanes(), 8, None)
+        .compose(&request, &query_view(), empty_foreground_lanes(), 8, None)
         .expect("compose");
 
     assert_eq!(

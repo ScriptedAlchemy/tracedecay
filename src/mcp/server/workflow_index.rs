@@ -8,30 +8,22 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
-
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::mcp::tools::{
-    WorkflowAgentView, WorkflowIndexReadPort, WorkflowIndexUnavailableReason,
-    WorkflowRunDetailCommand, WorkflowRunDetailFuture, WorkflowRunDetailOutcome,
-    WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture, WorkflowRunListOutcome,
-    WorkflowRunScope,
+use tracedecay_sessions::{
+    WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError, WorkflowRunDetail,
+    WorkflowRunDetailFuture, WorkflowRunDetailOutcome, WorkflowRunDetailRequest,
+    WorkflowRunListFuture, WorkflowRunListOutcome, WorkflowRunListRequest, WorkflowRunScope,
 };
+
+use crate::global_db::RegisteredGlobalDb;
+use crate::sessions::git_correlation::GitScopeFilter;
 use crate::sessions::workflow_index::{RegisteredWorkflowIndexSnapshot, WorkflowIndexError};
 use crate::store::GlobalDbWorkflowStore;
 
 /// Keeps the workflow index's own error text, so a read failure still reads the
 /// same way after the boundary moved.
 #[allow(clippy::needless_pass_by_value)] // used with `.map_err(workflow_error)`
-fn workflow_error(err: WorkflowIndexError) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: err.to_string(),
-    }
-}
-
-fn serialize_row<T: serde::Serialize>(row: &T) -> Result<Value> {
-    serde_json::to_value(row).map_err(Into::into)
+fn workflow_error(err: WorkflowIndexError) -> WorkflowReadError {
+    WorkflowReadError::new(err.to_string())
 }
 
 pub(crate) struct DaemonWorkflowIndexReadService {
@@ -48,7 +40,7 @@ impl DaemonWorkflowIndexReadService {
     /// Opens one snapshot for one command. The shard-scope refusal lives in
     /// [`GlobalDbWorkflowStore::open_workflow_index_snapshot`], so a wrong-scope
     /// handle fails here instead of reading another shard's rows.
-    async fn snapshot(&self) -> Result<RegisteredWorkflowIndexSnapshot> {
+    async fn snapshot(&self) -> Result<RegisteredWorkflowIndexSnapshot, WorkflowReadError> {
         GlobalDbWorkflowStore::new(self.database.as_ref())
             .open_workflow_index_snapshot()
             .await
@@ -63,7 +55,9 @@ impl DaemonWorkflowIndexReadService {
     /// installs the git-correlation and workflow-index DDL in a single
     /// transaction, so the correlation tables cannot be absent while these are
     /// present.
-    async fn schema_missing(snapshot: &RegisteredWorkflowIndexSnapshot) -> Result<bool> {
+    async fn schema_missing(
+        snapshot: &RegisteredWorkflowIndexSnapshot,
+    ) -> Result<bool, WorkflowReadError> {
         snapshot
             .workflow_tables_present()
             .await
@@ -73,26 +67,32 @@ impl DaemonWorkflowIndexReadService {
 
     async fn execute_runs(
         &self,
-        command: WorkflowRunListCommand,
-    ) -> Result<WorkflowRunListOutcome> {
-        let WorkflowRunListCommand { scope, limit } = command;
+        command: WorkflowRunListRequest,
+    ) -> Result<WorkflowRunListOutcome, WorkflowReadError> {
+        let WorkflowRunListRequest { scope, limit } = command;
         let snapshot = self.snapshot().await?;
         if Self::schema_missing(&snapshot).await? {
             return Ok(WorkflowRunListOutcome::Unavailable(
-                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+                WorkflowIndexState::IndexNotBuilt,
             ));
         }
-        let runs = match &scope {
+        let runs = match scope {
             WorkflowRunScope::Session { session_id } => snapshot
-                .runs_for_session(session_id, limit)
+                .runs_for_session(&session_id, limit)
                 .await
                 .map_err(workflow_error)?,
-            WorkflowRunScope::GitScope { filter } => snapshot
-                .runs_for_git_scope(filter, limit)
-                .await
-                .map_err(workflow_error)?,
+            WorkflowRunScope::GitScope(filter) => {
+                let filter = GitScopeFilter {
+                    branch: filter.branch,
+                    worktree: filter.worktree,
+                    commit: filter.commit,
+                };
+                snapshot
+                    .runs_for_git_scope(&filter, limit)
+                    .await
+                    .map_err(workflow_error)?
+            }
         };
-        let runs = runs.iter().map(serialize_row).collect::<Result<Vec<_>>>()?;
         Ok(WorkflowRunListOutcome::Runs(runs))
     }
 
@@ -100,15 +100,15 @@ impl DaemonWorkflowIndexReadService {
     /// the same database generation.
     async fn execute_run(
         &self,
-        command: WorkflowRunDetailCommand,
-    ) -> Result<WorkflowRunDetailOutcome> {
-        let WorkflowRunDetailCommand { run_id, limit } = command;
+        command: WorkflowRunDetailRequest,
+    ) -> Result<WorkflowRunDetailOutcome, WorkflowReadError> {
+        let WorkflowRunDetailRequest { run_id, limit } = command;
         let snapshot = self.snapshot().await?;
         // Without this, a store with no schema answers `NotFound`, which claims
         // the index looked and the run is absent. It cannot know that.
         if Self::schema_missing(&snapshot).await? {
             return Ok(WorkflowRunDetailOutcome::Unavailable(
-                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+                WorkflowIndexState::IndexNotBuilt,
             ));
         }
         let Some(run) = snapshot.run_for_id(&run_id).await.map_err(workflow_error)? else {
@@ -118,28 +118,19 @@ impl DaemonWorkflowIndexReadService {
             .agents_for_run(&run_id, limit)
             .await
             .map_err(workflow_error)?;
-        let agents = agents
-            .iter()
-            .map(|agent| {
-                Ok(WorkflowAgentView {
-                    agent_label: agent.agent_label.clone(),
-                    row: serialize_row(agent)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetailView {
-            run: serialize_row(&run)?,
+        Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+            run,
             agents,
         }))
     }
 }
 
 impl WorkflowIndexReadPort for DaemonWorkflowIndexReadService {
-    fn runs(&self, command: WorkflowRunListCommand) -> WorkflowRunListFuture<'_> {
+    fn runs(&self, command: WorkflowRunListRequest) -> WorkflowRunListFuture<'_> {
         Box::pin(async move { self.execute_runs(command).await })
     }
 
-    fn run(&self, command: WorkflowRunDetailCommand) -> WorkflowRunDetailFuture<'_> {
+    fn run(&self, command: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_> {
         Box::pin(async move { self.execute_run(command).await })
     }
 }

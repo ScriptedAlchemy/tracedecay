@@ -1,4 +1,4 @@
-//! Root adapters for [`WorkflowIndexPort`] and [`WorkflowIngestSink`].
+//! Root adapter for workflow-index storage and [`WorkflowIngestSink`].
 
 use std::future::Future;
 use std::path::Path;
@@ -10,8 +10,8 @@ use crate::db::engine::params;
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use crate::sessions::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowAgent, WorkflowIndexError,
-    WorkflowIndexPort, WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun,
-    read_ingest_watermark, upsert_agent, upsert_run,
+    WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
+    upsert_run,
 };
 use crate::sessions::workflow_ingest::{WorkflowIngestStats, ingest_workflow_runs_with_sink};
 use crate::sessions::workflow_state::{WorkflowStateItem, list_unfinished};
@@ -149,15 +149,6 @@ impl WorkflowIngestWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
                 .await
                 .map_err(|error| WorkflowIndexError::Db(error.to_string()))
         }
-    }
-}
-
-impl WorkflowIndexPort for GlobalDbWorkflowStore<'_> {
-    fn open_workflow_index_snapshot(
-        &self,
-    ) -> impl Future<Output = Result<RegisteredWorkflowIndexSnapshot, WorkflowIndexError>> + Send
-    {
-        async move { GlobalDbWorkflowStore::open_workflow_index_snapshot(self).await }
     }
 }
 

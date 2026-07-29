@@ -54,13 +54,6 @@ pub(crate) use session::{
     SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
     SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
 };
-pub(crate) use workflow_index::{
-    WorkflowAgentView, WorkflowIndexReadPort, WorkflowIndexUnavailableReason,
-    WorkflowRunDetailCommand, WorkflowRunDetailFuture, WorkflowRunDetailOutcome,
-    WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture, WorkflowRunListOutcome,
-    WorkflowRunScope,
-};
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};

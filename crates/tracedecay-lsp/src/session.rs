@@ -2,17 +2,136 @@
 //! ordering. The stdio bridge has no copy of this state.
 
 use std::collections::BTreeMap;
+use std::fmt;
+
+use crate::gateway::AdmittedRoot;
 
 pub const MAX_PENDING_REQUESTS: usize = 64;
 /// A single `publishDiagnostics` JSON-RPC publication is bounded separately
 /// from the four-MiB transport frame limit so noisy documents cannot starve
 /// unrelated interactive requests.
 pub const MAX_PUBLICATION_BYTES: usize = 256 * 1024;
+/// Maximum number of live bridge sessions in one daemon process.
+pub const MAX_LSP_SESSIONS: usize = 64;
+/// Detached session state is deterministically discarded after this TTL.
+pub const LSP_SESSION_TTL_MS: u64 = 15 * 60 * 1_000;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum LspRequestId {
     Number(i64),
     String(String),
+}
+
+/// Opaque daemon-assigned LSP session identity.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LspSessionId(String);
+
+impl LspSessionId {
+    pub fn new(value: impl Into<String>) -> Result<Self, LspEndpointError> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 128 {
+            return Err(LspEndpointError::InvalidSessionId);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Opaque credential minted by the daemon admission authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct LspSessionCredential(Vec<u8>);
+
+impl LspSessionCredential {
+    pub fn new(value: impl Into<Vec<u8>>) -> Result<Self, LspEndpointError> {
+        let value = value.into();
+        if value.len() < 16 || value.len() > 256 {
+            return Err(LspEndpointError::InvalidCredential);
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns credential material only to an authenticated daemon wire
+    /// adapter. Presentation code must never log or render this value.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for LspSessionCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LspSessionCredential([redacted])")
+    }
+}
+
+/// Credential-bearing bridge access to one daemon LSP session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LspSessionAccess {
+    session_id: LspSessionId,
+    credential: LspSessionCredential,
+}
+
+impl LspSessionAccess {
+    pub fn new(session_id: LspSessionId, credential: LspSessionCredential) -> Self {
+        Self {
+            session_id,
+            credential,
+        }
+    }
+
+    pub fn session_id(&self) -> &LspSessionId {
+        &self.session_id
+    }
+
+    /// Returns the opaque credential only to the authenticated daemon
+    /// invocation service.
+    pub fn credential(&self) -> &LspSessionCredential {
+        &self.credential
+    }
+}
+
+/// Request to begin one typed daemon session. Requested roots are
+/// presentation hints; the admission authority resolves the canonical root.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LspSessionOpenRequest {
+    pub requested_root_uri: Option<String>,
+    pub workspace_folders: Vec<String>,
+    pub client_revision: String,
+}
+
+/// Session result authorized by the daemon admission boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedLspSession {
+    pub session_id: LspSessionId,
+    pub credential: LspSessionCredential,
+    pub root: AdmittedRoot,
+    pub expires_at_ms: u64,
+}
+
+/// Admission resolves one canonical project root before document content is
+/// accepted.
+pub trait LspSessionAdmissionPort {
+    fn admit_lsp_session(
+        &self,
+        request: &LspSessionOpenRequest,
+        now_ms: u64,
+    ) -> Result<AuthorizedLspSession, LspEndpointError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LspEndpointError {
+    InvalidSessionId,
+    InvalidCredential,
+    MultipleRootsUnsupported,
+    AdmissionRejected,
+    DuplicateSession,
+    Saturated,
+    AuthenticationFailed,
+    SessionExpired,
+    SessionUnavailable,
+    Lifecycle(LifecycleError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -339,7 +458,7 @@ impl LspSessionControl {
         self.admit_sized_publication(document_uri, document_version, generation, 0)
     }
 
-    /// Records an outbound publication only if it fits the PR12 publication
+    /// Records an outbound publication only if it fits the session publication
     /// budget. This is deliberately independent of the outer LSP framing
     /// limit: a valid four-MiB request must never imply a four-MiB diagnostic
     /// notification is permitted.
@@ -444,9 +563,252 @@ impl LspSessionControl {
     }
 }
 
+#[derive(Debug)]
+struct RegisteredLspSession {
+    credential: LspSessionCredential,
+    root: AdmittedRoot,
+    expires_at_ms: u64,
+    control: LspSessionControl,
+}
+
+/// Bounded in-memory registry for authenticated protocol sessions.
+#[derive(Debug)]
+pub struct LspSessionRegistry {
+    sessions: BTreeMap<LspSessionId, RegisteredLspSession>,
+    max_sessions: usize,
+}
+
+impl Default for LspSessionRegistry {
+    fn default() -> Self {
+        Self::new(MAX_LSP_SESSIONS)
+    }
+}
+
+impl LspSessionRegistry {
+    pub fn new(max_sessions: usize) -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            max_sessions,
+        }
+    }
+
+    pub fn register(
+        &mut self,
+        authorized: AuthorizedLspSession,
+        now_ms: u64,
+    ) -> Result<LspSessionAccess, LspEndpointError> {
+        self.expire_at(now_ms);
+        if authorized.expires_at_ms <= now_ms {
+            return Err(LspEndpointError::SessionExpired);
+        }
+        if self.sessions.contains_key(&authorized.session_id) {
+            return Err(LspEndpointError::DuplicateSession);
+        }
+        if self.sessions.len() >= self.max_sessions {
+            return Err(LspEndpointError::Saturated);
+        }
+        let access =
+            LspSessionAccess::new(authorized.session_id.clone(), authorized.credential.clone());
+        self.sessions.insert(
+            authorized.session_id,
+            RegisteredLspSession {
+                credential: authorized.credential,
+                root: authorized.root,
+                expires_at_ms: authorized.expires_at_ms,
+                control: LspSessionControl::default(),
+            },
+        );
+        Ok(access)
+    }
+
+    pub fn authenticate(
+        &mut self,
+        access: &LspSessionAccess,
+        now_ms: u64,
+    ) -> Result<&mut LspSessionControl, LspEndpointError> {
+        let Some(session) = self.sessions.get(access.session_id()) else {
+            return Err(LspEndpointError::AuthenticationFailed);
+        };
+        if !constant_time_eq(
+            session.credential.as_bytes(),
+            access.credential().as_bytes(),
+        ) {
+            return Err(LspEndpointError::AuthenticationFailed);
+        }
+        if session.expires_at_ms <= now_ms
+            || session.control.lifecycle() == SessionLifecycle::Expired
+        {
+            if let Some(mut expired) = self.sessions.remove(access.session_id()) {
+                expired.control.expire();
+            }
+            return Err(LspEndpointError::SessionExpired);
+        }
+        self.sessions
+            .get_mut(access.session_id())
+            .map(|session| &mut session.control)
+            .ok_or(LspEndpointError::AuthenticationFailed)
+    }
+
+    pub fn root(
+        &mut self,
+        access: &LspSessionAccess,
+        now_ms: u64,
+    ) -> Result<&AdmittedRoot, LspEndpointError> {
+        self.authenticate(access, now_ms)?;
+        self.sessions
+            .get(access.session_id())
+            .map(|session| &session.root)
+            .ok_or(LspEndpointError::AuthenticationFailed)
+    }
+
+    pub fn detach(
+        &mut self,
+        access: &LspSessionAccess,
+        now_ms: u64,
+    ) -> Result<(), LspEndpointError> {
+        self.authenticate(access, now_ms)?
+            .detach()
+            .map_err(LspEndpointError::Lifecycle)
+    }
+
+    pub fn close(
+        &mut self,
+        access: &LspSessionAccess,
+        now_ms: u64,
+    ) -> Result<(), LspEndpointError> {
+        self.authenticate(access, now_ms)?;
+        let mut session = self
+            .sessions
+            .remove(access.session_id())
+            .ok_or(LspEndpointError::AuthenticationFailed)?;
+        session.control.expire();
+        Ok(())
+    }
+
+    pub fn reconnect(
+        &mut self,
+        access: &LspSessionAccess,
+        now_ms: u64,
+    ) -> Result<(), LspEndpointError> {
+        self.authenticate(access, now_ms)?
+            .reconnect()
+            .map_err(LspEndpointError::Lifecycle)
+    }
+
+    pub fn reconnect_with_credential(
+        &mut self,
+        access: &LspSessionAccess,
+        credential: LspSessionCredential,
+        now_ms: u64,
+    ) -> Result<LspSessionAccess, LspEndpointError> {
+        match self.authenticate(access, now_ms)?.lifecycle() {
+            SessionLifecycle::Detached => self.reconnect(access, now_ms)?,
+            SessionLifecycle::AwaitingInitialize
+            | SessionLifecycle::AwaitingInitialized
+            | SessionLifecycle::Ready
+            | SessionLifecycle::Shutdown => {}
+            SessionLifecycle::Exited | SessionLifecycle::Expired => {
+                return Err(LspEndpointError::SessionUnavailable);
+            }
+        }
+        let session = self
+            .sessions
+            .get_mut(access.session_id())
+            .ok_or(LspEndpointError::AuthenticationFailed)?;
+        session.credential = credential.clone();
+        Ok(LspSessionAccess::new(
+            access.session_id().clone(),
+            credential,
+        ))
+    }
+
+    pub fn expire_at(&mut self, now_ms: u64) -> usize {
+        let expired: Vec<LspSessionId> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.expires_at_ms <= now_ms)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            if let Some(session) = self.sessions.get_mut(id) {
+                session.control.expire();
+            }
+        }
+        self.sessions
+            .retain(|_, session| session.expires_at_ms > now_ms);
+        expired.len()
+    }
+
+    pub fn active_sessions(&self) -> usize {
+        self.sessions.len()
+    }
+}
+
+/// Typed single-project endpoint used by daemon startup.
+#[derive(Debug)]
+pub struct DaemonLspSessionEndpoint<A> {
+    admission: A,
+    registry: LspSessionRegistry,
+}
+
+impl<A> DaemonLspSessionEndpoint<A>
+where
+    A: LspSessionAdmissionPort,
+{
+    pub fn new(admission: A) -> Self {
+        Self {
+            admission,
+            registry: LspSessionRegistry::default(),
+        }
+    }
+
+    pub fn with_registry(admission: A, registry: LspSessionRegistry) -> Self {
+        Self {
+            admission,
+            registry,
+        }
+    }
+
+    pub fn open(
+        &mut self,
+        request: LspSessionOpenRequest,
+        now_ms: u64,
+    ) -> Result<LspSessionAccess, LspEndpointError> {
+        if request.workspace_folders.len() > 1 {
+            return Err(LspEndpointError::MultipleRootsUnsupported);
+        }
+        let authorized = self.admission.admit_lsp_session(&request, now_ms)?;
+        self.registry.register(authorized, now_ms)
+    }
+
+    pub fn registry(&self) -> &LspSessionRegistry {
+        &self.registry
+    }
+
+    pub fn registry_mut(&mut self) -> &mut LspSessionRegistry {
+        &mut self.registry
+    }
+
+    pub fn into_registry(self) -> LspSessionRegistry {
+        self.registry
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max_len = left.len().max(right.len());
+    let mut difference = left.len() ^ right.len();
+    for index in 0..max_len {
+        let left = left.get(index).copied().unwrap_or_default();
+        let right = right.get(index).copied().unwrap_or_default();
+        difference |= usize::from(left ^ right);
+    }
+    difference == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::AdmittedRoot;
 
     fn ready(limit: usize) -> LspSessionControl {
         let mut session = LspSessionControl::new(limit);
@@ -567,6 +929,118 @@ mod tests {
                 size: MAX_PUBLICATION_BYTES + 1,
                 limit: MAX_PUBLICATION_BYTES,
             }
+        );
+    }
+
+    #[derive(Clone)]
+    struct Admission;
+
+    impl LspSessionAdmissionPort for Admission {
+        fn admit_lsp_session(
+            &self,
+            _request: &LspSessionOpenRequest,
+            now_ms: u64,
+        ) -> Result<AuthorizedLspSession, LspEndpointError> {
+            Ok(AuthorizedLspSession {
+                session_id: LspSessionId::new("daemon-session-1").unwrap(),
+                credential: LspSessionCredential::new(vec![7; 16]).unwrap(),
+                root: AdmittedRoot::new("file:///admitted"),
+                expires_at_ms: now_ms + LSP_SESSION_TTL_MS,
+            })
+        }
+    }
+
+    #[test]
+    fn endpoint_admits_one_project_root_only() {
+        let mut endpoint = DaemonLspSessionEndpoint::new(Admission);
+        assert_eq!(
+            endpoint.open(
+                LspSessionOpenRequest {
+                    workspace_folders: vec!["file:///one".into(), "file:///two".into()],
+                    ..LspSessionOpenRequest::default()
+                },
+                10,
+            ),
+            Err(LspEndpointError::MultipleRootsUnsupported)
+        );
+
+        let access = endpoint
+            .open(
+                LspSessionOpenRequest {
+                    requested_root_uri: Some("file:///untrusted".into()),
+                    ..LspSessionOpenRequest::default()
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            endpoint.registry_mut().root(&access, 11).unwrap().uri(),
+            "file:///admitted"
+        );
+    }
+
+    #[test]
+    fn registry_authenticates_reconnects_and_reclaims_expired_capacity() {
+        let mut endpoint = DaemonLspSessionEndpoint::new(Admission);
+        let access = endpoint.open(LspSessionOpenRequest::default(), 0).unwrap();
+        let forged = LspSessionAccess::new(
+            access.session_id().clone(),
+            LspSessionCredential::new(vec![8; 16]).unwrap(),
+        );
+        assert_eq!(
+            endpoint.registry_mut().authenticate(&forged, 1).err(),
+            Some(LspEndpointError::AuthenticationFailed)
+        );
+
+        let control = endpoint.registry_mut().authenticate(&access, 1).unwrap();
+        control.begin_initialize().unwrap();
+        control.initialized().unwrap();
+        endpoint.registry_mut().detach(&access, 2).unwrap();
+        let reconnected = endpoint
+            .registry_mut()
+            .reconnect_with_credential(&access, LspSessionCredential::new(vec![9; 16]).unwrap(), 3)
+            .unwrap();
+        assert_eq!(endpoint.registry().active_sessions(), 1);
+        assert_eq!(
+            endpoint.registry_mut().authenticate(&access, 4).err(),
+            Some(LspEndpointError::AuthenticationFailed)
+        );
+        endpoint.registry_mut().close(&reconnected, 4).unwrap();
+        assert_eq!(endpoint.registry().active_sessions(), 0);
+
+        let mut registry = LspSessionRegistry::new(1);
+        registry
+            .register(
+                AuthorizedLspSession {
+                    session_id: LspSessionId::new("expired").unwrap(),
+                    credential: LspSessionCredential::new(vec![1; 16]).unwrap(),
+                    root: AdmittedRoot::new("file:///admitted"),
+                    expires_at_ms: 10,
+                },
+                0,
+            )
+            .unwrap();
+        assert!(
+            registry
+                .register(
+                    AuthorizedLspSession {
+                        session_id: LspSessionId::new("replacement").unwrap(),
+                        credential: LspSessionCredential::new(vec![2; 16]).unwrap(),
+                        root: AdmittedRoot::new("file:///admitted"),
+                        expires_at_ms: 20,
+                    },
+                    10,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn credentials_remain_redacted() {
+        let credential = LspSessionCredential::new(b"never-render-this-secret".to_vec()).unwrap();
+        assert_eq!(
+            format!("{credential:?}"),
+            "LspSessionCredential([redacted])"
         );
     }
 }
