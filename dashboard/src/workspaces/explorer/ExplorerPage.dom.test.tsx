@@ -337,6 +337,14 @@ function unavailable(sourceId: 'code_graph' | 'sessions' | 'knowledge', code: st
   return withoutAnswer(sourceId, 'unavailable', code, message);
 }
 
+/** The domain state a lane readout is actually drawing, taken off the chip
+ * rather than off its wording: two conditions that read differently in prose
+ * while lighting the same indicator are still one fact to anyone scanning the
+ * indicators. */
+function laneChipState(lane: HTMLElement): string | null {
+  return lane.querySelector('[data-state]')?.getAttribute('data-state') ?? null;
+}
+
 describe('ExplorerPage no-falsified-UI invariant', () => {
   it('never counts a source that did not answer in the result caption', async () => {
     renderExplorer({
@@ -585,12 +593,17 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     expect(code.textContent).toContain('loaded of 0 matching rows reported');
 
     const sessions = screen.getByRole('button', { name: /^Sessions/ });
+    expect(laneChipState(sessions)).toBe('cancelled');
     expect(sessions.textContent).toMatch(/read cancelled/);
     expect(sessions.textContent).toMatch(/no count reported/);
     expect(sessions.textContent).not.toMatch(/\b0\b/);
 
     const knowledge = screen.getByRole('button', { name: /^Knowledge/ });
-    expect(knowledge.textContent).toMatch(/source unavailable/);
+    // The chip itself carries the condition, and the clause beside it carries
+    // the reason the source gave rather than a second copy of the state.
+    expect(laneChipState(knowledge)).toBe('unavailable');
+    expect(knowledge.textContent).toMatch(/Source unavailable/);
+    expect(knowledge.textContent).toMatch(/fact_store_unavailable/);
     expect(knowledge.textContent).toMatch(/no count reported/);
     expect(knowledge.textContent).not.toMatch(/\b0\b/);
   });
@@ -603,12 +616,17 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     await screen.findByText('Some sources did not answer');
 
     // No source said anything about itself — the browser never got a reply —
-    // so no lane may be shown as an unavailable or broken source.
+    // so no lane may be shown as an unavailable or broken source. Held at the
+    // chip as well as in the prose: source-level unavailability is now its own
+    // chip, so a lane that merely worded the difference while drawing the same
+    // indicator would still be lying to anyone reading the indicator.
     for (const name of [/^Code graph/, /^Sessions/, /^Knowledge/]) {
       const lane = screen.getByRole('button', { name });
+      expect(laneChipState(lane)).toBe('offline');
+      expect(lane.textContent).toMatch(/Offline/);
       expect(lane.textContent).toMatch(/daemon unreachable/);
       expect(lane.textContent).toMatch(/no count reported/);
-      expect(lane.textContent).not.toMatch(/source unavailable/);
+      expect(lane.textContent).not.toMatch(/Source unavailable/);
     }
   });
 
@@ -846,8 +864,16 @@ describe('ExplorerPage', () => {
     await user.keyboard('{Enter}');
 
     expect(await screen.findByText('Some sources did not answer')).toBeTruthy();
-    expect(screen.getByText(/session_store_unavailable/)).toBeTruthy();
-    expect(screen.getByText(/session store is not mounted/)).toBeTruthy();
+    // Scoped to the coordinator's own source list, which is where the code and
+    // the message it reported are printed verbatim. Unscoped `getByText` for
+    // the code now has a second, legitimate match — the lane chip's clause
+    // carries the reported reason — and would fail on multiplicity rather than
+    // on the thing under test.
+    const progress = within(screen.getByRole('list', { name: 'Source progress' }));
+    expect(progress.getByText(/session_store_unavailable/)).toBeTruthy();
+    expect(progress.getByText(/session store is not mounted/)).toBeTruthy();
+    // The source said it could not serve; the browser reached the daemon fine.
+    expect(laneChipState(screen.getByRole('button', { name: /^Sessions/ }))).toBe('unavailable');
     expect(screen.queryByText(/genuinely absent from/)).toBeNull();
   });
 
