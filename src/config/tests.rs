@@ -1396,6 +1396,7 @@ mod legacy_configuration_migration_input {
 
 mod runtime_configuration_cutover {
     use std::collections::BTreeMap;
+    use std::process::Command;
     use std::sync::Mutex;
 
     use tempfile::TempDir;
@@ -1969,6 +1970,101 @@ mod runtime_configuration_cutover {
             .expect("binding repair is idempotent");
         assert_eq!(reopened.revision_id, repaired.revision_id);
         assert_eq!(reopened.snapshot, repaired.snapshot);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_runtime_configuration_keeps_binding_revision_across_linked_worktrees() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary root");
+        let primary = root.path().join("primary");
+        let linked = root.path().join("linked");
+        std::fs::create_dir_all(&primary).expect("create primary root");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+                .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
+                .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+                .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&primary, &["init", "-b", "main", "--quiet"]);
+        std::fs::write(primary.join("README.md"), "primary\n").expect("fixture");
+        git(&primary, &["add", "README.md"]);
+        git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/linked",
+                linked.to_str().expect("linked path"),
+                "HEAD",
+            ],
+        );
+
+        let project_id = project_id("proj_runtime_linked_binding");
+        crate::storage::write_enrollment_marker(
+            &primary,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(&primary)
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            &primary,
+            project_id.clone(),
+        )
+        .await
+        .expect("open retained project runtime");
+
+        let primary_configuration = runtime
+            .ensure_runtime_configuration_for_test(&primary, &layout)
+            .await
+            .expect("open primary configuration");
+        let linked_configuration = runtime
+            .ensure_runtime_configuration_for_test(&linked, &layout)
+            .await
+            .expect("open linked configuration");
+        let reopened_primary = runtime
+            .ensure_runtime_configuration_for_test(&primary, &layout)
+            .await
+            .expect("reopen primary configuration");
+
+        assert_eq!(
+            linked_configuration.revision_id, primary_configuration.revision_id,
+            "linked open must not rebind the shared repository authority"
+        );
+        assert_eq!(
+            reopened_primary.revision_id, primary_configuration.revision_id,
+            "returning to the primary must not repair linked-worktree churn"
+        );
+        assert_eq!(
+            crate::config::scope_control::daemon_owned_project_source_binding(
+                &project_id,
+                &primary,
+            )
+            .expect("primary binding"),
+            crate::config::scope_control::daemon_owned_project_source_binding(
+                &project_id,
+                &linked,
+            )
+            .expect("linked binding"),
+        );
     }
 
     #[tokio::test]
