@@ -1265,9 +1265,13 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
     }
 
     fn database(&self) -> &RegisteredGlobalDb {
-        self.authority
+        match self
+            .authority
             .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
-            .expect("transcript facts test runtime has ProjectSessions authority")
+        {
+            Some(database) => database,
+            None => panic!("transcript facts test runtime has ProjectSessions authority"),
+        }
     }
 
     pub async fn transcript_facts_backfill_status_for_test(
@@ -1315,9 +1319,13 @@ impl StructuredBackfillTestRuntimeV1 {
     }
 
     fn database(&self) -> &RegisteredGlobalDb {
-        self.authority
+        match self
+            .authority
             .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
-            .expect("structured backfill test runtime has ProjectSessions authority")
+        {
+            Some(database) => database,
+            None => panic!("structured backfill test runtime has ProjectSessions authority"),
+        }
     }
 
     pub fn database_path(&self) -> &Path {

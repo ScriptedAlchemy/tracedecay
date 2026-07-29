@@ -1359,7 +1359,13 @@ fn page_hydration_slot<'a>(
     ranked: &RankedCandidate,
     hydrated: &'a [TemporalHydratedResult],
 ) -> Result<&'a TemporalHydratedResult, SessionRetrievalOmissionView> {
-    let rank = u32::try_from(rank).expect("bounded retrieval rank must fit u32");
+    let Ok(rank) = u32::try_from(rank) else {
+        return Err(SessionRetrievalOmissionView {
+            rank: u32::MAX,
+            anchor: ranked.anchor_id.clone(),
+            reason: HydrationStateV1::RetainedButUnavailable,
+        });
+    };
     let Some(hydrated) = hydrated.get(rank as usize).filter(|hydrated| {
         hydrated.rank() == rank
             && hydrated.stable_id() == ranked.stable_id

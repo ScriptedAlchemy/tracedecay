@@ -138,11 +138,12 @@ impl Pr13AdvisoryHookNoticeQueueV1 {
     }
 }
 
-fn registered_hook_notice_queues()
--> &'static Mutex<BTreeMap<([u8; 16], [u8; 16]), Weak<Pr13AdvisoryHookNoticeQueueV1>>> {
-    static QUEUES: OnceLock<
-        Mutex<BTreeMap<([u8; 16], [u8; 16]), Weak<Pr13AdvisoryHookNoticeQueueV1>>>,
-    > = OnceLock::new();
+type Pr13AdvisoryHookNoticeQueueMapV1 =
+    BTreeMap<([u8; 16], [u8; 16]), Weak<Pr13AdvisoryHookNoticeQueueV1>>;
+type Pr13AdvisoryHookNoticeQueuesLockV1 = Mutex<Pr13AdvisoryHookNoticeQueueMapV1>;
+
+fn registered_hook_notice_queues() -> &'static Pr13AdvisoryHookNoticeQueuesLockV1 {
+    static QUEUES: OnceLock<Pr13AdvisoryHookNoticeQueuesLockV1> = OnceLock::new();
     QUEUES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 

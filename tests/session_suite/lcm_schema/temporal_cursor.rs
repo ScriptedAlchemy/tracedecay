@@ -428,9 +428,7 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
         match timeout(Duration::from_secs(5), release_rx).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => panic!("release signal dropped before holder cleanup"),
-            Err(error) => {
-                panic!("timed out waiting to release holder after contention: {error}")
-            }
+            Err(error) => panic!("timed out waiting to release holder after contention: {error}"),
         }
         transaction
             .rollback()

@@ -502,6 +502,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
     }
 
     #[must_use]
+    #[allow(dead_code)] // staged admission builder — preserve authority surface
     pub(crate) fn with_profile_identity(
         mut self,
         brain_id: BrainId,
@@ -513,6 +514,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
     }
 
     #[must_use]
+    #[allow(dead_code)] // staged admission builder — preserve authority surface
     pub(crate) const fn with_project_registered(mut self, runtime: &'a RegisteredGlobalDb) -> Self {
         self.project_registered = Some(runtime);
         self
@@ -589,6 +591,7 @@ impl<'a> HostAdmissionFacade<'a> {
         Self { authorities }
     }
 
+    #[allow(dead_code)] // evidence-assembly admission port — preserve authority surface
     pub(crate) async fn resolve_evidence_assembly_anchor(
         &self,
         context: &tracedecay_application::RequestContext,
@@ -978,6 +981,7 @@ pub struct LcmExternalPayloadManifestTestRecord {
 /// registry, and actor-time database authority used by the daemon. It exposes
 /// neither raw admission authorities nor registered database handles.
 #[doc(hidden)]
+#[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
 pub struct HostAdmissionTestRuntimeV1 {
     brain_id: BrainId,
     profile_id: UserProfileId,
@@ -1134,6 +1138,7 @@ impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
     }
 }
 
+#[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-transport"))]
@@ -4388,11 +4393,10 @@ impl HostAdmissionTestRuntimeV1 {
                 [query],
             )
             .await?;
-        Ok(rows
-            .next()
-            .await?
-            .expect("COUNT(*) returns one row")
-            .get(0)?)
+        let row = rows.next().await?.ok_or_else(|| {
+            crate::sessions::lcm::LcmError::Db("COUNT(*) returned no row".to_owned())
+        })?;
+        Ok(row.get(0)?)
     }
 
     #[doc(hidden)]

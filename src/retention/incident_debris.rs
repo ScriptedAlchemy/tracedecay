@@ -688,7 +688,7 @@ fn verify_artifact(
 
 fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; HASH_BUFFER_BYTES];
+    let mut buffer = vec![0u8; HASH_BUFFER_BYTES].into_boxed_slice();
     loop {
         let read = reader.read(&mut buffer)?;
         if read == 0 {

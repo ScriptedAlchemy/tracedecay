@@ -891,16 +891,13 @@ fn code_index_search_executor(
             }
             let (semantic, ordered_candidates, next_cursor, accepted_semantic_budget) =
                 match &executed.semantic {
-                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented {
-                    composition,
-                    cursor,
-                    hydration_budget,
-                    ..
-                } => (
+                code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented(
+                    augmented,
+                ) => (
                     crate::mcp::server::CodeIndexSemanticStatusV1::Complete,
-                    composition.ranked_candidates.clone(),
-                    cursor.clone(),
-                    Some(hydration_budget),
+                    augmented.composition.ranked_candidates.clone(),
+                    augmented.cursor.clone(),
+                    Some(&augmented.hydration_budget),
                 ),
                 code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
                     abstention,

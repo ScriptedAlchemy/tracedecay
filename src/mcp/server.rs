@@ -136,6 +136,10 @@ pub(crate) struct CodeIndexSearchRequestV1 {
     pub(crate) limit: usize,
     pub(crate) cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub(crate) mode: CodeIndexSearchModeV1,
+    /// MCP→executor admission envelope. The type-erased
+    /// [`CodeIndexSearchExecutor`] authenticates this value; keep it on the
+    /// request even when local analysis cannot see through `Arc<dyn Fn…>`.
+    #[allow(dead_code)]
     pub(crate) authority: Option<CodeIndexSearchAuthorityV1>,
     pub(crate) deadline: Option<tracedecay_application::Deadline>,
     pub(crate) cancellation: Option<tracedecay_application::CancellationSignal>,
@@ -217,6 +221,7 @@ pub(crate) struct CodeIndexSearchUnavailableV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // typed search terminal states; avoid heap on Unavailable
 pub(crate) enum CodeIndexSearchOutcomeV1 {
     Complete(CodeIndexSearchCompletedV1),
     Unavailable(CodeIndexSearchUnavailableV1),
@@ -593,6 +598,7 @@ impl McpServer {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) async fn new_with_global_db(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -601,6 +607,7 @@ impl McpServer {
         Self::new_with_dbs(cg, scope_prefix, global_db.clone(), global_db, true).await
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -713,7 +720,7 @@ impl McpServer {
     /// the daemon's behaviour.
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
-    pub async fn new_with_registered_test_context(
+    pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
         retained_graphs: Vec<Arc<TraceDecay>>,
     ) -> Arc<Self> {
@@ -829,6 +836,7 @@ impl McpServer {
         Self::new_with_context(context).await
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
     async fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -1290,12 +1298,6 @@ impl McpServer {
 
     pub(crate) fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
         self.session_db.clone()
-    }
-
-    pub(crate) fn registered_project_session_db(
-        &self,
-    ) -> Option<Arc<crate::global_db::RegisteredGlobalDb>> {
-        self.registered_session_db.clone()
     }
 
     /// Clones out the currently served `TraceDecay` instance. The lock is

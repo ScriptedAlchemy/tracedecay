@@ -1368,6 +1368,9 @@ struct PendingContextExpansion {
     abort: AbortHandle,
 }
 
+type DeliveredContextChanges =
+    BTreeMap<(String, Option<String>, ContextProjectionKind), ContextProjectionChange>;
+
 /// Async-capable `ContextProjectionPort` without a blocking runtime bridge.
 /// Its in-flight map is bounded by session capacity and contains only one-shot
 /// response correlation, never feedback or evidence truth.
@@ -1376,8 +1379,7 @@ pub struct Pr12ContextProjectionAdapter {
     authority: Arc<dyn CanonicalContextProjectionAuthority>,
     in_flight: Mutex<BTreeMap<ContextRequestKey, PendingContextOperation>>,
     expansions: Mutex<BTreeMap<ContextRequestKey, PendingContextExpansion>>,
-    delivered_changes:
-        Mutex<BTreeMap<(String, Option<String>, ContextProjectionKind), ContextProjectionChange>>,
+    delivered_changes: Mutex<DeliveredContextChanges>,
 }
 
 impl Pr12ContextProjectionAdapter {

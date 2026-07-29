@@ -1991,7 +1991,7 @@ async fn merge_databases(
         let target_graph_record = artifact_record(&ledger.artifact_records, target_graph)?;
         let mut maxima = if ledger.graph_offsets.is_empty() {
             let target_mount = owner.mount(target_graph, target_graph_record).await?;
-            let maxima = sqlite::registered_graph_maxima(target_mount.database()).await;
+            let maxima = sqlite::registered_graph_maxima(target_mount.database()?).await;
             let (maxima, token) = target_mount.finish_operation(maxima).await?;
             drop(token);
             Some(maxima)
@@ -2005,7 +2005,7 @@ async fn merge_databases(
             let record = artifact_record(&ledger.artifact_records, source)?;
             let mounted = owner.mount(source, record).await?;
             if let Some(maxima) = maxima.as_mut() {
-                let source_maxima = sqlite::registered_graph_maxima(mounted.database()).await;
+                let source_maxima = sqlite::registered_graph_maxima(mounted.database()?).await;
                 let (source_maxima, token) = mounted.finish_operation(source_maxima).await?;
                 computed_offsets.push(sqlite::graph_offsets((*source).clone(), *maxima));
                 sqlite::advance_graph_maxima(maxima, source_maxima)?;
@@ -2036,7 +2036,7 @@ async fn merge_databases(
             .zip(graph_tokens)
             .collect::<Vec<_>>();
         let merged =
-            sqlite::merge_registered_graph_facts(target_mount.database(), graph_sources).await;
+            sqlite::merge_registered_graph_facts(target_mount.database()?, graph_sources).await;
         let ((), token) = target_mount.finish_operation(merged).await?;
         drop(token);
 
@@ -2058,9 +2058,9 @@ async fn merge_databases(
             .mount(destination_sessions, destination_sessions_record)
             .await?;
         let offsets = async {
-            sqlite::normalize_registered_sessions(mounted.database()).await?;
+            sqlite::normalize_registered_sessions(mounted.database()?).await?;
             if ledger.session_offsets.is_none() {
-                sqlite::registered_session_offsets(mounted.database())
+                sqlite::registered_session_offsets(mounted.database()?)
                     .await
                     .map(Some)
             } else {
@@ -2078,8 +2078,8 @@ async fn merge_databases(
         let source_record = artifact_record(&ledger.artifact_records, source_sessions)?;
         let mounted = owner.mount(source_sessions, source_record).await?;
         let prepared = async {
-            sqlite::normalize_registered_sessions(mounted.database()).await?;
-            sqlite::validate_registered_session_source(mounted.database()).await
+            sqlite::normalize_registered_sessions(mounted.database()?).await?;
+            sqlite::validate_registered_session_source(mounted.database()?).await
         }
         .await;
         let ((), source_token) = mounted.finish_operation(prepared).await?;
@@ -2096,9 +2096,9 @@ async fn merge_databases(
             .mount(destination_sessions, destination_sessions_record)
             .await?;
         let merged = async {
-            sqlite::normalize_registered_sessions(mounted.database()).await?;
+            sqlite::normalize_registered_sessions(mounted.database()?).await?;
             sqlite::merge_registered_sessions(
-                mounted.database(),
+                mounted.database()?,
                 source_token,
                 target_input_token,
                 &resolved.report.source.project_id,
@@ -2214,6 +2214,7 @@ fn graph_db_paths(layout: &StoreLayout, meta: &BranchMeta) -> Result<Vec<PathBuf
     graph_db_paths_for_root(&layout.data_root, meta)
 }
 
+#[cfg(test)]
 fn input_database_paths(resolved: &ResolvedPlan) -> Result<Vec<PathBuf>> {
     database_paths_for_layouts(
         &resolved.source_layout,
@@ -2223,6 +2224,7 @@ fn input_database_paths(resolved: &ResolvedPlan) -> Result<Vec<PathBuf>> {
     )
 }
 
+#[cfg(test)]
 fn database_paths_for_layouts(
     source_layout: &StoreLayout,
     source_meta: &BranchMeta,

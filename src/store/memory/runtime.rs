@@ -323,7 +323,7 @@ fn build_read_request(
         .map_err(|error| runtime_error(operation_name, error.to_string()))?;
     let digest = canonical_sha256(&command)
         .map_err(|error| runtime_error(operation_name, error.to_string()))?;
-    let suffix = digest_suffix(digest.as_str());
+    let suffix = digest_suffix(digest.as_str(), operation_name)?;
     RuntimeReadRequestV1::new(
         binding.clone(),
         ConsistencyModeV1::LatestAvailable,
@@ -347,7 +347,7 @@ fn build_submit_request(
     idempotency_key: &str,
 ) -> FactStoreResult<RuntimeSubmitRequestV1> {
     let admitted_at = runtime_now();
-    let suffix = digest_suffix(command_digest);
+    let suffix = digest_suffix(command_digest, COMMIT_OPERATION)?;
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!("operation.memory-fact.{suffix}"))
             .map_err(|error| runtime_error(COMMIT_OPERATION, error.to_string()))?,
@@ -428,10 +428,13 @@ fn request_control(
     })
 }
 
-fn digest_suffix(digest: &str) -> &str {
+fn digest_suffix<'digest>(
+    digest: &'digest str,
+    operation: &'static str,
+) -> FactStoreResult<&'digest str> {
     digest
         .strip_prefix("sha256:")
-        .expect("canonical SHA-256 digest prefix")
+        .ok_or_else(|| runtime_error(operation, "canonical SHA-256 digest prefix missing"))
 }
 
 fn runtime_now() -> UtcMicros {

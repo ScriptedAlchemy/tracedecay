@@ -809,7 +809,7 @@ fn source_generation(path: &Path) -> Result<String> {
                 }
                 let mut file =
                     fs::File::open(&member).map_err(|error| migration_error(error.to_string()))?;
-                let mut buffer = [0_u8; 64 * 1024];
+                let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
                 loop {
                     let read = file
                         .read(&mut buffer)

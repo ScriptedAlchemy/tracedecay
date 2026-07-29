@@ -1,5 +1,7 @@
 //! Daemon-owned storage-runtime adapter for retrieval-anchor authority.
 
+#![allow(dead_code)] // production retrieval-anchor authority; mounted via RegisteredGlobalDb
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 

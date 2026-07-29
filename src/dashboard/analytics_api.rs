@@ -1094,7 +1094,13 @@ fn read_hook_analytics_tail(
 }
 
 fn bytecount(haystack: &[u8], needle: u8) -> usize {
-    haystack.iter().filter(|byte| **byte == needle).count()
+    let mut count = 0;
+    let mut remaining = haystack;
+    while let Some(index) = remaining.iter().position(|byte| *byte == needle) {
+        count += 1;
+        remaining = &remaining[index + 1..];
+    }
+    count
 }
 
 fn read_hook_analytics_file(
@@ -1256,9 +1262,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        HOOK_ANALYTICS_WINDOW_ROWS, HookAnalyticsRows, diagnostics_summary_from_parts,
-        hint_efficacy_from_events, hint_summary_from_events, read_hook_analytics_file,
-        recent_hook_rows, sort_hook_analytics_rows,
+        HOOK_ANALYTICS_WINDOW_ROWS, HookAnalyticsRows, HookAnalyticsWindow,
+        diagnostics_summary_from_parts, hint_efficacy_from_events, hint_summary_from_events,
+        read_hook_analytics_file, recent_hook_rows, sort_hook_analytics_rows,
     };
 
     #[test]

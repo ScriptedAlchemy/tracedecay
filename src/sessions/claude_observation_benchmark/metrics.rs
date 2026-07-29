@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use super::MEASURED_REPETITIONS;
@@ -223,16 +223,4 @@ pub(super) fn preflight_platform() -> u64 {
     });
     parse_clock_ticks_per_second(&command_output("getconf", &["CLK_TCK"]))
         .expect("PR5 benchmark contract requires nonzero getconf CLK_TCK")
-}
-
-pub(super) fn database_storage_bytes(path: &Path) -> u64 {
-    [
-        path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", path.display())),
-        PathBuf::from(format!("{}-shm", path.display())),
-    ]
-    .iter()
-    .filter_map(|candidate| fs::metadata(candidate).ok())
-    .map(|metadata| metadata.len())
-    .sum()
 }

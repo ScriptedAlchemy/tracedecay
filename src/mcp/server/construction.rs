@@ -178,6 +178,7 @@ impl McpServerConstructionContext {
         }
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) fn with_direct_databases(
         mut self,
         global_db: Option<Arc<RegisteredGlobalDb>>,

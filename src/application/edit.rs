@@ -1425,6 +1425,7 @@ fn retained_reconciliation_journal(
     Ok(journal)
 }
 
+#[cfg(test)]
 fn reconcile_prepared_source_edit(
     durability: &SourceEditDurability,
     project_root: &Path,
@@ -2123,8 +2124,10 @@ fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Result<Vec<Stri
 fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
-        let state = crate::tracedecay::read_source_edit_candidate(root, Path::new(relative))?
-            .map(|bytes| hash_source_edit_content(&bytes));
+        let state = match crate::tracedecay::read_source_edit_candidate(root, Path::new(relative))? {
+            Some(bytes) => Some(hash_source_edit_content(&bytes)?),
+            None => None,
+        };
         states.push((relative, state));
     }
     canonical_sha256(&(SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1, states)).map_err(domain_error)
@@ -2155,15 +2158,17 @@ fn planned_source_edit_state_digest(
         };
         states.push((
             relative,
-            content.map(|content| hash_source_edit_content(content.as_bytes())),
+            content
+                .map(|content| hash_source_edit_content(content.as_bytes()))
+                .transpose()?,
         ));
     }
     canonical_sha256(&(SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1, states)).map_err(domain_error)
 }
 
-fn hash_source_edit_content(content: &[u8]) -> ManifestDigest {
+fn hash_source_edit_content(content: &[u8]) -> Result<ManifestDigest> {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(content))))
-        .expect("SHA-256 hex is a valid manifest digest")
+        .map_err(domain_error)
 }
 
 fn effect_id(

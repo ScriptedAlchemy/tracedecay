@@ -140,6 +140,13 @@ fn db_error(source: impl std::error::Error + Send + Sync + 'static) -> TraceDeca
     TraceDecayError::database_operation(OPERATION, source)
 }
 
+fn require_apply_transaction<T>(transaction: Option<T>, message: &'static str) -> Result<T> {
+    transaction.ok_or_else(|| TraceDecayError::Database {
+        operation: OPERATION.to_string(),
+        message: message.to_string(),
+    })
+}
+
 fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::Text(text.to_string()))
 }
@@ -150,8 +157,8 @@ fn opt_text(value: Option<&str>) -> Value {
 /// disposition ledgers remain durable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationRetentionConfig {
-    /// Master switch. When `false`, [`run_observation_retention`] is a no-op
-    /// even in [`RetentionMode::Apply`].
+    /// Master switch. When `false`, [`run_observation_retention_authorized`] is a
+    /// no-op even in [`RetentionMode::Apply`].
     #[serde(default = "default_retention_enabled")]
     pub enabled: bool,
     /// Window (days since the governing disposition took effect) after which a
@@ -359,11 +366,13 @@ const OBSERVATION_PAYLOAD_COUNT_SQL: &str = "SELECT COUNT(*) FROM observations o
 
 const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advances";
 
-/// Runs the configured observation-evidence retention passes.
+/// Test-only unauthorized entry: dry-run may proceed, but apply must use the
+/// authority-bound [`run_observation_retention_authorized`] path.
 ///
 /// `generation` scopes every pass to a single `projection_generation` (`None`
 /// spans all generations). In [`RetentionMode::DryRun`] nothing is mutated and
 /// each phase reports the candidate count and bytes that *would* be reclaimed.
+#[cfg(test)]
 pub async fn run_observation_retention(
     conn: &Connection,
     generation: Option<&str>,
@@ -607,7 +616,10 @@ async fn run_anchor_pass(
     // Drop the update trigger, rewrite the fat column to the compact marker,
     // then recreate the identical trigger — atomically, so immutability is
     // never observably relaxed and a crash rolls back to the triggered schema.
-    let txn = transaction.expect("apply mode starts an anchor retention transaction");
+    let txn = require_apply_transaction(
+        transaction,
+        "apply mode requires an open anchor retention transaction",
+    )?;
     execute_authorized_required(
         &txn,
         authorize,
@@ -759,7 +771,10 @@ async fn run_observation_pass(
         return Ok(report);
     }
 
-    let txn = transaction.expect("apply mode starts an observation retention transaction");
+    let txn = require_apply_transaction(
+        transaction,
+        "apply mode requires an open observation retention transaction",
+    )?;
     execute_authorized_required(
         &txn,
         authorize,
@@ -886,7 +901,10 @@ async fn run_provenance_pass(
         return Ok(report);
     }
 
-    let txn = transaction.expect("apply mode starts a provenance retention transaction");
+    let txn = require_apply_transaction(
+        transaction,
+        "apply mode requires an open provenance retention transaction",
+    )?;
     execute_authorized_required(
         &txn,
         authorize,
@@ -1005,7 +1023,10 @@ async fn run_cursor_advance_pass(
         return Ok(report);
     }
 
-    let txn = transaction.expect("apply mode starts a cursor advance retention transaction");
+    let txn = require_apply_transaction(
+        transaction,
+        "apply mode requires an open cursor advance retention transaction",
+    )?;
     execute_authorized_required(
         &txn,
         authorize,

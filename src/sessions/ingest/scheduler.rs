@@ -22,7 +22,6 @@ use super::failure::{
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, classify_transcript_ingest_failure,
     plan_round_robin_admission, scheduling_write_required,
 };
-use super::startup::TranscriptIngestOutcome;
 
 /// Durable fair-rotation cursor for project file-transcript multi-source passes.
 pub(super) const TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY: &str =
@@ -470,28 +469,6 @@ pub(super) async fn write_ingest_frontier(
     )
     .await
     .is_ok()
-}
-
-/// Drive a set of sources against `db` for `project_root` under bounded fair
-/// multi-source admission. Separated from the project catch-up driver so tests
-/// can supply sources rooted at a temporary home directory instead of the
-/// real `~`.
-pub(crate) async fn ingest_sources(
-    db: &RegisteredGlobalDb,
-    project_root: &Path,
-    project_id: &ProjectId,
-    sources: &[Box<dyn TranscriptSource>],
-) -> TranscriptIngestOutcome {
-    ingest_sources_bounded(
-        db,
-        project_root,
-        project_id,
-        sources,
-        default_ingest_pass_bounds(),
-        &ObservationCancellation::default(),
-    )
-    .await
-    .into_transcript_outcome()
 }
 
 /// Bounded fair multi-source ingest with typed coverage / scheduling outcomes.
