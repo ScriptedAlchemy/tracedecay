@@ -22,7 +22,7 @@ use super::super::primitives::{
 };
 use super::super::projection::{
     compatibility_fact_for_legacy_id_tx, load_compatibility_projection_tx,
-    resolve_compatibility_target_tx,
+    load_compatibility_projections_tx, resolve_compatibility_target_tx,
 };
 use super::{COMPATIBILITY_RETENTION_CLASS, DEFAULT_TRUST, commit_fact_tx, query_fact_lineage_tx};
 use crate::db::Database;
@@ -185,14 +185,7 @@ pub(in crate::store::memory) async fn list_compatibility_facts_tx(
     drop(rows);
     let has_more = fact_ids.len() > query.limit();
     fact_ids.truncate(query.limit());
-    let mut facts = Vec::with_capacity(fact_ids.len());
-    for fact_id in fact_ids {
-        if let Some(fact) =
-            load_compatibility_projection_tx(transaction, query.owner(), &fact_id).await?
-        {
-            facts.push(fact);
-        }
-    }
+    let facts = load_compatibility_projections_tx(transaction, query.owner(), &fact_ids).await?;
     let next = has_more
         .then(|| facts.last().map(|fact| fact.fact_id().clone()))
         .flatten();
