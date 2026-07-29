@@ -1003,3 +1003,249 @@ pub fn workflow_semantic_kind(kind: CanonicalWorkflowSemanticKindV1) -> &'static
         CanonicalWorkflowSemanticKindV1::Task => "task",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tracedecay_domain::{
+        CanonicalBoundaryKindV1, CanonicalObservationEvidenceV1, CanonicalObservationRelationsV1,
+        ObservationId, ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
+        SessionId,
+    };
+
+    use super::*;
+
+    fn envelope(facts: Vec<CanonicalObservationFactV1>) -> CanonicalObservationEnvelopeV1 {
+        CanonicalObservationEnvelopeV1::new(
+            ProviderId::new("codex").unwrap(),
+            "fixture",
+            ObservationId::new("record.fixture").unwrap(),
+            CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+            facts,
+            CanonicalObservationEvidenceV1::new(
+                ObservationOrderingDomainV1::SnapshotOrder,
+                ObservationSourceRangeV1::new(1, 2).unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn canonical_projection_prefers_authored_message_over_supporting_facts() {
+        let envelope = envelope(vec![
+            CanonicalObservationFactV1::Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(4),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            },
+            CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: ObservationId::new("tool.fixture").unwrap(),
+                name: "Read".to_owned(),
+                arguments: json!({"path": "redacted"}),
+            },
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "safe"}),
+                model: Some("model.fixture".to_owned()),
+                timestamp: Some(42),
+            },
+        ]);
+
+        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
+        assert_eq!(fields.role, "assistant");
+        assert_eq!(fields.text, "safe");
+        assert_eq!(fields.kind, "message");
+        assert_eq!(fields.model.as_deref(), Some("model.fixture"));
+        assert_eq!(fields.timestamp, Some(42));
+        assert_eq!(fields.tool_names.as_deref(), Some("Read"));
+    }
+
+    #[test]
+    fn canonical_projection_emits_checked_in_codex_goal_as_one_message() {
+        let envelope: CanonicalObservationEnvelopeV1 = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/provider_normalization/codex/thread_goal_updated.expected_envelope.json"
+        ))
+        .unwrap();
+
+        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
+        assert_eq!(fields.role, "system");
+        assert_eq!(
+            fields.text,
+            "phlogiston pipeline overhaul and reconciliation"
+        );
+        assert_eq!(fields.kind, "goal");
+        assert_eq!(fields.timestamp, Some(1_783_500_569));
+        assert!(fields.model.is_none());
+        assert!(fields.tool_names.is_none());
+    }
+
+    #[test]
+    fn canonical_projection_does_not_duplicate_goal_colocated_with_message() {
+        let envelope = envelope(vec![
+            CanonicalObservationFactV1::WorkflowLifecycle {
+                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
+                provider_reference: Some("session.fixture".to_owned()),
+                item_id: None,
+                parent_reference: None,
+                list_reference: None,
+                state: None,
+                status: Some("active".to_owned()),
+                item_order: None,
+                revision: None,
+                event_sequence: None,
+                content: Some(json!({"objective": "supporting goal"})),
+            },
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": "authored response"}),
+                model: None,
+                timestamp: Some(43),
+            },
+        ]);
+
+        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
+        assert_eq!(fields.kind, "message");
+        assert_eq!(fields.text, "authored response");
+    }
+
+    #[test]
+    fn canonical_projection_skips_boundary_only_records() {
+        let envelope = envelope(vec![CanonicalObservationFactV1::Boundary {
+            boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
+        }]);
+
+        assert!(canonical_message_fields(&envelope).unwrap().is_none());
+    }
+
+    #[test]
+    fn canonical_session_fact_projects_typed_metadata_without_becoming_a_message() {
+        let session_fact = CanonicalObservationFactV1::Session {
+            project_path: Some("/workspace/project".to_owned()),
+            location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
+            transcript_path: Some("/transcripts/session.jsonl".to_owned()),
+            title: Some("Session title".to_owned()),
+            started_at: Some(10),
+            ended_at: Some(20),
+            source: Some("provider_store".to_owned()),
+            native_source: Some("tui".to_owned()),
+            profile: Some("default".to_owned()),
+            location_provenance: Some("profile_pin".to_owned()),
+        };
+        assert!(
+            canonical_message_fields(&envelope(vec![session_fact.clone()]))
+                .unwrap()
+                .is_none()
+        );
+        let envelope = envelope(vec![
+            session_fact,
+            CanonicalObservationFactV1::Usage {
+                input_tokens: Some(12),
+                output_tokens: Some(3),
+                cache_read_tokens: Some(7),
+                cache_write_tokens: Some(0),
+                reasoning_tokens: None,
+            },
+        ]);
+
+        let fields = canonical_session_fields(&envelope).unwrap();
+        assert_eq!(fields.project_path.as_deref(), Some("/workspace/project"));
+        assert_eq!(
+            fields.location_path.as_deref(),
+            Some("/workspace/project/.worktrees/feature")
+        );
+        assert_eq!(
+            fields.transcript_path.as_deref(),
+            Some("/transcripts/session.jsonl")
+        );
+        let session_metadata =
+            canonical_session_metadata("codex", Some(&fields), envelope.facts()).unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(session_metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["source"], "provider_store");
+        assert_eq!(
+            metadata["codex_session_cwd"],
+            "/workspace/project/.worktrees/feature"
+        );
+        assert_eq!(
+            metadata["codex_session_worktree"],
+            "/workspace/project/.worktrees/feature"
+        );
+        assert_eq!(metadata["codex_session_location_provenance"], "profile_pin");
+        assert_eq!(metadata["usage"]["input_tokens"], 12);
+        assert!(
+            metadata["usage"]
+                .get("cache_creation_input_tokens")
+                .is_none()
+        );
+
+        let message_metadata: serde_json::Value = serde_json::from_str(
+            &canonical_message_metadata(&envelope, session_metadata.as_deref()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            message_metadata["codex_session_cwd"],
+            "/workspace/project/.worktrees/feature"
+        );
+        assert_eq!(
+            message_metadata["codex_session_worktree"],
+            "/workspace/project/.worktrees/feature"
+        );
+        assert_eq!(
+            message_metadata["codex_session_location_provenance"],
+            "profile_pin"
+        );
+        assert_eq!(message_metadata["stable_record_id"], "record.fixture");
+    }
+
+    #[test]
+    fn cursor_transcript_metadata_uses_event_compatibility_namespace() {
+        let fields = CanonicalSessionFields {
+            project_path: Some("/workspace/project".to_owned()),
+            location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
+            transcript_path: Some("/transcripts/session.jsonl".to_owned()),
+            title: None,
+            started_at: None,
+            ended_at: None,
+            source: Some("cursor_transcript".to_owned()),
+            native_source: Some("cursor".to_owned()),
+            profile: None,
+            location_provenance: Some("hook_event".to_owned()),
+        };
+        let metadata: serde_json::Value = serde_json::from_str(
+            canonical_session_metadata("cursor", Some(&fields), &[])
+                .unwrap()
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            metadata["cursor_event_cwd"],
+            "/workspace/project/.worktrees/feature"
+        );
+        assert_eq!(
+            metadata["cursor_event_worktree"],
+            "/workspace/project/.worktrees/feature"
+        );
+        assert_eq!(metadata["cursor_event_location_provenance"], "hook_event");
+        assert!(metadata.get("cursor_session_cwd").is_none());
+    }
+
+    #[test]
+    fn canonical_projection_kind_names_are_stable() {
+        assert_eq!(
+            reasoning_kind(CanonicalReasoningVisibilityV1::Visible),
+            "reasoning_visible"
+        );
+        assert_eq!(
+            git_kind(CanonicalGitEvidenceKindV1::PullRequest),
+            "git_pull_request"
+        );
+        assert_eq!(
+            workflow_kind(CanonicalWorkflowEvidenceKindV1::ModelFallback),
+            "workflow_model_fallback"
+        );
+    }
+}

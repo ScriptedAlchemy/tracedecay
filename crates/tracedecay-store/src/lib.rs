@@ -117,8 +117,9 @@ pub use memory::{
     authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
 };
 pub use observation::{
-    AnchoredObservationWrite, CursorAdvanceOutcome, ObservationCommitReceipt,
-    ObservationCoverageReason, ObservationCoverageV1, ObservationCursorAdvance,
+    AnchoredObservationWrite, CursorAdvanceOutcome, ObservationAdmissionPort,
+    ObservationCaptureSink, ObservationCommitReceipt, ObservationCoverageReason,
+    ObservationCoverageV1, ObservationCursorAdvance, ObservationCursorPort,
     ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationStoreResult, ObservationWrite,
     ObservedEvidenceAnchorResolution, RepositoryProvenanceAttachmentV1, StoredObservation,
