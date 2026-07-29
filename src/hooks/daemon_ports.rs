@@ -1,9 +1,9 @@
-//! Root adapters for Hook V2 admission and feedback-notice delivery.
+//! Root adapters for Hook V2 daemon transport.
 //!
-//! These ports own the daemon tool transport. The Hook V2 dispatch core
-//! consumes only [`AsyncHookAdmissionPortV1`] and
-//! [`AsyncHookFeedbackDeliveryPortV1`] and never issues `daemon_hook_action`
-//! JSON itself for admit or feedback-notice acknowledgement.
+//! These ports own the `daemon_hook_action` JSON. The Hook V2 dispatch core
+//! consumes typed ports ([`AsyncHookAdmissionPortV1`],
+//! [`AsyncHookFeedbackDeliveryPortV1`], and the OpenCode LSP submit port) and
+//! never issues those action strings itself.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -87,7 +87,7 @@ struct DaemonAdmissionResponseWireV1 {
     reason: Option<String>,
 }
 
-fn now_utc() -> UtcMicros {
+pub(crate) fn now_utc() -> UtcMicros {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(1, |duration| {
@@ -183,6 +183,33 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
     }
 }
 
+fn delivery_outcome_from_status(status: Option<&str>) -> HookFeedbackDeliveryOutcomeV1 {
+    match status {
+        Some("stored") => HookFeedbackDeliveryOutcomeV1::Delivered,
+        // Exact-address commits that lost a compare-and-swap still prove the
+        // daemon retained an authoritative row for this receipt/feedback.
+        Some("duplicate" | "superseded") => HookFeedbackDeliveryOutcomeV1::Duplicate,
+        _ => HookFeedbackDeliveryOutcomeV1::Unavailable,
+    }
+}
+
+async fn timed_daemon_hook_action(
+    project_root: &Path,
+    action: serde_json::Value,
+    deadline: HookSynchronousDeadlineV1,
+    telemetry: Option<&HookTimingSpan>,
+) -> HookFeedbackDeliveryOutcomeV1 {
+    let response = tokio::time::timeout(
+        Duration::from_micros(deadline.remaining_micros()),
+        super::daemon_hook_action(Some(project_root), action, telemetry),
+    )
+    .await;
+    let Ok(Ok(response)) = response else {
+        return HookFeedbackDeliveryOutcomeV1::Unavailable;
+    };
+    delivery_outcome_from_status(response.get("status").and_then(|value| value.as_str()))
+}
+
 /// Daemon-backed Hook V2 feedback-notice delivery. Acknowledgement crosses the
 /// local daemon boundary; finding content stays in the PR12 store.
 pub(crate) struct DaemonFeedbackNoticeDeliveryPort<'a> {
@@ -192,14 +219,6 @@ pub(crate) struct DaemonFeedbackNoticeDeliveryPort<'a> {
 impl<'a> DaemonFeedbackNoticeDeliveryPort<'a> {
     pub(crate) fn new(project_root: &'a Path) -> Self {
         Self { project_root }
-    }
-}
-
-fn delivery_outcome_from_status(status: Option<&str>) -> HookFeedbackDeliveryOutcomeV1 {
-    match status {
-        Some("stored") => HookFeedbackDeliveryOutcomeV1::Delivered,
-        Some("duplicate") => HookFeedbackDeliveryOutcomeV1::Duplicate,
-        _ => HookFeedbackDeliveryOutcomeV1::Unavailable,
     }
 }
 
@@ -213,23 +232,17 @@ impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryH
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
-            let response = tokio::time::timeout(
-                Duration::from_micros(deadline.remaining_micros()),
-                super::daemon_hook_action(
-                    Some(self.project_root),
-                    serde_json::json!({
-                        "action": "hook_v2_feedback_notice_delivery",
-                        "envelope": envelope,
-                        "feedback_notice": feedback,
-                    }),
-                    None,
-                ),
+            timed_daemon_hook_action(
+                self.project_root,
+                serde_json::json!({
+                    "action": "hook_v2_feedback_notice_delivery",
+                    "envelope": envelope,
+                    "feedback_notice": feedback,
+                }),
+                deadline,
+                None,
             )
-            .await;
-            let Ok(Ok(response)) = response else {
-                return HookFeedbackDeliveryOutcomeV1::Unavailable;
-            };
-            delivery_outcome_from_status(response.get("status").and_then(|value| value.as_str()))
+            .await
         })
     }
 
@@ -243,6 +256,161 @@ impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryH
     }
 }
 
+/// Daemon-backed Context Scout delivery-receipt commit.
+pub(crate) struct DaemonDeliveryReceiptPort<'a> {
+    project_root: &'a Path,
+}
+
+impl<'a> DaemonDeliveryReceiptPort<'a> {
+    pub(crate) fn new(project_root: &'a Path) -> Self {
+        Self { project_root }
+    }
+
+    pub(crate) async fn post_receipt(
+        &self,
+        receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+        deadline: HookSynchronousDeadlineV1,
+    ) -> HookFeedbackDeliveryOutcomeV1 {
+        timed_daemon_hook_action(
+            self.project_root,
+            serde_json::json!({
+                "action": "hook_v2_delivery_receipt",
+                "receipt": receipt,
+            }),
+            deadline,
+            None,
+        )
+        .await
+    }
+}
+
+impl AsyncHookFeedbackDeliveryPortV1<crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1>
+    for DaemonDeliveryReceiptPort<'_>
+{
+    fn deliver_hook_v2<'a>(
+        &'a self,
+        _envelope: &'a HookEventEnvelopeV2,
+        feedback: &'a crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+        deadline: HookSynchronousDeadlineV1,
+    ) -> HookDeliveryFutureV1<'a> {
+        Box::pin(async move { self.post_receipt(feedback, deadline).await })
+    }
+
+    fn deliver_legacy<'a>(
+        &'a self,
+        _envelope: &'a HookEventEnvelopeV2,
+        _feedback: &'a crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+        _deadline: HookSynchronousDeadlineV1,
+    ) -> HookDeliveryFutureV1<'a> {
+        Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
+    }
+}
+
+/// Typed Context Scout explicit-feedback payload for envelope-bound delivery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContextScoutFeedbackCommitV1 {
+    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+    pub feedback: crate::agents::context_scout_v2::ContextScoutFeedbackV1,
+}
+
+/// Daemon-backed Context Scout explicit-feedback commit.
+pub(crate) struct DaemonContextScoutFeedbackPort<'a> {
+    project_root: &'a Path,
+}
+
+impl<'a> DaemonContextScoutFeedbackPort<'a> {
+    pub(crate) fn new(project_root: &'a Path) -> Self {
+        Self { project_root }
+    }
+
+    pub(crate) async fn post_feedback(
+        &self,
+        receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+        feedback: &crate::agents::context_scout_v2::ContextScoutFeedbackV1,
+        deadline: HookSynchronousDeadlineV1,
+    ) -> HookFeedbackDeliveryOutcomeV1 {
+        timed_daemon_hook_action(
+            self.project_root,
+            serde_json::json!({
+                "action": "hook_v2_feedback",
+                "receipt": receipt,
+                "feedback": feedback,
+            }),
+            deadline,
+            None,
+        )
+        .await
+    }
+}
+
+impl AsyncHookFeedbackDeliveryPortV1<ContextScoutFeedbackCommitV1>
+    for DaemonContextScoutFeedbackPort<'_>
+{
+    fn deliver_hook_v2<'a>(
+        &'a self,
+        _envelope: &'a HookEventEnvelopeV2,
+        feedback: &'a ContextScoutFeedbackCommitV1,
+        deadline: HookSynchronousDeadlineV1,
+    ) -> HookDeliveryFutureV1<'a> {
+        Box::pin(async move {
+            self.post_feedback(&feedback.receipt, &feedback.feedback, deadline)
+                .await
+        })
+    }
+
+    fn deliver_legacy<'a>(
+        &'a self,
+        _envelope: &'a HookEventEnvelopeV2,
+        _feedback: &'a ContextScoutFeedbackCommitV1,
+        _deadline: HookSynchronousDeadlineV1,
+    ) -> HookDeliveryFutureV1<'a> {
+        Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
+    }
+}
+
+/// Daemon-backed OpenCode LSP update submission.
+pub(crate) struct DaemonOpenCodeLspUpdatePort<'a> {
+    project_root: &'a Path,
+    telemetry: Option<&'a HookTimingSpan>,
+}
+
+impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
+    pub(crate) fn new(project_root: &'a Path, telemetry: Option<&'a HookTimingSpan>) -> Self {
+        Self {
+            project_root,
+            telemetry,
+        }
+    }
+
+    pub(crate) async fn submit_updated_event(&self, event: &serde_json::Value) -> bool {
+        let response = super::daemon_hook_action(
+            Some(self.project_root),
+            serde_json::json!({
+                "action": "opencode_lsp_updated",
+                "event": event,
+            }),
+            self.telemetry,
+        )
+        .await;
+        response
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|status| status == "accepted")
+    }
+}
+
+pub(crate) fn outcome_is_committed(outcome: HookFeedbackDeliveryOutcomeV1) -> bool {
+    matches!(
+        outcome,
+        HookFeedbackDeliveryOutcomeV1::Delivered | HookFeedbackDeliveryOutcomeV1::Duplicate
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +418,22 @@ mod tests {
     use tracedecay_domain::{
         CodeGenerationId, CommitId, ManifestDigest, ProjectId, RepositoryId, WorktreeId,
     };
+
+    #[test]
+    fn delivery_outcome_maps_superseded_as_duplicate() {
+        assert_eq!(
+            delivery_outcome_from_status(Some("superseded")),
+            HookFeedbackDeliveryOutcomeV1::Duplicate
+        );
+        assert_eq!(
+            delivery_outcome_from_status(Some("stored")),
+            HookFeedbackDeliveryOutcomeV1::Delivered
+        );
+        assert_eq!(
+            delivery_outcome_from_status(Some("unavailable")),
+            HookFeedbackDeliveryOutcomeV1::Unavailable
+        );
+    }
 
     #[test]
     fn daemon_feedback_notice_survives_admission_decode() {
