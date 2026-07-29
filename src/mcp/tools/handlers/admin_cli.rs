@@ -634,7 +634,7 @@ async fn sessions_git_backfill(
     dry_run: bool,
 ) -> Result<Value> {
     use crate::sessions::git_correlation::{
-        BackfillOptions, DEFAULT_SPAN_MERGE_GAP_SECS, SystemGit, run_backfill,
+        BackfillOptions, DEFAULT_SPAN_MERGE_GAP_SECS, SystemGit,
     };
 
     let project_id = RegisteredGlobalDb::canonical_project_key(cg.project_root());
@@ -647,22 +647,22 @@ async fn sessions_git_backfill(
         })
         .await
         .unwrap_or_default();
-    let stats = run_backfill(
-        session_db,
-        &analytics_events,
-        &SystemGit,
-        &BackfillOptions {
-            since,
-            limit_sessions,
-            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
-            max_commits_per_repo: 5_000,
-            dry_run,
-        },
-    )
-    .await
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("git backfill failed: {error}"),
-    })?;
+    let stats = crate::store::GlobalDbGitCorrelationStore::new(session_db)
+        .run_backfill(
+            &analytics_events,
+            &SystemGit,
+            &BackfillOptions {
+                since,
+                limit_sessions,
+                merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+                max_commits_per_repo: 5_000,
+                dry_run,
+            },
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("git backfill failed: {error}"),
+        })?;
     Ok(json!({
         "dry_run": dry_run,
         "sessions_scanned": stats.sessions_scanned,
@@ -676,7 +676,8 @@ async fn sessions_git_backfill(
 }
 
 async fn sessions_unfinished(db: &RegisteredGlobalDb, limit: usize) -> Result<Value> {
-    let items = crate::sessions::workflow_state::list_unfinished(db, limit)
+    let items = crate::store::GlobalDbWorkflowStore::new(db)
+        .list_unfinished_workflows(limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;
     Ok(json!({ "items": items }))

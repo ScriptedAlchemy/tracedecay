@@ -25,13 +25,21 @@ pub mod health;
 pub mod hook_runtime;
 pub mod info;
 pub mod memory;
+mod project_registry;
 pub mod redundancy;
 pub mod session;
 pub mod skills;
 mod support;
 pub mod workflow;
+mod workflow_index;
 pub mod workflow_query;
 
+pub(crate) use project_registry::{
+    ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
+    ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
+    ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
+    ProjectRegistryReadPort, ProjectRegistrySelector,
+};
 pub(crate) use session::message_search::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
@@ -45,6 +53,11 @@ pub(crate) use session::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
     SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
     SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
+};
+pub(crate) use workflow_index::{
+    WorkflowAgentView, WorkflowIndexReadPort, WorkflowRunDetailCommand, WorkflowRunDetailFuture,
+    WorkflowRunDetailOutcome, WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture,
+    WorkflowRunListOutcome, WorkflowRunScope,
 };
 
 use std::collections::BTreeSet;
@@ -357,12 +370,15 @@ pub(crate) async fn selected_registered_project_reader(
             ),
         )
     })?;
+    let scope = crate::mcp::scope::resolve_query_scope(&context, &requested_path)
+        .map_err(|error| error.into_route_failure().into_error())?;
     Ok(Some(crate::mcp::project_route::ResolvedProjectRoute {
         graph,
         owner: context,
         requested_root: requested_path,
         requested_git_common_dir: request.requested_git_common_dir,
         requested_branch: request.requested_branch,
+        scope,
     }))
 }
 
@@ -488,10 +504,16 @@ pub(crate) async fn handle_tool_call_with_registry(
 
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
-    pub(crate) global_db: Option<&'a RegisteredGlobalDb>,
-    pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
-    pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub global_db: Option<&'a RegisteredGlobalDb>,
+    /// Daemon-owned project-registry reads. `None` is the typed
+    /// missing-registry state, not an empty registry.
+    pub project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
+    /// Daemon-owned workflow-index reads. `None` is an unavailable retained
+    /// project-session authority, not a successful empty index.
+    pub workflow_index_reads: Option<&'a dyn WorkflowIndexReadPort>,
+    pub accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub profile_root: Option<&'a Path>,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
@@ -511,6 +533,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
     pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub application_invocation_target: tracedecay_application::InvocationTarget,
     /// The code-index generation authority producers resolve identity through.
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
@@ -529,6 +552,8 @@ impl Default for ToolCallRegistryOptions<'_> {
     fn default() -> Self {
         Self {
             global_db: None,
+            project_registry_reads: None,
+            workflow_index_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
             registered_savings_db: None,
@@ -547,6 +572,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_request_id: None,
             application_deadline: None,
             application_cancellation: None,
+            application_invocation_target: tracedecay_application::InvocationTarget::CurrentProject,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             source_edit_executor: None,
@@ -1239,12 +1265,14 @@ async fn dispatch_info_tools(
             server_stats,
             scope_prefix,
         )),
-        "tracedecay_project_list" => info::handle_project_list(cg, args, options.global_db).await,
+        "tracedecay_project_list" => {
+            info::handle_project_list(cg, args, options.project_registry_reads).await
+        }
         "tracedecay_project_search" => {
-            info::handle_project_search(cg, args, options.global_db).await
+            info::handle_project_search(cg, args, options.project_registry_reads).await
         }
         "tracedecay_project_context" => {
-            info::handle_project_context(cg, args, options.global_db).await
+            info::handle_project_context(cg, args, options.project_registry_reads).await
         }
         "tracedecay_files" => info::handle_files(cg, args, selected_scope_prefix).await,
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
@@ -1337,6 +1365,7 @@ async fn dispatch_application_surface_tools(
             operation,
             normalized_args,
             options.application_invocation_executor,
+            options.application_invocation_target,
             options.application_request_id.clone(),
             options.application_deadline.clone(),
             options.application_cancellation.clone(),
@@ -1568,12 +1597,8 @@ async fn execute_project_retained_application_tool(
             .await
         }
         RetainedSurfaceOperation::Workflows => {
-            workflow_query::handle_workflows(
-                cg,
-                request.arguments,
-                options.session_authorities.project_registered,
-            )
-            .await
+            workflow_query::handle_workflows(cg, request.arguments, options.workflow_index_reads)
+                .await
         }
         RetainedSurfaceOperation::LcmStatus
         | RetainedSurfaceOperation::LcmDoctor

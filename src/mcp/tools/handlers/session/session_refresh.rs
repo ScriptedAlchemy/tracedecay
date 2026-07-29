@@ -1,23 +1,28 @@
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
     TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::super::support::tool_json_with_md;
 use crate::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
 };
-use crate::application::session::SessionRefreshTarget;
+use crate::application::session::{SessionRefreshTarget, SessionRequestBinding};
 use crate::errors::Result;
 use crate::mcp::tools::ToolResult;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -93,6 +98,7 @@ impl SessionRefreshScope {
 pub(crate) struct SessionRefreshCommand {
     pub(crate) action: SessionRefreshAction,
     pub(crate) context: RequestContext,
+    pub(crate) binding: SessionRequestBinding,
     pub(crate) target: SessionRefreshTarget,
     pub(crate) handle: Option<String>,
 }
@@ -340,30 +346,72 @@ fn command_from_request(
     let digest_material = stable_digest_material(&request)?;
     let request_id = mint_global_request_id(GlobalRequestSurface::SessionRefresh)
         .map_err(|error| error.to_string())?;
+    let request_id = RequestId::new(request_id.as_str()).map_err(|error| error.to_string())?;
+    let actor = ActorId::new("mcp.session-refresh").map_err(|error| error.to_string())?;
+    let scope = identity
+        .application_scope()
+        .map_err(|error| error.to_string())?;
+    let capability = CapabilityDigest::new(stable_digest(
+        b"tracedecay.mcp.session-refresh.capability.v1\0",
+        &digest_material,
+    ));
+    let policy = PolicyDigest::new(stable_digest(
+        b"tracedecay.mcp.session-refresh.policy.v1\0",
+        &digest_material,
+    ));
+    let configuration = ConfigurationDigest::new(stable_digest(
+        b"tracedecay.mcp.session-refresh.configuration.v1\0",
+        &digest_material,
+    ));
+    let cancellation = CancellationToken::for_application_request(&request_id);
+    let budgets = RequestBudgets::new(
+        REQUEST_MAX_RESULTS,
+        REQUEST_MAX_BYTES,
+        REQUEST_MAX_WORK_UNITS,
+    )
+    .map_err(|error| error.to_string())?;
+    let observed_at = application_observed_at();
+    let timeout_micros = i64::try_from(REQUEST_TIMEOUT.as_micros()).unwrap_or(i64::MAX);
+    let expires_at = UtcMicros(observed_at.0.saturating_add(timeout_micros));
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.mcp.session-refresh").map_err(|error| error.to_string())?,
+        1,
+        session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
+            .map_err(|error| error.to_string())?,
+        actor.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        std::collections::BTreeSet::from([
+            CapabilityId::new("capability.session.refresh").map_err(|error| error.to_string())?
+        ]),
+        std::collections::BTreeSet::from([
+            UseCaseId::new("use-case.mcp.session-refresh").map_err(|error| error.to_string())?
+        ]),
+        DisclosureClass::Evidence,
+    )
+    .map_err(|error| error.to_string())?;
     let context = RequestContext::new(
-        ActorId::new("mcp.session-refresh").map_err(|error| error.to_string())?,
-        RequestId::new(request_id.as_str()).map_err(|error| error.to_string())?,
-        identity,
-        CapabilityDigest::new(stable_digest(
-            b"tracedecay.mcp.session-refresh.capability.v1\0",
-            &digest_material,
-        )),
-        PolicyDigest::new(stable_digest(
-            b"tracedecay.mcp.session-refresh.policy.v1\0",
-            &digest_material,
-        )),
-        ConfigurationDigest::new(stable_digest(
-            b"tracedecay.mcp.session-refresh.configuration.v1\0",
-            &digest_material,
-        )),
-        MonotonicDeadline::at(Instant::now() + REQUEST_TIMEOUT),
-        CancellationToken::new(),
-        RequestBudgets::new(
-            REQUEST_MAX_RESULTS,
-            REQUEST_MAX_BYTES,
-            REQUEST_MAX_WORK_UNITS,
+        actor,
+        scope,
+        grant,
+        request_id,
+        Deadline::new(expires_at).map_err(|error| error.to_string())?,
+        CancellationContext::active(
+            cancellation
+                .application_token_id()
+                .ok_or_else(|| "session refresh cancellation identity is missing".to_string())?,
         )
         .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let binding = SessionRequestBinding::new(
+        identity,
+        capability,
+        policy,
+        configuration,
+        cancellation,
+        budgets,
     );
     let frontier = SessionRefreshFrontierV1::new(
         request.target.frontier.observed_through,
@@ -381,6 +429,7 @@ fn command_from_request(
     Ok(SessionRefreshCommand {
         action: request.action.command_action(),
         context,
+        binding,
         target,
         handle: request.handle,
     })

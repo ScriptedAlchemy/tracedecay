@@ -9,12 +9,10 @@ use crate::db::engine::{Executor, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::sessions::lcm::{
-    raw,
-    types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft},
-};
+use crate::application::session::compatibility::projected_content_hash;
+use crate::sessions::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 
-pub(crate) use publication::publish_immutable_summary;
+pub(crate) use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
 pub(crate) const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
@@ -147,7 +145,7 @@ impl CanonicalPublicationManifest {
             && self.session_id == draft.session_id
             && self.depth == draft.depth
             && self.summary_text == draft.summary_text
-            && self.summary_hash == raw::sha256_hex(&draft.summary_text)
+            && self.summary_hash == projected_content_hash(&draft.summary_text)
             && self.source_refs == draft.source_refs
             && self.source_token_count == draft.source_token_count
             && self.summary_token_count == draft.summary_token_count
@@ -174,7 +172,7 @@ pub(crate) struct FrozenPublicationReceipt {
 pub(crate) fn receipt_id(summary_id: &str, summary_hash: &str) -> String {
     format!(
         "receipt_summary_{}",
-        raw::sha256_hex(&format!("{summary_id}\0{summary_hash}"))
+        projected_content_hash(&format!("{summary_id}\0{summary_hash}"))
     )
 }
 
@@ -187,7 +185,7 @@ pub(super) fn logical_identity_digest(draft: &LcmSummaryNodeDraft) -> Result<Str
         &draft.source_refs,
     ))
     .map_err(|error| LcmError::Db(format!("encode summary logical identity: {error}")))?;
-    Ok(raw::sha256_hex(&identity))
+    Ok(projected_content_hash(&identity))
 }
 
 pub(super) fn normalize_timestamp(value: i64) -> i64 {

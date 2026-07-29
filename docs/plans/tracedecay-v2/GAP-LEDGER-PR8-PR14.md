@@ -246,8 +246,41 @@ it and owns the temporary-alias deletion slices.
   keeps failed/timed-out outcomes distinct from known zero and withholds values
   under unavailable/partial coverage; named presentation, performance, and
   end-to-end acceptance gaps remain owned by Plan 11/PR14.
-- `27-cross-host-agent-plugin-bundles.md`: four declared safety/evidence guards
-  are not production-reached, and Cursor Cloud has no default component set.
+- `27-cross-host-agent-plugin-bundles.md`: the four declared safety/evidence
+  guards recorded on 2026-07-26 as not production-reached are closed on
+  2026-07-29 by `356353fbf`, `c45170fcf`, `0dfb5bef0`, `9824ce6c4`, and
+  `ec9a5b68c`. Competing-extension discovery now runs before preflight and rides
+  the preview and confirmed plan digest, so a post-confirmation claim makes the
+  plan stale and a full default install stops for an explicit `--yes`; Cursor
+  Cloud and every other unadmitted host return a typed unavailable component-set
+  reason (`HostRegistrationUnsupported`, `NativeFixtureLimited`, or
+  `CheckedInEvidenceMissing`) from the default, explicit, and project-local
+  builders instead of an empty default set; Cline-family routes read the
+  embedded, digest-bound checked-in evidence packet rather than inferring a
+  route from an adapter source file; and the native edit/stop conformance matrix
+  has a real consumer on the host-bundle Doctor report, printed even with
+  nothing installed. `require_capability` and `cline_family_evidence` were
+  already production-reached through `require_component_capabilities` and were
+  verified rather than given a second caller, and the native-fixture helper's
+  repository-relative runtime read is gone — fixtures are `include_bytes!`
+  embedded and OpenCode resolves to the present `opencode/baseline.json`,
+  reported degraded rather than supported. Evidence is focused and local:
+  `pr13_host_bundle_acceptance` 27 passed, `agents::host_bundle_registry` 20
+  passed, `agent_cmd::tests` 18 of 19 passed; no full suite and no CI. This
+  closes those four guards only. It does not close PR13 acceptance — the
+  lifecycle dogfood, cross-platform host runs, host-by-host rollback, feedback
+  rollback switch, Kimi Code/OpenCode conformance, and an end-to-end
+  Cline-family route proof are unrun — and it does not close the Cursor Core
+  component-ownership conflict this ledger records under delivery-band
+  authority. The one failing test in the touched territory, the `agent_cmd`
+  binary's `explicit_core_component_lifecycle_preserves_opencode_companions`,
+  is a pre-existing isolation flake that passes alone and fails in parallel
+  because `which_tracedecay()` reads `PATH` and `CARGO_TARGET_DIR` while sibling
+  tests mutate the environment under a `HOST_ENV_LOCK` it does not take; it
+  stays open for a separate fix that gives the test that lease, not for a
+  weakened assertion. `deferred_kimi_refresh_does_not_block_maintenance` and a
+  daemonless-init bootstrap test fail in untouched peer territory and are
+  outside this slice.
 - `31-native-fastembed-semantic-code-search.md`: daemon-owned immutable
   `hf-hub` background acquisition shipped in `dd4adbe2a`, including verified
   online acquisition and packaged offline-cache acceptance. Manual local/HTTPS
@@ -265,16 +298,13 @@ it and owns the temporary-alias deletion slices.
   `tracedecay lsp servers|bridge`; the old `--no-lsp`/environment/config/module
   proposal is not a missing plan requirement.
 - `36-git-aware-change-context-and-index-transactions.md`: carries an open
-  portability gap recorded 2026-07-27. The daemon canonicalizes
-  `repository_root` before building the assembler
-  (`src/daemon/git_transactions/owner.rs`, around line 460) while callers
-  capture snapshots from uncanonicalized paths. On Linux with a real `/tmp`
-  the two agree, so the defect is latent there; on any host whose repository
-  path traverses a symlink — macOS `/tmp` → `/private/tmp` is the canonical
-  case — daemon recapture and caller snapshot diverge and `git_preview` would
-  misreport `stale_preview`. The honest repair is to canonicalize consistently
-  at snapshot construction. Loosening the comparison to make the paths match is
-  the wrong fix and must not be adopted.
+  portability gap recorded 2026-07-27 and closed by canonicalizing repository/
+  worktree roots through `canonicalize_repository_root` at owner mount and
+  snapshot construction. Callers and daemon now share one filesystem identity
+  across symlink aliases (including macOS `/tmp` → `/private/tmp`); exact
+  preview CAS is unchanged and still rejects genuine drift. Unix symlink-alias
+  fixtures cover capture parity and owner reuse. Do not reopen by loosening
+  snapshot comparison.
 - `38-storage-retention-size-and-efficiency.md` and `NEXT.md`: raw LCM
   offload/drop, projected-message dedupe, legacy session/raw pruning, and
   observation-evidence release now have bounded defaults. Superseded
@@ -554,6 +584,15 @@ above.
     `src/global_db/project_registry.rs` was reported that way and is exercised
     by storage-suite tests through the `GlobalDb` methods it backs. Search for
     callers, not just for a test module.
+24. Plan 27's four host-guard reachability gaps — the empty competing-extension
+    claim slice, the three capability authorities without production callers,
+    the native-fixture helper's repository-relative runtime read, and Cursor
+    Cloud's empty default component set — are closed as of 2026-07-29. Plan 27
+    retains the requirement text those gaps were written against, including that
+    Cursor Cloud stays typed unavailable and that family resemblance never
+    establishes a Cline-family route; a retained requirement is not an open gap.
+    Confirm against `356353fbf`, `c45170fcf`, `0dfb5bef0`, and `ec9a5b68c`
+    before refiling any of the four.
 
 ## Out-of-scope correction requests
 

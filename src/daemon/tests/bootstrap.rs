@@ -2,6 +2,7 @@ use super::*;
 #[cfg(unix)]
 use crate::application::context::CancellationToken;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
+use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 #[cfg(unix)]
 use crate::errors::TraceDecayError;
 use crate::mcp::JsonRpcResponse;
@@ -40,6 +41,54 @@ fn project_open_test_route(name: &str) -> ProjectRouteKey {
         project_path: std::path::PathBuf::from(format!("/projects/{name}")),
         scope_prefix: None,
     }
+}
+
+#[test]
+fn host_ingest_waits_for_registered_project_authority_publication() {
+    let ingest = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_hook_runtime",
+            "arguments": {
+                "action": "ingest_transcript",
+                "provider": "cursor",
+                "user_scope": false,
+                "event_json": "{}"
+            }
+        }
+    })
+    .to_string();
+    let hook_event = json!({
+        "jsonrpc": "2.0",
+        "method": crate::daemon::HOOK_EVENT_METHOD,
+        "params": {}
+    })
+    .to_string();
+    let status = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_status",
+            "arguments": {"format": "json"}
+        }
+    })
+    .to_string();
+
+    assert_eq!(
+        project_server_requirement(&ingest),
+        ProjectServerRequirement::RegisteredHostIngest
+    );
+    assert_eq!(
+        project_server_requirement(&hook_event),
+        ProjectServerRequirement::RegisteredHostIngest
+    );
+    assert_eq!(
+        project_server_requirement(&status),
+        ProjectServerRequirement::Core
+    );
 }
 
 fn run_git(root: &std::path::Path, args: &[&str]) {

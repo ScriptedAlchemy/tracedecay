@@ -1,0 +1,110 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::must_use_candidate)]
+// Retained from the root crate's posture so extraction does not churn protocol
+// signatures and control flow: these are stylistic findings whose "fixes"
+// ripple across daemon call sites.
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::too_many_lines)]
+
+//! Store-free LSP transport and session-protocol contracts.
+//!
+//! This crate owns the stdio framing bridge plus the LSP 3.17 protocol,
+//! session lifecycle, capability negotiation, overlay, diagnostic-merge, and
+//! analyzer-broker contracts that need no database, socket, analyzer process,
+//! or filesystem authority.
+//!
+//! The daemon retains everything this crate deliberately excludes: the
+//! authenticated session registry, admitted-root resolution, analyzer process
+//! and store composition, and the application feedback/semantic/context
+//! authorities. Those reach the session actor only as injected port
+//! implementations.
+
+mod bridge;
+mod capabilities;
+mod context;
+mod diagnostics;
+mod dispatch;
+mod gateway;
+mod overlay;
+mod protocol;
+mod provider;
+mod request_sequence;
+mod rpc;
+mod session;
+
+pub use bridge::{
+    BridgeDirection, BridgePumpOutcome, ContentLengthCodec, ContentLengthCodecError,
+    ContentLengthStdioError, ContentLengthStdioTransport, DaemonLspSessionTransport, FramePoll,
+    FrameSend, LspFrame, MAX_LSP_FRAME_BYTES, MAX_LSP_HEADER_BYTES, StdioFrameTransport,
+    StdioLspBridge, StdioLspBridgeError,
+};
+pub use capabilities::{
+    CapabilityAvailability, CapabilityParseError, CapabilityUnavailable,
+    CapabilityUnavailableReason, ClientCapabilities, EffectiveCapabilities, GatewayCapabilities,
+    LSP_PROTOCOL_VERSION, PositionEncoding, SemanticCapability, TextDocumentSync,
+    UpstreamCapabilities, negotiate_capabilities,
+};
+pub use context::{
+    ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
+    ContextExpansionScope, ContextFreshness, ContextProducerState, ContextProjectionChange,
+    ContextProjectionEnvelope, ContextProjectionIdentity, ContextProjectionItem,
+    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
+    ContextProjectionRegistration, ContextProjectionRequest, ContextSubscribeRequest,
+    MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS,
+    MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
+    TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
+    TRACEDECAY_CONTEXT_REVISION, TRACEDECAY_SUBSCRIBE_METHOD,
+};
+pub use diagnostics::{
+    DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
+    GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
+    GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
+    GatewayDiagnosticRelatedInformation, LspPosition, LspRange, MAX_DIAGNOSTIC_MESSAGE_BYTES,
+    MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,
+    MAX_DIAGNOSTIC_URI_BYTES, MAX_DOCUMENT_DIAGNOSTICS, PositionError,
+    TRACEDECAY_DIAGNOSTIC_DATA_REVISION, byte_offset_to_utf16_position, merge_diagnostics,
+    utf16_position_to_byte_offset,
+};
+pub use gateway::{
+    AdmittedRoot, CallHierarchyItem, DaemonLspGateway, DiagnosticTrigger, DocumentSymbol,
+    FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse, GatewayDocumentDiagnostics,
+    GatewayMethod, GatewayResponse, Hover, IncomingCall, LspLocation, MethodUnavailable,
+    MethodUnavailableReason, OutgoingCall, RenameCandidate, RenameCandidateResult,
+    RenameCandidateUnavailableReason, SemanticProviderOutcome, SemanticProviderPort,
+    SemanticRequest, SemanticResponse, SignatureHelp, TypeHierarchyItem,
+    UnavailableSemanticProvider, WorkspaceSymbol,
+};
+pub use overlay::{
+    DebouncedDiagnostic, DebouncedDiagnosticKind, MAX_OPEN_DOCUMENTS, MAX_OVERLAY_BYTES,
+    MAX_PENDING_OVERLAY_DIAGNOSTICS, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS,
+    OVERLAY_DIAGNOSTIC_MAX_WAIT_MS, OverlayChange, OverlayDiagnosticDebouncer, OverlayError,
+    OverlaySnapshot, OverlayStore,
+};
+pub use protocol::{
+    DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession, DaemonLspProtocolTransport,
+    MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, ProtocolDispatch,
+};
+pub use provider::{
+    AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,
+    AnalyzerSupervisor, AnalyzerTransitionError, DiagnosticRefreshAdmission,
+    DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome, DiagnosticSnapshotPort,
+    GenerationDiagnostics, MAX_ANALYZER_RESTARTS, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
+    UnavailableDiagnosticSnapshotProvider,
+};
+pub use request_sequence::{
+    ConnectionLocalRequestSequence, ProcessLocalRequestSequence, SequenceExhausted,
+};
+pub use session::{
+    CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
+    LspSessionControl, MAX_PENDING_REQUESTS, MAX_PUBLICATION_BYTES, PublicationAdmission,
+    PublicationDelivery, PublicationState, RequestAdmission, SessionLifecycle,
+};

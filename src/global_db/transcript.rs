@@ -486,7 +486,9 @@ impl RegisteredGlobalDb {
             expand_hint: Some("Codex context compaction boundary".to_string()),
             metadata_json: summary_metadata_json.or_else(|| Some(metadata_json.to_string())),
         };
-        crate::sessions::lcm::dag::insert_summary_node_in_transaction(conn, draft)
+        let publisher =
+            crate::global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(conn);
+        crate::sessions::lcm::dag::insert_summary_node(&publisher, draft)
             .await
             .map(|_| ())
             .map_err(|error| {
@@ -791,7 +793,9 @@ impl RegisteredGlobalDb {
                         }
                         TranscriptWritePolicy::ProjectionOnly => {
                             let text =
-                                crate::sessions::lcm::raw::derived_text_for_index(&message.text);
+                                crate::application::session::compatibility::derived_text_for_index(
+                                    &message.text,
+                                );
                             if !Self::upsert_session_message_projection(
                                 &transaction,
                                 message,

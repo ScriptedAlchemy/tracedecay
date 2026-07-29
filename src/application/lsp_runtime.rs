@@ -1865,11 +1865,10 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
         request: ContextProjectionRequest,
     ) -> LspRuntimeFuture<ContextProjectionOutcome> {
         if request.kind == ContextProjectionKind::test_run_results() {
-            return self.test_runs.snapshot(
-                root,
-                request.document_uri,
-                request.document_content_digest,
-            );
+            let document_content_digest = request.document_content_digest().cloned();
+            return self
+                .test_runs
+                .snapshot(root, request.document_uri, document_content_digest);
         }
         let source = self.clone();
         Box::pin(async move {
@@ -1877,7 +1876,7 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
                 .current_cycle(
                     root.clone(),
                     request.document_uri.clone(),
-                    request.document_content_digest.clone(),
+                    request.document_content_digest().cloned(),
                 )
                 .await
             {

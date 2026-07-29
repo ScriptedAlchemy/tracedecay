@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::ProjectServerRequirement;
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]
@@ -791,6 +792,15 @@ fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliase
     );
     assert!(registry.mark_ready(&key));
     assert!(
+        registry
+            .get_route_and_touch_for(
+                &route("/project"),
+                ProjectServerRequirement::RegisteredHostIngest,
+            )
+            .is_none(),
+        "a graph-only core must not receive host ingest before registered authority publication"
+    );
+    assert!(
         !registry.replace_ready_if(&key, Arc::clone(&full), |_| false),
         "a stale core comparison must not replace the current server"
     );
@@ -813,6 +823,15 @@ fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliase
             .1,
         &full
     ));
+    assert!(
+        registry
+            .get_route_and_touch_for(
+                &route("/project"),
+                ProjectServerRequirement::RegisteredHostIngest,
+            )
+            .is_some(),
+        "the full server must publish registered host-ingest authority"
+    );
 }
 
 #[test]

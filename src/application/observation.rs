@@ -12,8 +12,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
-    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationWrite,
+    AnchoredObservationWrite, ObservationAdmissionPort, ObservationCaptureSink,
+    ObservationCursorPort, ObservationPersistOutcome, ObservationProjectionStatus,
+    ObservationReplayRequest, ObservationStoreError, ObservationWrite,
     SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
@@ -270,7 +271,10 @@ pub struct ObservationApplication<S> {
     sanitizer: RecordSanitizerV1,
 }
 
-impl<S: ObservationStore> ObservationApplication<S> {
+impl<S> ObservationApplication<S>
+where
+    S: ObservationCaptureSink + ObservationCursorPort + ObservationAdmissionPort,
+{
     pub fn new(store: S, sanitizer: RecordSanitizerV1) -> Self {
         Self { store, sanitizer }
     }
@@ -289,7 +293,7 @@ impl<S: ObservationStore> ObservationApplication<S> {
         }
         let outcome = self
             .store
-            .advance_source_cursor(advance)
+            .advance_admitted_source_cursor(advance)
             .await
             .map_err(ObservationApplicationError::from)?;
         if cancellation.is_cancelled() {
@@ -387,12 +391,12 @@ impl<S: ObservationStore> ObservationApplication<S> {
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
-                    let outcome = self.store.persist_observation(write).await?;
+                    let outcome = self.store.persist_admitted_observation(write).await?;
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
                     let observation_id = outcome.receipt().observation().observation_id();
-                    let stored = self.store.get_observation(observation_id).await?;
+                    let stored = self.store.read_admitted_observation(observation_id).await?;
                     if cancellation.is_cancelled() {
                         return Err(ObservationApplicationError::Cancelled);
                     }
@@ -436,7 +440,7 @@ impl<S: ObservationStore> ObservationApplication<S> {
         }
         let observation = self
             .store
-            .get_observation(&observation_id)
+            .read_admitted_observation(&observation_id)
             .await
             .map_err(ObservationApplicationError::from)?;
         if cancellation.is_cancelled() {
@@ -466,7 +470,7 @@ impl<S: ObservationStore> ObservationApplication<S> {
             .and_then(|limit| ObservationReplayRequest::new(request.after_sequence(), limit).ok());
         let mut observations = self
             .store
-            .replay_observations(lookahead.unwrap_or(request))
+            .replay_admitted_observations(lookahead.unwrap_or(request))
             .await?;
         if cancellation.is_cancelled() {
             return Err(ObservationApplicationError::Cancelled);
@@ -481,7 +485,11 @@ impl<S: ObservationStore> ObservationApplication<S> {
             if cancellation.is_cancelled() {
                 return Err(ObservationApplicationError::Cancelled);
             }
-            has_more = !self.store.replay_observations(probe).await?.is_empty();
+            has_more = !self
+                .store
+                .replay_admitted_observations(probe)
+                .await?
+                .is_empty();
             if cancellation.is_cancelled() {
                 return Err(ObservationApplicationError::Cancelled);
             }

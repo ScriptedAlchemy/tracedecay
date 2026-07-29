@@ -3,19 +3,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
-use tracedecay_store::StoreShardScopeV1;
+use tracedecay_store::ParseOffset;
 
 use crate::application::host_admission::DEFAULT_MAX_RECORDS;
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::SessionProvider;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::snapshot_observation::MAX_SNAPSHOT_CAPTURE_UNIT_BYTES;
 use crate::sessions::source::{
     MAX_JSONL_RECORD_BYTES, TranscriptCursorKey, TranscriptDiscoveryBounds, TranscriptSource,
-    path_byte_len, try_ingest_source_with_store,
+    path_byte_len, try_ingest_source,
 };
-use crate::store::GlobalDbTranscriptStore;
+use crate::store::TranscriptIngestStore;
 
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, IngestPassOutcome, RoundRobinAdmission,
@@ -34,7 +33,7 @@ pub(super) const USER_INGEST_PROVIDER_FRONTIER_KEY: &str =
 const MAX_TRANSIENT_INGEST_FRONTIERS: usize = 256;
 
 #[derive(Clone, PartialEq, Eq)]
-struct TransientIngestAuthority {
+pub(super) struct TransientIngestAuthority {
     brain_id: BrainId,
     profile_id: UserProfileId,
     project_id: ProjectId,
@@ -42,14 +41,15 @@ struct TransientIngestAuthority {
 }
 
 impl TransientIngestAuthority {
-    fn new(
-        db: &RegisteredGlobalDb,
+    pub(super) fn new(
+        brain_id: BrainId,
+        profile_id: UserProfileId,
         project_id: &ProjectId,
         sources: &[Box<dyn TranscriptSource>],
     ) -> Self {
         Self {
-            brain_id: db.binding().shard_id.brain_id.clone(),
-            profile_id: db.binding().shard_id.profile_id.clone(),
+            brain_id,
+            profile_id,
             project_id: project_id.clone(),
             providers: sources.iter().map(|source| source.provider()).collect(),
         }
@@ -441,16 +441,18 @@ pub(super) fn admit_fair_ingest_units(
     (admitted, coverage)
 }
 
-pub(super) async fn read_ingest_frontier(db: &RegisteredGlobalDb, key: &str) -> Option<u64> {
-    match db.get_parse_offset_result(key).await {
-        Ok(Some(offset)) => Some(offset.byte_offset),
-        Ok(None) => Some(0),
+pub(super) async fn read_ingest_frontier<S: TranscriptIngestStore>(
+    store: &S,
+    key: &str,
+) -> Option<u64> {
+    match store.get_parse_offset(Path::new(key)).await {
+        Ok(offset) => Some(offset.byte_offset),
         Err(_) => None,
     }
 }
 
-pub(super) async fn write_ingest_frontier(
-    db: &RegisteredGlobalDb,
+pub(super) async fn write_ingest_frontier<S: TranscriptIngestStore>(
+    store: &S,
     key: &str,
     previous: u64,
     advance: usize,
@@ -459,47 +461,56 @@ pub(super) async fn write_ingest_frontier(
         return false;
     }
     let processed = u64::try_from(advance).unwrap_or(u64::MAX);
-    db.advance_parse_offset_result(
-        key,
-        crate::global_db::ParseOffset {
-            byte_offset: previous.saturating_add(processed),
-            mtime: 0,
-            file_id: 1,
-        },
+    store
+        .advance_parse_offset_monotonic(
+            Path::new(key),
+            ParseOffset {
+                byte_offset: previous.saturating_add(processed),
+                mtime: 0,
+                file_id: 1,
+            },
+        )
+        .await
+        .is_ok()
+}
+
+/// Drive a set of sources against `store` for `project_root` under bounded fair
+/// multi-source admission. Separated from the project catch-up driver so tests
+/// can supply sources rooted at a temporary home directory instead of the
+/// real `~`.
+pub(super) async fn ingest_sources<S: TranscriptIngestStore>(
+    store: &S,
+    authority: &TransientIngestAuthority,
+    project_root: &Path,
+    sources: &[Box<dyn TranscriptSource>],
+) -> TranscriptIngestOutcome {
+    ingest_sources_bounded(
+        store,
+        authority,
+        project_root,
+        sources,
+        default_ingest_pass_bounds(),
+        &ObservationCancellation::default(),
     )
     .await
-    .is_ok()
+    .into_transcript_outcome()
 }
 
 /// Bounded fair multi-source ingest with typed coverage / scheduling outcomes.
-pub(crate) async fn ingest_sources_bounded(
-    db: &RegisteredGlobalDb,
+pub(super) async fn ingest_sources_bounded<S: TranscriptIngestStore>(
+    store: &S,
+    authority: &TransientIngestAuthority,
     project_root: &Path,
-    project_id: &ProjectId,
     sources: &[Box<dyn TranscriptSource>],
     bounds: IngestPassBounds,
     cancellation: &ObservationCancellation,
 ) -> IngestPassOutcome {
-    if db.binding().shard_id.scope
-        != (StoreShardScopeV1::ProjectSessions {
-            project_id: project_id.clone(),
-        })
-    {
-        return IngestPassOutcome::failed(TranscriptCatchUpFailure::new(
-            "all",
-            "project_sessions_authority",
-            "project_sessions_authority_mismatch",
-            false,
-        ));
-    }
-    let store = GlobalDbTranscriptStore::new(db);
     let Some(durable_frontier) =
-        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await
+        read_ingest_frontier(store, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await
     else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
-    let transient_authority = TransientIngestAuthority::new(db, project_id, sources);
-    let frontier = durable_frontier.saturating_add(transient_ingest_frontier(&transient_authority));
+    let frontier = durable_frontier.saturating_add(transient_ingest_frontier(authority));
     let discovery = discover_ingest_page(sources, project_root, bounds, frontier);
     let units = discovery.units;
     let deferred_discovery_units = discovery.deferred;
@@ -552,8 +563,7 @@ pub(crate) async fn ingest_sources_bounded(
         };
         attempted = attempted.saturating_add(1);
         let outcome = ingest_admitted_unit(
-            &store,
-            db,
+            store,
             source,
             &unit.path,
             project_root,
@@ -624,7 +634,7 @@ pub(crate) async fn ingest_sources_bounded(
     let write = scheduling_progress && scheduling_write_required(coverage, attempted, cancelled);
     let scheduling_state_written = if write {
         write_ingest_frontier(
-            db,
+            store,
             TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY,
             discovery.frontier_base,
             attempted,
@@ -638,13 +648,13 @@ pub(crate) async fn ingest_sources_bounded(
     }
     if !cancelled {
         if scheduling_state_written {
-            set_transient_ingest_frontier(&transient_authority, 0);
+            set_transient_ingest_frontier(authority, 0);
         } else if attempted > 0 {
             let transient_frontier = discovery
                 .frontier_base
                 .saturating_add(u64::try_from(attempted).unwrap_or(u64::MAX))
                 .saturating_sub(durable_frontier);
-            set_transient_ingest_frontier(&transient_authority, transient_frontier);
+            set_transient_ingest_frontier(authority, transient_frontier);
         }
     }
 
@@ -670,9 +680,8 @@ struct UnitIngestOutcome {
 
 /// Ingest one admitted path unit under its byte grant, charging `remaining_bytes`
 /// and reporting whether the durable cursor or stats advanced.
-async fn ingest_admitted_unit(
-    store: &GlobalDbTranscriptStore<'_>,
-    db: &RegisteredGlobalDb,
+async fn ingest_admitted_unit<S: TranscriptIngestStore>(
+    store: &S,
     source: &dyn TranscriptSource,
     path: &Path,
     project_root: &Path,
@@ -680,11 +689,11 @@ async fn ingest_admitted_unit(
     remaining_bytes: &mut u64,
 ) -> UnitIngestOutcome {
     let single = SinglePathSource::new(source, path.to_path_buf());
-    let cursor_key = source.cursor_key(path).durable_text();
-    let cursor_before = db
-        .get_parse_offset_result(&cursor_key)
+    let cursor_path = source.cursor_key(path).store_path();
+    let cursor_before = store
+        .get_parse_offset(&cursor_path)
         .await
-        .map(|offset| offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id)));
+        .map(|offset| (offset.byte_offset, offset.mtime, offset.file_id));
     let mut attempts = 0usize;
     loop {
         let grant = (*remaining_bytes).min(bounds.bytes_per_unit);
@@ -697,11 +706,12 @@ async fn ingest_admitted_unit(
             };
         }
         *remaining_bytes = remaining_bytes.saturating_sub(grant);
-        match try_ingest_source_with_store(store, &single, project_root, Some(grant)).await {
+        match try_ingest_source(store, &single, project_root, Some(grant)).await {
             Ok(source_stats) => {
-                let cursor_after = db.get_parse_offset_result(&cursor_key).await.map(|offset| {
-                    offset.map(|offset| (offset.byte_offset, offset.mtime, offset.file_id))
-                });
+                let cursor_after = store
+                    .get_parse_offset(&cursor_path)
+                    .await
+                    .map(|offset| (offset.byte_offset, offset.mtime, offset.file_id));
                 let cursor_progress = match (&cursor_before, &cursor_after) {
                     (Ok(before), Ok(after)) => before != after,
                     _ => true,

@@ -106,17 +106,39 @@ pub async fn plan_api_migration(
                         format!("\n{}", definition.trim_end())
                     }
                 };
-                sites.push(PendingSite {
-                    operation_id: operation_id.clone(),
-                    path: node.file_path,
-                    start: offset,
-                    end: offset,
-                    expected: String::new(),
-                    replacement: insertion,
-                    disposition: ApiMigrationSiteDispositionV1::Changed,
-                    reason: "deliberate compatibility definition".to_owned(),
-                    caller_node_id: None,
-                });
+                let already_satisfied = match position {
+                    tracedecay_application::ApiDefinitionInsertionV1::Before => source[..offset]
+                        .strip_suffix(&insertion)
+                        .map(|_| (offset - insertion.len(), offset)),
+                    tracedecay_application::ApiDefinitionInsertionV1::After => source[offset..]
+                        .starts_with(&insertion)
+                        .then_some((offset, offset + insertion.len())),
+                };
+                if let Some((start, end)) = already_satisfied {
+                    sites.push(PendingSite {
+                        operation_id: operation_id.clone(),
+                        path: node.file_path,
+                        start,
+                        end,
+                        expected: insertion.clone(),
+                        replacement: insertion,
+                        disposition: ApiMigrationSiteDispositionV1::Unchanged,
+                        reason: "compatibility definition already satisfies migration".to_owned(),
+                        caller_node_id: None,
+                    });
+                } else {
+                    sites.push(PendingSite {
+                        operation_id: operation_id.clone(),
+                        path: node.file_path,
+                        start: offset,
+                        end: offset,
+                        expected: String::new(),
+                        replacement: insertion,
+                        disposition: ApiMigrationSiteDispositionV1::Changed,
+                        reason: "deliberate compatibility definition".to_owned(),
+                        caller_node_id: None,
+                    });
+                }
             }
             ApiMigrationOperationRequestV1::ReplaceSelectedTerminology {
                 operation_id,
@@ -166,6 +188,7 @@ pub async fn plan_api_migration(
     }
 
     block_overlapping_sites(&mut sites);
+    block_protected_value_changes(&request.operations, &sources, &mut sites)?;
     let files = materialize_file_plans(&sources, &sites)?;
     let blocked = sites
         .iter()
@@ -234,8 +257,12 @@ async fn plan_definition_replacement(
         path: node.file_path,
         start,
         end,
+        replacement: if disposition == ApiMigrationSiteDispositionV1::Unchanged {
+            expected.clone()
+        } else {
+            replacement.to_owned()
+        },
         expected,
-        replacement: replacement.to_owned(),
         disposition,
         reason: reason.to_owned(),
         caller_node_id: None,
@@ -428,6 +455,58 @@ async fn plan_selected_ast_occurrences(
                 && matched.matched_text == pattern
         })
         .collect::<Vec<_>>();
+    if let Some(replacement) = replacement
+        && candidates.is_empty()
+    {
+        let replacement_result = search_tree(
+            graph.project_root(),
+            replacement,
+            None,
+            Some(&node.file_path),
+            MAX_API_MIGRATION_AST_MATCHES,
+        )
+        .map_err(|error| {
+            config_error(format!("AST satisfied-occurrence planning failed: {error}"))
+        })?;
+        if replacement_result.truncated {
+            return Err(config_error(
+                "satisfied AST occurrence planning exceeded its bounded match budget",
+            ));
+        }
+        let replacement_candidates = replacement_result
+            .matches
+            .iter()
+            .filter(|matched| {
+                matched.file == node.file_path
+                    && matched.start_byte >= start
+                    && matched.end_byte <= end
+                    && matched.matched_text == replacement
+            })
+            .collect::<Vec<_>>();
+        for index in indexes {
+            let Some(matched) = replacement_candidates.get(*index as usize) else {
+                sites.push(blocked_site(
+                    operation_id,
+                    &node.file_path,
+                    start,
+                    "selected AST occurrence index is stale",
+                ));
+                continue;
+            };
+            sites.push(PendingSite {
+                operation_id: operation_id.to_owned(),
+                path: matched.file.clone(),
+                start: matched.start_byte,
+                end: matched.end_byte,
+                expected: matched.matched_text.clone(),
+                replacement: matched.matched_text.clone(),
+                disposition: ApiMigrationSiteDispositionV1::Unchanged,
+                reason: "selected AST terminology already satisfies migration".to_owned(),
+                caller_node_id: Some(node.id.clone()),
+            });
+        }
+        return Ok(());
+    }
     for index in indexes {
         let Some(matched) = candidates.get(*index as usize) else {
             sites.push(blocked_site(
@@ -455,7 +534,7 @@ async fn plan_selected_ast_occurrences(
                 end: matched.end_byte,
                 expected: matched.matched_text.clone(),
                 replacement: matched.matched_text.clone(),
-                disposition: ApiMigrationSiteDispositionV1::Unchanged,
+                disposition: ApiMigrationSiteDispositionV1::Skipped,
                 reason: reason.to_owned(),
                 caller_node_id: Some(node.id.clone()),
             });
@@ -562,7 +641,9 @@ fn blocked_site(operation_id: &str, path: &str, offset: usize, reason: &str) -> 
 }
 
 fn block_overlapping_sites(sites: &mut [PendingSite]) {
-    let mut order = (0..sites.len()).collect::<Vec<_>>();
+    let mut order = (0..sites.len())
+        .filter(|index| sites[*index].disposition == ApiMigrationSiteDispositionV1::Changed)
+        .collect::<Vec<_>>();
     order.sort_by(|left, right| {
         sites[*left]
             .path
@@ -570,23 +651,94 @@ fn block_overlapping_sites(sites: &mut [PendingSite]) {
             .then(sites[*left].start.cmp(&sites[*right].start))
             .then(sites[*left].end.cmp(&sites[*right].end))
     });
-    for pair in order.windows(2) {
-        let left = pair[0];
-        let right = pair[1];
-        if sites[left].path == sites[right].path
-            && sites[left].disposition == ApiMigrationSiteDispositionV1::Changed
-            && sites[right].disposition == ApiMigrationSiteDispositionV1::Changed
-            && (sites[right].start < sites[left].end
-                || (sites[left].start == sites[left].end
-                    && sites[right].start == sites[right].end
-                    && sites[left].start == sites[right].start))
+    let mut active = None;
+    for index in order {
+        let Some(previous) = active else {
+            active = Some(index);
+            continue;
+        };
+        if sites[previous].path != sites[index].path {
+            active = Some(index);
+            continue;
+        }
+        if sites[index].start < sites[previous].end
+            || (sites[previous].start == sites[previous].end
+                && sites[index].start == sites[index].end
+                && sites[previous].start == sites[index].start)
         {
-            sites[left].disposition = ApiMigrationSiteDispositionV1::Blocked;
-            "overlapping API migration sites".clone_into(&mut sites[left].reason);
-            sites[right].disposition = ApiMigrationSiteDispositionV1::Blocked;
-            "overlapping API migration sites".clone_into(&mut sites[right].reason);
+            sites[previous].disposition = ApiMigrationSiteDispositionV1::Blocked;
+            sites[previous].reason = "overlapping API migration sites".to_owned();
+            sites[index].disposition = ApiMigrationSiteDispositionV1::Blocked;
+            sites[index].reason = "overlapping API migration sites".to_owned();
+        }
+        if sites[index].end > sites[previous].end {
+            active = Some(index);
         }
     }
+}
+
+fn block_protected_value_changes(
+    operations: &[ApiMigrationOperationRequestV1],
+    sources: &BTreeMap<String, String>,
+    sites: &mut [PendingSite],
+) -> Result<()> {
+    let predicted_files = materialize_file_plans(sources, sites)?;
+    let protected_operations = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            ApiMigrationOperationRequestV1::AssertStableValue {
+                operation_id,
+                category,
+                exact_bytes,
+                ..
+            } => Some((
+                operation_id.as_str(),
+                (category.as_str(), exact_bytes.as_str()),
+            )),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut blocked = BTreeSet::new();
+    for (protected_index, protected) in sites.iter().enumerate() {
+        let Some((_category, exact_bytes)) =
+            protected_operations.get(protected.operation_id.as_str())
+        else {
+            continue;
+        };
+        if protected.disposition == ApiMigrationSiteDispositionV1::Blocked {
+            continue;
+        }
+        let predicted_preserves_value = predicted_files
+            .iter()
+            .find(|file| file.path == protected.path)
+            .is_some_and(|file| file.intended_content.contains(*exact_bytes));
+        let overlapping_changes = sites
+            .iter()
+            .enumerate()
+            .filter(|(_, changed)| {
+                changed.path == protected.path
+                    && changed.disposition == ApiMigrationSiteDispositionV1::Changed
+                    && changed.start < protected.end
+                    && protected.start < changed.end
+            })
+            .collect::<Vec<_>>();
+        let overlapping_changes_preserve_value = overlapping_changes
+            .iter()
+            .all(|(_, changed)| changed.replacement.contains(*exact_bytes));
+        if !predicted_preserves_value || !overlapping_changes_preserve_value {
+            blocked.insert(protected_index);
+            blocked.extend(overlapping_changes.into_iter().map(|(index, _)| index));
+        }
+    }
+    for index in blocked {
+        sites[index].disposition = ApiMigrationSiteDispositionV1::Blocked;
+        if let Some((category, _)) = protected_operations.get(sites[index].operation_id.as_str()) {
+            sites[index].reason = format!("protected {category} would change byte identity");
+        } else {
+            sites[index].reason = "operation would change protected stable bytes".to_owned();
+        }
+    }
+    Ok(())
 }
 
 fn materialize_file_plans(

@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
+use tokio_stream::StreamExt;
 
 use crate::application::context::CancellationToken;
 use crate::client_identity::DaemonClientIdentity;
@@ -1975,6 +1976,7 @@ struct InProcessDaemonInvocationExecutor {
     invocation: DaemonInvocationState,
     store_administration: StoreAdministration,
     project_path: PathBuf,
+    scope: tracedecay_application::ResolvedScope,
 }
 
 impl InProcessDaemonInvocationExecutor {
@@ -1982,11 +1984,13 @@ impl InProcessDaemonInvocationExecutor {
         invocation: DaemonInvocationState,
         store_administration: StoreAdministration,
         project_path: PathBuf,
+        scope: tracedecay_application::ResolvedScope,
     ) -> Self {
         Self {
             invocation,
             store_administration,
             project_path,
+            scope,
         }
     }
 
@@ -1998,6 +2002,297 @@ impl InProcessDaemonInvocationExecutor {
                 request,
             )
             .await
+    }
+}
+
+impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonInvocationExecutor {
+    fn invoke(
+        &self,
+        invocation: tracedecay_application::ApplicationInvocation,
+    ) -> tracedecay_application::ApplicationInvocationFuture<
+        '_,
+        std::result::Result<
+            tracedecay_application::ApplicationResponse,
+            tracedecay_application::InvocationError,
+        >,
+    > {
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let (request_id, target, deadline, cancellation) = context.into_parts();
+            if target.resolved().is_some_and(|scope| scope != &self.scope) {
+                return Err(tracedecay_application::InvocationError::Denied);
+            }
+            let target = match target {
+                tracedecay_application::InvocationTarget::CurrentProject => {
+                    tracedecay_application::InvocationTarget::Resolved(self.scope.clone())
+                }
+                target => target,
+            };
+            match request {
+                tracedecay_application::ApplicationRequest::Surface { binding, payload } => {
+                    let (_binding_id, surface, operation, result_contract, _page) =
+                        binding.into_parts();
+                    let operation =
+                        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(
+                            operation.as_str(),
+                        )
+                        .ok_or(tracedecay_application::InvocationError::InvalidRequest)?;
+                    let typed = crate::application_surface::parse_application_surface_request(
+                        operation, payload,
+                    )
+                    .map_err(|_| tracedecay_application::InvocationError::InvalidRequest)?;
+                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let cancellation_context = cancellation.context();
+                    let scope = match target {
+                        tracedecay_application::InvocationTarget::CurrentProject => None,
+                        tracedecay_application::InvocationTarget::Resolved(scope) => Some(scope),
+                    };
+                    let policy = if operation
+                        == crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                    {
+                        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect
+                    } else {
+                        crate::daemon_client::InvocationCancellationPolicy::ReadOnly
+                    };
+                    let request = match (operation, typed) {
+                        (
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
+                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                                request,
+                            ),
+                        )
+                        | (
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                                request,
+                            ),
+                        ) => DaemonInvocationRequest::configuration(
+                            request_id.as_str(),
+                            operation,
+                            request,
+                            observed_at,
+                            deadline.clone(),
+                            cancellation_context,
+                        )
+                        .with_resolved_scope(scope),
+                        (
+                            crate::application_surface::ApplicationSurfaceOperation::FeedbackGet,
+                            crate::application_surface::ApplicationSurfaceRequest::Feedback(
+                                request,
+                            ),
+                        ) => DaemonInvocationRequest::feedback(
+                            request_id.as_str(),
+                            operation,
+                            request.request_handle,
+                            observed_at,
+                            deadline.clone(),
+                            cancellation_context,
+                        )
+                        .with_resolved_scope(scope),
+                        _ => {
+                            return Err(
+                                tracedecay_application::InvocationError::InvalidRequest,
+                            );
+                        }
+                    }
+                    .with_delivery_route(crate::daemon_client::application_delivery_route(surface));
+                    let response =
+                        <Self as crate::daemon_client::DaemonInvocationExecutor>::invoke_controlled(
+                            self,
+                            request,
+                            deadline,
+                            cancellation,
+                            policy,
+                        )
+                        .await
+                        .map_err(crate::daemon_client::map_invocation_error)?;
+                    crate::daemon_client::application_response(
+                        request_id,
+                        result_contract,
+                        response.outcome,
+                    )
+                }
+                tracedecay_application::ApplicationRequest::FeedbackObservation {
+                    configuration_digest,
+                    observed_at,
+                    event,
+                } => {
+                    let event = serde_json::from_value(event)
+                        .map_err(|_| tracedecay_application::InvocationError::InvalidRequest)?;
+                    let response = self
+                        .invoke_once(DaemonInvocationRequest::feedback_observation(
+                            request_id.as_str(),
+                            configuration_digest,
+                            observed_at,
+                            event,
+                        ))
+                        .await;
+                    if matches!(
+                        response.outcome,
+                        DaemonInvocationOutcome::ObservationAccepted
+                    ) {
+                        Ok(tracedecay_application::ApplicationResponse::ObservationAccepted)
+                    } else {
+                        Err(tracedecay_application::InvocationError::Unavailable)
+                    }
+                }
+                tracedecay_application::ApplicationRequest::OperationEvents {
+                    operation_id,
+                    max_events,
+                    after_sequence,
+                } => {
+                    let operation_id =
+                        crate::application::operation_stream::OperationId::from_request(
+                            operation_id.clone(),
+                        );
+                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let authority = self.invocation.service.operation_events();
+                    let admitted = authority
+                        .resolve_invocation_context(
+                            &operation_id,
+                            &target,
+                            request_id,
+                            deadline,
+                            cancellation.context(),
+                            observed_at,
+                            None,
+                        )
+                        .await
+                        .map_err(map_operation_event_invocation_error)?;
+                    let requested_next_sequence =
+                        after_sequence.map_or(0, |sequence| sequence.saturating_add(1));
+                    let subscription = authority
+                        .subscribe(
+                            &operation_id,
+                            &admitted,
+                            observed_at,
+                            requested_next_sequence,
+                            None,
+                        )
+                        .await
+                        .map_err(map_operation_event_invocation_error)?;
+                    let (_correlation_id, frontier, mut stream) = subscription.into_sse_parts();
+                    let mut events = Vec::with_capacity(max_events as usize);
+                    let mut terminated = false;
+                    for _ in 0..max_events {
+                        let Ok(Some(event)) =
+                            timeout(Duration::from_millis(1), stream.next()).await
+                        else {
+                            break;
+                        };
+                        terminated = matches!(
+                            &event.kind,
+                            tracedecay_application::StreamEventKind::Terminal(_)
+                        );
+                        let kind = match event.kind {
+                            tracedecay_application::StreamEventKind::Item(item) => {
+                                tracedecay_application::StreamEventKind::Item(
+                                    serde_json::to_value(item).map_err(|_| {
+                                        tracedecay_application::InvocationError::Unavailable
+                                    })?,
+                                )
+                            }
+                            tracedecay_application::StreamEventKind::Progress {
+                                completed,
+                                total,
+                            } => tracedecay_application::StreamEventKind::Progress {
+                                completed,
+                                total,
+                            },
+                            tracedecay_application::StreamEventKind::Gap(gap) => {
+                                tracedecay_application::StreamEventKind::Gap(gap)
+                            }
+                            tracedecay_application::StreamEventKind::Terminal(terminal) => {
+                                tracedecay_application::StreamEventKind::Terminal(terminal)
+                            }
+                        };
+                        events.push(tracedecay_application::StreamEvent {
+                            sequence: event.sequence,
+                            kind,
+                        });
+                        if terminated {
+                            break;
+                        }
+                    }
+                    let next_sequence = (!terminated).then_some(frontier.next_sequence);
+                    Ok(tracedecay_application::ApplicationResponse::Stream(
+                        tracedecay_application::ApplicationStreamResponse {
+                            stream: tracedecay_application::ApplicationStream {
+                                operation_id: operation_id.request_id().clone(),
+                                events,
+                                frontier,
+                                next_sequence,
+                                terminated,
+                            },
+                        },
+                    ))
+                }
+                tracedecay_application::ApplicationRequest::OperationCancel { operation_id } => {
+                    let operation_id =
+                        crate::application::operation_stream::OperationId::from_request(
+                            operation_id.clone(),
+                        );
+                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let authority = self.invocation.service.operation_events();
+                    let admitted = authority
+                        .resolve_invocation_context(
+                            &operation_id,
+                            &target,
+                            request_id,
+                            deadline,
+                            cancellation.context(),
+                            observed_at,
+                            None,
+                        )
+                        .await
+                        .map_err(map_operation_event_invocation_error)?;
+                    let cancelled = match authority
+                        .cancel(&operation_id, &admitted, observed_at)
+                        .await
+                        .map_err(map_operation_event_invocation_error)?
+                    {
+                        crate::application::operation_stream::OperationCancelOutcome::Requested
+                        | crate::application::operation_stream::OperationCancelOutcome::AlreadyRequested => true,
+                        crate::application::operation_stream::OperationCancelOutcome::AlreadyTerminal => false,
+                    };
+                    Ok(tracedecay_application::ApplicationResponse::Cancellation(
+                        tracedecay_application::InvocationCancellation {
+                            operation_id: operation_id.request_id().clone(),
+                            cancelled,
+                        },
+                    ))
+                }
+            }
+        })
+    }
+}
+
+fn map_operation_event_invocation_error(
+    error: crate::application::operation_stream::OperationEventError,
+) -> tracedecay_application::InvocationError {
+    match error {
+        crate::application::operation_stream::OperationEventError::NotFoundOrNotAuthorized => {
+            tracedecay_application::InvocationError::Denied
+        }
+        crate::application::operation_stream::OperationEventError::RequestNotAdmitted => {
+            tracedecay_application::InvocationError::DeadlineExceeded
+        }
+        crate::application::operation_stream::OperationEventError::InvalidFrontier
+        | crate::application::operation_stream::OperationEventError::FrontierExpired
+        | crate::application::operation_stream::OperationEventError::ResumeExpired => {
+            tracedecay_application::InvocationError::Conflict
+        }
+        crate::application::operation_stream::OperationEventError::InvalidConfiguration
+        | crate::application::operation_stream::OperationEventError::InvalidContext(_)
+        | crate::application::operation_stream::OperationEventError::AlreadyBound
+        | crate::application::operation_stream::OperationEventError::Saturated
+        | crate::application::operation_stream::OperationEventError::ResumeUnavailable
+        | crate::application::operation_stream::OperationEventError::InvalidProgress
+        | crate::application::operation_stream::OperationEventError::TerminalAlreadyPublished
+        | crate::application::operation_stream::OperationEventError::InvalidTerminal(_)
+        | crate::application::operation_stream::OperationEventError::InvalidTestRunEvent => {
+            tracedecay_application::InvocationError::Unavailable
+        }
     }
 }
 
@@ -2571,13 +2866,51 @@ impl ProjectOpenTasks {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectServerRequirement {
+    Core,
+    RegisteredHostIngest,
+}
+
+fn project_server_requirement(request_line: &str) -> ProjectServerRequirement {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+        return ProjectServerRequirement::Core;
+    };
+    match classify_mcp_method(&request.method) {
+        McpMethod::HookEvent => ProjectServerRequirement::RegisteredHostIngest,
+        McpMethod::ToolsCall
+            if projectless_tool_call(request.params.as_ref())
+                .is_ok_and(|(tool_name, _)| tool_name == "tracedecay_hook_runtime") =>
+        {
+            ProjectServerRequirement::RegisteredHostIngest
+        }
+        _ => ProjectServerRequirement::Core,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectServerPublication {
+    Pending,
+    Core,
+    RegisteredHostIngest,
+}
+
+impl ProjectServerPublication {
+    fn satisfies(self, requirement: ProjectServerRequirement) -> bool {
+        match requirement {
+            ProjectServerRequirement::Core => self != Self::Pending,
+            ProjectServerRequirement::RegisteredHostIngest => self == Self::RegisteredHostIngest,
+        }
+    }
+}
+
 /// Scope-specific MCP servers routed through one canonical physical DB owner.
 /// `Database` performs the actual same-process handle sharing; this registry
 /// keeps daemon cache aliases and branch-drift rekeys consistent with it.
 struct DatabaseOwnerEntry<Server> {
     server: Server,
     last_used: Instant,
-    ready: bool,
+    publication: ProjectServerPublication,
 }
 
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
@@ -2604,7 +2937,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn get_ready(&self, key: &ProjectServerKey) -> Option<&Server> {
         self.servers
             .get(key)
-            .filter(|entry| entry.ready)
+            .filter(|entry| entry.publication.satisfies(ProjectServerRequirement::Core))
             .map(|entry| &entry.server)
     }
 
@@ -2618,7 +2951,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             DatabaseOwnerEntry {
                 server,
                 last_used,
-                ready: true,
+                publication: ProjectServerPublication::RegisteredHostIngest,
             },
         );
     }
@@ -2626,16 +2959,27 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn get_route(&self, route: &ProjectRouteKey) -> Option<(&ProjectServerKey, &Server)> {
         let key = self.aliases.get(route)?;
         let (key, entry) = self.servers.get_key_value(key)?;
-        entry.ready.then_some((key, &entry.server))
+        entry
+            .publication
+            .satisfies(ProjectServerRequirement::Core)
+            .then_some((key, &entry.server))
     }
 
     fn get_route_and_touch(
         &mut self,
         route: &ProjectRouteKey,
     ) -> Option<(&ProjectServerKey, &Server)> {
+        self.get_route_and_touch_for(route, ProjectServerRequirement::Core)
+    }
+
+    fn get_route_and_touch_for(
+        &mut self,
+        route: &ProjectRouteKey,
+        requirement: ProjectServerRequirement,
+    ) -> Option<(&ProjectServerKey, &Server)> {
         let key = self.aliases.get(route)?.clone();
         let entry = self.servers.get_mut(&key)?;
-        if !entry.ready {
+        if !entry.publication.satisfies(requirement) {
             return None;
         }
         entry.last_used = Instant::now();
@@ -2646,7 +2990,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         let Some(entry) = self.servers.get_mut(key) else {
             return false;
         };
-        entry.ready = true;
+        entry.publication = ProjectServerPublication::Core;
         entry.last_used = Instant::now();
         true
     }
@@ -2660,7 +3004,16 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     where
         F: FnOnce(&Server) -> bool,
     {
-        self.swap_ready_if(key, replacement, matches).is_some()
+        let Some(entry) = self.servers.get_mut(key) else {
+            return false;
+        };
+        if !entry.publication.satisfies(ProjectServerRequirement::Core) || !matches(&entry.server) {
+            return false;
+        }
+        entry.server = replacement;
+        entry.publication = ProjectServerPublication::RegisteredHostIngest;
+        entry.last_used = Instant::now();
+        true
     }
 
     fn swap_ready_if<F>(
@@ -2675,10 +3028,11 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         let Some(entry) = self.servers.get_mut(key) else {
             return None;
         };
-        if !entry.ready || !matches(&entry.server) {
+        if !entry.publication.satisfies(ProjectServerRequirement::Core) || !matches(&entry.server) {
             return None;
         }
         let displaced = std::mem::replace(&mut entry.server, replacement);
+        entry.publication = ProjectServerPublication::Core;
         entry.last_used = Instant::now();
         Some(displaced)
     }
@@ -2720,6 +3074,17 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.synchronous_health.remove(owner);
     }
 
+    fn servers_for_owner(&self, owner: &StoreOwnerKey) -> Vec<Server>
+    where
+        Server: Clone,
+    {
+        self.servers
+            .iter()
+            .filter(|(key, _)| &key.owner == owner)
+            .map(|(_, entry)| entry.server.clone())
+            .collect()
+    }
+
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
         debug_assert!(self.servers.contains_key(&key));
         if let Some(entry) = self.servers.get_mut(&key) {
@@ -2744,7 +3109,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             DatabaseOwnerEntry {
                 server,
                 last_used: Instant::now(),
-                ready: false,
+                publication: ProjectServerPublication::Pending,
             },
         );
         self.aliases.insert(route, key);
@@ -2781,7 +3146,10 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         F: FnMut(&Server) -> bool,
     {
         if let Some(existing) = self.servers.get_mut(&key) {
-            if existing.ready {
+            if existing
+                .publication
+                .satisfies(ProjectServerRequirement::Core)
+            {
                 let server = existing.server.clone();
                 self.bind_route(route, key);
                 return Some((server, false));
@@ -2832,6 +3200,143 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn keys(&self) -> impl Iterator<Item = &ProjectServerKey> {
         self.servers.keys()
     }
+}
+
+/// The retirement steps a published project server has to support.
+///
+/// Once core publication exposes a route, any later failure must stop that
+/// server from answering before its registry entry disappears. Keeping the
+/// steps behind a trait lets the funnel below run against a recording double
+/// instead of a whole daemon composition.
+trait RetirableProjectServer: Send + Sync + 'static {
+    /// Stops the server from writing further responses and cancels its startup
+    /// transcript ingest.
+    fn revoke_and_cancel_ingest(&self);
+
+    /// Waits for responses already in flight when revocation landed.
+    fn wait_for_response_drain(&self) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl RetirableProjectServer for crate::mcp::McpServer {
+    fn revoke_and_cancel_ingest(&self) {
+        self.revoke_project_server();
+        self.cancel_startup_transcript_ingest();
+    }
+
+    fn wait_for_response_drain(&self) -> impl std::future::Future<Output = ()> + Send {
+        self.wait_for_project_server_response_drain()
+    }
+}
+
+/// What a retirement leaves behind for the owner's next open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishedOwnerRetirement {
+    /// The failure proved store damage, so the owner is quarantined as well as
+    /// removed and its next open re-validates health synchronously.
+    QuarantineForHealth,
+    /// The failure says nothing about store health — a cancelled open, a branch
+    /// change, a capability that never finished mounting. The owner is removed
+    /// without making its next open pay for a full revalidation.
+    Remove,
+}
+
+/// Retires every server published under one store owner after a failure that
+/// landed once the core was already routable.
+///
+/// Revocation runs first so no further response can be written, then in-flight
+/// responses drain, and only then is the owner removed. The drain and removal
+/// run on a detached task: a project-open future dropped mid-retirement must
+/// not leave a half-mounted owner bound to its route.
+async fn retire_published_project_owner<S>(
+    project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry<Arc<S>>>>,
+    owner: StoreOwnerKey,
+    published: Vec<Arc<S>>,
+    retirement: PublishedOwnerRetirement,
+) -> Result<usize>
+where
+    S: RetirableProjectServer,
+{
+    for server in &published {
+        server.revoke_and_cancel_ingest();
+    }
+    let retiring = tokio::spawn(async move {
+        for server in &published {
+            server.wait_for_response_drain().await;
+        }
+        let removed = {
+            let mut servers = project_servers.lock().await;
+            match retirement {
+                PublishedOwnerRetirement::QuarantineForHealth => {
+                    servers.quarantine_and_remove_owner(&owner)
+                }
+                PublishedOwnerRetirement::Remove => servers.remove_owner(&owner),
+            }
+        };
+        for server in &removed {
+            server.revoke_and_cancel_ingest();
+        }
+        for server in &removed {
+            server.wait_for_response_drain().await;
+        }
+        removed.len()
+    });
+    retiring
+        .await
+        .map_err(|join_error| TraceDecayError::Config {
+            message: format!(
+                "failed to retire the published project server owner after project open failed: {join_error}"
+            ),
+        })
+}
+
+/// Post-open FTS health for one project publication.
+#[derive(Debug, PartialEq, Eq)]
+enum PostOpenHealthOutcome {
+    /// The open owed publication nothing. It either applied its own post-open
+    /// policy — including the crash preflight's skip, which proved the store
+    /// healthy under both recovery locks and must not be re-spent on a second
+    /// full `quick_check` — or opened read-only, where FTS damage cannot be
+    /// repaired in place.
+    SettledDuringOpen,
+    /// The deferred check ran and found the retained handle intact.
+    Intact,
+    /// The deferred check rebuilt proven FTS-only damage. The report is the
+    /// evidence publication has to make daemon-visible.
+    Repaired(String),
+}
+
+fn repaired_post_open_health_log_fields(
+    project_path: &Path,
+    problem: &str,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project", project_path.display().to_string()),
+        ("outcome", "fts_repaired".to_owned()),
+        ("problem", problem.to_owned()),
+    ]
+}
+
+/// Settles the post-open FTS health a deferred open handed to publication.
+///
+/// A deferred open publishes the core before its retained-handle check runs, so
+/// publication owns what is left. `health` is absent exactly when the open owed
+/// nothing. Repaired corruption is real evidence — an operator has to be able
+/// to see that a store was rebuilt — so it is logged rather than discarded.
+async fn settle_deferred_post_open_health(
+    project_path: &Path,
+    health: Option<impl std::future::Future<Output = Result<Option<String>>>>,
+) -> Result<PostOpenHealthOutcome> {
+    let Some(health) = health else {
+        return Ok(PostOpenHealthOutcome::SettledDuringOpen);
+    };
+    let Some(problem) = health.await? else {
+        return Ok(PostOpenHealthOutcome::Intact);
+    };
+    log_daemon_event(
+        "project_open_health",
+        &repaired_post_open_health_log_fields(project_path, &problem),
+    );
+    Ok(PostOpenHealthOutcome::Repaired(problem))
 }
 
 fn project_server_capacity_error() -> TraceDecayError {
@@ -3336,11 +3841,20 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
+        self.cached_project_server_for_requirement(handshake, ProjectServerRequirement::Core)
+            .await
+    }
+
+    async fn cached_project_server_for_requirement(
+        &self,
+        handshake: &DaemonHandshake,
+        requirement: ProjectServerRequirement,
+    ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
         let (project_path, route) = Self::project_route(handshake)?;
         let cached = {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
-                .get_route_and_touch(&route)
+                .get_route_and_touch_for(&route, requirement)
                 .map(|(_, server)| Arc::clone(server))
         };
         let Some(server) = cached else {
@@ -3410,8 +3924,12 @@ impl DaemonEngine {
     async fn project_server_for_request(
         &self,
         handshake: &DaemonHandshake,
+        requirement: ProjectServerRequirement,
     ) -> Result<Arc<crate::mcp::McpServer>> {
-        if let Some(server) = self.cached_project_server(handshake).await? {
+        if let Some(server) = self
+            .cached_project_server_for_requirement(handshake, requirement)
+            .await?
+        {
             return Ok(server);
         }
         let (project_path, _) = Self::project_route(handshake)?;
@@ -3423,7 +3941,10 @@ impl DaemonEngine {
             ProjectOpenTaskClaim::InFlight(mut state) => {
                 let publication = async {
                     loop {
-                        if let Some(server) = self.cached_project_server(handshake).await? {
+                        if let Some(server) = self
+                            .cached_project_server_for_requirement(handshake, requirement)
+                            .await?
+                        {
                             return Ok(server);
                         }
                         let current = state.borrow().clone();
@@ -4286,12 +4807,13 @@ async fn portable_cached_project_server(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
+    requirement: ProjectServerRequirement,
 ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
     let server = {
         let mut servers = store_administration.project_servers().lock().await;
         servers
-            .get_route_and_touch(&route)
+            .get_route_and_touch_for(&route, requirement)
             .map(|(_, server)| Arc::clone(server))
     };
     let Some(server) = server else {
@@ -4370,9 +4892,14 @@ async fn schedule_portable_project_server_warmup(
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     let (canonical_project_path, route) = project_route_for_handshake(&handshake)?;
-    if portable_cached_project_server(&store_administration, &canonical_project_path, &handshake)
-        .await?
-        .is_some()
+    if portable_cached_project_server(
+        &store_administration,
+        &canonical_project_path,
+        &handshake,
+        ProjectServerRequirement::Core,
+    )
+    .await?
+    .is_some()
     {
         return Ok(());
     }
@@ -4405,12 +4932,17 @@ async fn portable_project_server_for_request(
     invocation: DaemonInvocationState,
     http_application_registry: http_application::DaemonHttpApplicationRegistry,
     handshake: &DaemonHandshake,
+    requirement: ProjectServerRequirement,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
     let (canonical_project_path, route) = project_route_for_handshake(handshake)?;
-    if let Some(server) =
-        portable_cached_project_server(&store_administration, &canonical_project_path, handshake)
-            .await?
+    if let Some(server) = portable_cached_project_server(
+        &store_administration,
+        &canonical_project_path,
+        handshake,
+        requirement,
+    )
+    .await?
     {
         return Ok(server);
     }
@@ -4439,6 +4971,7 @@ async fn portable_project_server_for_request(
                         &store_administration,
                         &canonical_project_path,
                         handshake,
+                        requirement,
                     )
                     .await?
                     {
@@ -4880,6 +5413,7 @@ async fn production_project_server(
             invocation.clone(),
             store_administration.clone(),
             canonical_project_path.to_path_buf(),
+            code_search_scope,
         ));
     let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
     let retained_graph_resolver = retained_project_graph_resolver(store_administration.clone());
@@ -4961,15 +5495,22 @@ async fn production_project_server(
             resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
         }
-        if !project_database_is_read_only {
-            project_open_owners::install_project_open_source_edit_preview_owner(
-                resolved.as_ref(),
-                Arc::clone(&cg),
-                canonical_project_path,
-                &project_id,
+        // The core's own lane never opens: only the full server reaches a Git
+        // transaction authority. Its gate is kept so a rolled-back publication
+        // can report a terminal failure instead of warming forever.
+        let core_source_edit_mutation = if project_database_is_read_only {
+            None
+        } else {
+            Some(
+                project_open_owners::install_project_open_source_edit_preview_owner(
+                    resolved.as_ref(),
+                    Arc::clone(&cg),
+                    canonical_project_path,
+                    &project_id,
+                )
+                .await?,
             )
-            .await?;
-        }
+        };
         // Publish the graph/search/diagnostic core before session admission.
         // Source-edit previews are available, while mutations fail closed as
         // warming until the full server has its transaction authority.
@@ -4981,7 +5522,7 @@ async fn production_project_server(
                         .to_owned(),
                 });
             }
-        };
+        }
         log_daemon_event(
             "project_open_phase",
             &[
@@ -5013,8 +5554,16 @@ async fn production_project_server(
         let session_capabilities_published = AtomicBool::new(false);
         let mut published_full_candidate = None;
         let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
-            if let Some(database) = deferred_post_open_health
-                && let Err(error) = database.repair_fts_after_open().await
+            // The core is reachable from here on, so every step below leaves
+            // this block with an error instead of returning behind a published
+            // route: the funnel around it owns retiring the owner.
+            if let Err(error) = settle_deferred_post_open_health(
+                canonical_project_path,
+                deferred_post_open_health
+                    .as_ref()
+                    .map(crate::db::Database::repair_fts_after_open),
+            )
+            .await
             {
                 quarantine_on_upgrade_failure.store(true, Ordering::Release);
                 return Err(error);
@@ -5393,6 +5942,13 @@ async fn production_project_server(
                 } else {
                     (false, None)
                 };
+                // The retained core owns preview-only source editing and never
+                // receives the full server's Git mutation authority. Once the
+                // upgrade fails, its mutation lane must become terminal rather
+                // than remaining in a warming state forever.
+                if let Some(mutation) = &core_source_edit_mutation {
+                    mutation.mark_failed();
+                }
                 if core_retained {
                     if let Some(failed_full_server) = failed_full_server {
                         failed_full_server.revoke_project_server_responses();
@@ -6047,7 +6603,7 @@ async fn serve_broker_socket_client(
     if let Some(request) = parse_branch_add_request(&first_request_line) {
         let response = match await_project_owner_or_disconnect(
             &mut transport,
-            engine.project_server_for_request(&handshake),
+            engine.project_server_for_request(&handshake, ProjectServerRequirement::Core),
         )
         .await
         {
@@ -6169,7 +6725,10 @@ async fn serve_broker_socket_client(
     let server = if handshake.project_path.is_some() && !user_session_request {
         match await_project_owner_or_disconnect(
             &mut transport,
-            engine.project_server_for_request(&handshake),
+            engine.project_server_for_request(
+                &handshake,
+                project_server_requirement(&first_request_line),
+            ),
         )
         .await
         {
@@ -6415,6 +6974,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                 invocation.clone(),
                 http_application_registry.clone(),
                 &handshake,
+                ProjectServerRequirement::Core,
                 #[cfg(test)]
                 project_open_attempts.clone(),
             ),
@@ -6555,6 +7115,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                 invocation.clone(),
                 http_application_registry,
                 &handshake,
+                project_server_requirement(&first_request_line),
                 #[cfg(test)]
                 project_open_attempts.clone(),
             ),
@@ -6630,6 +7191,7 @@ async fn execute_portable_daemon_invocation(
             invocation.clone(),
             http_application_registry,
             handshake,
+            ProjectServerRequirement::Core,
             #[cfg(test)]
             project_open_attempts,
         ))
@@ -7038,7 +7600,11 @@ async fn execute_daemon_invocation(
     let git_operation = invocation_is_git_operation(request.operation());
     let mut project_path = None;
     if request.requires_project() {
-        if engine.project_server_for_request(handshake).await.is_err() {
+        if engine
+            .project_server_for_request(handshake, ProjectServerRequirement::Core)
+            .await
+            .is_err()
+        {
             return DaemonInvocationResponse::problem(
                 request_id,
                 if git_operation {

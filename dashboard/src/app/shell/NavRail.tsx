@@ -8,6 +8,7 @@ import {
   Code2,
   Compass,
   GitBranch,
+  ListTodo,
   MessagesSquare,
   Settings,
   Wallet,
@@ -37,6 +38,7 @@ const ICONS: Record<string, LucideIcon> = {
   observatory: Activity,
   costs: Wallet,
   settings: Settings,
+  work: ListTodo,
 };
 
 const MAIN = CHANNELS.filter((channel) => channel.path !== 'settings');

@@ -19,13 +19,26 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
-use tracedecay_store::StoreShardScopeV1;
 
 use crate::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
-use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
+
+/// Scopes a `tracedecay_message_search` to the agent transcripts of one
+/// workflow run, mirroring [`GitScopeFilter`] as a search-only concern. The
+/// run's messages are the messages of its agents (rows in `workflow_agents`).
+/// The session-message search applies this with an `EXISTS` pushdown.
+/// Serializes so the applied filter echoes cleanly into the payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkflowScopeFilter {
+    /// The `wf_*` run whose agents' messages to keep.
+    pub run_id: String,
+    /// When set, narrows the scope to just this one agent of the run
+    /// (matched on `workflow_agents.agent_label`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+}
 
 /// Schema version recorded in `session_schema_migrations` under
 /// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
@@ -511,18 +524,14 @@ pub(crate) struct RegisteredWorkflowIndexSnapshot {
 }
 
 impl RegisteredWorkflowIndexSnapshot {
-    pub(crate) async fn new(database: &RegisteredGlobalDb) -> Result<Self, WorkflowIndexError> {
-        if !matches!(
-            &database.binding().shard_id.scope,
-            StoreShardScopeV1::ProjectSessions { .. }
-        ) {
-            return Err(WorkflowIndexError::InvalidArgument(
-                "workflow index requires ProjectSessions authority".to_string(),
-            ));
-        }
-        Ok(Self {
-            snapshot: database.read_snapshot().await?,
-        })
+    pub(crate) fn from_snapshot(snapshot: RegisteredReadSnapshot) -> Self {
+        Self { snapshot }
+    }
+
+    pub(crate) async fn from_port(
+        port: &impl WorkflowIndexPort,
+    ) -> Result<Self, WorkflowIndexError> {
+        port.open_workflow_index_snapshot().await
     }
 
     async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
@@ -815,7 +824,7 @@ pub(crate) async fn runs_for_git_scope(
 /// in order (`run_id`, optional `agent_label`). Callers append `params` to
 /// their query bind list and AND the predicate into the outer WHERE clause.
 pub(crate) fn workflow_scope_exists_predicate(
-    filter: &crate::global_db::WorkflowScopeFilter,
+    filter: &WorkflowScopeFilter,
     message_source_path_col: &str,
     message_session_id_col: &str,
 ) -> (String, Vec<Value>) {
@@ -833,6 +842,9 @@ pub(crate) fn workflow_scope_exists_predicate(
     predicate.push(')');
     (predicate, params)
 }
+
+mod port;
+pub(crate) use port::{WorkflowIndexPort, WorkflowIngestSink, WorkflowIngestWriteTxn};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

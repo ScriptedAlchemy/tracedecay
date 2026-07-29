@@ -98,8 +98,14 @@ impl NativeGitIndexPreviewAssembler {
         repository_id: RepositoryId,
         worktree_id: WorktreeId,
     ) -> Self {
+        let repository_root = repository_root.into();
+        // Capture and daemon recapture must share one filesystem identity.
+        // Fall back only when the path cannot be resolved yet; existing roots
+        // (including symlink aliases) always canonicalize.
+        let repository_root =
+            super::canonicalize_repository_root(&repository_root).unwrap_or(repository_root);
         Self {
-            repository_root: repository_root.into(),
+            repository_root,
             project_id,
             repository_id,
             worktree_id,
@@ -335,8 +341,11 @@ pub(crate) struct DaemonProjectGitIndexPreviewAssembler {
 
 impl DaemonProjectGitIndexPreviewAssembler {
     pub(crate) fn new(repository_root: impl Into<PathBuf>, project_id: ProjectId) -> Self {
+        let repository_root = repository_root.into();
+        let repository_root =
+            super::canonicalize_repository_root(&repository_root).unwrap_or(repository_root);
         Self {
-            repository_root: repository_root.into(),
+            repository_root,
             project_id,
         }
     }
@@ -1528,13 +1537,17 @@ pub(crate) fn capture_exact_snapshot_for_test(
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
 ) -> RepositoryStateSnapshotV1 {
+    // Same canonical root the daemon owner mounts; alias paths must not mint a
+    // divergent snapshot that later fails exact preview CAS.
+    let repository_root = super::canonicalize_repository_root(repository_root)
+        .expect("test repository root must canonicalize");
     let assembler = NativeGitIndexPreviewAssembler::new(
-        repository_root,
+        &repository_root,
         project_id,
         repository_id,
         worktree_id,
     );
-    let runner = FixedGitIndexRunner::new(repository_root).expect("test Git runner");
+    let runner = FixedGitIndexRunner::new(&repository_root).expect("test Git runner");
     let status = assembler
         .read_authority()
         .status()
@@ -2559,6 +2572,95 @@ mod tests {
         assert!(
             !live_result_matches_preview(directory.path(), &preview, &branch_drift, Some(&commit)),
             "the same commit on a different attached branch is not the previewed HEAD state"
+        );
+    }
+
+    /// Portable stand-in for macOS `/tmp` → `/private/tmp`: capture through a
+    /// symlink alias must mint the same snapshot the daemon recaptures from
+    /// the canonical root. Exact CAS stays strict — content drift still fails.
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_capture_agrees_across_symlink_repository_root_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let (directory, _assembler, runner) = repository_fixture();
+        let alias_parent = tempfile::tempdir().expect("alias parent");
+        let alias = alias_parent.path().join("repo-alias");
+        symlink(directory.path(), &alias).expect("repository root symlink alias");
+
+        let project_id = ProjectId::new("project.fixture").expect("project id");
+        let repository_id = RepositoryId::new("repository.fixture").expect("repository id");
+        let worktree_id = WorktreeId::new("worktree.fixture").expect("worktree id");
+        let captured_at = UtcMicros(1);
+
+        let via_real = capture_exact_snapshot_for_test(
+            directory.path(),
+            project_id.clone(),
+            repository_id.clone(),
+            worktree_id.clone(),
+            captured_at,
+        );
+        let via_alias = capture_exact_snapshot_for_test(
+            &alias,
+            project_id.clone(),
+            repository_id.clone(),
+            worktree_id.clone(),
+            captured_at,
+        );
+        assert_eq!(
+            via_real, via_alias,
+            "alias and real roots must produce identical snapshot identity at capture"
+        );
+        assert_ne!(
+            alias.as_os_str(),
+            directory
+                .path()
+                .canonicalize()
+                .expect("canonical root")
+                .as_os_str(),
+            "fixture must exercise a non-canonical alias path"
+        );
+
+        // Daemon-mounted assembler stores the canonical root; caller snapshot
+        // arrived via the alias. Recapture must compare equal without loosening
+        // PartialEq.
+        let daemon_assembler = NativeGitIndexPreviewAssembler::new(
+            directory.path().canonicalize().expect("canonical root"),
+            project_id,
+            repository_id,
+            worktree_id,
+        );
+        let lock = runner.acquire_index_lock().expect("alias CAS lock");
+        let recaptured = daemon_assembler
+            .capture_snapshot(&via_alias, &runner, &lock)
+            .expect("daemon recapture through canonical root");
+        drop(lock);
+        assert_eq!(
+            recaptured, via_alias,
+            "daemon recapture must match caller snapshot captured through a symlink alias"
+        );
+
+        fs::write(directory.path().join("packet.txt"), "drifted\n").expect("content drift");
+        let lock = runner.acquire_index_lock().expect("drift lock");
+        let drifted = daemon_assembler
+            .capture_snapshot(&via_alias, &runner, &lock)
+            .expect("drift recapture");
+        drop(lock);
+        assert_ne!(
+            drifted, via_alias,
+            "exact CAS must still reject genuine content drift after alias canonicalization"
+        );
+        let stale = commit_request(
+            via_alias,
+            commit_intent("alias stale preview\n"),
+            "git-index-preview.alias-stale",
+        );
+        assert!(
+            matches!(
+                daemon_assembler.materialize(&stale),
+                Err(GitIndexTransactionPortError::StalePreview)
+            ),
+            "preview CAS must report stale_preview for drifted state, never succeed"
         );
     }
 }

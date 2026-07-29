@@ -36,6 +36,8 @@ const DAEMON_SOURCE: &str = include_str!("../src/daemon.rs");
 const PROJECT_OPEN_OWNERS_SOURCE: &str = include_str!("../src/daemon/project_open_owners.rs");
 const INVOCATION_SOURCE: &str = include_str!("../src/daemon/service/invocation.rs");
 const APPLICATION_SURFACE_SOURCE: &str = include_str!("../src/application_surface.rs");
+const HOOK_V2_SOURCE: &str = include_str!("../src/hooks/v2.rs");
+const HOOK_DAEMON_PORTS_SOURCE: &str = include_str!("../src/hooks/daemon_ports.rs");
 
 /// Every surface pins its page size to ten rows, so a query with more matches
 /// than this must cross a page boundary to answer at all.
@@ -653,6 +655,44 @@ fn source_application_surface_declares_the_pr12_operation_family() {
             "ApplicationSurfaceOperation::TestResults",
             "ApplicationSurfaceOperation::SessionLookup",
             "ApplicationSurfaceOperation::DiagnosticsRead",
+        ],
+    );
+}
+
+/// Hook V2 production delivery must stay on typed daemon ports.
+///
+/// This is a source lint: runtime delivery through those ports is covered by
+/// the hook unit suite and PR13 advisory host-delivery acceptance.
+#[test]
+fn source_hook_v2_feedback_delivery_uses_typed_daemon_ports() {
+    assert_contains_all(
+        HOOK_V2_SOURCE,
+        &[
+            "deliver_hook_feedback",
+            "DaemonAdmissionPort",
+            "DaemonFeedbackNoticeDeliveryPort",
+            "HookScopedFeedbackV1",
+        ],
+    );
+    assert!(
+        !HOOK_V2_SOURCE.contains("acknowledge_advisory_feedback_notice"),
+        "hook v2 must not retain a direct feedback-notice daemon helper"
+    );
+    let production_v2 = HOOK_V2_SOURCE
+        .split("#[cfg(test)]")
+        .next()
+        .expect("hook v2 production source precedes tests");
+    assert!(
+        !production_v2.contains("\"hook_v2_feedback_notice_delivery\""),
+        "hook v2 production dispatch must not embed feedback-notice delivery action JSON"
+    );
+    assert_contains_all(
+        HOOK_DAEMON_PORTS_SOURCE,
+        &[
+            "AsyncHookAdmissionPortV1",
+            "AsyncHookFeedbackDeliveryPortV1",
+            "hook_v2_admit",
+            "hook_v2_feedback_notice_delivery",
         ],
     );
 }

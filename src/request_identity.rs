@@ -349,62 +349,15 @@ pub fn mcp_connection_request_id(id: &Value, connection_scope: &str) -> Option<R
     .ok()
 }
 
-/// Counter for protocol ids whose uniqueness requirement is explicitly one
-/// live connection, not global or persistent.
-#[derive(Clone, Debug)]
-pub struct ConnectionLocalRequestSequence {
-    next: u64,
-}
-
-impl ConnectionLocalRequestSequence {
-    pub const fn starting_at(first: u64) -> Self {
-        Self { next: first }
-    }
-
-    pub fn next_number(&mut self) -> Result<u64, RequestIdentityError> {
-        let current = self.next;
-        self.next = self
-            .next
-            .checked_add(1)
-            .ok_or(RequestIdentityError::SequenceExhausted)?;
-        Ok(current)
-    }
-
-    pub fn next_string(&mut self, prefix: &str) -> Result<String, RequestIdentityError> {
-        self.next_number()
-            .map(|sequence| format!("{prefix}{sequence}"))
-    }
-}
-
-/// Checked sequence for correlation ids whose complete lifetime is one process.
+/// Connection- and process-local protocol sequences.
 ///
-/// This is intentionally distinct from [`mint_global_request_id`]: callers may
-/// use it only when no id survives restart or crosses a process boundary.
-#[derive(Debug)]
-pub struct ProcessLocalRequestSequence {
-    next: AtomicU64,
-}
-
-impl ProcessLocalRequestSequence {
-    pub const fn starting_at(first: u64) -> Self {
-        Self {
-            next: AtomicU64::new(first),
-        }
-    }
-
-    pub fn next_number(&self) -> Result<u64, RequestIdentityError> {
-        self.next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
-            .map_err(|_| RequestIdentityError::SequenceExhausted)
-    }
-
-    pub fn next_string(&self, prefix: &str) -> Result<String, RequestIdentityError> {
-        self.next_number()
-            .map(|sequence| format!("{prefix}{sequence}"))
-    }
-}
+/// These are neither global nor durable identities, so they live beside the
+/// LSP protocol that mints them. They stay re-exported here because callers
+/// choose between them and [`mint_global_request_id`] at the same decision
+/// point.
+pub use tracedecay_lsp::{
+    ConnectionLocalRequestSequence, ProcessLocalRequestSequence, SequenceExhausted,
+};
 
 pub struct McpConnectionIdentityAuthority {
     instance_id: Option<String>,
@@ -720,18 +673,6 @@ mod tests {
         .unwrap();
         assert_eq!(first, replay);
         assert_ne!(first, distinct);
-    }
-
-    #[test]
-    fn connection_local_sequence_never_wraps_to_a_duplicate() {
-        let mut sequence = ConnectionLocalRequestSequence::starting_at(u64::MAX);
-        assert!(sequence.next_number().is_err());
-    }
-
-    #[test]
-    fn process_local_sequence_never_wraps_to_a_duplicate() {
-        let sequence = ProcessLocalRequestSequence::starting_at(u64::MAX);
-        assert!(sequence.next_number().is_err());
     }
 
     #[test]

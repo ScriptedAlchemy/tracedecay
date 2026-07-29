@@ -15,7 +15,7 @@ use tracedecay_domain::configuration::{
     DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY, RestartRequirementV1,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    SEMANTIC_RUNTIME_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
@@ -28,6 +28,8 @@ use tracedecay_domain::configuration::{
     safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+
+use super::SemanticConfig;
 
 /// Canonical Plan 20 default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
@@ -159,6 +161,27 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Public,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        let semantic_default = SemanticConfig::default();
+        semantic_default.validate().map_err(|_| {
+            ConfigurationRegistryError::InvalidDefinition(DomainError::NonCanonical {
+                field: "semantic runtime default",
+            })
+        })?;
+        let semantic_default = serde_json::to_string(&semantic_default).map_err(|_| {
+            ConfigurationRegistryError::InvalidDefinition(DomainError::NonCanonical {
+                field: "semantic runtime default encoding",
+            })
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(SEMANTIC_RUNTIME_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::Text,
+            default_value: ConfigurationValueV1::Text(semantic_default),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::AnalyzerRestart,
             deprecation: DeprecationStateV1::Active,
         })?;
         register_legacy_project_settings(&mut registry)?;

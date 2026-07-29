@@ -13,9 +13,12 @@
 //!   attributes, module graph) and the temporal kernel boundary test.
 //! - `dependency_boundaries`: forbidden-path layering guards for
 //!   application/domain/store/query/API code.
+//! - `session_store_boundaries`: session/registered-database edge guards for
+//!   the modules that completed the store-port inversion.
 
 mod compile_isolation;
 mod dependency_boundaries;
 mod manifest;
 mod module_scanner;
 mod query_kernel;
+mod session_store_boundaries;

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use super::model::{
+use tracedecay_migrate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, SkippedPath, SqliteIntegrityOutcome,
     StoreArtifact, StoreStatus,
 };

@@ -7,6 +7,10 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::Json;
+use tracedecay_api::feedback::{
+    FeedbackStatusCoverageV1, FeedbackStatusDenominatorsV1, FeedbackStatusPresentationV1,
+    feedback_status_envelope,
+};
 use tracedecay_application::ApplicationContractError;
 
 use crate::application::feedback::observations::{
@@ -15,11 +19,7 @@ use crate::application::feedback::observations::{
 use crate::daemon::DaemonFeedbackRuntimeRegistrar;
 
 use super::DashboardState;
-use super::read_model::{
-    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessStateV1,
-    DashboardFreshnessV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardTimeV1,
-    DashboardWatermarkV1, scope_from_state,
-};
+use super::read_model::{DashboardEnvelopeV1, scope_from_state};
 
 pub(crate) type FeedbackStatusReadFuture = Pin<
     Box<
@@ -69,113 +69,33 @@ fn status_envelope(
     state: &DashboardState,
     projected: Result<FeedbackObservationReadModelV1, ApplicationContractError>,
 ) -> DashboardEnvelopeV1<FeedbackObservationReadModelV1> {
-    let scope = scope_from_state(state);
-    let Ok(payload) = projected else {
-        let Some(empty_payload) = FeedbackObservationReadModelV1::project(&[]) else {
-            unreachable!("empty feedback observation projection is canonical");
-        };
-        return DashboardEnvelopeV1::new(
-            scope,
-            DashboardDomainStateV1::Unknown,
-            DashboardCoverageV1::unknown(),
-            DashboardFreshnessV1::unknown(),
-            empty_payload,
-        )
-        .with_legal_actions(vec![DashboardLegalActionRefV1::new(
-            DashboardLegalActionKindV1::Refresh,
-            "feedback_status",
-        )]);
-    };
-
-    let denominators = &payload.denominators;
-    let coverage = match payload.coverage {
-        Plan26CoverageV1::Known => {
-            DashboardCoverageV1::complete(denominators.eligible, "feedback_observations")
-        }
-        Plan26CoverageV1::Partial | Plan26CoverageV1::Sampled | Plan26CoverageV1::Capped => {
-            DashboardCoverageV1::partial(
-                denominators.eligible,
-                denominators.persisted,
-                "feedback_observations",
-                feedback_omission_reasons(&payload),
-            )
-        }
-        Plan26CoverageV1::Stale | Plan26CoverageV1::Unknown => DashboardCoverageV1::unknown(),
-    };
-    let domain_state = match payload.coverage {
-        Plan26CoverageV1::Known if payload.total_count == 0 => {
-            DashboardDomainStateV1::CompleteZeroFindings
-        }
-        Plan26CoverageV1::Known => DashboardDomainStateV1::Ready,
-        Plan26CoverageV1::Stale => DashboardDomainStateV1::Stale,
-        Plan26CoverageV1::Partial | Plan26CoverageV1::Sampled | Plan26CoverageV1::Capped => {
-            DashboardDomainStateV1::Partial
-        }
-        Plan26CoverageV1::Unknown => DashboardDomainStateV1::Unknown,
-    };
-    let freshness = match payload.coverage {
-        Plan26CoverageV1::Stale => DashboardFreshnessV1 {
-            state: DashboardFreshnessStateV1::Stale,
-            observed_at_micros: payload.last_observed_at.map(|value| value.0),
-            watermark: payload
-                .watermark
-                .producer_sequence
-                .map(|sequence| sequence.to_string()),
+    let presentation = projected.map(|payload| FeedbackStatusPresentationV1 {
+        coverage: match payload.coverage {
+            Plan26CoverageV1::Known => FeedbackStatusCoverageV1::Known,
+            Plan26CoverageV1::Partial => FeedbackStatusCoverageV1::Partial,
+            Plan26CoverageV1::Sampled => FeedbackStatusCoverageV1::Sampled,
+            Plan26CoverageV1::Capped => FeedbackStatusCoverageV1::Capped,
+            Plan26CoverageV1::Stale => FeedbackStatusCoverageV1::Stale,
+            Plan26CoverageV1::Unknown => FeedbackStatusCoverageV1::Unknown,
         },
-        Plan26CoverageV1::Unknown => DashboardFreshnessV1::unknown(),
-        Plan26CoverageV1::Known
-        | Plan26CoverageV1::Partial
-        | Plan26CoverageV1::Sampled
-        | Plan26CoverageV1::Capped => DashboardFreshnessV1 {
-            state: DashboardFreshnessStateV1::Fresh,
-            observed_at_micros: payload.last_observed_at.map(|value| value.0),
-            watermark: payload
-                .watermark
-                .producer_sequence
-                .map(|sequence| sequence.to_string()),
+        total_count: payload.total_count,
+        denominators: FeedbackStatusDenominatorsV1 {
+            eligible: payload.denominators.eligible,
+            persisted: payload.denominators.persisted,
+            delayed: payload.denominators.delayed,
+            dropped: payload.denominators.dropped,
+            retention_dropped: payload.denominators.retention_dropped,
+            incomplete_boots: payload.denominators.incomplete_boots,
         },
-    };
-    let source_watermark =
-        payload
-            .watermark
-            .producer_sequence
-            .map(|sequence| DashboardWatermarkV1 {
-                source: "feedback_observations".to_owned(),
-                watermark: sequence.to_string(),
-            });
-    let time = DashboardTimeV1 {
-        valid_time_micros: payload.last_observed_at.map(|value| value.0),
-        observation_time_micros: payload
-            .watermark
-            .observed_through
-            .or(payload.last_observed_at)
-            .map_or_else(super::read_model::now_micros, |value| value.0),
-    };
-    let mut envelope = DashboardEnvelopeV1::new(scope, domain_state, coverage, freshness, payload)
-        .with_legal_actions(vec![DashboardLegalActionRefV1::new(
-            DashboardLegalActionKindV1::Refresh,
-            "feedback_status",
-        )]);
-    envelope.source_watermark = source_watermark;
-    envelope.time = time;
-    envelope
-}
-
-fn feedback_omission_reasons(model: &FeedbackObservationReadModelV1) -> Vec<String> {
-    let mut reasons = Vec::new();
-    if model.denominators.delayed > 0 {
-        reasons.push("delayed_observations".to_owned());
-    }
-    if model.denominators.dropped > 0 {
-        reasons.push("dropped_observations".to_owned());
-    }
-    if model.denominators.retention_dropped > 0 {
-        reasons.push("retention_capped".to_owned());
-    }
-    if model.denominators.incomplete_boots > 0 {
-        reasons.push("incomplete_producer_boot".to_owned());
-    }
-    reasons
+        last_observed_at_micros: payload.last_observed_at.map(|value| value.0),
+        observed_through_micros: payload.watermark.observed_through.map(|value| value.0),
+        producer_sequence: payload.watermark.producer_sequence,
+        payload,
+    });
+    feedback_status_envelope(scope_from_state(state), presentation, || {
+        FeedbackObservationReadModelV1::project(&[])
+            .expect("empty feedback observation projection is canonical")
+    })
 }
 
 #[cfg(test)]

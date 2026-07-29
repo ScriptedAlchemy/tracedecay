@@ -24,14 +24,20 @@ implemented across `crates/tracedecay-domain/src/research/`,
 `crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`,
 `crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`,
 `src/application/evidence_assembly.rs`, and `src/db/retrieval_anchor_authority.rs`.
-Per-section verdicts follow. Known pending: dedicated GitHub-stack anchor targets
-(Required behavior 19).
+Per-section verdicts follow.
 
-**Status split (2026-07-26).** The core above is delivered PR7 behavior.
-Dedicated `GitHubStackCapabilitySnapshotV1`/`GitHubStackSnapshotV1` anchor
-targets are not delivered and remain a named PR13/Plan 37 integration follow-up;
-their absence must not be hidden by the "landed" header or refiled as a PR14
-dashboard gap.
+**Status split (2026-07-26, closed 2026-07-29).** The core above is delivered
+PR7 behavior. Dedicated `GitHubStackCapabilitySnapshotV1`/`GitHubStackSnapshotV1`
+anchor targets were the one named PR13/Plan 37 integration follow-up; they now
+ship in `crates/tracedecay-domain/src/research/git_topology.rs` as
+`GitTopologyAnchorTargetV1::{GitHubStackCapability, GitHubStackSnapshot}`.
+
+Scope of that closure, stated exactly: this delivers Plan 13's anchor-target and
+lineage contract, not a producer. Plan 27's stacked-pull-request capability
+probing and Plan 37's PR15 read-only stack adapter remain unshipped, so no
+production path mints these anchors yet. The targets exist so those owners bind
+to one anchor contract instead of inventing a parallel reference family; their
+own absence must not be refiled as a Plan 13 gap or as a PR14 dashboard gap.
 
 ## Outcome
 
@@ -77,17 +83,17 @@ coverage (`crates/tracedecay-domain/src/research/{anchor,resolution}.rs`,
   sources contributed to an assembled result without making rank, score, query text,
   summaries, or embeddings source authority.
 
-**Status (2026-07-23):** Implemented, one item pending. `RetrievalAnchorId`
+**Status (2026-07-23; completed 2026-07-29):** Implemented. `RetrievalAnchorId`
 identity/resolution, provenance relations, evidence-time/generation/watermark/
 coverage/drift state, immutable Git-object and repository/worktree/ref/PR/check/
 conflict/preflight/integration-receipt bindings, safe tombstones, derived
 evidence-span identity, and payload-free retriever-contribution anchors all exist
 (`crates/tracedecay-domain/src/research/{anchor,git_topology,resolution,coverage}.rs`,
-`crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`). Pending:
-dedicated GitHub-stack capability/snapshot anchor targets — the shipped
+`crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`). The shipped
 `GitTopologyAnchorTargetV1` covers `RepositoryCapture`/`WorktreeCapture`/`RefSnapshot`/
-`NativeObject`/`PullRequestSnapshot`/`ReviewSnapshot`/`CheckSnapshot`/`ConflictEvidence`/
-`PreflightPreview`/`ApplyReceipt`/`IntegrationReceipt` but no `GitHubStack*` variant.
+`NativeObject`/`PullRequestSnapshot`/`ReviewSnapshot`/`CheckSnapshot`/
+`GitHubStackCapability`/`GitHubStackSnapshot`/`ConflictEvidence`/`PreflightPreview`/
+`ApplyReceipt`/`IntegrationReceipt`.
 
 ## Does not own
 
@@ -199,8 +205,8 @@ dedicated GitHub-stack capability/snapshot anchor targets — the shipped
     task projection may abbreviate presentation, but its prose, score, status, branch
     label, or aggregate cannot become replacement evidence.
 
-**Status (2026-07-23):** Items 1–18 and 20–22 implemented; item 19 (GitHub-stack
-targets) pending. Shipped reality:
+**Status (2026-07-23; item 19 completed 2026-07-29):** Items 1–22 implemented.
+Shipped reality:
 
 - Item 1: the opaque `RetrievalAnchorId` is realized as a derived, digest-tagged
   string — `retrieval.v2.sha256:<hex>` for observation/repository/entity targets and
@@ -277,13 +283,24 @@ escape, ambiguous native admin identity, or missing proof returns
 `ambiguous`/`unavailable`; it never rekeys the old anchor or reveals the prior
 raw path.
 
-**Status (2026-07-23):** Implemented. `GitTopologyAnchorTargetV1` exposes
-`RepositoryCapture`, `WorktreeCapture`, `RefSnapshot`, `NativeObject`,
-`PullRequestSnapshot`, `ReviewSnapshot`, `CheckSnapshot`, `ConflictEvidence`,
-`PreflightPreview`, `ApplyReceipt`, and `IntegrationReceipt` variants with
-capture/object-format/receipt bindings; SHA-1/SHA-256 IDs carry object-format and
-repository-capture bindings (`crates/tracedecay-domain/src/research/git_topology.rs`).
-GitHub-stack capability/snapshot targets remain pending.
+**Status (2026-07-23; completed 2026-07-29):** Implemented.
+`GitTopologyAnchorTargetV1` exposes `RepositoryCapture`, `WorktreeCapture`,
+`RefSnapshot`, `NativeObject`, `PullRequestSnapshot`, `ReviewSnapshot`,
+`CheckSnapshot`, `GitHubStackCapability`, `GitHubStackSnapshot`,
+`ConflictEvidence`, `PreflightPreview`, `ApplyReceipt`, and `IntegrationReceipt`
+variants with capture/object-format/receipt bindings; SHA-1/SHA-256 IDs carry
+object-format and repository-capture bindings
+(`crates/tracedecay-domain/src/research/git_topology.rs`).
+
+`GitHubStackCapabilitySnapshotV1` records the exact four-state Plan 27
+capability observation; `GitHubStackSnapshotV1` exists only for an `Enabled`
+capability and validates a same-repository, strictly linear layer chain whose
+lowest layer sits on the declared final target. Each layer reuses the exact
+`PullRequestSnapshotAnchorRefV1` rather than duplicating pull-request identity,
+the provider stack ID is retained only as a `PrivacyDomainBoundLocatorDigest`,
+and both records exclude review text, check output, CI logs, patch hunks, and
+provider cursors. A later provider observation rekeys to a new target instead of
+retargeting the retained one.
 
 ### Lossless `TaskId` and integration drilldown
 
@@ -801,9 +818,15 @@ through without defining another reference type (Required behavior 10).
 - Repository search finds no research-ledger, plan-parser, compatibility-inventory, or
   plan-execution requirement in this contract.
 
-**Status (2026-07-23):** Largely implemented. Acceptance coverage lives in
+**Status (2026-07-23; completed 2026-07-29):** Implemented. Acceptance coverage
+lives in
 `tests/session_suite/{anchor_resolution,anchor_tombstone_expiry,fact_anchor_authority,temporal_derived_evidence,temporal_privacy}.rs`,
 `tests/session_suite/temporal_projection/lineage.rs`,
 `crates/tracedecay-store/tests/session_contract/`, and
-`crates/tracedecay-domain/src/research/{anchor_test,resolution}.rs`. The one criterion
-still pending is GitHub-stack target evidence (Required behavior 19).
+`crates/tracedecay-domain/src/research/{anchor_test,resolution}.rs`. GitHub-stack
+target evidence (Required behavior 19) is covered by
+`crates/tracedecay-domain/tests/git_topology_anchor_contract.rs`, which proves
+capability/snapshot generation binding, ordered layer lineage, anchor rekeying on
+a later observation, payload-free retained records, and rejection of non-enabled
+capabilities, empty layers, detached bases, mis-numbered positions,
+cross-repository layers, and a final target the lowest layer does not sit on.

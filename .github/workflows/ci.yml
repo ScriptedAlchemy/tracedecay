@@ -392,6 +392,13 @@ jobs:
         if: matrix.name == 'Linux'
         run: python3 tests/distribution/fastembed/prepare_fixture.py --check tests/distribution/fastembed
 
+      - name: Validate checked-in semantic activation workload
+        if: matrix.name == 'Linux'
+        run: >-
+          cargo run --locked --all-features
+          --bin tracedecay-search-eval --
+          validate --repo-root .
+
       - name: Run in-flight observation crash harness
         if: matrix.name == 'Linux'
         run: >-

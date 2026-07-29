@@ -1,22 +1,27 @@
 use std::path::Path;
-use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
 use tracedecay_hooks::{
-    AsyncHookAdmissionPortV1, HookAdmissionFutureV1, HookConfigurationFileReaderV1,
-    HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
+    AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
+    HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
+    HookFeedbackDeliveryRouteV1, HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1,
     HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionStateV1, HookImmediateAdmissionV1,
-    HookReadyGuidanceV1, HookRuntimeControlV1, HookScopeBindingV1, HookSpoolConfigV1,
+    HookRuntimeControlV1, HookScopeBindingV1, HookScopedFeedbackV1, HookSpoolConfigV1,
     HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1, HookTransportDispositionV1,
     NativeEnvelopeMaterialV1, NativeHookDecodeError, SpoolAppendOutcomeV1, admit_async_exact_scope,
-    decode_bound_native_hook_event, finish_synchronous_hook,
+    decode_bound_native_hook_event, deliver_hook_feedback, finish_synchronous_hook,
 };
 
 use super::analytics::HookTimingSpan;
+use super::daemon_ports::{
+    ContextScoutFeedbackCommitV1, DaemonAdmissionPort, DaemonContextScoutFeedbackPort,
+    DaemonDeliveryReceiptPort, DaemonFeedbackNoticeDeliveryPort, DaemonOpenCodeLspUpdatePort,
+    now_utc, outcome_is_committed,
+};
 
 pub(crate) enum HookV2Dispatch {
     NotApplicable,
@@ -381,94 +386,6 @@ fn native_context_scout_lifecycle(
         .flatten()
 }
 
-struct DaemonAdmissionPort<'a> {
-    project_root: &'a Path,
-    session_id: Option<&'a str>,
-    lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
-    feedback_notice: Mutex<Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>>,
-    /// The caller's hook span, so the admission round trip is attributed like
-    /// every other hook/daemon call. Passing `None` here reported hosts that
-    /// route through V2 as having done no daemon IPC at all.
-    telemetry: Option<&'a HookTimingSpan>,
-}
-
-struct DaemonAdmissionResponseV1 {
-    immediate: HookImmediateAdmissionV1,
-    feedback_notice: Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DaemonAdmissionStatusV1 {
-    Accepted,
-    Committed,
-    ExactDuplicate,
-    Backpressured,
-    Rejected,
-    Unavailable,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DaemonAdmissionResponseWireV1 {
-    action: String,
-    status: DaemonAdmissionStatusV1,
-    disposition: Option<HookTransportDispositionV1>,
-    orchestration: Option<serde_json::Value>,
-    ready_guidance: Option<HookReadyGuidanceV1>,
-    feedback_notice: Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>,
-    reason: Option<String>,
-}
-
-fn daemon_admission_response(response: &serde_json::Value) -> DaemonAdmissionResponseV1 {
-    let unavailable = || DaemonAdmissionResponseV1 {
-        immediate: HookImmediateAdmissionV1::Unavailable,
-        feedback_notice: None,
-    };
-    let Ok(wire) = serde_json::from_value::<DaemonAdmissionResponseWireV1>(response.clone()) else {
-        return unavailable();
-    };
-    if wire.action != "hook_v2_admit" {
-        return unavailable();
-    }
-    let _ = (&wire.orchestration, &wire.reason);
-    match (wire.status, wire.disposition) {
-        (DaemonAdmissionStatusV1::Rejected, Some(HookTransportDispositionV1::CatchupRequired)) => {
-            DaemonAdmissionResponseV1 {
-                immediate: HookImmediateAdmissionV1::CatchupRequired,
-                feedback_notice: None,
-            }
-        }
-        (
-            DaemonAdmissionStatusV1::Accepted
-            | DaemonAdmissionStatusV1::Committed
-            | DaemonAdmissionStatusV1::ExactDuplicate,
-            Some(HookTransportDispositionV1::Accepted),
-        ) => {
-            if wire
-                .feedback_notice
-                .as_ref()
-                .is_some_and(|notice| notice.validate().is_err())
-            {
-                return unavailable();
-            }
-            DaemonAdmissionResponseV1 {
-                immediate: HookImmediateAdmissionV1::Accepted {
-                    admitted_at: now_utc(),
-                    ready_guidance: wire.ready_guidance,
-                },
-                feedback_notice: wire.feedback_notice,
-            }
-        }
-        (DaemonAdmissionStatusV1::Backpressured, None) => DaemonAdmissionResponseV1 {
-            immediate: HookImmediateAdmissionV1::Backpressured,
-            feedback_notice: None,
-        },
-        (DaemonAdmissionStatusV1::Unavailable, None) => unavailable(),
-        _ => unavailable(),
-    }
-}
-
 const HOOK_ADMISSION_ACK_BUDGET_MICROS: u64 = 25_000;
 
 fn elapsed_micros(started: Instant) -> u64 {
@@ -491,44 +408,6 @@ fn admission_window_after_elapsed(elapsed: u64) -> Option<(HookSynchronousDeadli
     ))
 }
 
-impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
-    fn try_admit_async<'a>(
-        &'a self,
-        envelope: &'a HookEventEnvelopeV2,
-        deadline: HookSynchronousDeadlineV1,
-    ) -> HookAdmissionFutureV1<'a> {
-        Box::pin(async move {
-            let Ok(envelope) = serde_json::to_value(envelope) else {
-                return HookImmediateAdmissionV1::Unavailable;
-            };
-            let response = tokio::time::timeout(
-                Duration::from_micros(deadline.remaining_micros()),
-                super::daemon_hook_action(
-                    Some(self.project_root),
-                    serde_json::json!({
-                        "action": "hook_v2_admit",
-                        "envelope": envelope,
-                        "native_session_id": self.session_id,
-                        "native_lifecycle": self.lifecycle,
-                    }),
-                    self.telemetry,
-                ),
-            )
-            .await;
-            let Ok(Ok(response)) = response else {
-                return HookImmediateAdmissionV1::Unavailable;
-            };
-            let response = daemon_admission_response(&response);
-            if let Some(notice) = response.feedback_notice
-                && let Ok(mut retained) = self.feedback_notice.lock()
-            {
-                *retained = Some(notice);
-            }
-            response.immediate
-        })
-    }
-}
-
 pub(crate) async fn dispatch(
     host: HookHostV1,
     event_json: &str,
@@ -546,7 +425,19 @@ pub(crate) async fn dispatch(
         }
         Err(_) => return unavailable(),
     };
-    dispatch_decoded(host, event_json, project_root, decoded, started, telemetry).await
+    let Some(prepared) = prepare_bound_hook(host, event_json, project_root, decoded) else {
+        return unavailable();
+    };
+    let native_session_id = prepared.native_session_id.clone();
+    let native_lifecycle = prepared.native_lifecycle.clone();
+    let admission = DaemonAdmissionPort::new(
+        project_root,
+        native_session_id.as_deref(),
+        native_lifecycle.as_ref(),
+        telemetry,
+    );
+    let delivery = DaemonFeedbackNoticeDeliveryPort::new(project_root);
+    dispatch_decoded(prepared, project_root, started, &admission, &delivery).await
 }
 
 pub(crate) async fn dispatch_opencode_tool_after(
@@ -568,15 +459,21 @@ pub(crate) async fn dispatch_opencode_tool_after(
         }
         Err(_) => return unavailable(),
     };
-    dispatch_decoded(
-        HookHostV1::OpenCode,
-        event_json,
+    let Some(prepared) =
+        prepare_bound_hook(HookHostV1::OpenCode, event_json, project_root, decoded)
+    else {
+        return unavailable();
+    };
+    let native_session_id = prepared.native_session_id.clone();
+    let native_lifecycle = prepared.native_lifecycle.clone();
+    let admission = DaemonAdmissionPort::new(
         project_root,
-        decoded,
-        started,
+        native_session_id.as_deref(),
+        native_lifecycle.as_ref(),
         telemetry,
-    )
-    .await
+    );
+    let delivery = DaemonFeedbackNoticeDeliveryPort::new(project_root);
+    dispatch_decoded(prepared, project_root, started, &admission, &delivery).await
 }
 
 pub(crate) async fn dispatch_opencode_lsp_updated(
@@ -590,25 +487,8 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
     let Ok(event) = serde_json::from_str::<serde_json::Value>(event_json) else {
         return unavailable();
     };
-    let response = super::daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "opencode_lsp_updated",
-            "event": event,
-        }),
-        telemetry,
-    )
-    .await;
-    let accepted = response
-        .ok()
-        .and_then(|value| {
-            value
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .is_some_and(|status| status == "accepted");
-    if accepted {
+    let port = DaemonOpenCodeLspUpdatePort::new(project_root, telemetry);
+    if port.submit_updated_event(&event).await {
         HookV2Dispatch::Handled {
             guidance: None,
             disposition: HookTransportDispositionV1::Accepted,
@@ -618,49 +498,71 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
     }
 }
 
-async fn dispatch_decoded(
+struct PreparedBoundHook {
+    host: HookHostV1,
+    layout: crate::storage::StoreLayout,
+    snapshot: HookConfigurationSnapshotV1,
+    envelope: HookEventEnvelopeV2,
+    native_session_id: Option<String>,
+    native_lifecycle: Option<NativeContextScoutLifecycleV1>,
+    prepared_at: UtcMicros,
+}
+
+fn prepare_bound_hook(
     host: HookHostV1,
     event_json: &str,
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
-    started: Instant,
-    telemetry: Option<&HookTimingSpan>,
-) -> HookV2Dispatch {
-    let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) else {
-        return unavailable();
-    };
+) -> Option<PreparedBoundHook> {
+    let layout = crate::storage::resolve_layout_for_current_profile(project_root).ok()?;
     let config_path = tracedecay_hooks::hook_configuration_path(&layout.data_root, host);
     let subscriber =
         HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(config_path));
     let now = now_utc();
     let HookConfigurationReadOutcomeV1::Bound(snapshot) = subscriber.load_current(host, now) else {
-        return unavailable();
+        return None;
     };
     let binding = &snapshot.binding;
     let native_fields =
         serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
     let native_session_id = native_fields.session_id().map(str::to_owned);
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields);
-    let Some(material) = native_material(event_json, decoded.family(), now) else {
-        return unavailable();
-    };
-    let Ok(envelope) =
-        decode_bound_native_hook_event(host, event_json.as_bytes(), binding, material)
-    else {
-        return unavailable();
-    };
+    let material = native_material(event_json, decoded.family(), now)?;
+    let envelope =
+        decode_bound_native_hook_event(host, event_json.as_bytes(), binding, material).ok()?;
+    Some(PreparedBoundHook {
+        host,
+        layout,
+        snapshot,
+        envelope,
+        native_session_id,
+        native_lifecycle,
+        prepared_at: now,
+    })
+}
 
-    let port = DaemonAdmissionPort {
-        project_root,
-        session_id: native_session_id.as_deref(),
-        lifecycle: native_lifecycle.as_ref(),
-        feedback_notice: Mutex::new(None),
-        telemetry,
-    };
+async fn dispatch_decoded(
+    prepared: PreparedBoundHook,
+    project_root: &Path,
+    started: Instant,
+    admission: &DaemonAdmissionPort<'_>,
+    delivery: &impl AsyncHookFeedbackDeliveryPortV1<
+        crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+    >,
+) -> HookV2Dispatch {
+    let PreparedBoundHook {
+        host,
+        layout,
+        snapshot,
+        envelope,
+        prepared_at,
+        ..
+    } = prepared;
+    let binding = &snapshot.binding;
     let immediate = match admission_window(started) {
         Some((deadline, timeout)) => match tokio::time::timeout(
             timeout,
-            admit_async_exact_scope(&envelope, binding, deadline, &port),
+            admit_async_exact_scope(&envelope, binding, deadline, admission),
         )
         .await
         {
@@ -681,7 +583,7 @@ async fn dispatch_decoded(
             host,
             &envelope,
             binding,
-            now,
+            prepared_at,
         )),
     };
     let guidance_envelope_id = match &immediate {
@@ -692,7 +594,6 @@ async fn dispatch_decoded(
         _ => None,
     };
     let control = HookRuntimeControlV1::from_configuration(&snapshot, HookGuidanceStateV1::Active);
-    let elapsed_before_finish_micros = elapsed_micros(started);
     let completed = finish_synchronous_hook(
         &envelope,
         binding,
@@ -700,55 +601,58 @@ async fn dispatch_decoded(
         immediate,
         replay,
         now_utc(),
-        elapsed_before_finish_micros,
+        elapsed_micros(started),
     );
-    let feedback_notice = port
-        .feedback_notice
-        .lock()
-        .ok()
-        .and_then(|mut notice| notice.take());
+    let feedback_notice = admission.take_feedback_notice();
     match completed {
         Ok(result) => {
-            if result.rendered_guidance.is_some()
-                && let Some(envelope_id) = guidance_envelope_id
-                && let Some(deadline) =
-                    HookSynchronousDeadlineV1::after_elapsed(elapsed_before_finish_micros)
-            {
-                let receipt = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
-                    receipt_id: context_scout_delivery_receipt_id(envelope.event_id, envelope_id),
-                    envelope_id,
-                    delivered_at: now_utc(),
-                    outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Attempted,
-                };
-                let _ = tokio::time::timeout(
-                    Duration::from_micros(deadline.remaining_micros()),
-                    record_context_scout_delivery(project_root, &receipt),
-                )
-                .await;
-            }
-            let feedback_notice = if may_render_feedback_notice(
-                result.receipt.immediate,
-                result.receipt.deadline_exceeded,
-            ) && feedback_notice
-                .as_ref()
-                .is_some_and(|notice| feedback_notice_matches_envelope(notice, &envelope))
-            {
-                feedback_notice
-            } else {
-                None
+            let rollback = HookFeedbackRollbackSwitchV1 {
+                configuration_revision: snapshot.revision,
+                route: HookFeedbackDeliveryRouteV1::HookV2,
             };
-            if let (Some(notice), Some(deadline)) = (
-                feedback_notice.as_ref(),
-                HookSynchronousDeadlineV1::after_elapsed(elapsed_micros(started)),
-            ) {
-                let _ = tokio::time::timeout(
-                    Duration::from_micros(deadline.remaining_micros()),
-                    acknowledge_advisory_feedback_notice(project_root, &envelope, notice),
-                )
-                .await;
-            }
+            let deadline = HookSynchronousDeadlineV1::after_elapsed(elapsed_micros(started));
+            let scout_receipt = match (result.rendered_guidance.as_ref(), guidance_envelope_id) {
+                (Some(_), Some(envelope_id)) => {
+                    Some(crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+                        receipt_id: context_scout_delivery_receipt_id(
+                            envelope.event_id,
+                            envelope_id,
+                        ),
+                        envelope_id,
+                        delivered_at: now_utc(),
+                        outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Attempted,
+                    })
+                }
+                _ => None,
+            };
+            let receipts = DaemonDeliveryReceiptPort::new(project_root);
+            let _ = deliver_hook_feedback(
+                &envelope,
+                &result.receipt,
+                rollback,
+                scout_receipt,
+                deadline,
+                &receipts,
+            )
+            .await;
+            let delivered = deliver_hook_feedback(
+                &envelope,
+                &result.receipt,
+                rollback,
+                feedback_notice,
+                deadline,
+                delivery,
+            )
+            .await
+            .unwrap_or_else(|_| HookFeedbackDeliveryV1 {
+                feedback: None,
+                outcome: None,
+            });
             HookV2Dispatch::Handled {
-                guidance: render_host_delivery(result.rendered_guidance, feedback_notice.as_ref()),
+                guidance: render_host_delivery(
+                    result.rendered_guidance,
+                    delivered.feedback.as_ref(),
+                ),
                 disposition: result.receipt.disposition,
             }
         }
@@ -756,11 +660,27 @@ async fn dispatch_decoded(
     }
 }
 
-fn may_render_feedback_notice(
-    immediate: HookImmediateAdmissionStateV1,
-    deadline_exceeded: bool,
-) -> bool {
-    immediate == HookImmediateAdmissionStateV1::Accepted && !deadline_exceeded
+impl HookScopedFeedbackV1 for crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
+    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        feedback_notice_matches_envelope(self, envelope)
+    }
+}
+
+impl HookScopedFeedbackV1 for crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        self.receipt_id != [0; 16]
+            && self.envelope_id != [0; 16]
+            && self.delivered_at.0 > 0
+            && self.receipt_id
+                == context_scout_delivery_receipt_id(envelope.event_id, self.envelope_id)
+    }
+}
+
+impl HookScopedFeedbackV1 for ContextScoutFeedbackCommitV1 {
+    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        self.feedback.receipt_id == self.receipt.receipt_id
+            && self.receipt.matches_envelope(envelope)
+    }
 }
 
 fn feedback_notice_matches_envelope(
@@ -785,23 +705,14 @@ pub(crate) async fn record_context_scout_delivery(
     project_root: &Path,
     receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
 ) -> bool {
-    super::daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "hook_v2_delivery_receipt",
-            "receipt": receipt,
-        }),
-        None,
+    let Some(deadline) = HookSynchronousDeadlineV1::after_elapsed(0) else {
+        return false;
+    };
+    outcome_is_committed(
+        DaemonDeliveryReceiptPort::new(project_root)
+            .post_receipt(receipt, deadline)
+            .await,
     )
-    .await
-    .ok()
-    .and_then(|response| {
-        response
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    })
-    .is_some_and(|status| matches!(status.as_str(), "stored" | "duplicate"))
 }
 
 pub(crate) async fn commit_context_scout_feedback(
@@ -809,49 +720,14 @@ pub(crate) async fn commit_context_scout_feedback(
     receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
     feedback: crate::agents::context_scout_v2::ContextScoutFeedbackV1,
 ) -> bool {
-    super::daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "hook_v2_feedback",
-            "receipt": receipt,
-            "feedback": feedback,
-        }),
-        None,
+    let Some(deadline) = HookSynchronousDeadlineV1::after_elapsed(0) else {
+        return false;
+    };
+    outcome_is_committed(
+        DaemonContextScoutFeedbackPort::new(project_root)
+            .post_feedback(receipt, &feedback, deadline)
+            .await,
     )
-    .await
-    .ok()
-    .and_then(|response| {
-        response
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    })
-    .is_some_and(|status| matches!(status.as_str(), "stored" | "duplicate"))
-}
-
-async fn acknowledge_advisory_feedback_notice(
-    project_root: &Path,
-    envelope: &HookEventEnvelopeV2,
-    notice: &crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
-) -> bool {
-    super::daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "hook_v2_feedback_notice_delivery",
-            "envelope": envelope,
-            "feedback_notice": notice,
-        }),
-        None,
-    )
-    .await
-    .ok()
-    .and_then(|response| {
-        response
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    })
-    .is_some_and(|status| matches!(status.as_str(), "stored" | "duplicate"))
 }
 
 fn render_host_delivery(
@@ -957,15 +833,6 @@ fn domain_hash32(value: &str, domain: &str) -> [u8; 32] {
     hash32(format!("{domain}:{value}").as_bytes())
 }
 
-fn now_utc() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(1, |duration| {
-            duration.as_micros().min(i64::MAX as u128) as i64
-        });
-    UtcMicros(micros.max(1))
-}
-
 fn unavailable() -> HookV2Dispatch {
     HookV2Dispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
 }
@@ -973,8 +840,14 @@ fn unavailable() -> HookV2Dispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::daemon_ports::daemon_admission_response;
+    use std::sync::Mutex;
     use tracedecay_domain::feedback::{FeedbackCycleId, FeedbackResultId, FeedbackScopeV1};
     use tracedecay_domain::{CodeGenerationId, CommitId, ManifestDigest, RepositoryId, WorktreeId};
+    use tracedecay_hooks::{
+        HookAdmissionReceiptV1, HookDeliveryFutureV1, HookFeedbackDeliveryOutcomeV1,
+        HookGuidanceDispositionV1,
+    };
 
     fn scope(worktree: &str) -> ResolvedScope {
         ResolvedScope::new(
@@ -1160,24 +1033,253 @@ mod tests {
         );
     }
 
-    #[test]
-    fn feedback_notice_never_renders_after_deadline_or_failed_admission() {
-        assert!(may_render_feedback_notice(
-            HookImmediateAdmissionStateV1::Accepted,
-            false
-        ));
-        assert!(!may_render_feedback_notice(
-            HookImmediateAdmissionStateV1::Accepted,
-            true
-        ));
-        assert!(!may_render_feedback_notice(
-            HookImmediateAdmissionStateV1::Backpressured,
-            false
-        ));
+    struct RecordingFeedbackDeliveryPort {
+        calls: Mutex<usize>,
+    }
+
+    impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>
+        for RecordingFeedbackDeliveryPort
+    {
+        fn deliver_hook_v2<'a>(
+            &'a self,
+            _envelope: &'a HookEventEnvelopeV2,
+            _feedback: &'a crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+            _deadline: HookSynchronousDeadlineV1,
+        ) -> HookDeliveryFutureV1<'a> {
+            Box::pin(async move {
+                *self.calls.lock().unwrap() += 1;
+                HookFeedbackDeliveryOutcomeV1::Delivered
+            })
+        }
+
+        fn deliver_legacy<'a>(
+            &'a self,
+            _envelope: &'a HookEventEnvelopeV2,
+            _feedback: &'a crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+            _deadline: HookSynchronousDeadlineV1,
+        ) -> HookDeliveryFutureV1<'a> {
+            Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
+        }
+    }
+
+    fn sample_notice() -> crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
+        crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
+            scope: FeedbackScopeV1 {
+                project_id: ProjectId::new("project.hook-v2-test").unwrap(),
+                repository_id: RepositoryId::new("repository.hook-v2-test").unwrap(),
+                worktree_id: WorktreeId::new("worktree.hook-v2-test").unwrap(),
+                branch_ref: "refs/heads/feature".to_owned(),
+                head_commit_id: CommitId::new("a".repeat(40)).unwrap(),
+            },
+            result_id: FeedbackResultId::new("result.hook-v2-test").unwrap(),
+            cycle_id: FeedbackCycleId::new("cycle.hook-v2-test").unwrap(),
+            generation_id: CodeGenerationId::new("generation.hook-v2-test").unwrap(),
+            generation_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            returned_findings: 2,
+            omitted_findings: 1,
+        }
+    }
+
+    fn sample_envelope(
+        notice: &crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+    ) -> HookEventEnvelopeV2 {
+        HookEventEnvelopeV2 {
+            schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+            event_id: [1; 16],
+            producer: HookHostV1::ClaudeCode,
+            protected_session_id: [2; 32],
+            project_id: domain_hash16(notice.scope.project_id.as_str(), "project"),
+            repository_id: domain_hash16(notice.scope.repository_id.as_str(), "repository"),
+            worktree_id: domain_hash16(notice.scope.worktree_id.as_str(), "worktree"),
+            worktree_epoch: 1,
+            binding_token: [3; 32],
+            ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+            observed_at: UtcMicros(1),
+            event: tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::TurnComplete,
+            },
+        }
+    }
+
+    fn sample_receipt(
+        immediate: HookImmediateAdmissionStateV1,
+        deadline_exceeded: bool,
+    ) -> HookAdmissionReceiptV1 {
+        HookAdmissionReceiptV1 {
+            event_id: [1; 16],
+            protected_session_id: [2; 32],
+            configuration_revision: 1,
+            completed_at: UtcMicros(10),
+            elapsed_micros: 1,
+            deadline_exceeded,
+            immediate,
+            disposition: HookTransportDispositionV1::Accepted,
+            guidance: HookGuidanceDispositionV1::NotReady,
+        }
+    }
+
+    #[tokio::test]
+    async fn feedback_notice_never_delivers_after_deadline_or_failed_admission() {
+        let notice = sample_notice();
+        let envelope = sample_envelope(&notice);
+        let port = RecordingFeedbackDeliveryPort {
+            calls: Mutex::new(0),
+        };
+        let rollback = HookFeedbackRollbackSwitchV1 {
+            configuration_revision: 1,
+            route: HookFeedbackDeliveryRouteV1::HookV2,
+        };
+        let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
+
+        let accepted = deliver_hook_feedback(
+            &envelope,
+            &sample_receipt(HookImmediateAdmissionStateV1::Accepted, false),
+            rollback,
+            Some(notice.clone()),
+            deadline,
+            &port,
+        )
+        .await
+        .unwrap();
+        assert!(accepted.feedback.is_some());
+        assert_eq!(*port.calls.lock().unwrap(), 1);
+
+        let after_deadline = deliver_hook_feedback(
+            &envelope,
+            &sample_receipt(HookImmediateAdmissionStateV1::Accepted, true),
+            rollback,
+            Some(notice.clone()),
+            deadline,
+            &port,
+        )
+        .await
+        .unwrap();
+        assert!(after_deadline.feedback.is_none());
+
+        let backpressured = deliver_hook_feedback(
+            &envelope,
+            &sample_receipt(HookImmediateAdmissionStateV1::Backpressured, false),
+            rollback,
+            Some(notice),
+            deadline,
+            &port,
+        )
+        .await
+        .unwrap();
+        assert!(backpressured.feedback.is_none());
+        assert_eq!(*port.calls.lock().unwrap(), 1);
     }
 
     #[tokio::test]
     async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
+        let project = tempfile::tempdir().unwrap();
+        let notice = sample_notice();
+        let mut envelope = sample_envelope(&notice);
+        envelope.event_id = [7; 16];
+        let envelope_id = [22; 16];
+        let receipt = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+            receipt_id: context_scout_delivery_receipt_id(envelope.event_id, envelope_id),
+            envelope_id,
+            delivered_at: UtcMicros(23),
+            outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Displayed,
+        };
+        let feedback = crate::agents::context_scout_v2::ContextScoutFeedbackV1 {
+            receipt_id: receipt.receipt_id,
+            kind: crate::agents::context_scout_v2::ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+        };
+        let commit = ContextScoutFeedbackCommitV1 {
+            receipt: receipt.clone(),
+            feedback,
+        };
+        let guard = crate::hooks::TestDaemonHookActionGuard::install([
+            serde_json::json!({ "status": "stored" }),
+            serde_json::json!({ "status": "duplicate" }),
+            serde_json::json!({ "status": "stored" }),
+        ]);
+        let admission = sample_receipt(HookImmediateAdmissionStateV1::Accepted, false);
+        let rollback = HookFeedbackRollbackSwitchV1 {
+            configuration_revision: 1,
+            route: HookFeedbackDeliveryRouteV1::HookV2,
+        };
+        let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
+
+        let recorded = deliver_hook_feedback(
+            &envelope,
+            &admission,
+            rollback,
+            Some(receipt.clone()),
+            deadline,
+            &DaemonDeliveryReceiptPort::new(project.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            recorded.outcome,
+            Some(HookFeedbackDeliveryOutcomeV1::Delivered)
+        );
+
+        let committed = deliver_hook_feedback(
+            &envelope,
+            &admission,
+            rollback,
+            Some(commit.clone()),
+            deadline,
+            &DaemonContextScoutFeedbackPort::new(project.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            committed.outcome,
+            Some(HookFeedbackDeliveryOutcomeV1::Duplicate)
+        );
+
+        let delivered = deliver_hook_feedback(
+            &envelope,
+            &admission,
+            rollback,
+            Some(notice.clone()),
+            deadline,
+            &DaemonFeedbackNoticeDeliveryPort::new(project.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            delivered.outcome,
+            Some(HookFeedbackDeliveryOutcomeV1::Delivered)
+        );
+        assert_eq!(delivered.feedback.as_ref(), Some(&notice));
+
+        let calls = guard.calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].0.as_deref(), Some(project.path()));
+        assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
+        assert_eq!(
+            serde_json::from_value::<
+                crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+            >(calls[0].1["receipt"].clone())
+            .unwrap(),
+            receipt
+        );
+        assert_eq!(calls[1].1["action"], "hook_v2_feedback");
+        assert_eq!(
+            serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutFeedbackV1>(
+                calls[1].1["feedback"].clone()
+            )
+            .unwrap(),
+            commit.feedback
+        );
+        assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
+        assert_eq!(
+            serde_json::from_value::<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>(
+                calls[2].1["feedback_notice"].clone()
+            )
+            .unwrap(),
+            notice
+        );
+    }
+
+    #[tokio::test]
+    async fn scout_receipt_and_feedback_helpers_delegate_to_daemon_ports() {
         let project = tempfile::tempdir().unwrap();
         let receipt = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
             receipt_id: [21; 16],
@@ -1199,22 +1301,59 @@ mod tests {
 
         let calls = guard.calls();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0.as_deref(), Some(project.path()));
         assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
-        assert_eq!(
-            serde_json::from_value::<
-                crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-            >(calls[0].1["receipt"].clone())
-            .unwrap(),
-            receipt
-        );
         assert_eq!(calls[1].1["action"], "hook_v2_feedback");
+    }
+
+    #[test]
+    fn production_hook_v2_does_not_embed_remaining_daemon_action_strings() {
+        let production = include_str!("v2.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        let ports = include_str!("daemon_ports.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("daemon ports production source precedes tests");
+        for action in [
+            "hook_v2_admit",
+            "hook_v2_delivery_receipt",
+            "hook_v2_feedback",
+            "hook_v2_feedback_notice_delivery",
+            "opencode_lsp_updated",
+        ] {
+            assert!(
+                !production.contains(&format!("\"{action}\"")),
+                "production hook v2 must not embed daemon action {action}"
+            );
+            assert!(
+                ports.contains(&format!("\"{action}\"")),
+                "daemon ports must own daemon action {action}"
+            );
+        }
+        assert!(!production.contains("daemon_hook_action"));
+        assert!(!production.contains("fn now_utc"));
+        assert!(ports.contains("pub(crate) fn now_utc"));
+        let now_utc_owners = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/hooks")
+            .read_dir()
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
+            .filter(|entry| {
+                let source = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                let production = source
+                    .split("#[cfg(test)]")
+                    .next()
+                    .unwrap_or(source.as_str());
+                production.contains("fn now_utc")
+            })
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
         assert_eq!(
-            serde_json::from_value::<crate::agents::context_scout_v2::ContextScoutFeedbackV1>(
-                calls[1].1["feedback"].clone()
-            )
-            .unwrap(),
-            feedback
+            now_utc_owners,
+            vec![std::ffi::OsString::from("daemon_ports.rs")],
+            "now_utc must be defined only in daemon_ports.rs production"
         );
     }
 
@@ -1238,9 +1377,7 @@ mod tests {
         assert_eq!(material.file_id, Some(hash16(b"event-17")));
     }
 
-    #[tokio::test]
-    async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
-        let project = tempfile::tempdir().unwrap();
+    fn opencode_lsp_fixture_event() -> (serde_json::Value, String) {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/packaged_host_events/opencode/baseline.json"
         ))
@@ -1253,6 +1390,13 @@ mod tests {
             .unwrap()["request"]
             .clone();
         let event_json = serde_json::to_string(&event).unwrap();
+        (event, event_json)
+    }
+
+    #[tokio::test]
+    async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
+        let project = tempfile::tempdir().unwrap();
+        let (event, event_json) = opencode_lsp_fixture_event();
         let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
             "action": "opencode_lsp_updated",
             "status": "accepted",
@@ -1272,6 +1416,90 @@ mod tests {
         assert_eq!(calls[0].0.as_deref(), Some(project.path()));
         assert_eq!(calls[0].1["action"], "opencode_lsp_updated");
         assert_eq!(calls[0].1["event"], event);
+    }
+
+    #[tokio::test]
+    async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
+        let project = tempfile::tempdir().unwrap();
+        let (_event, event_json) = opencode_lsp_fixture_event();
+        let _guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "action": "opencode_lsp_updated",
+            "status": "rejected",
+        })]);
+
+        let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
+        assert!(matches!(
+            dispatch,
+            HookV2Dispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
+        let project = tempfile::tempdir().unwrap();
+        let notice = sample_notice();
+        let mut envelope = sample_envelope(&notice);
+        envelope.event_id = [9; 16];
+        let envelope_id = [11; 16];
+        let receipt = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+            receipt_id: context_scout_delivery_receipt_id(envelope.event_id, envelope_id),
+            envelope_id,
+            delivered_at: UtcMicros(23),
+            outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Attempted,
+        };
+        let foreign = crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+            receipt_id: [3; 16],
+            ..receipt.clone()
+        };
+        let port = DaemonDeliveryReceiptPort::new(project.path());
+        let rollback = HookFeedbackRollbackSwitchV1 {
+            configuration_revision: 1,
+            route: HookFeedbackDeliveryRouteV1::HookV2,
+        };
+        let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
+        let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "status": "stored"
+        })]);
+
+        let after_deadline = deliver_hook_feedback(
+            &envelope,
+            &sample_receipt(HookImmediateAdmissionStateV1::Accepted, true),
+            rollback,
+            Some(receipt.clone()),
+            deadline,
+            &port,
+        )
+        .await
+        .unwrap();
+        assert!(after_deadline.feedback.is_none());
+
+        let foreign_scope = deliver_hook_feedback(
+            &envelope,
+            &sample_receipt(HookImmediateAdmissionStateV1::Accepted, false),
+            rollback,
+            Some(foreign),
+            deadline,
+            &port,
+        )
+        .await
+        .unwrap();
+        assert!(foreign_scope.feedback.is_none());
+
+        let accepted = deliver_hook_feedback(
+            &envelope,
+            &sample_receipt(HookImmediateAdmissionStateV1::Accepted, false),
+            rollback,
+            Some(receipt),
+            deadline,
+            &port,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            accepted.outcome,
+            Some(HookFeedbackDeliveryOutcomeV1::Delivered)
+        );
+        assert_eq!(guard.calls().len(), 1);
     }
 
     #[test]

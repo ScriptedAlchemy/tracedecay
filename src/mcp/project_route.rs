@@ -23,6 +23,26 @@ pub(crate) struct ResolvedProjectRoute {
     pub(crate) requested_git_common_dir: Option<PathBuf>,
     #[allow(dead_code)]
     pub(crate) requested_branch: Option<String>,
+    /// The exact application scope resolved ONCE at the entry point for this
+    /// route (plan: `docs/superpowers/plans/v2/01-domain-request-context.md`).
+    /// Query-facing handlers consume the routed graph; the scope names the
+    /// exact project/repository/worktree that graph answers for.
+    pub(crate) scope: tracedecay_application::ResolvedScope,
+}
+
+impl std::fmt::Debug for ResolvedProjectRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `graph` is a live engine handle with no useful Debug form; the
+        // scope naming what it answers for is the diagnostic payload.
+        formatter
+            .debug_struct("ResolvedProjectRoute")
+            .field("owner", &self.owner)
+            .field("requested_root", &self.requested_root)
+            .field("requested_git_common_dir", &self.requested_git_common_dir)
+            .field("requested_branch", &self.requested_branch)
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

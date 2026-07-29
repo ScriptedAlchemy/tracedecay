@@ -57,7 +57,7 @@ use tracedecay_domain::{
 use super::artifact_store::AdmittedArtifactV1;
 use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1, Sha256DigestHex};
 use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
-use crate::config::SemanticResourceCeilings;
+use super::root_adapter::SemanticResourceCeilings;
 
 /// Typed failure of one embedding operation or runtime admission (Plan 31:
 /// load failure, OOM, corruption, revocation, or incompatible pins disables
@@ -1399,10 +1399,10 @@ fn pseudo_embedding(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::*;
-    use crate::semantic_code::model_catalog::{
+    use super::super::model_catalog::{
         CatalogMemberPinV1, CatalogSourceV1, CatalogedFastEmbedModelV1,
     };
+    use super::*;
     use tracedecay_domain::{ChunkerRevision, EmbeddingProjectionKeyV1, PrivacyDomainId};
 
     fn id<T>(value: &str) -> T

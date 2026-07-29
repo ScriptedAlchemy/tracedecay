@@ -1,3 +1,19 @@
+//! Root build script: embeds the dashboard dist and the plugin bundle, renders
+//! the CLI logo, and bakes the build's commit identity.
+//!
+//! Rerun-edge contract. Cargo recompiles the whole root crate whenever this
+//! script reruns, regardless of whether the generated output changed, so every
+//! `rerun-if-changed` path below costs a full root rebuild when it moves and
+//! must be load-bearing. Two rules follow:
+//!
+//! - This script must never write to a path it watches, or it arms its own
+//!   trigger. `dashboard/app-dist/.source-stamp` is the one file it writes into
+//!   a watched tree, so `app-dist` is registered file-by-file with that stamp
+//!   skipped rather than as a directory.
+//! - Moving these generators into their own crate would not shield the root
+//!   from the churn: a dependency's build-script rerun recompiles its
+//!   dependents unconditionally.
+
 use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::{collections::hash_map::DefaultHasher, fmt::Write as _, fs, path::Path};
@@ -229,7 +245,12 @@ fn generate_plugin_bundle() {
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let out_path = Path::new(&out_dir).join("plugin_bundle_generated.rs");
-    if let Err(e) = fs::write(&out_path, code) {
+    // Only rewrite when the content differs, matching the dashboard manifest
+    // and logo: this script reruns for inputs it does not consume, and an
+    // identical rewrite would still churn the manifest every time.
+    if !matches!(fs::read_to_string(&out_path), Ok(current) if current == code)
+        && let Err(e) = fs::write(&out_path, code)
+    {
         panic!("failed to write {}: {e}", out_path.display());
     }
 }
@@ -399,19 +420,4 @@ fn main() {
         "cargo::rustc-env=TRACEDECAY_GIT_DIRTY={}",
         u8::from(identity.dirty)
     );
-
-    // Vendored WGSL grammar — compiled only when lang-wgsl is enabled.
-    // Using vendored sources avoids pulling in tree-sitter-wgsl 0.0.6 which was
-    // built against the incompatible tree-sitter 0.20 API.
-    if std::env::var("CARGO_FEATURE_LANG_WGSL").is_ok() {
-        let wgsl_dir = Path::new("vendor/tree-sitter-wgsl/src");
-        cc::Build::new()
-            .include(wgsl_dir)
-            .file(wgsl_dir.join("parser.c"))
-            .file(wgsl_dir.join("scanner.c"))
-            .warnings(false)
-            .compile("tree_sitter_wgsl");
-        println!("cargo::rerun-if-changed=vendor/tree-sitter-wgsl/src/parser.c");
-        println!("cargo::rerun-if-changed=vendor/tree-sitter-wgsl/src/scanner.c");
-    }
 }

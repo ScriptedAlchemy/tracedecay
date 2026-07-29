@@ -1149,9 +1149,9 @@ impl StoreAdministration {
         })
         .await
         .unwrap_or_else(|| {
-            Err(TraceDecayError::Config {
-                message: "branch store administration is busy: another daemon writer is active; retry after current project maintenance finishes".to_owned(),
-            })
+            Err(branch_administration_busy(
+                "branch store administration is busy: another daemon writer is active; retry after current project maintenance finishes",
+            ))
         })
     }
 }
@@ -1188,6 +1188,10 @@ fn canonical_branch_database_paths(paths: &[PathBuf]) -> Result<HashSet<PathBuf>
         .collect()
 }
 
+fn branch_administration_busy(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("branch_administration_busy", true, detail)
+}
+
 #[cfg(any(unix, test))]
 fn cached_scheduler_owns_selected<Scheduler>(
     automation_schedulers: &HashMap<ProjectServerKey, Scheduler>,
@@ -1222,12 +1226,10 @@ fn ensure_no_cached_store_owners<Server>(
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
     paths.sort();
-    Err(TraceDecayError::Config {
-        message: format!(
-            "branch store administration is busy: selected database(s) {} are still cached by the daemon as {cached_as}; restart the TraceDecay daemon before retrying",
-            paths.join(", ")
-        ),
-    })
+    Err(branch_administration_busy(format!(
+        "branch store administration is busy: selected database(s) {} are still cached by the daemon as {cached_as}; restart the TraceDecay daemon before retrying",
+        paths.join(", ")
+    )))
 }
 
 fn ensure_recovery_tombstone_states(
@@ -1300,6 +1302,23 @@ fn branch_admin_tool_result(
     }))
 }
 
+fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -> JsonRpcResponse {
+    if let Some((reason_code, retryable, detail)) = error.project_route_context() {
+        return JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            format!("branch administration unavailable: {detail}"),
+            Some(json!({
+                "tool": BRANCH_ADMIN_TOOL_NAME,
+                "reason_code": reason_code,
+                "retryable": retryable,
+                "detail": detail,
+            })),
+        );
+    }
+    JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string())
+}
+
 pub(super) async fn write_branch_admin_response(
     transport: &mut impl McpTransport,
     request: BranchAdminRequest,
@@ -1310,9 +1329,7 @@ pub(super) async fn write_branch_admin_response(
         (Ok(_), Ok(report)) => {
             JsonRpcResponse::success(request.id, branch_admin_tool_result(&report)?)
         }
-        (Ok(_), Err(error)) => {
-            JsonRpcResponse::error(request.id, ErrorCode::InternalError, error.to_string())
-        }
+        (Ok(_), Err(error)) => branch_admin_error_response(request.id, &error),
     };
     write_json_rpc_response(transport, &response).await
 }
@@ -1322,6 +1339,35 @@ pub(super) async fn write_branch_admin_response(
 mod tests {
     use super::super::{ProjectRouteKey, StoreOwnerKey};
     use super::*;
+
+    #[test]
+    fn branch_administration_busy_is_retryable_and_typed() {
+        let error = branch_administration_busy("another daemon writer is active");
+
+        assert_eq!(
+            error.project_route_context(),
+            Some((
+                "branch_administration_busy",
+                true,
+                "another daemon writer is active",
+            ))
+        );
+
+        let response = branch_admin_error_response(json!(7), &error);
+        let response_error = response
+            .error
+            .expect("branch busy response must be an error");
+        assert_eq!(response_error.code, ErrorCode::InternalError.as_i32());
+        assert_eq!(
+            response_error.data,
+            Some(json!({
+                "tool": BRANCH_ADMIN_TOOL_NAME,
+                "reason_code": "branch_administration_busy",
+                "retryable": true,
+                "detail": "another daemon writer is active",
+            }))
+        );
+    }
 
     #[tokio::test]
     async fn destructive_writer_operation_fails_fast_while_lane_is_busy() {

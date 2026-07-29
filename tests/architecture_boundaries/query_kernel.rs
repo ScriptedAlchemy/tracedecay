@@ -1,13 +1,13 @@
 #![allow(clippy::collapsible_if)] // test scaffolding
 //! Query kernel source guards.
 //!
-//! Validates that `src/query` stays pure: only allowlisted dependency roots,
+//! Validates that `crates/tracedecay-query/src` stays pure: only allowlisted dependency roots,
 //! macros, attributes, and derives; conventional module layout reachable from
-//! `src/query/mod.rs`; and no generated or out-of-repository sources.
+//! `crates/tracedecay-query/src/lib.rs`; and no generated or out-of-repository sources.
 
 use crate::manifest::{
-    cargo_source_layout, filesystem_rust_sources, git_tracked_paths,
-    inspect_physical_manifest_paths, physical_manifest_layout,
+    filesystem_rust_sources, git_tracked_paths, inspect_physical_manifest_paths,
+    query_allowed_packages,
 };
 use crate::module_scanner::{
     SourceReference, Token, matching_delimiter, normalize_identifier, normalize_relative,
@@ -19,6 +19,13 @@ use std::path::{Path, PathBuf};
 
 const FORBIDDEN_LIBSQL_CRATE: &str = "libsql";
 
+/// Dependency roots the query kernel source may name.
+///
+/// Beyond the language roots, every entry must be a declared dependency of
+/// `crates/tracedecay-query/Cargo.toml`. `tracedecay_application` is
+/// deliberately absent: the kernel reaches it only transitively through
+/// `tracedecay_code_index`, so naming it here would turn an accepted transitive
+/// edge into a direct layering violation.
 const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "alloc",
     "core",
@@ -30,17 +37,12 @@ const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "static_assertions",
     "std",
     "thiserror",
+    "tracedecay_code_index",
     "tracedecay_domain",
     "tracedecay_policy",
-    "tracedecay_store",
     "zeroize",
 ];
-const QUERY_ALLOWED_CRATE_PATHS: &[&[&str]] = &[&[
-    "crate",
-    "code_index",
-    "chunks",
-    "ExtractionAdmittedCodeSearchChunkV1",
-]];
+const QUERY_LANGUAGE_ROOTS: &[&str] = &["alloc", "core", "std"];
 /// Pure compile-time macros re-exported from allowlisted crates. Unlike the
 /// built-in macros in [`QUERY_ALLOWED_MACROS`], these must be imported before
 /// use, so the import-shadowing guard deliberately does not flag them.
@@ -233,15 +235,6 @@ fn validate_graph_query_path(
     let Some(root) = path.first() else {
         return true;
     };
-    if QUERY_ALLOWED_CRATE_PATHS.iter().any(|allowed| {
-        path.len() >= allowed.len()
-            && path
-                .iter()
-                .zip(allowed.iter())
-                .all(|(actual, expected)| actual == expected)
-    }) {
-        return true;
-    }
     let normalized = normalize_identifier(root);
     if QUERY_ALLOWED_ROOTS.contains(&normalized.as_str())
         || QUERY_ALLOWED_PRELUDE_PATH_ROOTS.contains(&root.as_str())
@@ -341,9 +334,7 @@ fn local_path_base<'a>(
     graph: &QueryModuleGraph,
 ) -> Option<(Vec<String>, &'a [String])> {
     match path.first().map(String::as_str) {
-        Some("crate") if path.get(1).is_some_and(|segment| segment == "query") => {
-            Some((Vec::new(), &path[2..]))
-        }
+        Some("crate") => Some((Vec::new(), &path[1..])),
         Some("self") => Some((current_module.to_vec(), &path[1..])),
         Some("super") => {
             let ascents = path
@@ -387,9 +378,9 @@ fn graph_module_symbols(graph: &QueryModuleGraph, module: &[String]) -> BTreeSet
 
 fn display_query_module(module: &[String]) -> String {
     if module.is_empty() {
-        "crate::query".to_string()
+        "crate".to_string()
     } else {
-        format!("crate::query::{}", module.join("::"))
+        format!("crate::{}", module.join("::"))
     }
 }
 
@@ -731,9 +722,13 @@ fn validate_query_path(
     };
     let normalized_root = normalize_identifier(root);
     if normalized_root == "crate" {
-        if path.get(1).map(|segment| normalize_identifier(segment)) != Some("query".to_string()) {
+        if !path
+            .get(1)
+            .map(|segment| normalize_identifier(segment))
+            .is_some_and(|segment| matches!(segment.as_str(), "retrieval" | "temporal"))
+        {
             violations.insert(format!(
-                "crate path must remain under crate::query: {}",
+                "crate path escapes query kernel: {}",
                 path.join("::")
             ));
         }
@@ -745,7 +740,10 @@ fn validate_query_path(
             .take_while(|segment| normalize_identifier(segment) == "super")
             .count();
         if ascents > module_depth {
-            violations.insert(format!("super path escapes src/query: {}", path.join("::")));
+            violations.insert(format!(
+                "super path escapes crates/tracedecay-query/src: {}",
+                path.join("::")
+            ));
         }
         return;
     }
@@ -949,13 +947,33 @@ fn validate_query_attributes(
                     )
                 }
                 "must_use" => body == [Token::Ident("must_use".to_string())],
+                "default" => body == [Token::Ident("default".to_string())],
                 "cfg" => {
                     body == [
                         Token::Ident("cfg".to_string()),
                         Token::Punct('('),
                         Token::Ident("test".to_string()),
                         Token::Punct(')'),
-                    ]
+                    ] || matches!(
+                        body,
+                        [
+                            Token::Ident(cfg),
+                            Token::Punct('('),
+                            Token::Ident(any),
+                            Token::Punct('('),
+                            Token::Ident(test),
+                            Token::Punct(','),
+                            Token::Ident(feature),
+                            Token::Punct('='),
+                            Token::StringLiteral(test_helpers),
+                            Token::Punct(')'),
+                            Token::Punct(')'),
+                        ] if cfg == "cfg"
+                            && any == "any"
+                            && test == "test"
+                            && feature == "feature"
+                            && test_helpers == "test-helpers"
+                    )
                 }
                 "test" | "from" => body.len() == 1,
                 "serde" => {
@@ -1092,7 +1110,9 @@ fn is_path_separator(tokens: &[Token], index: usize) -> bool {
 }
 
 pub(crate) fn query_kernel_sources(repository: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    let source_roots = [PathBuf::from("src/query")].into_iter().collect();
+    let source_roots = [PathBuf::from("crates/tracedecay-query/src")]
+        .into_iter()
+        .collect();
     let mut sources = filesystem_rust_sources(repository, &source_roots)?;
     if let Ok(tracked) = git_tracked_paths(repository) {
         let physical = inspect_physical_manifest_paths(repository, &tracked)?;
@@ -1107,7 +1127,7 @@ pub(crate) fn query_kernel_sources(repository: &Path) -> Result<BTreeSet<PathBuf
             physical
                 .symlinked_rust_sources
                 .into_iter()
-                .filter(|path| path.starts_with("src/query")),
+                .filter(|path| path.starts_with("crates/tracedecay-query/src")),
         );
     }
     Ok(sources)
@@ -1153,17 +1173,18 @@ fn build_query_module_graph(
     repository: &Path,
     sources: &BTreeSet<PathBuf>,
 ) -> Result<QueryModuleGraph, String> {
-    let query_root = repository.join("src/query");
+    let query_root = repository.join("crates/tracedecay-query/src");
     fs::canonicalize(&query_root)
         .map_err(|error| format!("cannot canonicalize {}: {error}", query_root.display()))?;
     let canonical_repository = fs::canonicalize(repository)
         .map_err(|error| format!("cannot canonicalize {}: {error}", repository.display()))?;
-    let root = PathBuf::from("src/query/mod.rs");
+    let root = PathBuf::from("crates/tracedecay-query/src/lib.rs");
     let mut graph = QueryModuleGraph::default();
     if !sources.contains(&root) {
-        graph
-            .violations
-            .insert("src/query/mod.rs is required as the single query module root".to_string());
+        graph.violations.insert(
+            "crates/tracedecay-query/src/lib.rs is required as the single query module root"
+                .to_string(),
+        );
         return Ok(graph);
     }
 
@@ -1171,7 +1192,7 @@ fn build_query_module_graph(
     let mut scanned = BTreeSet::new();
     let mut pending = VecDeque::from([QueryScanContext {
         path: root,
-        module_dir: PathBuf::from("src/query"),
+        module_dir: PathBuf::from("crates/tracedecay-query/src"),
         module_path: Vec::new(),
     }]);
 
@@ -1242,7 +1263,7 @@ fn build_query_module_graph(
                     ..
                 } => {
                     graph.violations.insert(format!(
-                        "{}: #[path = {path:?}] is forbidden; query modules must follow the src/query file convention",
+                        "{}: #[path = {path:?}] is forbidden; query modules must follow the crates/tracedecay-query/src file convention",
                         context.path.display()
                     ));
                 }
@@ -1309,7 +1330,7 @@ fn build_query_module_graph(
 
     for unreachable in sources.difference(&reachable) {
         graph.violations.insert(format!(
-            "{} is not reachable from src/query/mod.rs through conventional mod declarations",
+            "{} is not reachable from crates/tracedecay-query/src/lib.rs through conventional mod declarations",
             unreachable.display()
         ));
     }
@@ -1447,6 +1468,162 @@ fn query_source_guard_rejects_import_path_and_macro_bypasses() {
 }
 
 #[test]
+fn query_source_guard_allows_exact_test_helper_cfg() {
+    let violations = query_source_violations(
+        r#"
+        #[cfg(any(test, feature = "test-helpers"))]
+        pub fn for_test() {}
+        "#,
+    );
+
+    assert!(
+        violations.is_empty(),
+        "exact test-helper cfg must remain available to integration tests: {violations:?}"
+    );
+}
+
+#[test]
+fn query_source_guard_rejects_other_cfg_forms() {
+    for (name, source) in [
+        (
+            "unrelated feature",
+            r#"#[cfg(feature = "test-helpers")] fn helper() {}"#,
+        ),
+        ("arbitrary any", r#"#[cfg(any(test, unix))] fn helper() {}"#),
+        (
+            "additional feature",
+            r#"#[cfg(any(test, feature = "test-helpers", feature = "extra"))] fn helper() {}"#,
+        ),
+        (
+            "different combinator",
+            r#"#[cfg(all(test, feature = "test-helpers"))] fn helper() {}"#,
+        ),
+    ] {
+        let violations = query_source_violations(source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("not an exact allowlisted form")),
+            "query source guard accepted {name}: {violations:?}"
+        );
+    }
+}
+
+#[test]
+fn query_source_guard_allows_only_exact_default_enum_marker() {
+    let violations = query_source_violations(
+        r#"
+        #[derive(Default)]
+        enum Mode {
+            #[default]
+            Current,
+            Historical,
+        }
+        "#,
+    );
+
+    assert!(
+        violations.is_empty(),
+        "the exact Rust #[default] enum marker must remain available: {violations:?}"
+    );
+
+    for (name, source) in [
+        (
+            "default with arguments",
+            "#[default(anything)] enum Mode { Current }",
+        ),
+        (
+            "default with a value",
+            r#"#[default = "current"] enum Mode { Current }"#,
+        ),
+        ("default cfg", "#[cfg(default)] enum Mode { Current }"),
+        (
+            "default through cfg_attr",
+            "#[cfg_attr(test, default)] enum Mode { Current }",
+        ),
+        ("unrelated attribute", "#[arbitrary] enum Mode { Current }"),
+    ] {
+        let violations = query_source_violations(source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("not an exact allowlisted form")),
+            "query source guard accepted {name}: {violations:?}"
+        );
+    }
+}
+
+#[test]
+fn temporal_execution_control_source_has_no_scheduler_state() {
+    let source = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/tracedecay-query/src/temporal/ports.rs"
+    ))
+    .expect("read the temporal ports source");
+    let (production_source, _) = source
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("ports module has an inline test boundary");
+    for forbidden in [
+        "use std::thread;",
+        "std::thread::",
+        "thread::spawn",
+        "thread::sleep",
+        "Waker",
+        "wake_waiters",
+        "fn register(",
+        "tokio",
+        "rusqlite",
+        "sqlx",
+        "diesel",
+        "sqlite",
+        "SELECT ",
+        "async_std",
+        "smol::",
+    ] {
+        assert!(
+            !production_source.contains(forbidden),
+            "runtime-bound deadline implementation contains forbidden `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn temporal_ports_and_cursor_are_runtime_and_sql_free() {
+    let ports = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/tracedecay-query/src/temporal/ports.rs"
+    ))
+    .expect("ports");
+    let cursor = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/tracedecay-query/src/temporal/cursor.rs"
+    ))
+    .expect("cursor");
+    let (ports_prod, _) = ports
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("ports tests");
+    let (cursor_prod, _) = cursor
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("cursor tests");
+    for (label, source) in [("ports", ports_prod), ("cursor", cursor_prod)] {
+        for forbidden in [
+            "rusqlite",
+            "sqlx",
+            "diesel",
+            "tokio::",
+            "async_std",
+            "std::thread::",
+            "thread::spawn",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{label} production source must remain SQL/runtime-free; found `{forbidden}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn query_source_guard_scopes_clippy_lint_to_allowlisted_attribute() {
     let accepted = query_source_violations(
         r#"
@@ -1478,8 +1655,8 @@ fn query_source_guard_allows_comments_strings_and_query_contracts() {
 
         use {::serde::Serialize, std::collections::BTreeSet};
         use tracedecay_domain::session::SessionId;
-        use tracedecay_store::memory::StorePort;
-        use crate::query::temporal::ports::TemporalReadPort;
+        use tracedecay_policy::retention::RetentionWindow;
+        use crate::temporal::ports::TemporalReadPort;
 
         #[derive(Clone, Debug, Serialize)]
         struct Contract;
@@ -1494,7 +1671,72 @@ fn query_source_guard_allows_comments_strings_and_query_contracts() {
 
     assert!(
         query_source_violations(source).is_empty(),
-        "comments, strings, and domain/store/query contracts must be allowed"
+        "comments, strings, and domain/policy/query contracts must be allowed"
+    );
+}
+
+/// The query kernel depends on `tracedecay-code-index`, which depends on
+/// `tracedecay-application`. That makes application types reachable from the
+/// kernel's dependency closure, so the decision has to be explicit: the
+/// transitive edge is accepted, but a direct one is not. The kernel may name
+/// only `tracedecay_code_index`; naming `tracedecay_application` — including
+/// through a code-index re-export path — is a layering violation.
+#[test]
+fn query_source_guard_refuses_direct_application_layer_paths() {
+    assert!(
+        !QUERY_ALLOWED_ROOTS.contains(&"tracedecay_application"),
+        "tracedecay_application must not become a query source root"
+    );
+    for (name, source) in [
+        (
+            "direct import",
+            "use tracedecay_application::ResolvedScope;",
+        ),
+        (
+            "aliased import",
+            "use tracedecay_application::RequestContext as Context;",
+        ),
+        (
+            "qualified path",
+            "fn scope() -> tracedecay_application::ResolvedScope { unreachable!() }",
+        ),
+    ] {
+        let violations = query_source_violations(source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("tracedecay_application")),
+            "query source guard accepted a direct application path via {name}: {violations:?}"
+        );
+    }
+
+    let transitive_owner = query_source_violations(
+        "use tracedecay_code_index::historical_query::HistoricalSourceAuthorizationV1;",
+    );
+    assert!(
+        transitive_owner.is_empty(),
+        "the code-index hop that owns the application edge must stay allowed: {transitive_owner:?}"
+    );
+}
+
+/// Both query allowlists describe the same dependency contract from different
+/// angles: `QUERY_ALLOWED_ROOTS` gates source paths, `QUERY_ALLOWED_PACKAGES`
+/// gates manifest entries. Drift between them is how a root outlives the
+/// dependency that justified it.
+#[test]
+fn query_source_roots_agree_with_the_query_package_allowlist() {
+    let packages = query_allowed_packages()
+        .iter()
+        .map(|package| normalize_identifier(package))
+        .collect::<BTreeSet<_>>();
+    let roots = QUERY_ALLOWED_ROOTS
+        .iter()
+        .filter(|root| !QUERY_LANGUAGE_ROOTS.contains(*root))
+        .map(|root| normalize_identifier(root))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        roots, packages,
+        "query source roots and query package allowlist must describe the same dependencies"
     );
 }
 
@@ -1531,9 +1773,9 @@ fn query_source_guard_allows_proven_local_macros_and_exact_serde_forms() {
 fn query_kernel_guard_rejects_generated_source_and_unresolved_modules() {
     let temporary = tempfile::tempdir().expect("create query source fixture");
     let repository = temporary.path();
-    fs::create_dir_all(repository.join("src/query")).unwrap();
+    fs::create_dir_all(repository.join("crates/tracedecay-query/src")).unwrap();
     fs::write(
-        repository.join("src/query/mod.rs"),
+        repository.join("crates/tracedecay-query/src/lib.rs"),
         r#"
         #[path = "../outside.rs"]
         mod path_dependency;
@@ -1561,15 +1803,19 @@ fn query_kernel_guard_rejects_generated_source_and_unresolved_modules() {
 fn query_kernel_guard_accepts_only_conventional_reachable_modules() {
     let temporary = tempfile::tempdir().expect("create query module fixture");
     let repository = temporary.path();
-    fs::create_dir_all(repository.join("src/query/temporal")).unwrap();
-    fs::write(repository.join("src/query/mod.rs"), "pub mod temporal;\n").unwrap();
+    fs::create_dir_all(repository.join("crates/tracedecay-query/src/temporal")).unwrap();
     fs::write(
-        repository.join("src/query/temporal/mod.rs"),
+        repository.join("crates/tracedecay-query/src/lib.rs"),
+        "pub mod temporal;\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.join("crates/tracedecay-query/src/temporal/mod.rs"),
         "mod ports;\nuse self::ports::Port;\nstruct Kernel(Port);\n",
     )
     .unwrap();
     fs::write(
-        repository.join("src/query/temporal/ports.rs"),
+        repository.join("crates/tracedecay-query/src/temporal/ports.rs"),
         "pub struct Port;\n",
     )
     .unwrap();
@@ -1583,34 +1829,12 @@ fn query_kernel_guard_accepts_only_conventional_reachable_modules() {
     );
 }
 
+/// The manifest preconditions this test used to assert now live in
+/// `manifest::workspace_manifest_contract_is_reported_independently`, so a
+/// manifest regression can no longer abort this scan before it runs.
 #[test]
 fn temporal_kernel_sources_respect_dependency_boundary() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let physical =
-        physical_manifest_layout(&repository).expect("inspect tracked physical Cargo manifests");
-    assert!(
-        physical.violations.is_empty(),
-        "workspace manifests violate driver-neutral dependency boundaries:\n{}",
-        physical
-            .violations
-            .iter()
-            .map(|violation| format!("  - {violation}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-
-    let layout = cargo_source_layout(&repository).expect("inspect Cargo workspace membership");
-    assert!(
-        layout.boundary_violations.is_empty(),
-        "workspace dependencies or targets violate query/runtime boundaries:\n{}",
-        layout
-            .boundary_violations
-            .iter()
-            .map(|violation| format!("  - {violation}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-
     let sources = query_kernel_sources(&repository).expect("resolve temporal kernel sources");
     assert!(!sources.is_empty(), "temporal kernel sources must exist");
     let violations =
@@ -1628,7 +1852,7 @@ fn pr8_temporal_kernel_has_one_scope_cursor_and_payload_path() {
     let sources = query_kernel_sources(&repository).expect("resolve temporal kernel sources");
     let temporal_sources = sources
         .iter()
-        .filter(|path| path.starts_with("src/query/temporal"))
+        .filter(|path| path.starts_with("crates/tracedecay-query/src/temporal"))
         .collect::<Vec<_>>();
     assert!(
         !temporal_sources.is_empty(),
@@ -1637,7 +1861,8 @@ fn pr8_temporal_kernel_has_one_scope_cursor_and_payload_path() {
     assert_eq!(
         temporal_sources
             .iter()
-            .filter(|path| path.as_path() == Path::new("src/query/temporal/cursor.rs"))
+            .filter(|path| path.as_path()
+                == Path::new("crates/tracedecay-query/src/temporal/cursor.rs"))
             .count(),
         1,
         "PR8 must retain exactly one canonical cursor module"

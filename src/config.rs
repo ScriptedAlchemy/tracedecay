@@ -60,7 +60,7 @@ pub const DB_FILENAME: &str = "tracedecay.db";
 /// profile, rollback profile, and local resource ceilings under one setting
 /// prevents a configuration revision from exposing a partially updated
 /// semantic selection.
-pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
+pub use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 
 /// Atomic daemon retention/compaction policy tree (Plan 38).
 ///

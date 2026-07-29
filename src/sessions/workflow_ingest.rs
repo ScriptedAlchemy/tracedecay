@@ -10,12 +10,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tracedecay_domain::ProjectId;
-use tracedecay_store::StoreShardScopeV1;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::application::host_admission::DEFAULT_MAX_RECORDS;
-use crate::db::engine::params;
-use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::ProjectRootMatcher;
 use crate::sessions::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -24,9 +21,8 @@ use crate::sessions::source::{
     MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, TranscriptDiscoveryBounds,
     collect_files_with_ext_bounded, path_byte_len,
 };
-use crate::sessions::workflow_index::{
-    INGEST_WATERMARK_KEY, WorkflowAgent, WorkflowRun, WorkflowStatus, read_ingest_watermark,
-};
+use crate::sessions::workflow_index::{WorkflowAgent, WorkflowRun, WorkflowStatus};
+use crate::store::GlobalDbWorkflowStore;
 
 const RESULT_SUMMARY_CAP: usize = 600;
 const MAX_WORKFLOW_RUNS: usize = DEFAULT_MAX_RECORDS;
@@ -59,35 +55,17 @@ struct DiscoveredRun {
 /// Fail-open at every level: a store that cannot be read, a project whose home
 /// cannot be resolved, or an individual malformed run all degrade to "ingest
 /// less", never an error. Returns the number of runs and agents upserted.
-pub(crate) async fn ingest_workflow_runs(
-    db: &RegisteredGlobalDb,
-    project_id: &ProjectId,
-    project_root: &Path,
-) -> WorkflowIngestStats {
-    let Some(home) = crate::sessions::home_dir() else {
-        return WorkflowIngestStats::default();
-    };
-    ingest_workflow_runs_from(
-        db,
-        project_id,
-        project_root,
-        &home.join(".claude").join("projects"),
-    )
-    .await
-}
-
-pub(crate) async fn ingest_workflow_runs_from(
-    db: &RegisteredGlobalDb,
+///
+/// The registered-database entry points live on the store adapter, which
+/// implements [`WorkflowIngestSink`]; taking the concrete adapter here keeps
+/// spawn paths on inherent `Send` futures instead of HRTB trait RPITIT.
+pub(crate) async fn ingest_workflow_runs_with_sink(
+    sink: &GlobalDbWorkflowStore<'_>,
     project_id: &ProjectId,
     project_root: &Path,
     projects_dir: &Path,
 ) -> WorkflowIngestStats {
-    if !matches!(
-        &db.binding().shard_id.scope,
-        StoreShardScopeV1::ProjectSessions {
-            project_id: authority_project_id,
-        } if authority_project_id == project_id
-    ) {
+    if !sink.matches_project_sessions_authority(project_id) {
         tracing::warn!(
             %project_id,
             reason_code = "project_sessions_authority_mismatch",
@@ -95,11 +73,9 @@ pub(crate) async fn ingest_workflow_runs_from(
         );
         return WorkflowIngestStats::default();
     }
-    let Ok(snapshot) = db.read_snapshot().await else {
+    let Some(watermark) = sink.read_ingest_watermark().await else {
         return WorkflowIngestStats::default();
     };
-    let watermark = read_ingest_watermark(&snapshot, INGEST_WATERMARK_KEY).await;
-    drop(snapshot);
 
     let mut stats = WorkflowIngestStats::default();
     let mut max_mtime = watermark;
@@ -130,7 +106,7 @@ pub(crate) async fn ingest_workflow_runs_from(
             max_mtime = run_mtime;
         }
 
-        match ingest_one_run(db, &run).await {
+        match ingest_one_run(sink, &run).await {
             Ok(run_stats) => stats = stats.merge(run_stats),
             Err(err) => {
                 tracing::debug!(run_id = %run.run_id, error = %err, "skipping workflow run");
@@ -142,30 +118,7 @@ pub(crate) async fn ingest_workflow_runs_from(
     // processed. Best-effort: a write failure only means the next sweep does a
     // little redundant (idempotent) work.
     if max_mtime > watermark {
-        match db.begin_write_transaction().await {
-            Ok(transaction) => {
-                let write = async {
-                    transaction
-                        .execute(
-                            "INSERT INTO workflow_index_meta(key, value)
-                         VALUES (?1, ?2)
-                         ON CONFLICT(key) DO UPDATE SET
-                             value = MAX(value, excluded.value),
-                             updated_at = unixepoch()",
-                            params![INGEST_WATERMARK_KEY, max_mtime],
-                        )
-                        .await?;
-                    transaction.commit().await
-                }
-                .await;
-                if let Err(err) = write {
-                    tracing::debug!(error = %err, "workflow ingest watermark not advanced");
-                }
-            }
-            Err(err) => {
-                tracing::debug!(error = %err, "workflow ingest writer unavailable");
-            }
-        }
+        sink.bump_ingest_watermark(max_mtime).await;
     }
 
     stats
@@ -335,7 +288,7 @@ fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
 
 /// Parse one discovered run and upsert its run row plus every agent row.
 async fn ingest_one_run(
-    db: &RegisteredGlobalDb,
+    sink: &GlobalDbWorkflowStore<'_>,
     run: &DiscoveredRun,
 ) -> Result<WorkflowIngestStats, crate::sessions::workflow_index::WorkflowIndexError> {
     let (mut workflow_run, mut agents) = match run.meta_path.as_deref().and_then(read_run_meta) {
@@ -356,14 +309,7 @@ async fn ingest_one_run(
         workflow_run.agent_count = i64::try_from(agents.len()).unwrap_or(i64::MAX);
     }
 
-    let transaction = db.begin_write_transaction().await.map_err(|error| {
-        crate::sessions::workflow_index::WorkflowIndexError::Db(error.to_string())
-    })?;
-    crate::sessions::workflow_index::upsert_run(&transaction, &workflow_run).await?;
-    for agent in &agents {
-        crate::sessions::workflow_index::upsert_agent(&transaction, agent).await?;
-    }
-    transaction.commit().await?;
+    sink.upsert_workflow_run(&workflow_run, &agents).await?;
     Ok(WorkflowIngestStats {
         runs_ingested: 1,
         agents_ingested: agents.len() as u64,

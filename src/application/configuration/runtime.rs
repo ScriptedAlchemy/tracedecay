@@ -10,10 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueKindV1,
-    ConfigurationValueV1, CredentialReferenceMetadataV1, DeprecationStateV1, ProtectedApplyRequest,
-    ProtectedChange, ProtectedChangePlan, RestartRequirementV1, SettingDefinitionV1, SettingKey,
-    SettingScopeV1, SettingSensitivityV1,
+    ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
+    CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
+    SettingKey,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros, canonical_sha256};
 
@@ -23,8 +22,7 @@ use crate::application::semantic_runtime::{
 };
 use crate::config::{
     ConfigurationDaemonClient, OpenedRuntimeConfiguration, PinnedRuntimeConfiguration,
-    RuntimeConfigurationFuture, RuntimeConfigurationTarget, SEMANTIC_RUNTIME_SETTING_KEY,
-    SemanticConfig,
+    RuntimeConfigurationFuture, RuntimeConfigurationTarget,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
@@ -72,13 +70,11 @@ impl ProjectConfigurationRuntime {
             registered_database,
         } = opened;
         let target = configuration.target.clone();
-        let mut registry =
-            crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("configuration registry unavailable: {error}"),
-                }
-            })?;
-        register_semantic_runtime_configuration(&mut registry)?;
+        let registry = crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("configuration registry unavailable: {error}"),
+            }
+        })?;
         let registry = Arc::new(registry);
         let store = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
             Arc::clone(&registered_database),
@@ -391,37 +387,6 @@ impl Drop for ProjectConfigurationRuntime {
             &self.dyn_client(),
         );
     }
-}
-
-fn register_semantic_runtime_configuration(
-    registry: &mut crate::config::registry::ConfigurationRegistry,
-) -> Result<()> {
-    let key =
-        SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).map_err(|error| TraceDecayError::Config {
-            message: format!("semantic runtime setting key is invalid: {error}"),
-        })?;
-    if registry.definition(&key).is_ok() {
-        return Ok(());
-    }
-    let default = SemanticConfig::default();
-    default.validate()?;
-    let default = serde_json::to_string(&default).map_err(|error| TraceDecayError::Config {
-        message: format!("semantic runtime default is invalid: {error}"),
-    })?;
-    registry
-        .register(SettingDefinitionV1 {
-            key,
-            schema_revision: crate::config::registry::CONFIGURATION_REGISTRY_SCHEMA_REVISION,
-            value_kind: ConfigurationValueKindV1::Text,
-            default_value: ConfigurationValueV1::Text(default),
-            sensitivity: SettingSensitivityV1::Sensitive,
-            scope: SettingScopeV1::Project,
-            restart_requirement: RestartRequirementV1::AnalyzerRestart,
-            deprecation: DeprecationStateV1::Active,
-        })
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic runtime setting registration failed: {error}"),
-        })
 }
 
 /// Production daemon client for the retained project configuration runtime.
@@ -1032,10 +997,12 @@ mod tests {
     use tracedecay_domain::configuration::{
         ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
         ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
-        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1,
+        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationValueKindV1,
         DIAGNOSTICS_PREWARM_SETTING_KEY,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId};
+
+    use crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, SemanticConfig};
 
     struct TestScopeResolution;
 
@@ -1131,10 +1098,9 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_accepts_atomic_semantic_configuration() {
-        let mut registry =
+    fn core_registry_owns_atomic_semantic_configuration() {
+        let registry =
             crate::config::registry::ConfigurationRegistry::core().expect("core registry");
-        register_semantic_runtime_configuration(&mut registry).expect("semantic definition");
         let key = SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
         let definition = registry.definition(&key).unwrap();
         assert_eq!(definition.value_kind, ConfigurationValueKindV1::Text);

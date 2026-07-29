@@ -296,23 +296,6 @@ impl RegisteredGlobalDb {
             })
     }
 
-    pub(crate) async fn session_lcm_retention_report(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-        config: &crate::sessions::lcm::retention::LcmRetentionConfig,
-        now: i64,
-    ) -> crate::errors::Result<crate::sessions::lcm::retention::LcmRetentionReport> {
-        self.run_session_lcm_retention(
-            provider,
-            session_id,
-            config,
-            crate::sessions::lcm::retention::RetentionMode::DryRun,
-            now,
-        )
-        .await
-    }
-
     pub(crate) async fn run_session_lcm_retention(
         &self,
         provider: &str,
@@ -346,21 +329,6 @@ impl RegisteredGlobalDb {
         .map_err(|error| registered_error("run registered session retention", error))
     }
 
-    pub(crate) async fn observation_retention_report(
-        &self,
-        generation: Option<&str>,
-        config: &super::observation::retention::ObservationRetentionConfig,
-        now: i64,
-    ) -> crate::errors::Result<super::observation::retention::ObservationRetentionReport> {
-        self.run_observation_retention(
-            generation,
-            config,
-            super::observation::retention::RetentionMode::DryRun,
-            now,
-        )
-        .await
-    }
-
     pub(crate) async fn run_observation_retention(
         &self,
         generation: Option<&str>,
@@ -392,64 +360,6 @@ impl RegisteredGlobalDb {
         &self,
     ) -> super::git_index_transactions::GlobalDbGitIndexTransactionStore<'_> {
         super::git_index_transactions::GlobalDbGitIndexTransactionStore::new(self)
-    }
-
-    pub(crate) async fn git_record_span_observation(
-        &self,
-        observation: &crate::sessions::git_correlation::SpanObservation,
-        merge_gap_secs: i64,
-    ) -> Result<i64, crate::sessions::git_correlation::GitCorrelationError> {
-        let transaction = self.begin_write_transaction().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        let span_id = crate::sessions::git_correlation::record_span_observation_in_transaction(
-            &transaction,
-            observation,
-            merge_gap_secs,
-        )
-        .await?;
-        transaction.commit().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        Ok(span_id)
-    }
-
-    pub(crate) async fn git_run_incremental_backfill(
-        &self,
-        git: &dyn crate::sessions::git_correlation::GitReflogSource,
-        limit_sessions: usize,
-    ) -> Result<
-        crate::sessions::git_correlation::BackfillStats,
-        crate::sessions::git_correlation::GitCorrelationError,
-    > {
-        crate::sessions::git_correlation::run_incremental_backfill(self, git, limit_sessions).await
-    }
-
-    pub(crate) async fn git_correlation_index_health(
-        &self,
-    ) -> Result<
-        crate::sessions::git_correlation::CorrelationIndexHealth,
-        crate::sessions::git_correlation::GitCorrelationError,
-    > {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        crate::sessions::git_correlation::correlation_index_health(&snapshot).await
-    }
-
-    pub(crate) async fn git_sessions_for_with_relation(
-        &self,
-        query: &crate::sessions::git_correlation::SessionsForQuery,
-        relation: crate::sessions::git_correlation::CommitRelationFilter,
-    ) -> Result<
-        Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
-        crate::sessions::git_correlation::GitCorrelationError,
-    > {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        crate::sessions::git_correlation::sessions_for_with_relation(&snapshot, query, relation)
-            .await
     }
 }
 
@@ -698,14 +608,15 @@ fn validate_registered_locator(
         expected_locator,
     )?;
     validate_registered_path(runtime.locator().path(), authority)?;
-    let current_file_identity =
-        crate::sessions::source::sqlite_generation_identity(authority.canonical_database_path())
-            .map_err(|error| {
-                registered_error(
-                    "verify registered global database file identity",
-                    sqlite_identity_error_message(error),
-                )
-            })?;
+    let current_file_identity = crate::db::sqlite_generation_identity(
+        authority.canonical_database_path(),
+    )
+    .map_err(|error| {
+        registered_error(
+            "verify registered global database file identity",
+            sqlite_identity_error_message(error),
+        )
+    })?;
     validate_opened_file_identity(runtime.opened_file_identity(), current_file_identity)
 }
 
@@ -767,16 +678,12 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
-fn sqlite_identity_error_message(
-    error: crate::sessions::source::SqliteFileIdentityError,
-) -> &'static str {
-    use crate::sessions::source::SqliteFileIdentityError;
-
+fn sqlite_identity_error_message(error: crate::db::SqliteFileIdentityError) -> &'static str {
     match error {
-        SqliteFileIdentityError::Open => "could not open SQLite file identity",
-        SqliteFileIdentityError::Inspect => "could not inspect SQLite file identity",
-        SqliteFileIdentityError::Identify => "could not identify SQLite file",
-        SqliteFileIdentityError::Unavailable => "SQLite file identity is unavailable",
+        crate::db::SqliteFileIdentityError::Open => "could not open SQLite file identity",
+        crate::db::SqliteFileIdentityError::Inspect => "could not inspect SQLite file identity",
+        crate::db::SqliteFileIdentityError::Identify => "could not identify SQLite file",
+        crate::db::SqliteFileIdentityError::Unavailable => "SQLite file identity is unavailable",
     }
 }
 

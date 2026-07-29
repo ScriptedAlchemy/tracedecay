@@ -1,13 +1,14 @@
 mod artifacts;
 mod hermes;
-mod model;
 mod project;
 mod sqlite;
 
 use std::collections::HashSet;
 use std::path::Path;
 
-pub use model::*;
+/// The inventory record vocabulary lives in `tracedecay-migrate`; the scanners
+/// below stay here because they open databases and read the registry.
+pub use tracedecay_migrate::inventory::*;
 
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;

@@ -2,6 +2,9 @@ use std::fmt::Write as _;
 
 use serde_json::Value as JsonValue;
 
+use crate::application::session::compatibility::{
+    RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
+};
 use crate::db::engine::Value;
 
 use super::{
@@ -351,10 +354,7 @@ impl RegisteredGlobalDb {
             .filter(|term| term.contains('-'))
             .map(str::to_lowercase)
             .collect::<Vec<_>>();
-        let fetch_limit = crate::sessions::message_noise::rerank_fetch_limit(
-            limit,
-            SESSION_MESSAGE_SEARCH_MAX_FETCH,
-        );
+        let fetch_limit = rerank_fetch_limit(limit, SESSION_MESSAGE_SEARCH_MAX_FETCH);
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(_) => return Vec::new(),
@@ -421,20 +421,17 @@ impl RegisteredGlobalDb {
         let workflow_results =
             search_workflow_facts(&snapshot, provider, project_key, query, fetch_limit).await;
         let mut results = interleave_workflow_search_results(transcript_results, workflow_results);
-        results =
-            crate::sessions::message_noise::dedupe_related_message_copies(results, |result| {
-                crate::sessions::message_noise::RelatedMessageCopyIdentity {
-                    provider: &result.session.provider,
-                    family_session_id: result
-                        .session
-                        .parent_session_id
-                        .as_deref()
-                        .unwrap_or(&result.session.session_id),
-                    session_id: &result.session.session_id,
-                    is_subagent: result.session.is_subagent,
-                    content: &result.message.text,
-                }
-            });
+        results = dedupe_related_message_copies(results, |result| RelatedMessageCopyIdentity {
+            provider: &result.session.provider,
+            family_session_id: result
+                .session
+                .parent_session_id
+                .as_deref()
+                .unwrap_or(&result.session.session_id),
+            session_id: &result.session.session_id,
+            is_subagent: result.session.is_subagent,
+            content: &result.message.text,
+        });
         downrank_inventory_messages(&mut results);
         results.truncate(limit);
         results

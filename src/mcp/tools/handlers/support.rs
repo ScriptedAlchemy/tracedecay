@@ -323,7 +323,10 @@ async fn unique_project_basename_context(
     Ok(db.project_registry_context_by_id(&project_id).await?.into())
 }
 
-fn is_explicit_project_path_selector(selector: &str) -> bool {
+/// Whether a selector names a path rather than a bare project name. This is
+/// pure syntax: it decides whether a selector may fall back to Git identity,
+/// and never consults the registry.
+pub(super) fn is_explicit_project_path_selector(selector: &str) -> bool {
     let selector = selector.trim();
     !selector.is_empty()
         && (Path::new(selector).is_absolute()

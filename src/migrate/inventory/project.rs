@@ -5,7 +5,7 @@ use super::artifacts::{
     dir_size, file_size, record_branch_db_artifacts, record_optional_artifact,
     record_sqlite_family_sidecars,
 };
-use super::model::{
+use tracedecay_migrate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath,
     SqliteIntegrityOutcome, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };

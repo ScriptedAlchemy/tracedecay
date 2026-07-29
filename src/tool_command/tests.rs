@@ -99,6 +99,63 @@ fn args_escape_hatch() {
 }
 
 #[test]
+fn api_migration_cli_preserves_typed_plan_and_apply_payloads() {
+    let plan_payload = json!({
+        "family_id": "family.cli",
+        "operations": [{
+            "kind": "assert_stable_value",
+            "operation_id": "protect-wire-name",
+            "depends_on": [],
+            "enclosing_symbol": {
+                "node_id": "node-wire-name",
+                "qualified_name": "crate::wire_name",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "old_name": "wire_name"
+            },
+            "category": "wire field",
+            "exact_bytes": "\"stable_name\"",
+            "occurrence_indexes": [0]
+        }]
+    });
+    let parsed_plan = parse_invocation(
+        &def("api_migration_plan"),
+        &[
+            "--args".to_owned(),
+            serde_json::to_string(&plan_payload).unwrap(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(parsed_plan.tool_args, plan_payload);
+
+    let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let apply_payload = json!({
+        "plan": {
+            "family_id": "family.cli",
+            "repository_revision": "HEAD",
+            "graph_revision": digest,
+            "operations": plan_payload["operations"],
+            "sites": [],
+            "files": [],
+            "blocked": false,
+            "plan_digest": digest
+        },
+        "plan_digest": digest,
+        "dry_run": true,
+        "verify": true
+    });
+    let parsed_apply = parse_invocation(
+        &def("api_migration_apply"),
+        &[
+            "--args".to_owned(),
+            serde_json::to_string(&apply_payload).unwrap(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(parsed_apply.tool_args, apply_payload);
+}
+
+#[test]
 fn args_escape_hatch_reads_at_file() {
     let d = def("search");
     let dir = std::env::temp_dir().join(format!("ts-args-at-{}", std::process::id()));

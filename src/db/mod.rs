@@ -6,6 +6,7 @@ mod edges;
 pub(crate) mod engine;
 mod evidence_assembly;
 mod external_source;
+mod file_identity;
 mod files;
 mod fingerprints;
 mod maintenance;
@@ -47,6 +48,7 @@ pub(crate) use connection::{
     DatabaseWriteTransaction,
 };
 pub(crate) use external_source::install_external_source_schema;
+pub(crate) use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use fingerprints::StoredFingerprint;
 pub(crate) use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;

@@ -23,6 +23,7 @@ use super::id::{
     CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProviderId, RefId,
     RepositoryCaptureId, RepositoryId, RetrievalAnchorId, WorktreeId,
 };
+use super::retrieval::PrivacyDomainBoundLocatorDigest;
 use super::time::UtcMicros;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +58,19 @@ pub enum GitTopologyGenerationRefV1 {
         receipt_id: GitIndexReceiptId,
         preview_id: GitIndexPreviewId,
         commit_id: Option<GitOidV1>,
+    },
+    #[serde(rename = "github_stack_capability")]
+    GitHubStackCapability {
+        generation_id: ProjectionGenerationId,
+        source_anchor_id: RetrievalAnchorId,
+        content_digest: ManifestDigest,
+    },
+    #[serde(rename = "github_stack_snapshot")]
+    GitHubStackSnapshot {
+        generation_id: ProjectionGenerationId,
+        source_anchor_id: RetrievalAnchorId,
+        content_digest: ManifestDigest,
+        final_target_commit_id: CommitId,
     },
 }
 
@@ -108,6 +122,26 @@ impl GitTopologyGenerationRefV1 {
                 preview_id.validate()?;
                 commit_id.as_ref().map_or(Ok(()), GitOidV1::validate)
             }
+            Self::GitHubStackCapability {
+                generation_id,
+                source_anchor_id,
+                content_digest,
+            } => {
+                generation_id.validate()?;
+                source_anchor_id.validate()?;
+                content_digest.validate()
+            }
+            Self::GitHubStackSnapshot {
+                generation_id,
+                source_anchor_id,
+                content_digest,
+                final_target_commit_id,
+            } => {
+                generation_id.validate()?;
+                source_anchor_id.validate()?;
+                content_digest.validate()?;
+                final_target_commit_id.validate()
+            }
         }
     }
 }
@@ -130,6 +164,10 @@ pub enum GitTopologySourceRoleV1 {
     ApplyReceipt,
     Decision,
     RuntimeReceipt,
+    #[serde(rename = "github_stack_capability")]
+    GitHubStackCapability,
+    #[serde(rename = "github_stack_snapshot")]
+    GitHubStackSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -667,6 +705,305 @@ impl CheckSnapshotAnchorRefV1 {
     }
 }
 
+/// Exact read-only provider capability observation for GitHub stacked pull
+/// requests. The content digest is recomputed from every identity-bearing
+/// field; mutable provider permissions or ambient configuration cannot be
+/// substituted during resolution.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubStackCapabilitySnapshotV1 {
+    pub provider: ProviderId,
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub state: GitHubStackCapabilityStateV1,
+    pub generation_id: ProjectionGenerationId,
+    pub source_anchor_id: RetrievalAnchorId,
+    pub content_digest: ManifestDigest,
+    pub sources: Vec<OrderedGitTopologySourceV1>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubStackCapabilityStateV1 {
+    Unavailable,
+    PrivatePreviewDisabled,
+    Enabled,
+    Degraded,
+}
+
+impl GitHubStackCapabilitySnapshotV1 {
+    pub fn new(
+        provider: ProviderId,
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        worktree_id: WorktreeId,
+        state: GitHubStackCapabilityStateV1,
+        generation_id: ProjectionGenerationId,
+        source_anchor_id: RetrievalAnchorId,
+    ) -> Result<Self, DomainError> {
+        let content_digest = canonical_sha256(&(
+            "tracedecay.github-stack.capability.v1",
+            &provider,
+            &project_id,
+            &repository_id,
+            &worktree_id,
+            state,
+            &generation_id,
+            &source_anchor_id,
+        ))?;
+        let mut sources = Vec::new();
+        push_source(
+            &mut sources,
+            GitTopologySourceRoleV1::GitHubStackCapability,
+            source_anchor_id.clone(),
+        )?;
+        let value = Self {
+            provider,
+            project_id,
+            repository_id,
+            worktree_id,
+            state,
+            generation_id,
+            source_anchor_id,
+            content_digest,
+            sources,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn generation(&self) -> GitTopologyGenerationRefV1 {
+        GitTopologyGenerationRefV1::GitHubStackCapability {
+            generation_id: self.generation_id.clone(),
+            source_anchor_id: self.source_anchor_id.clone(),
+            content_digest: self.content_digest.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.provider.validate()?;
+        self.project_id.validate()?;
+        self.repository_id.validate()?;
+        self.worktree_id.validate()?;
+        self.generation_id.validate()?;
+        self.source_anchor_id.validate()?;
+        self.content_digest.validate()?;
+        validate_ordered_sources(&self.sources)?;
+        if self.sources.len() != 1
+            || self.sources[0].role != GitTopologySourceRoleV1::GitHubStackCapability
+            || self.sources[0].anchor_id != self.source_anchor_id
+        {
+            return Err(DomainError::NonCanonical {
+                field: "GitHub stack capability source",
+            });
+        }
+        let expected = canonical_sha256(&(
+            "tracedecay.github-stack.capability.v1",
+            &self.provider,
+            &self.project_id,
+            &self.repository_id,
+            &self.worktree_id,
+            self.state,
+            &self.generation_id,
+            &self.source_anchor_id,
+        ))?;
+        if expected != self.content_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        self.generation().validate()
+    }
+}
+
+/// One immutable layer in a provider-proven strictly linear GitHub stack.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubStackLayerSnapshotV1 {
+    pub provider_position: u32,
+    pub pull_request: PullRequestSnapshotAnchorRefV1,
+    pub base_ref_id: RefId,
+    pub head_ref_id: RefId,
+    pub protection_digest: ManifestDigest,
+    pub ci_digest: ManifestDigest,
+    pub merge_queue_digest: ManifestDigest,
+}
+
+impl GitHubStackLayerSnapshotV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.pull_request.validate()?;
+        self.base_ref_id.validate()?;
+        self.head_ref_id.validate()?;
+        self.protection_digest.validate()?;
+        self.ci_digest.validate()?;
+        self.merge_queue_digest.validate()
+    }
+}
+
+/// Exact, payload-free Plan 37 GitHub stack observation. A snapshot exists
+/// only for an enabled capability and retains the complete linear topology.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubStackSnapshotV1 {
+    pub capability: GitHubStackCapabilitySnapshotV1,
+    pub provider_stack_id_digest: PrivacyDomainBoundLocatorDigest,
+    pub generation_id: ProjectionGenerationId,
+    pub final_target_ref_id: RefId,
+    pub final_target_commit_id: CommitId,
+    pub layers: Vec<GitHubStackLayerSnapshotV1>,
+    pub source_anchor_id: RetrievalAnchorId,
+    pub content_digest: ManifestDigest,
+    pub sources: Vec<OrderedGitTopologySourceV1>,
+}
+
+impl GitHubStackSnapshotV1 {
+    pub fn new(
+        capability: GitHubStackCapabilitySnapshotV1,
+        provider_stack_id_digest: PrivacyDomainBoundLocatorDigest,
+        generation_id: ProjectionGenerationId,
+        final_target_ref_id: RefId,
+        final_target_commit_id: CommitId,
+        layers: Vec<GitHubStackLayerSnapshotV1>,
+        source_anchor_id: RetrievalAnchorId,
+    ) -> Result<Self, DomainError> {
+        let content_digest = canonical_sha256(&(
+            "tracedecay.github-stack.snapshot.v1",
+            &capability,
+            &provider_stack_id_digest,
+            &generation_id,
+            &final_target_ref_id,
+            &final_target_commit_id,
+            &layers,
+            &source_anchor_id,
+        ))?;
+        let mut sources = Vec::new();
+        push_source(
+            &mut sources,
+            GitTopologySourceRoleV1::GitHubStackCapability,
+            capability.source_anchor_id.clone(),
+        )?;
+        push_source(
+            &mut sources,
+            GitTopologySourceRoleV1::GitHubStackSnapshot,
+            source_anchor_id.clone(),
+        )?;
+        for layer in &layers {
+            push_source(
+                &mut sources,
+                GitTopologySourceRoleV1::PullRequestObservation,
+                layer.pull_request.source_anchor_id.clone(),
+            )?;
+        }
+        let value = Self {
+            capability,
+            provider_stack_id_digest,
+            generation_id,
+            final_target_ref_id,
+            final_target_commit_id,
+            layers,
+            source_anchor_id,
+            content_digest,
+            sources,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn generation(&self) -> GitTopologyGenerationRefV1 {
+        GitTopologyGenerationRefV1::GitHubStackSnapshot {
+            generation_id: self.generation_id.clone(),
+            source_anchor_id: self.source_anchor_id.clone(),
+            content_digest: self.content_digest.clone(),
+            final_target_commit_id: self.final_target_commit_id.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.capability.validate()?;
+        if self.capability.state != GitHubStackCapabilityStateV1::Enabled {
+            return Err(DomainError::NonCanonical {
+                field: "GitHub stack snapshot capability",
+            });
+        }
+        self.provider_stack_id_digest.validate()?;
+        self.generation_id.validate()?;
+        self.final_target_ref_id.validate()?;
+        self.final_target_commit_id.validate()?;
+        self.source_anchor_id.validate()?;
+        self.content_digest.validate()?;
+        validate_ordered_sources(&self.sources)?;
+        let first = self.layers.first().ok_or(DomainError::NonCanonical {
+            field: "GitHub stack layers",
+        })?;
+        if first.base_ref_id != self.final_target_ref_id
+            || first.pull_request.base_commit_id != self.final_target_commit_id
+        {
+            return Err(DomainError::SnapshotMismatch {
+                field: "GitHub stack final target",
+            });
+        }
+        for (index, layer) in self.layers.iter().enumerate() {
+            layer.validate()?;
+            if usize::try_from(layer.provider_position).ok() != Some(index)
+                || layer.pull_request.provider != self.capability.provider
+                || layer.pull_request.project_id != self.capability.project_id
+                || layer.pull_request.repository_id != self.capability.repository_id
+                || layer.pull_request.worktree_id != self.capability.worktree_id
+            {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "GitHub stack layer authority",
+                });
+            }
+            if let Some(previous) = index
+                .checked_sub(1)
+                .and_then(|prior| self.layers.get(prior))
+                && (layer.base_ref_id != previous.head_ref_id
+                    || layer.pull_request.base_commit_id != previous.pull_request.head_commit_id)
+            {
+                return Err(DomainError::SnapshotMismatch {
+                    field: "GitHub stack linear topology",
+                });
+            }
+        }
+        let mut expected_sources = Vec::new();
+        push_source(
+            &mut expected_sources,
+            GitTopologySourceRoleV1::GitHubStackCapability,
+            self.capability.source_anchor_id.clone(),
+        )?;
+        push_source(
+            &mut expected_sources,
+            GitTopologySourceRoleV1::GitHubStackSnapshot,
+            self.source_anchor_id.clone(),
+        )?;
+        for layer in &self.layers {
+            push_source(
+                &mut expected_sources,
+                GitTopologySourceRoleV1::PullRequestObservation,
+                layer.pull_request.source_anchor_id.clone(),
+            )?;
+        }
+        if self.sources != expected_sources {
+            return Err(DomainError::NonCanonical {
+                field: "GitHub stack snapshot sources",
+            });
+        }
+        let expected = canonical_sha256(&(
+            "tracedecay.github-stack.snapshot.v1",
+            &self.capability,
+            &self.provider_stack_id_digest,
+            &self.generation_id,
+            &self.final_target_ref_id,
+            &self.final_target_commit_id,
+            &self.layers,
+            &self.source_anchor_id,
+        ))?;
+        if expected != self.content_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        self.generation().validate()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConflictEvidenceAnchorRefV1 {
@@ -929,6 +1266,10 @@ pub enum GitTopologyAnchorTargetV1 {
     PullRequestSnapshot(PullRequestSnapshotAnchorRefV1),
     ReviewSnapshot(ReviewSnapshotAnchorRefV1),
     CheckSnapshot(CheckSnapshotAnchorRefV1),
+    #[serde(rename = "github_stack_capability")]
+    GitHubStackCapability(GitHubStackCapabilitySnapshotV1),
+    #[serde(rename = "github_stack_snapshot")]
+    GitHubStackSnapshot(GitHubStackSnapshotV1),
     ConflictEvidence(ConflictEvidenceAnchorRefV1),
     PreflightPreview(PreflightPreviewAnchorRefV1),
     ApplyReceipt(ApplyReceiptAnchorRefV1),
@@ -945,6 +1286,8 @@ impl GitTopologyAnchorTargetV1 {
             Self::PullRequestSnapshot(value) => value.validate(),
             Self::ReviewSnapshot(value) => value.validate(),
             Self::CheckSnapshot(value) => value.validate(),
+            Self::GitHubStackCapability(value) => value.validate(),
+            Self::GitHubStackSnapshot(value) => value.validate(),
             Self::ConflictEvidence(value) => value.validate(),
             Self::PreflightPreview(value) => value.validate(),
             Self::ApplyReceipt(value) => value.validate(),
@@ -961,6 +1304,8 @@ impl GitTopologyAnchorTargetV1 {
             Self::PullRequestSnapshot(value) => &value.project_id,
             Self::ReviewSnapshot(value) => &value.pull_request.project_id,
             Self::CheckSnapshot(value) => &value.project_id,
+            Self::GitHubStackCapability(value) => &value.project_id,
+            Self::GitHubStackSnapshot(value) => &value.capability.project_id,
             Self::ConflictEvidence(value) => &value.repository.project_id,
             Self::PreflightPreview(value) => &value.repository.project_id,
             Self::ApplyReceipt(value) => &value.preflight.repository.project_id,
@@ -977,6 +1322,8 @@ impl GitTopologyAnchorTargetV1 {
             Self::PullRequestSnapshot(value) => &value.repository_id,
             Self::ReviewSnapshot(value) => &value.pull_request.repository_id,
             Self::CheckSnapshot(value) => &value.repository_id,
+            Self::GitHubStackCapability(value) => &value.repository_id,
+            Self::GitHubStackSnapshot(value) => &value.capability.repository_id,
             Self::ConflictEvidence(value) => &value.repository.repository_id,
             Self::PreflightPreview(value) => &value.repository.repository_id,
             Self::ApplyReceipt(value) => &value.preflight.repository.repository_id,
@@ -993,6 +1340,8 @@ impl GitTopologyAnchorTargetV1 {
             Self::PullRequestSnapshot(value) => value.generation(),
             Self::ReviewSnapshot(value) => value.pull_request.generation(),
             Self::CheckSnapshot(value) => value.generation_ref(),
+            Self::GitHubStackCapability(value) => value.generation(),
+            Self::GitHubStackSnapshot(value) => value.generation(),
             Self::ConflictEvidence(value) => value.repository.generation(),
             Self::PreflightPreview(value) => value.generation(),
             Self::ApplyReceipt(value) => value.generation(),
@@ -1005,6 +1354,8 @@ impl GitTopologyAnchorTargetV1 {
             Self::ReviewSnapshot(value) => &value.sources,
             Self::PullRequestSnapshot(value) => &value.sources,
             Self::CheckSnapshot(value) => &value.sources,
+            Self::GitHubStackCapability(value) => &value.sources,
+            Self::GitHubStackSnapshot(value) => &value.sources,
             Self::ApplyReceipt(value) => &value.sources,
             Self::IntegrationReceipt(value) => &value.sources,
             _ => &[],

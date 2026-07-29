@@ -115,9 +115,8 @@ impl RuntimeDatabaseWriteAuthority {
         self.authority
             .require_active_write_scope(intent)
             .map_err(|error| error.to_string())?;
-        let current_file_identity =
-            crate::sessions::source::sqlite_generation_identity(&self.canonical_path)
-                .map_err(|_| "could not verify the registered SQLite file identity".to_owned())?;
+        let current_file_identity = crate::db::sqlite_generation_identity(&self.canonical_path)
+            .map_err(|_| "could not verify the registered SQLite file identity".to_owned())?;
         if current_file_identity != self.opened_file_identity {
             return Err("database file identity changed after registry attachment".to_owned());
         }
@@ -510,13 +509,11 @@ impl StoreRuntimeHandle {
         // points revalidate the retained capability in
         // `validate_database_write_authority`; read-only facades must remain
         // usable after that writer scope is revoked.
-        let current_file_identity = crate::sessions::source::sqlite_generation_identity(
-            self.locator().path(),
-        )
-        .map_err(|_| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation,
-            message: "could not verify the registered SQLite file identity".to_owned(),
-        })?;
+        let current_file_identity = crate::db::sqlite_generation_identity(self.locator().path())
+            .map_err(|_| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation,
+                message: "could not verify the registered SQLite file identity".to_owned(),
+            })?;
         let opened_file_identity = self.inner.opened_file_identity;
         if current_file_identity != opened_file_identity {
             return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {

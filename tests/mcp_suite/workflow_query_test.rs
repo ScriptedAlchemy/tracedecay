@@ -9,7 +9,6 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::mcp::tools::ToolCallRegistryOptions;
 use tracedecay::sessions::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
@@ -182,19 +181,10 @@ async fn call_md(
     tool: &str,
     args: Value,
 ) -> String {
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
-        cg,
-        tool,
-        args,
-        None,
-        None,
-        ToolCallRegistryOptions {
-            session_authorities: runtime.mcp_session_authorities(),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
+    let result = runtime
+        .call_mcp_tool_for_test(cg, tool, args, None, None)
+        .await
+        .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     result.value["content"][0]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("{tool} result should carry text content: {}", result.value))
@@ -211,19 +201,10 @@ async fn call(
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
-        cg,
-        tool,
-        args,
-        None,
-        None,
-        ToolCallRegistryOptions {
-            session_authorities: runtime.mcp_session_authorities(),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
+    let result = runtime
+        .call_mcp_tool_for_test(cg, tool, args, None, None)
+        .await
+        .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     extract_json(&result)
 }
 

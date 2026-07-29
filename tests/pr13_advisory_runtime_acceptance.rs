@@ -5,6 +5,11 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const HOOK_V2_SOURCE: &str = include_str!("../src/hooks/v2.rs");
+const HOOK_DAEMON_PORTS_SOURCE: &str = include_str!("../src/hooks/daemon_ports.rs");
+const ADVISORY_HOST_DELIVERY_SOURCE: &str =
+    include_str!("../src/application/advisory/host_delivery.rs");
+
 use serde_json::{Value, json};
 use tracedecay::application::advisory::ci_runtime::{
     CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
@@ -23,12 +28,6 @@ use tracedecay::application::advisory::{
     GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1, GitHubReviewAnchorSeedV1,
     GitHubReviewProviderIdentityV1,
 };
-use tracedecay::application::configuration::{
-    AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
-    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationError,
-    ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationOperationFuture,
-    ConfigurationRollbackRequest, DirectConfigurationMutation, ScopeRevalidationEvidenceV1,
-};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_application::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
@@ -39,13 +38,10 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };
-use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationRevisionId, ProtectedApplyRequest, ProtectedChange,
-    ProtectedChangePlan,
-};
 use tracedecay_domain::feedback::{
-    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCurrentBranchRemapV1,
-    GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
+    FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1,
+    GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
+    ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     ActorId, CanonicalObservationIdV1, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
@@ -352,85 +348,6 @@ async fn corrupt_provider_identity_fails_production_decoder() {
             .await
             .is_none()
     );
-}
-
-struct ProximityConfiguration {
-    current: ConfigurationCurrentStateV1,
-}
-
-impl ConfigurationControlStore for ProximityConfiguration {
-    fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
-        let current = self.current.clone();
-        Box::pin(async move { Ok(current) })
-    }
-
-    fn save_plan(
-        &self,
-        _plan: &ProtectedChangePlan,
-        _operation: &ProtectedChange,
-    ) -> ConfigurationOperationFuture<'_, ()> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn load_plan(
-        &self,
-        _plan_id: &ChangePlanId,
-    ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn commit_direct(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _mutation: &DirectConfigurationMutation,
-        _expected_revision: &ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn commit_protected(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _request: &ProtectedApplyRequest,
-        _plan: &ProtectedChangePlan,
-        _evidence: &ScopeRevalidationEvidenceV1,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn dry_run_rollback(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _rollback: &ConfigurationRollbackRequest,
-        _now: UtcMicros,
-    ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn apply_rollback(
-        &self,
-        _authority: &ConfigurationMutationAuthority,
-        _request: &ProtectedApplyRequest,
-        _plan: &ProtectedChangePlan,
-        _evidence: &ScopeRevalidationEvidenceV1,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn audit(
-        &self,
-        _actor: &AuthorizedActor,
-        _query: &ConfigurationAuditQuery,
-    ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
-        Box::pin(async { Err(ConfigurationError::Unavailable) })
-    }
-
-    fn observed_state(
-        &self,
-        _actor: &AuthorizedActor,
-    ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
 }
 
 fn now_micros() -> UtcMicros {
@@ -888,22 +805,188 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         String::from_utf8_lossy(&advisory.stderr)
     );
     let advisory: Value = serde_json::from_slice(&advisory.stdout).unwrap();
-    let advisory = advisory.to_string();
-    for required in [
-        "request_handle",
-        "diagnostics",
-        "github_review_ingest",
-        "ci_failure_localize",
-        "feedback_proximity",
-        // The four-pillar terminal state must stay visible, so a cycle whose
-        // remote pillars are unavailable can never read as clean and empty.
-        "termination",
-        "provider_states",
-        "published",
-    ] {
+    assert_four_pillar_terminal_cycle(&advisory);
+}
+
+/// Asserts the four-pillar terminal state Plan 37 requires of one advisory
+/// cycle. `producer_contributions` is a fixed literal array in the daemon
+/// payload, so searching the serialized response for pillar names proves
+/// nothing; the terminal cycle object is the only place the pillars report
+/// real state.
+fn assert_four_pillar_terminal_cycle(advisory: &Value) {
+    let cycle = find_advisory_cycle(advisory).unwrap_or_else(|| {
+        panic!("advisory result carried no four-pillar terminal cycle object: {advisory}")
+    });
+
+    // Decoding through the domain enums keeps this gate bound to the real
+    // closed state sets instead of a copy that can silently go stale.
+    let termination: FeedbackCycleTerminationV1 =
+        serde_json::from_value(cycle["termination"].clone()).unwrap_or_else(|error| {
+            panic!("cycle termination is not a typed terminal state ({error}): {cycle}")
+        });
+    let provider_states: Vec<ProviderEvaluationStateV1> =
+        serde_json::from_value(cycle["provider_states"].clone()).unwrap_or_else(|error| {
+            panic!("cycle provider_states are not typed provider states ({error}): {cycle}")
+        });
+    assert!(
+        !provider_states.is_empty(),
+        "a terminated cycle always reports the state of every evaluated provider: {cycle}"
+    );
+
+    // The acceptance project has no GitHub or CI provider access, so those
+    // pillars are genuinely unavailable. Plan 37 requires that to stay visible
+    // per pillar rather than collapsing into one clean, empty answer.
+    let incomplete = provider_states
+        .iter()
+        .filter(|state| **state != ProviderEvaluationStateV1::SupportedCompletedComplete)
+        .count();
+    assert!(
+        incomplete > 0,
+        "unreachable GitHub and CI pillars must report their own state, not complete coverage: {cycle}"
+    );
+    assert_ne!(
+        termination,
+        FeedbackCycleTerminationV1::Clean,
+        "a cycle with {incomplete} non-complete provider states can never terminate clean: {cycle}"
+    );
+
+    let published = cycle["published"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("cycle published is not a boolean: {cycle}"));
+    if termination == FeedbackCycleTerminationV1::IncompleteCoverage {
         assert!(
-            advisory.contains(required),
-            "advisory result omitted {required}: {advisory}"
+            !published,
+            "an incomplete-coverage cycle is not publishable: {cycle}"
         );
     }
+}
+
+/// The gate above only runs after a daemon round trip, so prove here that it
+/// actually rejects every way a four-pillar result can lie. Without this the
+/// gate could silently rot back into the substring check it replaced.
+#[test]
+fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
+    // MCP delivers the evidence document as JSON text inside the envelope.
+    let envelope = |cycle: Value| json!({"content": [{"text": cycle.to_string()}]});
+    let contributions = json!([
+        "github_review_ingest",
+        "ci_failure_localize",
+        "feedback_proximity"
+    ]);
+
+    assert_four_pillar_terminal_cycle(&envelope(json!({
+        "request_handle": "rh.fixture",
+        "cycle": {
+            "termination": "incomplete_coverage",
+            "provider_states": ["unavailable", "unavailable", "supported_completed_complete"],
+            "published": false,
+        },
+        "producer_contributions": contributions.clone(),
+    })));
+
+    // Every case below is expected to panic, so keep the default hook from
+    // printing a backtrace per rejection.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcomes = [
+        (
+            "a payload carrying only the fixed contribution list",
+            json!({ "producer_contributions": contributions }),
+        ),
+        (
+            "a clean termination beside an unavailable pillar",
+            json!({"cycle": {
+                "termination": "clean",
+                "provider_states": ["unavailable", "supported_completed_complete"],
+                "published": true,
+            }}),
+        ),
+        (
+            "pillar states collapsed into complete coverage",
+            json!({"cycle": {
+                "termination": "clean",
+                "provider_states": ["supported_completed_complete"],
+                "published": true,
+            }}),
+        ),
+        (
+            "an incomplete-coverage cycle claiming publication",
+            json!({"cycle": {
+                "termination": "incomplete_coverage",
+                "provider_states": ["unavailable"],
+                "published": true,
+            }}),
+        ),
+        (
+            "an untyped termination",
+            json!({"cycle": {
+                "termination": "mostly_fine",
+                "provider_states": ["unavailable"],
+                "published": false,
+            }}),
+        ),
+        (
+            "an untyped provider state",
+            json!({"cycle": {
+                "termination": "blocked",
+                "provider_states": ["mostly_fine"],
+                "published": false,
+            }}),
+        ),
+    ]
+    .map(|(reason, payload)| {
+        let envelope = envelope(payload);
+        let rejected =
+            std::panic::catch_unwind(|| assert_four_pillar_terminal_cycle(&envelope)).is_err();
+        (reason, rejected)
+    });
+    std::panic::set_hook(previous_hook);
+
+    for (reason, rejected) in outcomes {
+        assert!(rejected, "the four-pillar gate accepted {reason}");
+    }
+}
+
+/// The advisory payload is wrapped by the MCP envelope and the application
+/// evidence contract, so locate the terminal cycle by its exact typed shape
+/// rather than pinning a transport path that neither plan owns. MCP tool
+/// content arrives as a JSON document inside a string field, so nested text is
+/// parsed and searched too.
+fn find_advisory_cycle(value: &Value) -> Option<Value> {
+    match value {
+        Value::Object(fields) => {
+            if fields.contains_key("termination")
+                && fields.contains_key("provider_states")
+                && fields.contains_key("published")
+            {
+                return Some(value.clone());
+            }
+            fields.values().find_map(find_advisory_cycle)
+        }
+        Value::Array(items) => items.iter().find_map(find_advisory_cycle),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .as_ref()
+            .and_then(find_advisory_cycle),
+        _ => None,
+    }
+}
+
+/// PR13 content-free hook notices must keep one synchronous delivery owner and
+/// one asynchronous Hook V2 delivery adapter. Declaration only — execution is
+/// covered by host-delivery unit coverage and the registered daemon path above.
+#[test]
+fn source_pr13_hook_notice_delivery_keeps_typed_ports() {
+    assert!(
+        ADVISORY_HOST_DELIVERY_SOURCE.contains("Pr13AdvisoryHookDeliveryPortV1")
+            && ADVISORY_HOST_DELIVERY_SOURCE.contains("deliver_feedback_with_rollback"),
+        "advisory host delivery must retain the sync HookFeedbackDeliveryPortV1 path"
+    );
+    assert!(
+        HOOK_V2_SOURCE.contains("deliver_hook_feedback")
+            && HOOK_V2_SOURCE.contains("DaemonFeedbackNoticeDeliveryPort")
+            && HOOK_DAEMON_PORTS_SOURCE.contains("AsyncHookFeedbackDeliveryPortV1")
+            && HOOK_DAEMON_PORTS_SOURCE.contains("hook_v2_feedback_notice_delivery"),
+        "Hook V2 must deliver PR13 notices through the async typed daemon port"
+    );
 }

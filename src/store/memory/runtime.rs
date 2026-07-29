@@ -34,15 +34,13 @@ pub(super) fn retained_fact_runtime(db: &Database) -> FactStoreResult<Option<&St
 }
 
 fn validate_mount(db: &Database, runtime: &StoreRuntimeHandle) -> FactStoreResult<()> {
-    let current_file_identity = crate::sessions::source::sqlite_generation_identity(
-        db.canonical_database_path(),
-    )
-    .map_err(|error| {
-        runtime_error(
-            "mount fact storage runtime",
-            format!("could not verify SQLite file identity: {error:?}"),
-        )
-    })?;
+    let current_file_identity = crate::db::sqlite_generation_identity(db.canonical_database_path())
+        .map_err(|error| {
+            runtime_error(
+                "mount fact storage runtime",
+                format!("could not verify SQLite file identity: {error:?}"),
+            )
+        })?;
     validate_mount_parts(
         db.canonical_database_path(),
         db.opened_file_identity(),

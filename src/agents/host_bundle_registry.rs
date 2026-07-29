@@ -7,7 +7,8 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    TraceDecayProfileBindingV1, canonical_json_bytes, host_integration_catalog_v1,
+    HostCapabilityUnavailableReasonV1, TraceDecayProfileBindingV1, canonical_json_bytes,
+    host_integration_catalog_v1,
 };
 
 use super::host_bundle_v2::{
@@ -75,18 +76,51 @@ impl HostBundleVerificationAdapterV1 for VerifiedEmbeddedHostComponentSetV1 {
 pub enum HostBundleRegistryError {
     #[error("first-party host component is incompatible")]
     Incompatible,
+    #[error("{host:?} has no installable first-party component set: {reason:?}")]
+    HostComponentSetUnavailable {
+        host: HostKindV1,
+        reason: HostCapabilityUnavailableReasonV1,
+    },
+}
+
+/// Why a stock host has no installable first-party component set. Returning
+/// `None` is the only claim of host support: an empty component list is a
+/// typed unavailable result, never a successfully empty install.
+pub fn unsupported_host_component_set_reason(
+    host: HostKindV1,
+) -> Option<HostCapabilityUnavailableReasonV1> {
+    match host {
+        HostKindV1::ClaudeCode
+        | HostKindV1::Codex
+        | HostKindV1::CursorDesktop
+        | HostKindV1::Hermes
+        | HostKindV1::KimiCode
+        | HostKindV1::OpenCode => None,
+        // Cursor cloud exposes no host registration API to install into. Its
+        // presence in the host enum and capability catalog is not support
+        // evidence, so it stays typed unavailable until a real component set
+        // is packaged.
+        HostKindV1::CursorCloud => Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported),
+        // Kiro's hook route is degraded by its own native fixture, and the
+        // Cline family has no checked-in evidence admitting a packaged route.
+        HostKindV1::Kiro => Some(HostCapabilityUnavailableReasonV1::NativeFixtureLimited),
+        HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
+            Some(HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing)
+        }
+    }
 }
 
 /// Canonical default install set. Each native MCP registration has one
 /// component owner. Kimi's plugin manifest carries its MCP route inside Core;
-/// hosts with a separable route use Context MCP.
+/// hosts with a separable route use Context MCP. The match is exhaustive so a
+/// newly admitted host cannot fall through to a silently empty set.
 pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
     match host {
         HostKindV1::ClaudeCode | HostKindV1::Codex => vec![
             HostBundleComponentV1::Core,
             HostBundleComponentV1::ContextMcp,
         ],
-        HostKindV1::CursorDesktop => vec![
+        HostKindV1::CursorDesktop | HostKindV1::OpenCode => vec![
             HostBundleComponentV1::Core,
             HostBundleComponentV1::Agent,
             HostBundleComponentV1::ContextMcp,
@@ -94,12 +128,12 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         HostKindV1::Hermes | HostKindV1::KimiCode => {
             vec![HostBundleComponentV1::Core]
         }
-        HostKindV1::OpenCode => vec![
-            HostBundleComponentV1::Core,
-            HostBundleComponentV1::Agent,
-            HostBundleComponentV1::ContextMcp,
-        ],
-        _ => Vec::new(),
+        HostKindV1::CursorCloud
+        | HostKindV1::Kiro
+        | HostKindV1::ClineFamily
+        | HostKindV1::Cline
+        | HostKindV1::RooCode
+        | HostKindV1::Kilo => Vec::new(),
     }
 }
 
@@ -109,6 +143,9 @@ pub fn verified_embedded_default_host_component_set(
     host: HostKindV1,
     now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
+    if let Some(reason) = unsupported_host_component_set_reason(host) {
+        return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
+    }
     verified_embedded_host_component_set(host, &default_components(host), now_unix)
 }
 
@@ -129,7 +166,11 @@ pub fn verified_embedded_project_host_component_set(
         _ => default_components(host),
     };
     if project_components.is_empty() {
-        return Err(HostBundleRegistryError::Incompatible);
+        return Err(HostBundleRegistryError::HostComponentSetUnavailable {
+            host,
+            reason: unsupported_host_component_set_reason(host)
+                .unwrap_or(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported),
+        });
     }
     let catalog = host_integration_catalog_v1();
     let integration_manifest_digest = catalog
@@ -222,6 +263,24 @@ pub fn verified_embedded_host_component_set(
     requested_components: &[HostBundleComponentV1],
     now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
+    let tracedecay_bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    verified_embedded_host_component_set_with_tracedecay_bin(
+        host,
+        requested_components,
+        now_unix,
+        &tracedecay_bin,
+    )
+}
+
+pub fn verified_embedded_host_component_set_with_tracedecay_bin(
+    host: HostKindV1,
+    requested_components: &[HostBundleComponentV1],
+    now_unix: u64,
+    tracedecay_bin: &str,
+) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
+    if let Some(reason) = unsupported_host_component_set_reason(host) {
+        return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
+    }
     if requested_components.is_empty() {
         return Err(HostBundleRegistryError::Incompatible);
     }
@@ -238,7 +297,12 @@ pub fn verified_embedded_host_component_set(
     let mut manifest_digests = BTreeSet::new();
     let mut entries = Vec::with_capacity(components.len());
     for component in components {
-        let bundle = verified_embedded_host_bundle(host, component, now_unix)?;
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            host,
+            component,
+            now_unix,
+            tracedecay_bin,
+        )?;
         if !bundle
             .manifest
             .artifacts
@@ -267,13 +331,23 @@ pub fn verified_embedded_host_component_set(
 pub fn verified_embedded_host_bundle(
     host: HostKindV1,
     component: HostBundleComponentV1,
+    now_unix: u64,
+) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
+    let tracedecay_bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    verified_embedded_host_bundle_with_tracedecay_bin(host, component, now_unix, &tracedecay_bin)
+}
+
+fn verified_embedded_host_bundle_with_tracedecay_bin(
+    host: HostKindV1,
+    component: HostBundleComponentV1,
     _now_unix: u64,
+    tracedecay_bin: &str,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
     require_component_capabilities(host, component)
         .map_err(|_| HostBundleRegistryError::Incompatible)?;
     let host_name = host_name(host);
     let component_name = component_name(component);
-    let assets = component_assets(host, component)?;
+    let assets = component_assets(host, component, tracedecay_bin)?;
     let artifacts = assets
         .iter()
         .map(|(path, bytes)| HostBundleArtifactV1 {
@@ -360,6 +434,7 @@ fn embedded_bundle_identity(
 fn component_assets(
     host: HostKindV1,
     component: HostBundleComponentV1,
+    tracedecay_bin: &str,
 ) -> Result<Vec<(String, Vec<u8>)>, HostBundleRegistryError> {
     // The managed Hermes plugin package is also written by the legacy installer
     // that the compatibility registration adapter re-runs during apply, and the
@@ -373,8 +448,7 @@ fn component_assets(
     // installed path (for example `./target/release/tracedecay reinstall`) and
     // corrupted every Hermes transaction.
     if (host, component) == (HostKindV1::Hermes, HostBundleComponentV1::Core) {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::hermes::rendered_plugin_files(&bin)
+        let files = super::hermes::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -402,8 +476,7 @@ fn component_assets(
                 | HostBundleComponentV1::OperatorMcp
         )
     {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::cursor::rendered_plugin_files(&bin)
+        let files = super::cursor::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostBundleComponentV1::Core;
         return Ok(files
@@ -430,8 +503,7 @@ fn component_assets(
                 | HostBundleComponentV1::OperatorMcp
         )
     {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::codex::rendered_global_plugin_files(&bin)
+        let files = super::codex::rendered_global_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostBundleComponentV1::Core;
         return Ok(files
@@ -458,8 +530,7 @@ fn component_assets(
                 | HostBundleComponentV1::OperatorMcp
         )
     {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::claude::rendered_plugin_files(&bin)
+        let files = super::claude::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostBundleComponentV1::Core;
         return Ok(files
@@ -478,8 +549,7 @@ fn component_assets(
     // native plugin. Render the complete managed inventory with the installed
     // binary path; companion MCP components would duplicate that ownership.
     if (host, component) == (HostKindV1::KimiCode, HostBundleComponentV1::Core) {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::kimi::rendered_plugin_files(&bin)
+        let files = super::kimi::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -497,8 +567,7 @@ fn component_assets(
     // during an in-tree reinstall. Context MCP and Agent remain disjoint
     // compiled assets.
     if (host, component) == (HostKindV1::OpenCode, HostBundleComponentV1::Core) {
-        let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-        let files = super::opencode::rendered_plugin_files(&bin)
+        let files = super::opencode::rendered_plugin_files(tracedecay_bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -696,9 +765,13 @@ mod tests {
     fn kimi_catalog_assets_match_the_legacy_installer_rendering() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::kimi::rendered_plugin_files(&bin).unwrap();
-        let bundle =
-            verified_embedded_host_bundle(HostKindV1::KimiCode, HostBundleComponentV1::Core, 0)
-                .unwrap();
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::KimiCode,
+            HostBundleComponentV1::Core,
+            0,
+            &bin,
+        )
+        .unwrap();
 
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
@@ -749,9 +822,13 @@ mod tests {
     fn opencode_catalog_assets_match_the_legacy_installer_rendering() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::opencode::rendered_plugin_files(&bin).unwrap();
-        let bundle =
-            verified_embedded_host_bundle(HostKindV1::OpenCode, HostBundleComponentV1::Core, 0)
-                .unwrap();
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::OpenCode,
+            HostBundleComponentV1::Core,
+            0,
+            &bin,
+        )
+        .unwrap();
 
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
@@ -775,12 +852,17 @@ mod tests {
     /// component-set journal.
     #[test]
     fn opencode_core_assets_do_not_depend_on_the_running_executable_path() {
-        let assets = component_assets(HostKindV1::OpenCode, HostBundleComponentV1::Core).unwrap();
         let running = std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let installed =
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let assets = component_assets(
+            HostKindV1::OpenCode,
+            HostBundleComponentV1::Core,
+            &installed,
+        )
+        .unwrap();
         assert_eq!(assets.len(), 1);
         let body = String::from_utf8(assets[0].1.clone()).unwrap();
         assert!(
@@ -799,9 +881,13 @@ mod tests {
     fn hermes_catalog_assets_match_the_legacy_installer_rendering() {
         let bin = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let rendered = super::super::hermes::rendered_plugin_files(&bin).unwrap();
-        let bundle =
-            verified_embedded_host_bundle(HostKindV1::Hermes, HostBundleComponentV1::Core, 0)
-                .unwrap();
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::Hermes,
+            HostBundleComponentV1::Core,
+            0,
+            &bin,
+        )
+        .unwrap();
 
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
@@ -825,12 +911,13 @@ mod tests {
     /// `component-set-journal.hermes.v1.json` behind.
     #[test]
     fn hermes_core_assets_do_not_depend_on_the_running_executable_path() {
-        let assets = component_assets(HostKindV1::Hermes, HostBundleComponentV1::Core).unwrap();
         let running = std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let installed =
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        let assets =
+            component_assets(HostKindV1::Hermes, HostBundleComponentV1::Core, &installed).unwrap();
         let tools = assets
             .iter()
             .find(|(path, _)| path == ".hermes/plugins/tracedecay/tools.py")
@@ -967,7 +1054,10 @@ mod tests {
             assert!(default_components(host).is_empty());
             assert_eq!(
                 verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
-                Err(HostBundleRegistryError::Incompatible)
+                Err(HostBundleRegistryError::HostComponentSetUnavailable {
+                    host,
+                    reason: HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing,
+                })
             );
         }
     }
@@ -981,8 +1071,48 @@ mod tests {
                 &[HostBundleComponentV1::Core],
                 0
             ),
-            Err(HostBundleRegistryError::Incompatible)
+            Err(HostBundleRegistryError::HostComponentSetUnavailable {
+                host: HostKindV1::Kiro,
+                reason: HostCapabilityUnavailableReasonV1::NativeFixtureLimited,
+            })
         );
+    }
+
+    #[test]
+    fn cursor_cloud_reports_a_typed_unavailable_set_instead_of_an_empty_default() {
+        assert_eq!(
+            unsupported_host_component_set_reason(HostKindV1::CursorCloud),
+            Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
+        );
+        for outcome in [
+            verified_embedded_default_host_component_set(HostKindV1::CursorCloud, 0),
+            verified_embedded_host_component_set(
+                HostKindV1::CursorCloud,
+                &[HostBundleComponentV1::Core],
+                0,
+            ),
+            verified_embedded_project_host_component_set(HostKindV1::CursorCloud, "cursor", 0),
+        ] {
+            assert_eq!(
+                outcome,
+                Err(HostBundleRegistryError::HostComponentSetUnavailable {
+                    host: HostKindV1::CursorCloud,
+                    reason: HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
+                }),
+                "cursor cloud must never fall through to an installable empty set"
+            );
+        }
+    }
+
+    #[test]
+    fn every_host_with_a_default_set_is_reported_supported() {
+        for host in HostKindV1::ALL {
+            assert_eq!(
+                default_components(host).is_empty(),
+                unsupported_host_component_set_reason(host).is_some(),
+                "{host:?} must not disagree between its default set and its typed availability"
+            );
+        }
     }
 
     #[test]

@@ -8,8 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::gateway::AdmittedRoot;
-use super::session::{LifecycleError, LspSessionControl, SessionLifecycle};
+use tracedecay_lsp::{AdmittedRoot, LifecycleError, LspSessionControl, SessionLifecycle};
 
 /// PR12 permits one admitted root and a bounded number of live bridge
 /// sessions in one daemon process.

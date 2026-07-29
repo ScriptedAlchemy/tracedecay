@@ -6,9 +6,8 @@ use std::sync::{
 };
 
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
-
-use crate::query::retrieval::ports::RetrievalPortError;
-use crate::query::retrieval::semantic::{
+use tracedecay_query::retrieval::ports::RetrievalPortError;
+use tracedecay_query::retrieval::semantic::{
     EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
 };
 
@@ -230,7 +229,7 @@ mod tests {
     use super::super::runtime_service::{SemanticRuntimeService, SharedEmbeddingRuntimeFactory};
     use super::super::session_pool::tests::{authority, config};
     use super::*;
-    use crate::query::retrieval::semantic::{
+    use tracedecay_query::retrieval::semantic::{
         SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
     };
 

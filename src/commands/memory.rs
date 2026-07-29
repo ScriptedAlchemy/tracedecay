@@ -15,13 +15,16 @@ pub(crate) async fn handle_memory_action(action: MemoryAction) -> tracedecay::er
             min_confidence,
             path,
         } => {
-            let project_path = tracedecay::config::resolve_path_with_discovery(path);
+            let resolved = super::scope::resolve_project_scope(
+                tracedecay::config::resolve_path_with_discovery(path),
+            )
+            .await?;
             let llm_ops_value = match llm_ops {
                 Some(source) => Some(read_llm_ops_payload(&source)?),
                 None => None,
             };
             let report = daemon_tool_json(
-                Some(&project_path),
+                Some(&resolved.project_path),
                 "tracedecay_admin_project",
                 serde_json::json!({
                     "action": "memory_curate",

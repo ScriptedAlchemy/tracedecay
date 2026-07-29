@@ -30,6 +30,7 @@ use super::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService,
     DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor, GitIndexPolicyRecheckPort,
     GitIndexTransactionStoreRegistry, SharedDaemonGitIndexTransactionStore,
+    canonicalize_repository_root,
 };
 
 const GIT_POLICY_REVISION: u64 = 2;
@@ -476,8 +477,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
             super::SharedDaemonGitIndexTransactionStore,
         >,
     {
-        let repository_root = repository_root
-            .canonicalize()
+        let repository_root = canonicalize_repository_root(&repository_root)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         if let Some(service) = self
             .existing(&database_path, &repository_root, &project_id)
@@ -549,8 +549,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         configuration_database: Arc<RegisteredGlobalDb>,
         runtime: tokio::runtime::Handle,
     ) -> Result<(), GitIndexTransactionPortError> {
-        let repository_root = repository_root
-            .canonicalize()
+        let repository_root = canonicalize_repository_root(repository_root)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let services = self.services.lock().await;
         let mut matches = services
@@ -584,8 +583,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         &self,
         repository_root: &std::path::Path,
     ) -> Result<Option<DaemonGitInvocationOwner>, GitIndexTransactionPortError> {
-        let repository_root = repository_root
-            .canonicalize()
+        let repository_root = canonicalize_repository_root(repository_root)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let services = self.services.lock().await;
         let mut matches = services
