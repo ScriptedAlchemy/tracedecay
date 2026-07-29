@@ -21,8 +21,7 @@ pub const DOCTOR_REMEDIATION_PREVIEW_ROUTE_PATH: &str = "/api/doctor/remediation
 /// Route for applying a confirmed remediation.
 pub const DOCTOR_REMEDIATION_APPLY_ROUTE_PATH: &str = "/api/doctor/remediations/apply";
 /// Route for reading one remediation operation.
-pub const DOCTOR_REMEDIATION_STATUS_ROUTE_PATH: &str =
-    "/api/doctor/remediations/{operation_id}";
+pub const DOCTOR_REMEDIATION_STATUS_ROUTE_PATH: &str = "/api/doctor/remediations/{operation_id}";
 
 /// One Doctor remediation route mounted by the dashboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

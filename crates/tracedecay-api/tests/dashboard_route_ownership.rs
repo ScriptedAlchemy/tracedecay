@@ -44,18 +44,16 @@ fn configuration_write_descriptors_and_cas_errors_are_api_owned() {
     assert_eq!(project.expected_revision_id, "revision.project.1");
     assert_eq!(project.include, Some(vec!["src/**".to_owned()]));
     assert_eq!(
-        project
-            .sync
-            .expect("sync patch")
-            .auto_track_pr_branches,
+        project.sync.expect("sync patch").auto_track_pr_branches,
         Some(true)
     );
 
-    let shape_error =
-        parse_user_settings_patch(json!({"expected_revision_id": "revision.user.1", "unknown": true}))
-            .expect_err("unknown field must remain a typed bad request");
+    let shape_error = parse_user_settings_patch(
+        json!({"expected_revision_id": "revision.user.1", "unknown": true}),
+    )
+    .expect_err("unknown field must remain a typed bad request");
     assert_eq!(shape_error.0, StatusCode::BAD_REQUEST);
-    assert_eq!(shape_error.1 .0["validation_errors"][0]["field"], "unknown");
+    assert_eq!(shape_error.1.0["validation_errors"][0]["field"], "unknown");
 
     let conflict = configuration_revision_conflict_error(
         "settings changed after this edit began; refresh and retry",
@@ -63,9 +61,9 @@ fn configuration_write_descriptors_and_cas_errors_are_api_owned() {
         "revision.actual",
     );
     assert_eq!(conflict.0, StatusCode::CONFLICT);
-    assert_eq!(conflict.1 .0["code"], "configuration_revision_conflict");
-    assert_eq!(conflict.1 .0["expected_revision_id"], "revision.expected");
-    assert_eq!(conflict.1 .0["actual_revision_id"], "revision.actual");
+    assert_eq!(conflict.1.0["code"], "configuration_revision_conflict");
+    assert_eq!(conflict.1.0["expected_revision_id"], "revision.expected");
+    assert_eq!(conflict.1.0["actual_revision_id"], "revision.actual");
 }
 
 #[test]
@@ -97,25 +95,19 @@ fn remediation_write_descriptors_and_presentation_preserve_truthfulness() {
 
     let unavailable = doctor_remediation_envelope(
         scope(),
-        Err::<
-            (
-                serde_json::Value,
-                DoctorRemediationOperationPresentationV1,
-            ),
-            _,
-        >((
+        Err::<(serde_json::Value, DoctorRemediationOperationPresentationV1), _>((
             "unsupported".to_owned(),
-            DoctorRemediationErrorPresentationV1::new(
-                DashboardDomainStateV1::Unsupported,
-                true,
-            ),
+            DoctorRemediationErrorPresentationV1::new(DashboardDomainStateV1::Unsupported, true),
         )),
     );
     assert_eq!(
         unavailable.coverage.completeness,
         DashboardCoverageCompletenessV1::Unsupported
     );
-    assert_eq!(unavailable.domain_state, DashboardDomainStateV1::Unsupported);
+    assert_eq!(
+        unavailable.domain_state,
+        DashboardDomainStateV1::Unsupported
+    );
     let unavailable_wire = serde_json::to_value(unavailable).expect("unavailable wire shape");
     assert_eq!(unavailable_wire["payload"]["status"], "unavailable");
     assert_eq!(unavailable_wire["payload"]["reason"], "unsupported");

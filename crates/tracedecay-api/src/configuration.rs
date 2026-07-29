@@ -172,9 +172,7 @@ pub fn validate_user_settings_patch(
 
 /// Render validation failures using the generated dashboard wire shape.
 #[must_use]
-pub fn settings_validation_error(
-    errors: impl Serialize,
-) -> DashboardConfigurationRouteErrorV1 {
+pub fn settings_validation_error(errors: impl Serialize) -> DashboardConfigurationRouteErrorV1 {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({
@@ -239,10 +237,7 @@ fn validation_error(field: &str, message: &str) -> Value {
     json!({ "field": field, "message": message })
 }
 
-fn patch_shape_error(
-    scope: &str,
-    error: &serde_json::Error,
-) -> DashboardConfigurationRouteErrorV1 {
+fn patch_shape_error(scope: &str, error: &serde_json::Error) -> DashboardConfigurationRouteErrorV1 {
     let message = format!("invalid {scope} patch: {error}");
     let field = serde_error_field(&message).unwrap_or_else(|| "patch".to_owned());
     (
