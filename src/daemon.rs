@@ -5263,6 +5263,7 @@ async fn production_project_server(
                 None,
             )
             .await;
+            full_candidate.publish_doctor_report();
             log_daemon_event(
                 "project_open_phase",
                 &[

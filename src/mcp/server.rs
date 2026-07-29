@@ -393,6 +393,7 @@ pub struct McpServer {
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    doctor_report_published: AtomicBool,
     dashboard_doctor_remediation_dispatcher:
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     dashboard_code_index_freshness_reader:
@@ -567,6 +568,12 @@ pub struct McpServer {
 impl McpServer {
     pub(crate) fn doctor_report_ready(&self) -> bool {
         self.dashboard_doctor_report_reader.is_some()
+            && self.doctor_report_published.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn publish_doctor_report(&self) {
+        debug_assert!(self.dashboard_doctor_report_reader.is_some());
+        self.doctor_report_published.store(true, Ordering::Release);
     }
 
     /// Creates a new MCP server backed by the given code graph.
@@ -1059,6 +1066,7 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
+            doctor_report_published: AtomicBool::new(false),
             dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
