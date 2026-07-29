@@ -8,6 +8,9 @@ mod fastembed_adapter;
 mod manifest;
 #[path = "../src/semantic_code/model_catalog.rs"]
 pub mod model_catalog;
+mod root_adapter {
+    pub(super) use tracedecay::config::{DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings};
+}
 #[path = "../src/semantic_code/runtime_query.rs"]
 mod runtime_query;
 #[path = "../src/semantic_code/runtime_service.rs"]
@@ -19,8 +22,7 @@ pub mod query {
     pub use tracedecay::query::*;
 }
 
-// The included sources resolve `crate::config` and
-// `crate::semantic_code::model_catalog` against this test crate's root, so
+// The included sources resolve root-owned paths against this test crate, so
 // mirror those paths onto the real lib module and the path-included copy.
 pub mod config {
     pub use tracedecay::config::*;
