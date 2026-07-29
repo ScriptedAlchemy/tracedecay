@@ -9,3 +9,4 @@ include = ["/src/**", "/tests/**"]
 [dependencies]
 regex = "1"
 serde = { version = "1", features = ["derive"] }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
