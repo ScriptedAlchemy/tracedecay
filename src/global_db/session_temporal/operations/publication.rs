@@ -1,8 +1,11 @@
+use std::future::Future;
+
 use crate::db::engine::{Executor, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{EntityKind, RetrievalAnchorRecord, RetrievalAnchorTargetV2};
 
 use crate::sessions::lcm::{
+    dag::LcmSummaryPublicationPort,
     raw,
     types::{
         LcmError, LcmImmutableSummaryPublication, LcmSummaryNode, LcmSummaryPublicationDisposition,
@@ -15,6 +18,28 @@ use super::{
     compatibility, generation, load_manifest, logical_identity_digest, receipt_id, sources,
     unixepoch,
 };
+
+pub(crate) struct GlobalDbLcmSummaryPublication<'a, E> {
+    conn: &'a E,
+}
+
+impl<'a, E> GlobalDbLcmSummaryPublication<'a, E> {
+    pub(crate) const fn new(conn: &'a E) -> Self {
+        Self { conn }
+    }
+}
+
+impl<E> LcmSummaryPublicationPort for GlobalDbLcmSummaryPublication<'_, E>
+where
+    E: Executor,
+{
+    fn publish_immutable_summary(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+    ) -> impl Future<Output = Result<LcmSummaryPublicationReceipt, LcmError>> {
+        publish_immutable_summary(self.conn, publication)
+    }
+}
 
 enum PublicationRule<'a> {
     Initial,

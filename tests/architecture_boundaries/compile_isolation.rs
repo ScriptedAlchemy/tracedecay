@@ -339,6 +339,39 @@ fn observation_projection_owns_raw_storage_and_uses_store_records() {
 }
 
 #[test]
+fn session_lcm_publication_and_rendering_do_not_reach_back_into_global_db() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dag = std::fs::read_to_string(root.join("src/sessions/lcm/dag.rs"))
+        .expect("read session LCM DAG");
+    assert!(
+        dag.contains("LcmSummaryPublicationPort"),
+        "session LCM publication must use its narrow publication port"
+    );
+    assert!(
+        !dag.contains("global_db"),
+        "session LCM publication must not reach back into global_db"
+    );
+
+    let render = std::fs::read_to_string(root.join("src/sessions/lcm/render.rs"))
+        .expect("read session LCM renderer");
+    for forbidden in ["crate::db", "crate::global_db", "ReadSnapshot", "Executor"] {
+        assert!(
+            !render.contains(forbidden),
+            "session LCM rendering must remain DB-free: {forbidden}"
+        );
+    }
+
+    let adapter = std::fs::read_to_string(
+        root.join("src/global_db/session_temporal/operations/publication.rs"),
+    )
+    .expect("read global DB LCM publication adapter");
+    assert!(
+        adapter.contains("impl<E> LcmSummaryPublicationPort for GlobalDbLcmSummaryPublication"),
+        "global_db must retain the concrete transaction-backed publication adapter"
+    );
+}
+
+#[test]
 fn application_dependencies_are_exactly_the_use_case_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-application");

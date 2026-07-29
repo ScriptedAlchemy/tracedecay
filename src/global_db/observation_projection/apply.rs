@@ -7,15 +7,17 @@ use tracedecay_domain::{
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
-    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
-    derive_canonical_projection, workflow_semantic_kind,
+    SessionMessageProjection, SessionMessageRecord, SessionRecord, WorkflowFactProjection,
+    WorkflowFactRecord, derive_canonical_projection, workflow_semantic_kind,
 };
 
+use crate::application::session::compatibility::{
+    derived_text_for_index, derived_text_for_snippet, projected_content_hash,
+};
 use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::sessions::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
-use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 use super::state::{
     canonicalize_session_project_paths, message_rows_compatible, read_message, read_output_state,
@@ -515,6 +517,52 @@ pub(super) async fn apply_session(
     }
 }
 
+async fn upsert_projected_raw_message(
+    conn: &impl Executor,
+    message: &SessionMessageRecord,
+) -> bool {
+    let content_hash = projected_content_hash(&message.text);
+    let snippet = derived_text_for_snippet(&message.text);
+    let index = derived_text_for_index(&message.text);
+    conn.execute(
+        "INSERT INTO lcm_raw_messages (
+            provider, message_id, session_id, role, ordinal, timestamp,
+            content, content_hash, storage_kind, payload_ref, snippet_text,
+            index_text, legacy_source, legacy_truncated, metadata_json
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'inline', NULL, ?9, ?10, 0, 0, ?11)
+         ON CONFLICT(provider, message_id) DO UPDATE SET
+            session_id = excluded.session_id,
+            role = excluded.role,
+            ordinal = excluded.ordinal,
+            timestamp = excluded.timestamp,
+            content = excluded.content,
+            content_hash = excluded.content_hash,
+            storage_kind = excluded.storage_kind,
+            payload_ref = excluded.payload_ref,
+            snippet_text = excluded.snippet_text,
+            index_text = excluded.index_text,
+            legacy_source = 0,
+            legacy_truncated = 0,
+            metadata_json = excluded.metadata_json",
+        params![
+            message.provider.as_str(),
+            message.message_id.as_str(),
+            message.session_id.as_str(),
+            message.role.as_str(),
+            message.ordinal,
+            message.timestamp,
+            message.text.as_str(),
+            content_hash.as_str(),
+            snippet.as_str(),
+            index.as_str(),
+            message.metadata_json.as_deref(),
+        ],
+    )
+    .await
+    .is_ok()
+}
+
 async fn apply_rows(
     conn: &impl Executor,
     sequence: u64,
@@ -610,7 +658,7 @@ async fn apply_rows(
         })?;
     if projected_message.provider != "hermes"
         && !preserve_protected_payload
-        && !crate::sessions::lcm::raw::upsert_projected_raw_message(conn, &projected_message).await
+        && !upsert_projected_raw_message(conn, &projected_message).await
     {
         return Err(storage_message(
             "upsert projected LCM raw message",

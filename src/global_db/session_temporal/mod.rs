@@ -3,7 +3,6 @@ mod direct;
 mod doctor_health;
 mod expand;
 mod hydration;
-mod lcm_render;
 pub(crate) mod operations;
 mod projection;
 mod query;
@@ -42,12 +41,12 @@ use crate::sessions::SessionMessageRecord;
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
+    render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content},
 };
 
 pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub(crate) use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
-use self::lcm_render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
 use self::retrieval::GlobalDbTemporalReadPort;
 use self::sql::TemporalSqlRead;
 
