@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 
-const MAX_DERIVED_TEXT_CHARS: usize = 64 * 1024;
-const MAX_DERIVED_SNIPPET_CHARS: usize = 4 * 1024;
-const DERIVED_TRUNCATION_MARKER: &str = "\n[derived snippet truncated by tracedecay]";
+pub const MAX_DERIVED_TEXT_CHARS: usize = 64 * 1024;
+pub const MAX_DERIVED_SNIPPET_CHARS: usize = 4 * 1024;
+pub const DERIVED_TRUNCATION_MARKER: &str = "\n[derived snippet truncated by tracedecay]";
 pub(crate) const RERANK_OVERFETCH_FACTOR: usize = 4;
 
 pub(crate) struct RelatedMessageCopyIdentity<'a> {

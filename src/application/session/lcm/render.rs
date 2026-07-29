@@ -1,8 +1,11 @@
 //! DB-free LCM compatibility shaping after canonical temporal hydration.
+//!
+//! Truncation, offsets, and typed omissions are decided here so the registered
+//! database adapters keep only snapshot, hydration, and transaction ownership.
 
 use tracedecay_domain::HydrationStateV1;
 
-use super::{LcmContentRange, LcmContentSlice, LcmExpandResponse, LcmSourceRef};
+use super::contracts::{LcmContentRange, LcmContentSlice, LcmExpandResponse, LcmSourceRef};
 
 #[derive(Debug)]
 pub(crate) struct CanonicalLcmSourceHydration {
@@ -110,8 +113,8 @@ pub(crate) fn apply_canonical_summary_source_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sessions::lcm::{
-        LcmContentRange, LcmExpandedSummarySource, LcmRawMessage, LcmSourceRef, LcmStorageKind,
+    use crate::application::session::lcm::contracts::{
+        LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind,
     };
 
     fn source(store_id: i64) -> LcmExpandedSummarySource {

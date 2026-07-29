@@ -9,7 +9,6 @@ mod maintenance;
 pub mod payload;
 pub mod query;
 pub mod raw;
-pub(crate) mod render;
 mod replay_transactions;
 pub mod retention;
 pub mod schema;

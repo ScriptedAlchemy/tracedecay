@@ -176,7 +176,6 @@ fn temporal_lcm_adapters_use_the_shared_cursor_codec() {
 #[test]
 fn temporal_lcm_rendering_never_performs_a_second_payload_read() {
     let temporal_executor = include_str!("../../global_db/session_temporal/mod.rs");
-    let legacy_renderer = include_str!("../../global_db/session_temporal/lcm_render.rs");
     let registered_renderer =
         include_str!("../../global_db/session_temporal/registered_lcm_render.rs");
 
@@ -187,12 +186,10 @@ fn temporal_lcm_rendering_never_performs_a_second_payload_read() {
         "payload::expand_payload(",
         "tombstoned_raw_ref_exists",
     ] {
-        for renderer in [legacy_renderer, registered_renderer] {
-            assert!(
-                !renderer.contains(forbidden),
-                "LCM renderer must not perform legacy payload lookup `{forbidden}`"
-            );
-        }
+        assert!(
+            !registered_renderer.contains(forbidden),
+            "LCM renderer must not perform legacy payload lookup `{forbidden}`"
+        );
     }
     assert!(
         !temporal_executor.contains("canonicalize_lcm_summary_sources"),

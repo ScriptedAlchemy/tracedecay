@@ -1,6 +1,6 @@
 use crate::db::engine::{Executor, params};
 
-use crate::sessions::lcm::types::{LcmError, LcmSourceRef};
+use crate::application::session::lcm::contracts::{LcmError, LcmSourceRef};
 
 use super::CanonicalPublicationManifest;
 

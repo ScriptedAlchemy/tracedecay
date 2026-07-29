@@ -1,3 +1,4 @@
+use crate::application::session::compatibility::projected_content_hash;
 use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 
 use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
@@ -516,7 +517,7 @@ async fn carry_forward_legacy_messages_in_transaction(
         let content: String = row.get(6)?;
         let metadata_json: Option<String> = row.get(7)?;
         let legacy_truncated = content.contains(TRUNCATION_MARKER);
-        let content_hash = raw::sha256_hex(&content);
+        let content_hash = projected_content_hash(&content);
         let snippet_text = raw::derived_text_for_snippet(&content);
         let index_text = raw::derived_text_for_index(&content);
 

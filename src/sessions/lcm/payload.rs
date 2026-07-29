@@ -1,5 +1,6 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
+pub use crate::application::session::lcm::contracts::validate_payload_ref;
 use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::SessionMessageRecord;
@@ -85,23 +86,6 @@ impl<'db> LcmStore<'db> {
 
 pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")
-}
-
-pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
-    if payload_ref.is_empty()
-        || payload_ref == "."
-        || payload_ref == ".."
-        || payload_ref.contains('/')
-        || payload_ref.contains('\\')
-    {
-        return Err(LcmError::InvalidPayloadRef);
-    }
-
-    let mut components = Path::new(payload_ref).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(_)), None) => Ok(payload_ref),
-        _ => Err(LcmError::InvalidPayloadRef),
-    }
 }
 
 pub(crate) fn extract_payload_refs_from_text(text: &str) -> Vec<String> {

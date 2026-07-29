@@ -392,15 +392,6 @@ fn session_lcm_publication_and_rendering_do_not_reach_back_into_global_db() {
         "session LCM publication must not reach back into global_db"
     );
 
-    let render = std::fs::read_to_string(root.join("src/sessions/lcm/render.rs"))
-        .expect("read session LCM renderer");
-    for forbidden in ["crate::db", "crate::global_db", "ReadSnapshot", "Executor"] {
-        assert!(
-            !render.contains(forbidden),
-            "session LCM rendering must remain DB-free: {forbidden}"
-        );
-    }
-
     let adapter = std::fs::read_to_string(
         root.join("src/global_db/session_temporal/operations/publication.rs"),
     )
@@ -408,6 +399,94 @@ fn session_lcm_publication_and_rendering_do_not_reach_back_into_global_db() {
     assert!(
         adapter.contains("impl<E> LcmSummaryPublicationPort for GlobalDbLcmSummaryPublication"),
         "global_db must retain the concrete transaction-backed publication adapter"
+    );
+}
+
+#[test]
+fn lcm_compatibility_contracts_are_application_owned_and_db_free() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("src/sessions/lcm/render.rs").exists(),
+        "LCM rendering must not be duplicated back under the session store"
+    );
+
+    for path in [
+        "src/application/session/lcm/contracts.rs",
+        "src/application/session/lcm/render.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(path)).expect("read LCM contract module");
+        for forbidden in [
+            "crate::db",
+            "crate::global_db",
+            "crate::sessions",
+            "ReadSnapshot",
+            "Executor",
+            "rusqlite",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} must stay DB-free and free of session-store dependencies: {forbidden}"
+            );
+        }
+    }
+
+    let contracts = std::fs::read_to_string(root.join("src/application/session/lcm/contracts.rs"))
+        .expect("read LCM contracts");
+    for owned in [
+        "pub enum LcmError",
+        "pub struct LcmContentRange",
+        "pub struct LcmContentSlice",
+        "pub struct LcmExpandResponse",
+        "pub struct LcmDescribeResponse",
+        "pub fn validate_payload_ref",
+    ] {
+        assert!(
+            contracts.contains(owned),
+            "the application session layer must own the LCM compatibility contract: {owned}"
+        );
+    }
+
+    let types = std::fs::read_to_string(root.join("src/sessions/lcm/types.rs"))
+        .expect("read session LCM types");
+    assert!(
+        types.contains("pub use crate::application::session::lcm::contracts::"),
+        "sessions::lcm::types must re-export the application-owned contracts"
+    );
+    assert!(
+        types.contains("impl From<crate::db::engine::Error> for LcmError"),
+        "the SQL error mapping stays with the session store, not the application contract"
+    );
+}
+
+#[test]
+fn session_temporal_rendering_does_not_import_the_session_lcm_tree() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in [
+        "src/global_db/session_temporal/mod.rs",
+        "src/global_db/session_temporal/registered_lcm_render.rs",
+        "src/global_db/session_temporal/direct.rs",
+        "src/global_db/session_temporal/operations/compatibility.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(path)).expect("read temporal LCM adapter");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source.as_str(), |(before, _)| before);
+        assert!(
+            !production.contains("crate::sessions::lcm::"),
+            "{path} must reach LCM rendering contracts through the application layer"
+        );
+    }
+
+    let renderer =
+        std::fs::read_to_string(root.join("src/global_db/session_temporal/registered_lcm_render.rs"))
+            .expect("read registered LCM renderer");
+    assert!(
+        renderer.contains("use crate::application::session::lcm::render::apply_canonical_content;"),
+        "the registered renderer must apply the application-owned canonical shaping"
+    );
+    assert!(
+        renderer.contains("ReadSnapshot"),
+        "the registered renderer keeps snapshot ownership; remove this guard if that changes"
     );
 }
 
@@ -478,6 +557,7 @@ fn api_dependencies_are_exactly_the_thin_adapter_allowlist() {
     let expected_direct = [
         "axum",
         "futures-util",
+        "schemars",
         "serde",
         "serde_json",
         "thiserror",

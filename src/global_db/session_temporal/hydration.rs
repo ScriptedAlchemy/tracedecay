@@ -23,7 +23,8 @@ use crate::query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
 };
 use crate::sessions::SessionMessageRecord;
-use crate::sessions::lcm::payload::{read_verified_payload_content, validate_payload_ref};
+use crate::application::session::lcm::contracts::validate_payload_ref;
+use crate::sessions::lcm::payload::read_verified_payload_content;
 
 use super::operations::CanonicalPublicationManifest;
 use super::sql::TemporalSqlRead;
