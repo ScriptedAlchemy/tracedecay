@@ -39,12 +39,20 @@ const sigmaState = vi.hoisted(() => ({
 
 vi.mock('sigma', () => ({
   default: class MockSigma {
+    /** The layer map the renderer reads to find the canvases whose WebGL
+     * context it must watch. */
+    private readonly layers = { nodes: document.createElement('canvas') };
+
     constructor(graph: Graph) {
       sigmaState.graph = graph;
     }
 
     setCustomBBox(bbox: { x: [number, number]; y: [number, number] }) {
       sigmaState.bbox = bbox;
+    }
+
+    getCanvases() {
+      return this.layers;
     }
 
     resize() {}

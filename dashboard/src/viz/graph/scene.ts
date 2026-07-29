@@ -29,8 +29,13 @@ export interface GraphScene {
   settle(): void;
   wake(): void;
   retheme(): void;
-  /** Idempotent: React's cleanup and the size observer both call it, and on
-   * an ordinary unmount they both fire. */
+  /** The layers whose WebGL context this whole composition depends on, for a
+   * surface that has to state a context lost after the field was drawn. They
+   * outlive the scene, because a restore is dispatched at the canvas of the
+   * renderer that died. */
+  readonly webGlCanvases: readonly HTMLCanvasElement[];
+  /** Idempotent: React's cleanup, the size observer and a lost context all
+   * call it, and on an ordinary unmount two of them fire. */
   teardown(): void;
 }
 
@@ -147,6 +152,7 @@ function compose(
   if (field.warm) overlay.wake();
 
   return {
+    webGlCanvases: renderer.webGlCanvases,
     repaint: paint,
     resize: () => {
       if (alive) renderer?.resize();

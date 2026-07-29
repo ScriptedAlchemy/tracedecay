@@ -30,6 +30,10 @@ vi.mock('graphology-layout-forceatlas2', () => ({
 
 vi.mock('sigma', () => ({
   default: class MockSigma {
+    /** The layer map the renderer reads to find the canvases whose WebGL
+     * context it must watch. */
+    private readonly layers = { nodes: document.createElement('canvas') };
+
     constructor(
       graph: Graph,
       _container: unknown,
@@ -40,6 +44,10 @@ vi.mock('sigma', () => ({
     }
 
     setCustomBBox() {}
+
+    getCanvases() {
+      return this.layers;
+    }
 
     resize() {}
     on() {}
