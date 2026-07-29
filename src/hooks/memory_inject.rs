@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +44,8 @@ const PROMPT_RECALL_MIN_SCORE: f64 = 0.18;
 /// Reset threshold for the persisted per-session seen-fact history, mirroring
 /// `tool_hints::MAX_PERSISTED_HINT_ENTRIES`.
 const MAX_PERSISTED_SEEN_ENTRIES: usize = 4_096;
+/// A prompt hook must never wait on memory retrieval long enough to delay the host.
+const PROMPT_RECALL_DAEMON_BUDGET: Duration = Duration::from_millis(500);
 
 const SEEN_FACTS_FILENAME: &str = "memory_inject_seen.json";
 const USER_SEEN_FACTS_FILENAME: &str = "user_memory_inject_seen.json";
@@ -108,16 +111,29 @@ async fn daemon_fact_search(
     prompt: &str,
     user_scope: bool,
 ) -> Vec<FactSearchResult> {
-    daemon_fact_store(
-        root,
-        "search",
-        Some(prompt),
-        user_scope,
-        PROMPT_RECALL_FACT_COUNT * 4,
+    match tokio::time::timeout(
+        PROMPT_RECALL_DAEMON_BUDGET,
+        daemon_fact_store(
+            root,
+            "search",
+            Some(prompt),
+            user_scope,
+            PROMPT_RECALL_FACT_COUNT * 4,
+        ),
     )
     .await
-    .and_then(|value| serde_json::from_value(value.get("facts")?.clone()).ok())
-    .unwrap_or_default()
+    {
+        Ok(value) => value
+            .and_then(|value| serde_json::from_value(value.get("facts")?.clone()).ok())
+            .unwrap_or_default(),
+        Err(_) => {
+            eprintln!(
+                "[tracedecay] memory hook search exceeded the {}ms prompt budget",
+                PROMPT_RECALL_DAEMON_BUDGET.as_millis()
+            );
+            Vec::new()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
