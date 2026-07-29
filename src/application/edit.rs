@@ -25,6 +25,7 @@ use crate::types::{AstGrepResult, EditResult, InsertResult, MoveResult, MultiEdi
 const JOURNAL_VERSION: u8 = 1;
 const MAX_DURABLE_RECORD_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1: &str = "tracedecay.source-edit-state.v1";
+const SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1: &str = "tracedecay.source-edit-recovery.v1";
 
 #[derive(Clone, Debug)]
 pub struct SourceEditEffectControlV1 {
@@ -64,10 +65,12 @@ struct SourceEditControlStopV1 {
     observation: CancellationObservation,
 }
 
-/// Body-free metadata retained after the live edit response is returned.
+/// Body-free outcome metadata retained after the live edit response is returned.
 ///
-/// Durable records intentionally keep no caller-supplied edit text, preview
-/// diff, moved/replaced span, import text, diagnostic text, or impact detail.
+/// Receipts intentionally keep no caller-supplied edit text, preview diff,
+/// moved/replaced span, import text, diagnostic text, or impact detail. The
+/// active transaction journal separately retains bounded exact preimages until
+/// commit or rollback so restart recovery can restore the accepted workspace.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEditDurableOutcomeV1 {
@@ -394,8 +397,28 @@ struct SourceEditJournalV1 {
     #[serde(default)]
     predicted_state: Option<ManifestDigest>,
     candidate_files: Vec<String>,
+    #[serde(default)]
+    recovery_files: Vec<crate::tracedecay::PlannedSourceEditFile>,
+    #[serde(default)]
+    recovery_digest: Option<ManifestDigest>,
     request: SourceEditDurableRequestV1,
     state: SourceEditJournalStateV1,
+}
+
+impl SourceEditJournalV1 {
+    fn validate_recovery(&self) -> Result<()> {
+        match (&self.recovery_digest, self.recovery_files.is_empty()) {
+            (None, true) => Ok(()),
+            (Some(digest), false)
+                if digest == &source_edit_recovery_digest(&self.recovery_files)? =>
+            {
+                Ok(())
+            }
+            _ => Err(config_error(
+                "source edit recovery journal digest does not match its preimages",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -490,6 +513,7 @@ impl SourceEditDurability {
                 &journal.request.authority,
                 &journal.request.authority_proof,
             )?;
+            journal.validate_recovery()?;
         }
         Ok(journal)
     }
@@ -637,6 +661,8 @@ fn persist_pre_effect_result(
         expected_state: expected_state.clone(),
         predicted_state,
         candidate_files,
+        recovery_files: Vec::new(),
+        recovery_digest: None,
         request: durable_request(operation, request, authority),
         state: SourceEditJournalStateV1::Prepared,
     };
@@ -820,6 +846,7 @@ where
             );
         }
     };
+    recover_source_edit_transaction(&durability, graph, request.context.scope()).await?;
     if let Some(result) = recover_or_replay(&durability, &request, &input_digest)? {
         return Ok(result);
     }
@@ -1014,6 +1041,14 @@ where
 
     let effect_id = effect_id(&request.idempotency_key, &input_digest)?;
     let durable_request = durable_request(operation, &request, &current_authority);
+    let recovery_files = planned_files
+        .iter()
+        .all(|file| file.expected.is_some() && file.intended.is_some())
+        .then(|| planned_files.clone())
+        .unwrap_or_default();
+    let recovery_digest = (!recovery_files.is_empty())
+        .then(|| source_edit_recovery_digest(&recovery_files))
+        .transpose()?;
     let mut journal = SourceEditJournalV1 {
         version: JOURNAL_VERSION,
         effect_id,
@@ -1021,6 +1056,8 @@ where
         expected_state: request.expected_state.clone(),
         predicted_state: Some(predicted_state.clone()),
         candidate_files,
+        recovery_files,
+        recovery_digest,
         request: durable_request,
         state: SourceEditJournalStateV1::Prepared,
     };
@@ -1530,6 +1567,69 @@ fn reconcile_prepared_source_edit_controlled(
     };
     durability.clear_journal()?;
     Ok(result)
+}
+
+async fn recover_source_edit_transaction(
+    durability: &SourceEditDurability,
+    graph: &TraceDecay,
+    scope: &tracedecay_application::ResolvedScope,
+) -> Result<()> {
+    let Some(journal) = durability.load_journal()? else {
+        return Ok(());
+    };
+    if &journal.request.scope != scope {
+        return Err(config_error(
+            "source edit crash recovery must run in the transaction's owning worktree",
+        ));
+    }
+    if let SourceEditJournalStateV1::Applied {
+        outcome,
+        committed_state,
+        ended_at,
+        control_observation,
+        verification_state,
+    } = &journal.state
+    {
+        let record = applied_durable_record(
+            &journal,
+            outcome.clone(),
+            committed_state.clone(),
+            *ended_at,
+            control_observation.clone(),
+            *verification_state,
+        )?;
+        durability.persist_receipt(&record)?;
+        return durability.clear_journal();
+    }
+    if journal.recovery_files.is_empty() {
+        return Ok(());
+    }
+    graph
+        .recover_source_edit_preimages(&journal.recovery_files)
+        .await?;
+    let restored_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+    if restored_state != journal.expected_state {
+        return Err(config_error(
+            "source edit crash recovery did not restore the journaled preimage state",
+        ));
+    }
+    let outcome = SourceEditOutcome::Failed {
+        message: "source edit crash recovery restored every journaled preimage".to_owned(),
+    };
+    let mut durable_outcome =
+        SourceEditDurableOutcomeV1::from_live(&journal.request.operation, &outcome);
+    durable_outcome.files = journal.candidate_files.clone();
+    let record = durable_record(
+        &journal,
+        durable_outcome,
+        None,
+        now_micros(),
+        EffectTermination::Failed,
+        ReconciliationState::Reconciled,
+        None,
+    )?;
+    durability.persist_receipt(&record)?;
+    durability.clear_journal()
 }
 
 fn recover_or_replay(
@@ -2130,6 +2230,12 @@ fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDig
     canonical_sha256(&(SOURCE_EDIT_STATE_DIGEST_DOMAIN_V1, states)).map_err(domain_error)
 }
 
+fn source_edit_recovery_digest(
+    files: &[crate::tracedecay::PlannedSourceEditFile],
+) -> Result<ManifestDigest> {
+    canonical_sha256(&(SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1, files)).map_err(domain_error)
+}
+
 fn planned_source_edit_state_digest(
     files: &[String],
     planned_files: &[crate::tracedecay::PlannedSourceEditFile],
@@ -2382,6 +2488,8 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 mod tests {
     use std::collections::BTreeSet;
     use std::ops::Deref;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2655,6 +2763,21 @@ mod tests {
             fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
             concurrent
         );
+        let replanned = crate::application::api_migration::plan_api_migration(
+            &graph,
+            ApiMigrationPlanRequestV1 {
+                family_id: plan.family_id.clone(),
+                operations: plan.operations.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(replanned.blocked);
+        assert_ne!(replanned.plan_digest, plan.plan_digest);
+        assert_eq!(
+            replanned.files[0].expected_content,
+            replanned.files[0].intended_content
+        );
         fs::write(project.path().join("src/lib.rs"), initial).unwrap();
         let result = apply_api_migration_fixture(&graph, plan).await;
         assert!(result.success);
@@ -2801,7 +2924,7 @@ mod tests {
         assert_eq!(plan.sites.len(), 1);
         assert_eq!(
             plan.sites[0].disposition,
-            ApiMigrationSiteDispositionV1::Unchanged
+            ApiMigrationSiteDispositionV1::Skipped
         );
         assert_eq!(
             plan.sites[0].reason,
@@ -2819,6 +2942,102 @@ mod tests {
         assert_eq!(
             fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
             initial
+        );
+    }
+
+    #[tokio::test]
+    async fn api_migration_replan_classifies_applied_compatibility_and_terminology_as_unchanged() {
+        let initial = "pub fn current_api() -> i32 {\n    7\n}\n\npub fn terminology() -> i32 {\n    let legacy = 1;\n    legacy\n}\n";
+        let compatibility = "#[deprecated]\npub fn legacy_api() -> i32 {\n    current_api()\n}";
+        let (project, graph) = indexed_api_migration_fixture(initial).await;
+        let request = ApiMigrationPlanRequestV1 {
+            family_id: "family.replan".to_owned(),
+            operations: vec![
+                ApiMigrationOperationRequestV1::InsertCompatibility {
+                    operation_id: "insert-compatibility".to_owned(),
+                    depends_on: Vec::new(),
+                    anchor: api_migration_symbol(&graph, "current_api").await,
+                    position: ApiDefinitionInsertionV1::After,
+                    definition: compatibility.to_owned(),
+                    disposition: ApiCompatibilityDispositionV1 {
+                        lifetime: ApiCompatibilityLifetimeV1::StablePublicContract,
+                        external_consumer: "fixture consumer".to_owned(),
+                        owner: "fixture API team".to_owned(),
+                        deprecation_policy: "retained as a stable compatibility alias".to_owned(),
+                        pr19_deletion_condition: None,
+                    },
+                },
+                ApiMigrationOperationRequestV1::ReplaceSelectedTerminology {
+                    operation_id: "replace-terminology".to_owned(),
+                    depends_on: Vec::new(),
+                    enclosing_symbol: api_migration_symbol(&graph, "terminology").await,
+                    old_term: "legacy".to_owned(),
+                    new_term: "current".to_owned(),
+                    occurrence_indexes: vec![0, 1],
+                },
+            ],
+        };
+        let plan = crate::application::api_migration::plan_api_migration(&graph, request.clone())
+            .await
+            .unwrap();
+        let result = apply_api_migration_fixture(&graph, plan).await;
+        assert!(result.success);
+
+        let replanned = crate::application::api_migration::plan_api_migration(&graph, request)
+            .await
+            .unwrap();
+
+        assert!(!replanned.blocked);
+        assert!(replanned.files.iter().all(|file| {
+            file.expected_content == file.intended_content
+                && fs::read_to_string(project.path().join(&file.path)).unwrap()
+                    == file.expected_content
+        }));
+        assert!(replanned.sites.iter().all(|site| {
+            site.disposition == ApiMigrationSiteDispositionV1::Unchanged
+                || site.disposition == ApiMigrationSiteDispositionV1::Skipped
+        }));
+    }
+
+    #[tokio::test]
+    async fn api_migration_blocks_a_definition_replacement_that_changes_protected_bytes() {
+        let initial = "pub fn wire_name() -> &'static str {\n    \"stable_name\"\n}\n";
+        let replacement = "pub fn wire_name() -> &'static str {\n    \"changed_name\"\n}\n";
+        let (_project, graph) = indexed_api_migration_fixture(initial).await;
+        let symbol = api_migration_symbol(&graph, "wire_name").await;
+        let request = ApiMigrationPlanRequestV1 {
+            family_id: "family.protected-overwrite".to_owned(),
+            operations: vec![
+                ApiMigrationOperationRequestV1::PromotePrimary {
+                    operation_id: "promote".to_owned(),
+                    depends_on: Vec::new(),
+                    symbol: symbol.clone(),
+                    expected_definition_digest: api_migration_definition_digest(initial).unwrap(),
+                    replacement_definition: replacement.to_owned(),
+                },
+                ApiMigrationOperationRequestV1::AssertStableValue {
+                    operation_id: "protect-wire-name".to_owned(),
+                    depends_on: vec!["promote".to_owned()],
+                    enclosing_symbol: symbol,
+                    category: "wire field".to_owned(),
+                    exact_bytes: "\"stable_name\"".to_owned(),
+                    occurrence_indexes: vec![0],
+                },
+            ],
+        };
+
+        let plan = crate::application::api_migration::plan_api_migration(&graph, request)
+            .await
+            .unwrap();
+
+        assert!(plan.blocked);
+        assert!(plan.sites.iter().any(|site| {
+            site.operation_id == "protect-wire-name"
+                && site.disposition == ApiMigrationSiteDispositionV1::Blocked
+        }));
+        assert_eq!(
+            plan.files[0].expected_content,
+            plan.files[0].intended_content
         );
     }
 
@@ -2917,6 +3136,8 @@ mod tests {
             expected_state: request.expected_state.clone(),
             predicted_state: None,
             candidate_files: vec!["src/lib.rs".to_owned()],
+            recovery_files: Vec::new(),
+            recovery_digest: None,
             request: SourceEditDurableRequestV1 {
                 operation: operation.use_case_id().clone(),
                 request_id: request.context.request_id().clone(),
@@ -3296,6 +3517,95 @@ mod tests {
             durability.load_journal().unwrap().is_some(),
             "an unknown prepared effect must retain its recovery evidence"
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_restart_with_preimages_restores_partial_bytes_before_another_edit() {
+        let project = tempdir().unwrap();
+        fs::create_dir_all(project.path().join("src")).unwrap();
+        fs::write(project.path().join("src/a.rs"), b"pub fn old_a() {}\n").unwrap();
+        fs::write(project.path().join("src/b.rs"), b"pub fn old_b() {}\n").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            project.path().join("src/a.rs"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let graph = fixture_graph(project.path()).await;
+        let durability = SourceEditDurability::for_graph(&graph);
+        let mut request = fixture_request();
+        let candidate_files = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
+        request.expected_state =
+            source_edit_state_digest(project.path(), &candidate_files).unwrap();
+        let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
+        journal.candidate_files = candidate_files;
+        journal.recovery_files = vec![
+            crate::tracedecay::PlannedSourceEditFile {
+                relative_path: "src/a.rs".to_owned(),
+                expected: Some("pub fn old_a() {}\n".to_owned()),
+                intended: Some("pub fn new_a() {}\n".to_owned()),
+            },
+            crate::tracedecay::PlannedSourceEditFile {
+                relative_path: "src/b.rs".to_owned(),
+                expected: Some("pub fn old_b() {}\n".to_owned()),
+                intended: Some("pub fn new_b() {}\n".to_owned()),
+            },
+        ];
+        journal.recovery_digest =
+            Some(source_edit_recovery_digest(&journal.recovery_files).unwrap());
+        durability.persist_journal(&journal).unwrap();
+        fs::write(project.path().join("src/a.rs"), b"pub fn new_a() {}\n").unwrap();
+
+        recover_source_edit_transaction(&durability, &graph, request.context.scope())
+            .await
+            .unwrap();
+        let result = recover_or_replay(&durability, &request, &request.input_digest().unwrap())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            result.effect.unwrap().receipt.outcome,
+            EffectTermination::Failed
+        );
+        assert_eq!(
+            fs::read(project.path().join("src/a.rs")).unwrap(),
+            b"pub fn old_a() {}\n"
+        );
+        assert_eq!(
+            fs::read(project.path().join("src/b.rs")).unwrap(),
+            b"pub fn old_b() {}\n"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(project.path().join("src/a.rs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert!(durability.load_journal().unwrap().is_none());
+    }
+
+    #[test]
+    fn prepared_restart_rejects_preimages_that_do_not_match_the_journal_digest() {
+        let directory = tempdir().unwrap();
+        let durability = SourceEditDurability {
+            root: directory.path().to_path_buf(),
+        };
+        let request = fixture_request();
+        let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
+        journal.recovery_files = vec![crate::tracedecay::PlannedSourceEditFile {
+            relative_path: "src/lib.rs".to_owned(),
+            expected: Some("old".to_owned()),
+            intended: Some("new".to_owned()),
+        }];
+        journal.recovery_digest =
+            Some(source_edit_recovery_digest(&journal.recovery_files).unwrap());
+        journal.recovery_files[0].expected = Some("tampered".to_owned());
+        durability.persist_journal(&journal).unwrap();
+
+        assert!(durability.load_journal().is_err());
     }
 
     #[test]

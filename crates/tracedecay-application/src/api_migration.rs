@@ -441,14 +441,56 @@ impl ApiMigrationPlanV1 {
                 });
             }
         }
+        let operations = self
+            .operations
+            .iter()
+            .map(|operation| (operation.operation_id(), operation))
+            .collect::<BTreeMap<_, _>>();
         let mut site_ids = BTreeSet::new();
+        let mut covered_operations = BTreeSet::new();
         for site in &self.sites {
             site.validate()?;
+            let Some(operation) = operations.get(site.operation_id.as_str()) else {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration typed site operation",
+                });
+            };
             if !site_ids.insert(site.site_id.as_str()) || !paths.contains(site.path.as_str()) {
                 return Err(ApplicationContractError::Inconsistent {
                     field: "api migration site identity",
                 });
             }
+            let Some(file) = self.files.iter().find(|file| file.path == site.path) else {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration site file",
+                });
+            };
+            let start = usize::try_from(site.start_byte).map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "api migration site preimage span",
+                }
+            })?;
+            let end = usize::try_from(site.end_byte).map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "api migration site preimage span",
+                }
+            })?;
+            if file.expected_content.get(start..end) != Some(site.expected_bytes.as_str()) {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration site preimage bytes",
+                });
+            }
+            covered_operations.insert(site.operation_id.as_str());
+            validate_site_for_operation(site, operation)?;
+        }
+        if covered_operations.len() != operations.len() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "api migration operation site coverage",
+            });
+        }
+        validate_materialized_files(&self.files, &self.sites)?;
+        for operation in &self.operations {
+            validate_operation_result(operation, &self.sites, &self.files)?;
         }
         if self.blocked
             != self
@@ -467,6 +509,178 @@ impl ApiMigrationPlanV1 {
         }
         Ok(())
     }
+}
+
+fn validate_materialized_files(
+    files: &[ApiMigrationFilePlanV1],
+    sites: &[ApiMigrationSiteV1],
+) -> Result<(), ApplicationContractError> {
+    for file in files {
+        let mut intended = file.expected_content.clone();
+        let mut edits = sites
+            .iter()
+            .filter(|site| {
+                site.path == file.path && site.disposition == ApiMigrationSiteDispositionV1::Changed
+            })
+            .collect::<Vec<_>>();
+        edits.sort_by(|left, right| {
+            right
+                .start_byte
+                .cmp(&left.start_byte)
+                .then(right.end_byte.cmp(&left.end_byte))
+        });
+        for pair in edits.windows(2) {
+            let right = pair[0];
+            let left = pair[1];
+            if right.start_byte < left.end_byte
+                || (right.start_byte == right.end_byte
+                    && left.start_byte == left.end_byte
+                    && right.start_byte == left.start_byte)
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration non-overlapping changed sites",
+                });
+            }
+        }
+        for edit in edits {
+            let start = usize::try_from(edit.start_byte).map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "api migration changed site span",
+                }
+            })?;
+            let end = usize::try_from(edit.end_byte).map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "api migration changed site span",
+                }
+            })?;
+            if intended.get(start..end) != Some(edit.expected_bytes.as_str()) {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration changed site preimage",
+                });
+            }
+            intended.replace_range(start..end, &edit.replacement_bytes);
+        }
+        if intended != file.intended_content {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "api migration materialized file content",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_site_for_operation(
+    site: &ApiMigrationSiteV1,
+    operation: &ApiMigrationOperationRequestV1,
+) -> Result<(), ApplicationContractError> {
+    match operation {
+        ApiMigrationOperationRequestV1::AssertStableValue {
+            enclosing_symbol,
+            exact_bytes,
+            ..
+        } => {
+            if site.path != enclosing_symbol.file
+                || site.expected_bytes != exact_bytes.as_str()
+                || site.replacement_bytes != exact_bytes.as_str()
+                || !matches!(
+                    site.disposition,
+                    ApiMigrationSiteDispositionV1::Skipped | ApiMigrationSiteDispositionV1::Blocked
+                )
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration protected value site",
+                });
+            }
+        }
+        ApiMigrationOperationRequestV1::InsertCompatibility { anchor, .. } => {
+            if site.path != anchor.file
+                || !matches!(
+                    site.disposition,
+                    ApiMigrationSiteDispositionV1::Changed
+                        | ApiMigrationSiteDispositionV1::Unchanged
+                        | ApiMigrationSiteDispositionV1::Blocked
+                )
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration compatibility site",
+                });
+            }
+        }
+        ApiMigrationOperationRequestV1::PromotePrimary { symbol, .. }
+        | ApiMigrationOperationRequestV1::ReplaceDefinition { symbol, .. }
+        | ApiMigrationOperationRequestV1::RenameBoundSymbol { symbol, .. } => {
+            if site.path != symbol.file && site.caller_node_id.is_none() {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration symbol site",
+                });
+            }
+        }
+        ApiMigrationOperationRequestV1::ReplaceSelectedTerminology {
+            enclosing_symbol, ..
+        } => {
+            if site.path != enclosing_symbol.file {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration terminology site",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_result(
+    operation: &ApiMigrationOperationRequestV1,
+    sites: &[ApiMigrationSiteV1],
+    files: &[ApiMigrationFilePlanV1],
+) -> Result<(), ApplicationContractError> {
+    let operation_sites = sites
+        .iter()
+        .filter(|site| site.operation_id == operation.operation_id())
+        .collect::<Vec<_>>();
+    if operation_sites.is_empty() {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "api migration operation site coverage",
+        });
+    }
+    let expected_site_count = match operation {
+        ApiMigrationOperationRequestV1::PromotePrimary { .. }
+        | ApiMigrationOperationRequestV1::ReplaceDefinition { .. }
+        | ApiMigrationOperationRequestV1::InsertCompatibility { .. } => Some(1),
+        ApiMigrationOperationRequestV1::ReplaceSelectedTerminology {
+            occurrence_indexes, ..
+        }
+        | ApiMigrationOperationRequestV1::AssertStableValue {
+            occurrence_indexes, ..
+        } => Some(occurrence_indexes.len()),
+        ApiMigrationOperationRequestV1::RenameBoundSymbol { .. } => None,
+    };
+    if expected_site_count.is_some_and(|expected| operation_sites.len() != expected) {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "api migration operation site cardinality",
+        });
+    }
+    if let ApiMigrationOperationRequestV1::AssertStableValue { exact_bytes, .. } = operation {
+        let required_by_path = operation_sites
+            .iter()
+            .filter(|site| site.disposition != ApiMigrationSiteDispositionV1::Blocked)
+            .fold(BTreeMap::<&str, usize>::new(), |mut counts, site| {
+                *counts.entry(site.path.as_str()).or_default() += 1;
+                counts
+            });
+        for (path, required) in required_by_path {
+            let Some(file) = files.iter().find(|file| file.path == path) else {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration protected value file",
+                });
+            };
+            if file.intended_content.matches(exact_bytes.as_str()).count() < required {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "api migration protected predicted bytes",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -664,6 +878,42 @@ mod tests {
         api_migration_file_digest(value).unwrap()
     }
 
+    fn symbol(old_name: &str) -> ApiMigrationSymbolV1 {
+        ApiMigrationSymbolV1 {
+            node_id: format!("node-{old_name}"),
+            qualified_name: format!("crate::{old_name}"),
+            kind: "function".to_owned(),
+            file: "src/lib.rs".to_owned(),
+            old_name: old_name.to_owned(),
+        }
+    }
+
+    fn plan_with(
+        operation: ApiMigrationOperationRequestV1,
+        site: ApiMigrationSiteV1,
+        expected_content: &str,
+        intended_content: &str,
+    ) -> ApiMigrationPlanV1 {
+        let mut plan = ApiMigrationPlanV1 {
+            family_id: "family.contract".to_owned(),
+            repository_revision: "HEAD".to_owned(),
+            graph_revision: digest("graph"),
+            operations: vec![operation],
+            sites: vec![site],
+            files: vec![ApiMigrationFilePlanV1 {
+                path: "src/lib.rs".to_owned(),
+                expected_digest: digest(expected_content),
+                predicted_digest: digest(intended_content),
+                expected_content: expected_content.to_owned(),
+                intended_content: intended_content.to_owned(),
+            }],
+            blocked: false,
+            plan_digest: digest("placeholder"),
+        };
+        plan.plan_digest = plan.compute_digest().unwrap();
+        plan
+    }
+
     #[test]
     fn temporary_compatibility_requires_pr19_condition() {
         let disposition = ApiCompatibilityDispositionV1 {
@@ -674,6 +924,87 @@ mod tests {
             pr19_deletion_condition: None,
         };
         assert!(disposition.validate().is_err());
+    }
+
+    #[test]
+    fn plan_requires_every_site_to_belong_to_its_typed_operation() {
+        let operation = ApiMigrationOperationRequestV1::InsertCompatibility {
+            operation_id: "compatibility".to_owned(),
+            depends_on: vec![],
+            anchor: symbol("current"),
+            position: ApiDefinitionInsertionV1::After,
+            definition: "pub fn legacy() { current(); }".to_owned(),
+            disposition: ApiCompatibilityDispositionV1 {
+                lifetime: ApiCompatibilityLifetimeV1::StablePublicContract,
+                external_consumer: "published users".to_owned(),
+                owner: "api".to_owned(),
+                deprecation_policy: "retain indefinitely".to_owned(),
+                pr19_deletion_condition: None,
+            },
+        };
+        let plan = plan_with(
+            operation,
+            ApiMigrationSiteV1 {
+                site_id: "site.compatibility".to_owned(),
+                operation_id: "untyped-operation".to_owned(),
+                path: "src/lib.rs".to_owned(),
+                start_byte: 16,
+                end_byte: 16,
+                expected_bytes: String::new(),
+                replacement_bytes: "\npub fn legacy() { current(); }".to_owned(),
+                disposition: ApiMigrationSiteDispositionV1::Changed,
+                reason: "deliberate compatibility definition".to_owned(),
+                caller_node_id: None,
+            },
+            "pub fn current() {}\n",
+            "pub fn current() {}\n\npub fn legacy() { current(); }",
+        );
+
+        assert!(plan.validate().is_err());
+    }
+
+    #[test]
+    fn protected_value_sites_are_skipped_and_survive_the_predicted_bytes() {
+        let operation = ApiMigrationOperationRequestV1::AssertStableValue {
+            operation_id: "protect-wire-name".to_owned(),
+            depends_on: vec![],
+            enclosing_symbol: symbol("wire_name"),
+            category: "wire field".to_owned(),
+            exact_bytes: "\"stable_name\"".to_owned(),
+            occurrence_indexes: vec![0],
+        };
+        let expected = "pub fn wire_name() -> &'static str { \"stable_name\" }\n";
+        let unchanged_site = ApiMigrationSiteV1 {
+            site_id: "site.protected".to_owned(),
+            operation_id: "protect-wire-name".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            start_byte: 37,
+            end_byte: 50,
+            expected_bytes: "\"stable_name\"".to_owned(),
+            replacement_bytes: "\"stable_name\"".to_owned(),
+            disposition: ApiMigrationSiteDispositionV1::Unchanged,
+            reason: "protected wire field remains byte-identical".to_owned(),
+            caller_node_id: Some("node-wire_name".to_owned()),
+        };
+        let unchanged = plan_with(operation.clone(), unchanged_site, expected, expected);
+        assert!(
+            unchanged.validate().is_err(),
+            "protected values must use the explicit skipped disposition"
+        );
+
+        let removed = plan_with(
+            operation,
+            ApiMigrationSiteV1 {
+                disposition: ApiMigrationSiteDispositionV1::Skipped,
+                ..unchanged.sites[0].clone()
+            },
+            expected,
+            "pub fn wire_name() -> &'static str { \"changed_name\" }\n",
+        );
+        assert!(
+            removed.validate().is_err(),
+            "the predicted file must retain every asserted protected byte sequence"
+        );
     }
 
     #[test]
