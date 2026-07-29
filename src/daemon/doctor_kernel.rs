@@ -1558,7 +1558,7 @@ pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
                         }
                         actions
                     }
-                    _ => Vec::new(),
+                    DoctorRemediationKindV1::Preview => Vec::new(),
                 }
             })
         },

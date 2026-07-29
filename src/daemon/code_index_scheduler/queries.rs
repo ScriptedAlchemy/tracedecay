@@ -706,7 +706,7 @@ fn bounded_result<T>(
         returned,
     )
     .unwrap_or_else(|_| panic!("bounded code query page"));
-    page_state.cursor = page.next_cursor.clone();
+    page_state.cursor.clone_from(&page.next_cursor);
     page_state.expires_at = page
         .next_cursor
         .as_ref()

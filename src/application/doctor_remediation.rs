@@ -924,8 +924,7 @@ fn validate_outcome(
         }
         _ => outcome.verification != DoctorRemediationVerificationV1::Pending,
     };
-    if (owner_boundary && owner_set_verification)
-        || (owner_boundary && invalid_initial_verification)
+    if (invalid_initial_verification || owner_set_verification) && owner_boundary
         || expected_termination.is_some_and(|expected| {
             outcome
                 .execution

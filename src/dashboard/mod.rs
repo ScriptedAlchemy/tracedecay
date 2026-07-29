@@ -889,7 +889,9 @@ pub(crate) async fn router(cg: &TraceDecay, mut state: DashboardState) -> Result
         state.application_invocation_executor.clone(),
     ) {
         Ok(application) => {
-            state.application_invocation_executor = application.executor.clone();
+            state
+                .application_invocation_executor
+                .clone_from(&application.executor);
             Some(application)
         }
         Err(error) => {

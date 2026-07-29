@@ -188,8 +188,8 @@ impl McpServerConstructionContext {
         self.global_db = global_db;
         self.accounting_db = self.global_db.clone();
         self.registry_db = registry_db;
-        self.session_db = session_db.clone();
-        self.user_session_db = user_session_db.clone();
+        self.session_db.clone_from(&session_db);
+        self.user_session_db.clone_from(&user_session_db);
         self.registered_session_db = session_db;
         self.registered_user_session_db = user_session_db;
         self

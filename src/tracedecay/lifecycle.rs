@@ -359,7 +359,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only: false,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
@@ -1374,7 +1374,7 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
@@ -1638,7 +1638,7 @@ impl TraceDecay {
             fallback_warning,
             read_only: true,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
@@ -1776,7 +1776,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only: false,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: self.test_runtime_guard.clone(),
             standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),
@@ -2224,7 +2224,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only,
             context_scout_owner: None,
-            context_scout_claim_authorities: Default::default(),
+            context_scout_claim_authorities: RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,

@@ -2130,7 +2130,7 @@ fn pr9_fallback_digest_for_query(
 
 fn pr9_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
     let mut fallback = profile.clone();
-    fallback.profile_id = "pr9-fallback".to_owned();
+    "pr9-fallback".clone_into(&mut fallback.profile_id);
     fallback.semantic_weight_ppm = 0;
     fallback.rerank_weight_ppm = 0;
     fallback

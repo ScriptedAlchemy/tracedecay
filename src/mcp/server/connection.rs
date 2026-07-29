@@ -10,9 +10,7 @@ fn queued_cancellable_request_key(
     request_id: &Value,
     connection_scope: &str,
 ) -> Option<String> {
-    let Some(expected) = application_surface_request_id(request_id, connection_scope) else {
-        return None;
-    };
+    let expected = application_surface_request_id(request_id, connection_scope)?;
     pending_lines
         .iter()
         .any(|line| {

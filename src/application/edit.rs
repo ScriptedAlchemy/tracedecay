@@ -1108,8 +1108,8 @@ where
         result.success = false;
         result.rolled_back = true;
         result.changed_files.clear();
-        result.message =
-            "API migration verification did not pass; every changed file was restored".to_owned();
+        "API migration verification did not pass; every changed file was restored"
+            .clone_into(&mut result.message);
         committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
         if committed_state != journal.expected_state {
             let live_outcome = SourceEditOutcome::EffectUnknown {
@@ -1150,7 +1150,7 @@ where
             ..
         } = &mut journal.state
         {
-            *durable_observation = control_observation.clone();
+            durable_observation.clone_from(&control_observation);
         }
         if control_observation.is_some() {
             durability.persist_journal(&journal)?;
