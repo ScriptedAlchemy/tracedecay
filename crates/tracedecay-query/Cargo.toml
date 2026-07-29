@@ -3,7 +3,7 @@ name = "tracedecay-query"
 version = "0.1.0"
 edition.workspace = true
 license = "MIT"
-description = "TraceDecay retrieval and temporal query kernel"
+description = "TraceDecay code retrieval query kernel"
 include = ["/src/**"]
 
 [dependencies]
@@ -13,7 +13,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 zeroize = "1.9.0"

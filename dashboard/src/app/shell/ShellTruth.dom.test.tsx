@@ -13,6 +13,9 @@ const eventState = vi.hoisted(() => ({ state: 'connecting' as const }));
 vi.mock('../../data/sse/useEvents.tsx', () => ({
   useEventStreamState: () => ({ state: eventState.state, lastEventAt: null }),
   useEventsConnection: () => null,
+  // No connection is mounted here, so there is no projection to reconcile
+  // against — the same reading the real hook gives for a null connection.
+  useProjectionSync: () => ({ kind: 'unmounted' }) as const,
 }));
 
 afterEach(() => {
@@ -30,9 +33,14 @@ function queryWrapper(children: ReactNode) {
 
 describe('shared shell truthfulness', () => {
   it('labels an unopened event stream as connecting, not synchronized', () => {
-    const { getByRole, queryByText } = render(<StatusStrip />);
+    const { getAllByRole, queryByText } = render(<StatusStrip />);
 
-    expect(getByRole('status').textContent).toBe('connecting');
+    // The strip reports the transport and the projection separately, so the
+    // readings are collected rather than assumed to be one: what matters is that
+    // neither of them claims synchronization for a stream that never opened.
+    const readings = getAllByRole('status').map((node) => node.textContent);
+    expect(readings).toContain('connecting');
+    expect(readings.some((reading) => reading?.includes('sync'))).toBe(false);
     expect(queryByText('sync')).toBeNull();
   });
 

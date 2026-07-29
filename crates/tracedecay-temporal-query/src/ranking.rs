@@ -442,7 +442,7 @@ mod tests {
     use tracedecay_domain::RetrievalAnchorId;
 
     use super::*;
-    use crate::temporal::candidates::CandidateChannel;
+    use crate::candidates::CandidateChannel;
 
     fn candidate(
         stable_id: &str,

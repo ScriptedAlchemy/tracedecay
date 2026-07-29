@@ -4,6 +4,10 @@
 //! availability. Host artifact rendering, lifecycle operations, remote
 //! transport, and host-local durable state belong to later delivery slices.
 
+mod descriptor;
+
+pub use descriptor::*;
+
 use std::collections::BTreeSet;
 
 use schemars::JsonSchema;
@@ -74,7 +78,9 @@ impl HostKindV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HostCapabilityV1 {
     Lsp,
@@ -84,7 +90,7 @@ pub enum HostCapabilityV1 {
     Cli,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostCapabilityUnavailableReasonV1 {
     HostApiAbsent,
@@ -94,7 +100,7 @@ pub enum HostCapabilityUnavailableReasonV1 {
     CompetingExtensionClaim,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "state", content = "reason", rename_all = "snake_case")]
 pub enum HostCapabilityStateV1 {
     Supported,
@@ -102,7 +108,7 @@ pub enum HostCapabilityStateV1 {
     Unavailable(HostCapabilityUnavailableReasonV1),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCapabilityRecordV1 {
     pub capability: HostCapabilityV1,

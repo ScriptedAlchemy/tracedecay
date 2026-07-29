@@ -5,6 +5,7 @@
 //! boundaries.
 
 mod ingest;
+pub mod lcm;
 mod provider;
 mod workflow;
 
@@ -13,5 +14,8 @@ pub use provider::{
     EXPECTED_MESSAGE_SEARCH_PROVIDER, MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider,
 };
 pub use workflow::{
-    WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus,
+    WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError,
+    WorkflowRun, WorkflowRunDetail, WorkflowRunDetailFuture, WorkflowRunDetailOutcome,
+    WorkflowRunDetailRequest, WorkflowRunListFuture, WorkflowRunListOutcome,
+    WorkflowRunListRequest, WorkflowRunScope, WorkflowScopeFilter, WorkflowStatus,
 };

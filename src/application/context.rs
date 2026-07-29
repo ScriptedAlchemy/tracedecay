@@ -472,99 +472,6 @@ impl RequestContext {
             },
         }
     }
-
-    /// Crosses the root orchestration identity into the transport-neutral
-    /// application scope: the project-owned [`ResolvedSessionIdentity`] plus
-    /// its [`ResolvedGitRoute`] map onto one exact
-    /// [`tracedecay_application::ResolvedScope`].
-    ///
-    /// Fails closed for a profile-owned identity (there is no path or CWD
-    /// fallback that could fabricate a project scope) and for a project
-    /// identity missing its git route.
-    #[deprecated(
-        note = "V2 RequestContext convergence compatibility facade: resolve tracedecay_application::ResolvedScope once at the transport boundary instead; deletion is gated on zero production callers"
-    )]
-    pub fn application_scope(
-        &self,
-    ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
-        self.identity.application_scope()
-    }
-
-    /// Composes the capability, policy, and configuration digests into the
-    /// single digest a [`tracedecay_application::CapabilityGrantSnapshot`]
-    /// carries for this request. The composition is deterministic and embeds
-    /// no paths or payloads.
-    pub fn grant_snapshot_digest(
-        &self,
-    ) -> Result<tracedecay_domain::ManifestDigest, ApplicationScopeError> {
-        application_grant_digest(
-            self.capability_digest,
-            self.policy_digest,
-            self.configuration_digest,
-        )
-    }
-
-    /// Crosses this orchestration context into the application boundary type.
-    ///
-    /// The grant is a pre-resolved input (the boundary narrows or rejects it;
-    /// it never issues one): a grant minted for another scope fails closed.
-    /// [`MonotonicDeadline`] anchors to wall time at this call — an elapsed
-    /// deadline stays elapsed — and [`CancellationToken`] snapshots into a
-    /// [`tracedecay_application::CancellationContext`] stamped with the
-    /// observation instant, never zero.
-    #[deprecated(
-        note = "V2 RequestContext convergence compatibility facade: construct tracedecay_application::RequestContext at the transport boundary instead; deletion is gated on zero production callers"
-    )]
-    #[allow(deprecated)] // delegates to the sibling facade adapter above
-    pub fn to_application(
-        &self,
-        grant: tracedecay_application::CapabilityGrantSnapshot,
-    ) -> Result<tracedecay_application::RequestContext, ApplicationScopeError> {
-        let scope = self.application_scope()?;
-        let request_id = tracedecay_application::RequestId::new(self.request_id.as_str())
-            .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-        let deadline = self.application_deadline();
-        let cancellation = self.application_cancellation()?;
-        tracedecay_application::RequestContext::new(
-            self.actor_id.clone(),
-            scope,
-            grant,
-            request_id,
-            deadline,
-            cancellation,
-        )
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
-    }
-
-    fn application_deadline(&self) -> tracedecay_application::Deadline {
-        let remaining = self
-            .deadline
-            .instant()
-            .saturating_duration_since(Instant::now());
-        let remaining_micros = i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX);
-        tracedecay_application::Deadline {
-            expires_at: tracedecay_domain::UtcMicros(
-                wall_clock_micros().saturating_add(remaining_micros),
-            ),
-        }
-    }
-
-    fn application_cancellation(
-        &self,
-    ) -> Result<tracedecay_application::CancellationContext, ApplicationScopeError> {
-        // The token id mirrors the request id: both name this exact request,
-        // and the mirror keeps the id within the canonical length bound.
-        let token_id = self.request_id.as_str();
-        if self.cancellation.is_cancelled() {
-            tracedecay_application::CancellationContext::cancelled(
-                token_id,
-                tracedecay_domain::UtcMicros(wall_clock_micros()),
-            )
-        } else {
-            tracedecay_application::CancellationContext::active(token_id)
-        }
-        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
-    }
 }
 
 fn wall_clock_micros() -> i64 {
@@ -574,22 +481,6 @@ fn wall_clock_micros() -> i64 {
             .map_or(0, |duration| duration.as_micros()),
     )
     .unwrap_or(i64::MAX)
-}
-
-/// Composes the legacy capability, policy, and configuration revisions into
-/// the one immutable digest carried by an application capability grant.
-pub fn application_grant_digest(
-    capability: CapabilityDigest,
-    policy: PolicyDigest,
-    configuration: ConfigurationDigest,
-) -> Result<tracedecay_domain::ManifestDigest, ApplicationScopeError> {
-    tracedecay_domain::canonical_sha256(&(
-        "tracedecay.root.grant-composition.v1",
-        capability.as_bytes(),
-        policy.as_bytes(),
-        configuration.as_bytes(),
-    ))
-    .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
 }
 
 /// Composes immutable session admission authority into one application grant
@@ -1056,12 +947,38 @@ mod tests {
         .unwrap()
     }
 
+    fn canonical_application_context(
+        context: &RequestContext,
+        grant: tracedecay_application::CapabilityGrantSnapshot,
+    ) -> tracedecay_application::RequestContext {
+        let scope = context.identity().application_scope().unwrap();
+        tracedecay_application::RequestContext::new(
+            context.actor_id().clone(),
+            scope,
+            grant,
+            tracedecay_application::RequestId::new(context.request_id().as_str()).unwrap(),
+            tracedecay_application::Deadline {
+                expires_at: tracedecay_domain::UtcMicros(i64::MAX - 1),
+            },
+            if context.cancellation().is_cancelled() {
+                tracedecay_application::CancellationContext::cancelled(
+                    context.request_id().as_str(),
+                    tracedecay_domain::UtcMicros(1),
+                )
+                .unwrap()
+            } else {
+                tracedecay_application::CancellationContext::active(context.request_id().as_str())
+                    .unwrap()
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
-    #[allow(deprecated)]
     fn application_scope_maps_project_identity_and_git_route() {
         let context = project_context();
 
-        let scope = context.application_scope().unwrap();
+        let scope = context.identity().application_scope().unwrap();
 
         assert_eq!(scope.project_id.as_str(), "project.tracedecay");
         assert_eq!(scope.repository_id.as_str(), "repository.tracedecay");
@@ -1082,7 +999,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn application_scope_fails_closed_for_profile_identity() {
         let context = RequestContext::new(
             ActorId::new("actor.cursor").unwrap(),
@@ -1103,13 +1019,12 @@ mod tests {
         // A profile-scoped identity has no exact project root; the boundary
         // must fail closed rather than fabricate one from a path or the CWD.
         assert_eq!(
-            context.application_scope().unwrap_err(),
+            context.identity().application_scope().unwrap_err(),
             ApplicationScopeError::ProfileIdentityWithoutProject
         );
     }
 
     #[test]
-    #[allow(deprecated)]
     fn application_scope_fails_closed_without_git_route() {
         let identity = ResolvedSessionIdentity {
             owner: SessionOwner::Project {
@@ -1133,7 +1048,7 @@ mod tests {
         );
 
         assert_eq!(
-            context.application_scope().unwrap_err(),
+            context.identity().application_scope().unwrap_err(),
             ApplicationScopeError::MissingGitRoute {
                 project_id: "project.tracedecay".to_string(),
             }
@@ -1141,16 +1056,15 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn to_application_binds_scope_grant_deadline_and_cancellation() {
+    fn canonical_application_context_binds_scope_grant_deadline_and_cancellation() {
         use tracedecay_application::RequestAdmission;
         use tracedecay_domain::UtcMicros;
 
         let context = project_context();
-        let scope = context.application_scope().unwrap();
+        let scope = context.identity().application_scope().unwrap();
         let grant = grant_for(&scope);
 
-        let application = context.to_application(grant).unwrap();
+        let application = canonical_application_context(&context, grant);
 
         assert_eq!(application.scope(), &scope);
         assert_eq!(application.actor().as_str(), "actor.cursor");
@@ -1166,8 +1080,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn to_application_rejects_grant_for_another_scope() {
+    fn canonical_application_context_rejects_grant_for_another_scope() {
         let context = project_context();
         let other_scope = tracedecay_application::ResolvedScope::new(
             ProjectId::new("project.other").unwrap(),
@@ -1180,16 +1093,31 @@ mod tests {
 
         // A grant minted for a different scope must fail closed, never be
         // rebound onto this request's scope.
-        let error = context.to_application(grant).unwrap_err();
+        let error = tracedecay_application::RequestContext::new(
+            context.actor_id().clone(),
+            context.identity().application_scope().unwrap(),
+            grant,
+            tracedecay_application::RequestId::new(context.request_id().as_str()).unwrap(),
+            tracedecay_application::Deadline {
+                expires_at: tracedecay_domain::UtcMicros(i64::MAX - 1),
+            },
+            tracedecay_application::CancellationContext::active(context.request_id().as_str())
+                .unwrap(),
+        )
+        .unwrap_err();
         assert!(
-            matches!(error, ApplicationScopeError::Contract(ref message) if message.contains("grant scope")),
+            matches!(
+                error,
+                tracedecay_application::ApplicationContractError::Inconsistent {
+                    field: "request context grant scope"
+                }
+            ),
             "unexpected error: {error}"
         );
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn to_application_marks_cancelled_token_and_elapsed_deadline() {
+    fn canonical_application_context_marks_cancelled_token() {
         use tracedecay_application::RequestAdmission;
         use tracedecay_domain::UtcMicros;
 
@@ -1205,10 +1133,10 @@ mod tests {
             cancellation.clone(),
             RequestBudgets::new(128, 4096, 32).unwrap(),
         );
-        let scope = context.application_scope().unwrap();
+        let scope = context.identity().application_scope().unwrap();
         cancellation.cancel();
 
-        let application = context.to_application(grant_for(&scope)).unwrap();
+        let application = canonical_application_context(&context, grant_for(&scope));
 
         assert!(application.cancellation().is_cancelled());
         match application.cancellation().state {
@@ -1223,34 +1151,13 @@ mod tests {
             application.admission_at(UtcMicros(i64::MAX)),
             RequestAdmission::Cancelled
         );
-        // Without cancellation the already-elapsed deadline stays elapsed; the
-        // boundary never resets it to a fresh budget.
-        let context = RequestContext::new(
-            ActorId::new("actor.cursor").unwrap(),
-            RequestId::new("request.application-slice-1").unwrap(),
-            project_identity(),
-            CapabilityDigest::new(DIGEST),
-            PolicyDigest::new(DIGEST),
-            ConfigurationDigest::new(DIGEST),
-            MonotonicDeadline::at(Instant::now()),
-            CancellationToken::new(),
-            RequestBudgets::new(128, 4096, 32).unwrap(),
-        );
-        let application = context
-            .to_application(grant_for(&context.application_scope().unwrap()))
-            .unwrap();
-        assert_eq!(
-            application.admission_at(UtcMicros(i64::MAX)),
-            RequestAdmission::TimedOut
-        );
     }
 
     #[tokio::test]
-    #[allow(deprecated)]
     async fn application_interruptible_observes_live_transport_cancellation() {
         let legacy = project_context();
-        let scope = legacy.application_scope().unwrap();
-        let application = legacy.to_application(grant_for(&scope)).unwrap();
+        let scope = legacy.identity().application_scope().unwrap();
+        let application = canonical_application_context(&legacy, grant_for(&scope));
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
         tokio::spawn(async move {
@@ -1271,28 +1178,6 @@ mod tests {
             !application.cancellation().is_cancelled(),
             "the immutable admission snapshot stays unchanged while the live token cancels"
         );
-    }
-
-    #[test]
-    fn grant_snapshot_digest_composes_capability_policy_configuration() {
-        let context = project_context();
-        let digest = context.grant_snapshot_digest().unwrap();
-        assert_eq!(digest, context.grant_snapshot_digest().unwrap());
-
-        let mut changed = [0x5a; 32];
-        changed[0] ^= 0xff;
-        let other = RequestContext::new(
-            ActorId::new("actor.cursor").unwrap(),
-            RequestId::new("request.application-slice-1").unwrap(),
-            project_identity(),
-            CapabilityDigest::new(changed),
-            PolicyDigest::new(DIGEST),
-            ConfigurationDigest::new(DIGEST),
-            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-            CancellationToken::new(),
-            RequestBudgets::new(128, 4096, 32).unwrap(),
-        );
-        assert_ne!(digest, other.grant_snapshot_digest().unwrap());
     }
 
     #[test]
