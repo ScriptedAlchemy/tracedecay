@@ -275,6 +275,26 @@ fn store_dependencies_are_exactly_the_contract_allowlist() {
 }
 
 #[test]
+fn canonical_projector_is_pure_and_store_owned() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source =
+        std::fs::read_to_string(root.join("crates/tracedecay-store/src/canonical_projection.rs"))
+            .expect("read canonical projector");
+    for forbidden in [
+        "crate::db",
+        "crate::global_db",
+        "rusqlite",
+        "tracedecay_rusqlite",
+        "tokio::",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "canonical projector must not import DB/runtime authority: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn application_dependencies_are_exactly_the_use_case_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-application");
