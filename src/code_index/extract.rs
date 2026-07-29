@@ -203,9 +203,7 @@ impl<'a> From<&'a Node> for CanonicalNodeRow<'a> {
 /// Rows are canonically ordered by their serialized canonical form, matching
 /// the legacy `sort_canonical_json` byte ordering exactly.
 fn sort_canonical_rows<T: Serialize>(rows: &mut [T]) {
-    rows.sort_by_cached_key(|row| {
-        serde_json::to_string(row).expect("canonical row serializes")
-    });
+    rows.sort_by_cached_key(|row| serde_json::to_string(row).expect("canonical row serializes"));
 }
 
 #[derive(Serialize)]
