@@ -1,8 +1,4 @@
-use std::{future::Future, time::Duration};
-
 use crate::cli::Commands;
-
-const USER_PROMPT_HOOK_BUDGET: Duration = Duration::from_millis(1_500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookInput {
@@ -101,7 +97,7 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
             tracedecay::hooks::hook_pre_tool_use();
         }
         Commands::HookPromptSubmit => {
-            run_bounded_claude_prompt_hook(tracedecay::hooks::hook_prompt_submit()).await;
+            tracedecay::hooks::hook_prompt_submit().await;
         }
         Commands::HookStop => {
             tracedecay::hooks::hook_stop().await;
@@ -119,11 +115,7 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
             exit_if_nonzero(tracedecay::hooks::hook_kiro_pre_tool_use());
         }
         Commands::HookKiroPromptSubmit => {
-            run_bounded_prompt_hook(
-                "Kiro UserPromptSubmit",
-                tracedecay::hooks::hook_kiro_prompt_submit(),
-            )
-            .await;
+            exit_if_nonzero(tracedecay::hooks::hook_kiro_prompt_submit().await);
         }
         Commands::HookKiroPostToolUse => {
             exit_if_nonzero(tracedecay::hooks::hook_kiro_post_tool_use().await);
@@ -135,11 +127,7 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
             exit_if_nonzero(tracedecay::hooks::hook_cursor_post_tool_use().await);
         }
         Commands::HookCursorBeforeSubmitPrompt => {
-            run_bounded_prompt_hook(
-                "Cursor beforeSubmitPrompt",
-                tracedecay::hooks::hook_cursor_before_submit_prompt(),
-            )
-            .await;
+            exit_if_nonzero(tracedecay::hooks::hook_cursor_before_submit_prompt().await);
         }
         Commands::HookCursorPreCompact => {
             exit_if_nonzero(tracedecay::hooks::hook_cursor_pre_compact().await);
@@ -166,11 +154,7 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
             exit_if_nonzero(tracedecay::hooks::hook_codex_session_start().await);
         }
         Commands::HookCodexUserPromptSubmit => {
-            run_bounded_prompt_hook(
-                "Codex UserPromptSubmit",
-                tracedecay::hooks::hook_codex_user_prompt_submit(),
-            )
-            .await;
+            exit_if_nonzero(tracedecay::hooks::hook_codex_user_prompt_submit().await);
         }
         Commands::HookCodexSubagentStart => {
             exit_if_nonzero(tracedecay::hooks::hook_codex_subagent_start().await);
@@ -202,28 +186,6 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         _ => unreachable!("non-hook command passed to hook dispatcher"),
     }
     Ok(())
-}
-
-async fn run_bounded_claude_prompt_hook(future: impl Future<Output = ()>) {
-    if tokio::time::timeout(USER_PROMPT_HOOK_BUDGET, future)
-        .await
-        .is_err()
-    {
-        eprintln!(
-            "[tracedecay] Claude UserPromptSubmit exceeded the {}ms hot-hook budget; continuing without injected context",
-            USER_PROMPT_HOOK_BUDGET.as_millis()
-        );
-    }
-}
-
-async fn run_bounded_prompt_hook(name: &str, future: impl Future<Output = i32>) {
-    match tokio::time::timeout(USER_PROMPT_HOOK_BUDGET, future).await {
-        Ok(code) => exit_if_nonzero(code),
-        Err(_) => eprintln!(
-            "[tracedecay] {name} exceeded the {}ms hot-hook budget; continuing without injected context",
-            USER_PROMPT_HOOK_BUDGET.as_millis()
-        ),
-    }
 }
 
 fn exit_if_nonzero(code: i32) {
@@ -301,15 +263,6 @@ mod tests {
             assert_eq!(hook_input(&command), Some(expected));
             assert!(crate::should_skip_agent_install_maintenance(&command));
         }
-    }
-
-    #[test]
-    fn user_prompt_hook_budget_stays_well_below_host_deadlines() {
-        assert_eq!(
-            super::USER_PROMPT_HOOK_BUDGET,
-            std::time::Duration::from_millis(1_500)
-        );
-        assert!(super::USER_PROMPT_HOOK_BUDGET < std::time::Duration::from_secs(5));
     }
 
     #[test]
