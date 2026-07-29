@@ -10,21 +10,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tokio::sync::watch;
 use tracedecay_store::{
     OperationPriorityV1, ReaderBudgetV1, RuntimeInterruptionV1, RuntimeReadOutcomeV1,
     RuntimeReadRequestV1, RuntimeRequestProbeV1, SaturationScopeV1, StorageRuntimeContractErrorV1,
     StoreRuntimeBindingV1, UnavailableReasonV1,
 };
-use tokio::sync::watch;
 
 use super::{
     ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, ReaderWorkerError,
     unavailable_read, worker,
 };
+use crate::CheckpointPressure;
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlReadSnapshot, MigrationSqlRows, MigrationSqlStatement,
 };
-use crate::CheckpointPressure;
 
 const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
@@ -475,10 +475,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     .checkpoint_pressure
                     .as_ref()
                     .is_some_and(|pressure| {
-                        matches!(
-                            &*pressure.borrow(),
-                            CheckpointPressure::BlockGeneral { .. }
-                        )
+                        matches!(&*pressure.borrow(), CheckpointPressure::BlockGeneral { .. })
                     })
             {
                 let elapsed = started.elapsed();
