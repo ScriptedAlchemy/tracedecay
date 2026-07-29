@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -251,15 +251,43 @@ impl MonotonicDeadline {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CancellationToken {
+    token_id: Option<Arc<str>>,
     cancelled: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self {
+            token_id: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 impl CancellationToken {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates the live cancellation authority for an application request.
+    pub fn for_application_request(request_id: &tracedecay_application::RequestId) -> Self {
+        static NEXT_TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let sequence = NEXT_TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        Self {
+            token_id: Some(Arc::from(format!(
+                "cancellation.{}.{sequence}",
+                request_id.as_str()
+            ))),
+            ..Self::default()
+        }
+    }
+
+    pub fn application_token_id(&self) -> Option<&str> {
+        self.token_id.as_deref()
     }
 
     pub fn cancel(&self) {
@@ -272,7 +300,9 @@ impl CancellationToken {
     }
 
     pub(crate) fn is_same_token(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.cancelled, &other.cancelled) && Arc::ptr_eq(&self.notify, &other.notify)
+        self.token_id == other.token_id
+            && Arc::ptr_eq(&self.cancelled, &other.cancelled)
+            && Arc::ptr_eq(&self.notify, &other.notify)
     }
 
     pub async fn cancelled(&self) {
@@ -562,6 +592,33 @@ pub fn application_grant_digest(
     .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
 }
 
+/// Composes immutable session admission authority into one application grant
+/// digest. Unlike the compatibility composition, this binds request budgets
+/// and the live cancellation token identity so a supplemental session binding
+/// cannot widen either after admission.
+pub fn session_application_grant_digest(
+    capability: CapabilityDigest,
+    policy: PolicyDigest,
+    configuration: ConfigurationDigest,
+    cancellation: &CancellationToken,
+    budgets: RequestBudgets,
+) -> Result<tracedecay_domain::ManifestDigest, ApplicationScopeError> {
+    let token_id = cancellation
+        .application_token_id()
+        .ok_or(ApplicationScopeError::MissingCancellationTokenId)?;
+    tracedecay_domain::canonical_sha256(&(
+        "tracedecay.session.grant-composition.v1",
+        capability.as_bytes(),
+        policy.as_bytes(),
+        configuration.as_bytes(),
+        token_id,
+        budgets.max_results(),
+        budgets.max_bytes(),
+        budgets.max_work_units(),
+    ))
+    .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+}
+
 /// Returns the current wall-clock observation used by application deadlines.
 pub fn application_observed_at() -> tracedecay_domain::UtcMicros {
     tracedecay_domain::UtcMicros(wall_clock_micros())
@@ -752,6 +809,9 @@ pub enum ApplicationScopeError {
         /// The project whose identity lacks a git route.
         project_id: String,
     },
+    /// Session admission requires a stable cancellation-token identity so the
+    /// live token cannot be substituted after the application grant is issued.
+    MissingCancellationTokenId,
     /// The application contract rejected the resolved scope, grant binding,
     /// or boundary adapter output.
     Contract(String),
@@ -788,6 +848,10 @@ impl fmt::Display for ApplicationScopeError {
             Self::MissingGitRoute { project_id } => write!(
                 formatter,
                 "project identity '{project_id}' has no resolved git route; application scope requires an exact repository and worktree"
+            ),
+            Self::MissingCancellationTokenId => write!(
+                formatter,
+                "session application admission requires a bound cancellation-token identity"
             ),
             Self::Contract(message) => {
                 write!(
