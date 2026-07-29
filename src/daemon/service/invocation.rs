@@ -292,7 +292,7 @@ impl DaemonLspSessionAccess {
 
 /// One versioned, request-correlated daemon operation.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct DaemonInvocationRequest {
+pub struct DaemonInvocationRequest {
     pub(crate) protocol: String,
     pub(crate) revision: u16,
     pub(crate) request_id: String,
@@ -1485,7 +1485,7 @@ pub(crate) enum DaemonInvocationProblem {
 
 /// Response envelope paired with one invocation request id.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct DaemonInvocationResponse {
+pub struct DaemonInvocationResponse {
     pub(crate) protocol: String,
     pub(crate) revision: u16,
     pub(crate) request_id: String,
