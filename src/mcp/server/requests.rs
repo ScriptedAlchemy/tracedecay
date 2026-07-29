@@ -1701,6 +1701,30 @@ impl McpServer {
         }
     }
 
+    pub(super) fn project_server_revoked_response(
+        &self,
+        id: &Value,
+        tool_name: &str,
+    ) -> Option<JsonRpcResponse> {
+        self.project_server_live
+            .as_ref()
+            .is_some_and(|live| !live.load(Ordering::Acquire))
+            .then(|| {
+                JsonRpcResponse::error_with_data(
+                    id.clone(),
+                    ErrorCode::InternalError,
+                    "tool project route failed: project server was revoked after health validation"
+                        .to_owned(),
+                    Some(json!({
+                        "tool": tool_name,
+                        "reason_code": "project_server_health_revoked",
+                        "retryable": true,
+                        "detail": "the retained project server failed post-open health validation; retry against a recovered owner",
+                    })),
+                )
+            })
+    }
+
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     pub(crate) async fn handle_tools_call(
         &self,
@@ -1721,23 +1745,8 @@ impl McpServer {
             Ok(call) => call,
             Err(response) => return response,
         };
-        if self
-            .project_server_live
-            .as_ref()
-            .is_some_and(|live| !live.load(Ordering::Acquire))
-        {
-            return JsonRpcResponse::error_with_data(
-                id,
-                ErrorCode::InternalError,
-                "tool project route failed: project server was revoked after health validation"
-                    .to_owned(),
-                Some(json!({
-                    "tool": tool_name,
-                    "reason_code": "project_server_health_revoked",
-                    "retryable": true,
-                    "detail": "the retained project server failed post-open health validation; retry against a recovered owner",
-                })),
-            );
+        if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
+            return response;
         }
 
         let fast_unavailable = self.message_search_worker_is_unavailable(&tool_name, &arguments);
@@ -1754,17 +1763,25 @@ impl McpServer {
                 !fast_unavailable,
             )
             .await;
+        if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
+            return response;
+        }
         if fast_unavailable {
             return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
         }
-        self.complete_tool_call(
-            id,
-            tool_name,
-            analytics_arguments,
-            analytics_session_id,
-            dispatch,
-        )
-        .await
+        let response = self
+            .complete_tool_call(
+                id.clone(),
+                tool_name.clone(),
+                analytics_arguments,
+                analytics_session_id,
+                dispatch,
+            )
+            .await;
+        if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
+            return response;
+        }
+        response
     }
 }
 

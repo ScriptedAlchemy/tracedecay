@@ -194,6 +194,11 @@ pub async fn run_post_update_health_pass_under_lease(
             return report;
         }
     };
+    // Post-update needs admission-critical schema and a durable repair
+    // checkpoint, not inline historical convergence over multi-gigabyte
+    // session stores. Use the daemon admission path; the restarted daemon
+    // resumes the checkpointed maintenance after service restoration.
+    crate::daemon::mark_process_long_lived_for_session_maintenance();
     let runtime_registry =
         match crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             profile_identity,
