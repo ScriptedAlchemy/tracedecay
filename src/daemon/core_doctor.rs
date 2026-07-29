@@ -23,12 +23,6 @@ pub(crate) struct DoctorRuntimeRequest {
     doctor_report_requested: bool,
 }
 
-impl DoctorRuntimeRequest {
-    pub(crate) fn doctor_report_requested(&self) -> bool {
-        self.doctor_report_requested
-    }
-}
-
 pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
     let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
     if request.method != "tools/call" {
@@ -725,7 +719,7 @@ mod doctor_runtime_route_tests {
         let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
         assert_eq!(parsed.id, serde_json::json!(7));
         assert!(!parsed.startup_health_only);
-        assert!(!parsed.doctor_report_requested());
+        assert!(!parsed.doctor_report_requested);
 
         let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
         assert!(doctor_runtime_request(&ordinary).is_none());
@@ -746,7 +740,7 @@ mod doctor_runtime_route_tests {
         let parsed = doctor_runtime_request(&startup).expect("startup health runtime request");
         assert_eq!(parsed.id, serde_json::json!(8));
         assert!(parsed.startup_health_only);
-        assert!(!parsed.doctor_report_requested());
+        assert!(!parsed.doctor_report_requested);
     }
 
     #[test]
@@ -768,7 +762,7 @@ mod doctor_runtime_route_tests {
         .to_string();
         let parsed = doctor_runtime_request(&request).expect("Doctor report request");
 
-        assert!(parsed.doctor_report_requested());
+        assert!(parsed.doctor_report_requested);
     }
 
     #[test]
