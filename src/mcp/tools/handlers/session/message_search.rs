@@ -18,14 +18,14 @@ use super::*;
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
+use crate::sessions::lcm::{
+    LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
+};
 use crate::query::temporal::context::ContextBudget;
 use crate::query::temporal::ports::{
     TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
 };
 use crate::query::temporal::ranking::DiversityLimits;
-use crate::sessions::lcm::{
-    LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
-};
 
 pub(super) struct MessageSearchRequest<'a> {
     pub(super) query: &'a str,
