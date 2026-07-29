@@ -58,6 +58,7 @@ use crate::storage::{
     write_repository_identity_marker,
 };
 use crate::store::GlobalDbSessionTemporalStore;
+use crate::timeutil::nearest_rank;
 
 const SCHEMA_VERSION: u64 = 2;
 const WORKLOAD_ID: &str = "pr8-session-temporal-v1";
@@ -571,9 +572,9 @@ async fn capture_measurement() -> BenchResult<MeasurementCapture> {
         phases.push(json!({
             "phase": phase.as_str(),
             "sample_count": samples.len(),
-            "p50_ns": nearest_rank(&samples, 50),
-            "p95_ns": nearest_rank(&samples, 95),
-            "p99_ns": nearest_rank(&samples, 99),
+            "p50_ns": nearest_rank(&samples, 50).unwrap_or_default(),
+            "p95_ns": nearest_rank(&samples, 95).unwrap_or_default(),
+            "p99_ns": nearest_rank(&samples, 99).unwrap_or_default(),
             "maximum_ns": *samples.last().unwrap(),
             "p95_label": P95_LABEL,
             "p99_label": P99_LABEL,
@@ -1132,14 +1133,6 @@ fn validate_bench_profile_enforced() -> BenchResult<()> {
     Ok(())
 }
 
-fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let rank = ((percentile * sorted.len()).div_ceil(100)).max(1);
-    sorted[rank - 1]
-}
-
 fn elapsed_ns(started: Instant) -> u64 {
     started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX)
 }
@@ -1356,9 +1349,9 @@ mod tests {
     #[test]
     fn nearest_rank_uses_descriptive_sample_labels() {
         let samples = [10_u64, 20, 30, 40, 50];
-        assert_eq!(nearest_rank(&samples, 50), 30);
-        assert_eq!(nearest_rank(&samples, 95), 50);
-        assert_eq!(nearest_rank(&samples, 99), 50);
+        assert_eq!(nearest_rank(&samples, 50), Some(30));
+        assert_eq!(nearest_rank(&samples, 95), Some(50));
+        assert_eq!(nearest_rank(&samples, 99), Some(50));
     }
 
     #[test]
