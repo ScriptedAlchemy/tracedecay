@@ -5435,7 +5435,6 @@ dependencies = [
  "bincode",
  "cap-fs-ext",
  "cap-std",
- "cc",
  "clap",
  "criterion",
  "crossterm",
@@ -5488,6 +5487,7 @@ dependencies = [
  "tower",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-hooks",
  "tracedecay-policy",
@@ -5535,6 +5535,28 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-policy",
  "tracedecay-tool-catalog",
+]
+
+[[package]]
+name = "tracedecay-code-index"
+version = "0.1.0"
+dependencies = [
+ "ast-grep-core",
+ "cc",
+ "ignore",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "static_assertions",
+ "tempfile",
+ "thiserror",
+ "tokensave-large-treesitters",
+ "tokensave-medium-treesitters",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tree-sitter",
+ "tree-sitter-hlsl",
+ "tree-sitter-language",
 ]
 
 [[package]]

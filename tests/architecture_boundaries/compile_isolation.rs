@@ -140,6 +140,50 @@ fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
 }
 
 #[test]
+fn code_index_dependencies_are_explicit_and_root_free() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-code-index");
+    let expected = [
+        "ast-grep-core",
+        "cc",
+        "ignore",
+        "serde",
+        "serde_json",
+        "sha2",
+        "static_assertions",
+        "tempfile",
+        "thiserror",
+        "tokensave-large-treesitters",
+        "tokensave-medium-treesitters",
+        "tracedecay-application",
+        "tracedecay-domain",
+        "tree-sitter",
+        "tree-sitter-hlsl",
+        "tree-sitter-language",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(direct, expected);
+    assert!(!direct.contains("tracedecay"));
+}
+
+#[test]
+fn root_uses_code_index_facades_instead_of_inline_sources() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for path in ["src/code_index", "src/extraction", "src/ast_grep_search.rs"] {
+        assert!(
+            !root.join(path).exists(),
+            "root must not retain extracted code-index source at {path}"
+        );
+    }
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).expect("read root lib facade");
+    assert!(lib.contains("pub use tracedecay_code_index as code_index;"));
+    assert!(lib.contains("pub use tracedecay_code_index::extraction;"));
+    assert!(lib.contains("pub use tracedecay_code_index::ast_grep_search;"));
+}
+
+#[test]
 fn domain_dependencies_are_exactly_the_pure_value_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-domain");
