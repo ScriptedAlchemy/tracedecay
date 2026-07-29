@@ -190,7 +190,11 @@ async fn project_begin_dispatches_to_project_service_and_renders_stable_json() {
     assert_eq!(profile.calls.load(Ordering::Acquire), 0);
     let commands = project.commands();
     let command = &commands[0];
-    let identity = command.context.identity();
+    command
+        .binding
+        .validate_context(&command.context)
+        .expect("refresh command binding matches application context");
+    let identity = command.binding.identity();
     let git_route = identity.git_route().expect("project git route");
     assert_eq!(
         identity.project_id().unwrap().as_str(),
