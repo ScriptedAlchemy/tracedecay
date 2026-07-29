@@ -96,7 +96,7 @@ impl AgentTaskBackend for JsonBackend {
 }
 
 enum RetrievalOutcome {
-    Complete(AutomationTemporalEvidenceItem),
+    Complete(Box<AutomationTemporalEvidenceItem>),
     Rejected(&'static str),
     Empty,
 }
@@ -110,7 +110,7 @@ impl TestRetrieval {
     fn message(provider: &str, session_id: &str, message_id: &str, text: &str) -> Self {
         Self {
             anchor_session_id: SessionId::new(session_id).expect("session id"),
-            outcome: RetrievalOutcome::Complete(AutomationTemporalEvidenceItem {
+            outcome: RetrievalOutcome::Complete(Box::new(AutomationTemporalEvidenceItem {
                 anchor_id: "user-scope-anchor".to_string(),
                 stable_id: "user-scope-stable".to_string(),
                 provider: provider.to_string(),
@@ -124,7 +124,7 @@ impl TestRetrieval {
                 knowledge_at_micros: 1_715_100_001_000_000,
                 normalized_score_micros: 1_000_000,
                 snippet: text.to_string(),
-            }),
+            })),
         }
     }
 
@@ -156,7 +156,7 @@ impl AutomationSessionRetrieval for TestRetrieval {
             match &self.outcome {
                 RetrievalOutcome::Complete(item) => {
                     AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
-                        items: vec![item.clone()],
+                        items: vec![item.as_ref().clone()],
                         coverage: TemporalCoverageCountsV1 {
                             visible: 1,
                             hidden: 0,
