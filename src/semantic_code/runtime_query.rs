@@ -1,6 +1,9 @@
 //! Production query-embedding adapter over the reloadable session service.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
 
@@ -18,6 +21,7 @@ use super::session_pool::SessionAcquireError;
 /// Owned factory for request-scoped query embedders.
 pub(super) struct PooledSemanticQueryEmbedderFactory<R: EmbeddingRuntime> {
     runtime: Arc<SemanticRuntimeService<R>>,
+    query_in_flight: AtomicBool,
 }
 
 impl<R> PooledSemanticQueryEmbedderFactory<R>
@@ -25,7 +29,10 @@ where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
     pub(super) fn new(runtime: Arc<SemanticRuntimeService<R>>) -> Arc<Self> {
-        Arc::new(Self { runtime })
+        Arc::new(Self {
+            runtime,
+            query_in_flight: AtomicBool::new(false),
+        })
     }
 
     pub(super) fn runtime(&self) -> &Arc<SemanticRuntimeService<R>> {
@@ -40,6 +47,25 @@ where
             factory: Arc::clone(self),
             cancellation,
         }
+    }
+
+    fn try_query_permit(&self) -> Option<SemanticQueryPermitV1<'_>> {
+        self.query_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| SemanticQueryPermitV1 {
+                in_flight: &self.query_in_flight,
+            })
+    }
+}
+
+struct SemanticQueryPermitV1<'a> {
+    in_flight: &'a AtomicBool,
+}
+
+impl Drop for SemanticQueryPermitV1<'_> {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
     }
 }
 
@@ -116,6 +142,12 @@ where
         let text = request.query_view.as_str().to_owned();
         let batch = BoundedSanitizedTextBatchV1::try_new(vec![text], 1, max_query_bytes)
             .map_err(map_embed_error)?;
+        // ORT inference cannot be preempted once entered. Admit only one
+        // request per published runtime so a timed-out caller cannot cause
+        // concurrent cold session opens and multiply resident model memory.
+        let _query_permit = self.factory.try_query_permit().ok_or_else(|| {
+            RetrievalPortError::AuthorityUnavailable("semantic query already in flight".to_owned())
+        })?;
         let mut session = pool.acquire(&authority).map_err(map_acquire_error)?;
         let mut vectors = session
             .embed_batch(&batch, self.cancellation.as_ref())
@@ -276,6 +308,57 @@ mod tests {
             1,
             "the production adapter path reuses one warmed session"
         );
+    }
+
+    #[test]
+    fn concurrent_query_abstains_without_opening_another_session() {
+        let authority = Arc::new(authority());
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let service = SemanticRuntimeService::new_owned(
+            Arc::clone(&authority),
+            factory,
+            config(2, std::time::Duration::from_mins(1), 1 << 20),
+        )
+        .expect("runtime service");
+        let embedder_factory = PooledSemanticQueryEmbedderFactory::new(Arc::clone(&service));
+        let held = embedder_factory
+            .try_query_permit()
+            .expect("first query permit");
+        let embedder = embedder_factory.create(Arc::new(ManualCancellation::new()));
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "do not multiply model sessions",
+            domain_id::<SanitizerRevision>("sanitizer.v1"),
+            domain_id::<QueryNormalizationRevision>("normalizer.v1"),
+        )
+        .expect("bounded query");
+        let query_digest = QueryDigest::new(
+            authority.projection().privacy_domain().clone(),
+            authority.projection().privacy_key_epoch(),
+            QueryMac::new(format!("hmac-sha256:{}", "12".repeat(32))).expect("query MAC"),
+        );
+        let request = SemanticQueryEmbeddingRequestV1 {
+            query_digest: &query_digest,
+            query_view: &query_view,
+            projection: authority.projection(),
+        };
+
+        assert!(matches!(
+            embedder.embed_query(request),
+            Err(RetrievalPortError::AuthorityUnavailable(message))
+                if message == "semantic query already in flight"
+        ));
+        assert_eq!(
+            service.stats().sessions_opened,
+            0,
+            "a concurrent query cannot open another model session"
+        );
+
+        drop(held);
+        embedder
+            .embed_query(request)
+            .expect("the permit is released after the active query");
+        assert_eq!(service.stats().sessions_opened, 1);
     }
 
     #[test]
