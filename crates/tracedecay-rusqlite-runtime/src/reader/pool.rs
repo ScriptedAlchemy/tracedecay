@@ -306,6 +306,20 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         }))
     }
 
+    pub(crate) fn begin_migration_health_snapshot(
+        &self,
+        max_wait: Duration,
+    ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
+        let mut lease = self
+            .acquire_lane(ReaderLane::ReservedHealth, max_wait, || None)
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+        lease.retire_after_snapshot();
+        lease.begin_migration_snapshot()?;
+        Ok(MigrationSqlReadSnapshot::new(move |statement| {
+            lease.execute_active_migration_query(statement)
+        }))
+    }
+
     pub fn read_store_size<F>(
         &self,
         max_wait: Duration,
@@ -683,6 +697,10 @@ pub struct ReaderLease<E: ReaderQueryExecutor> {
 }
 
 impl<E: ReaderQueryExecutor> ReaderLease<E> {
+    fn retire_after_snapshot(&mut self) {
+        self.checkout.retire = true;
+    }
+
     pub fn begin_snapshot(&mut self) -> Result<SnapshotLease<'_, E>, ReaderWorkerError> {
         if self.snapshot_active {
             return Err(ReaderWorkerError::SnapshotAlreadyActive);
