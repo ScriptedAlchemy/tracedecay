@@ -265,16 +265,13 @@ it and owns the temporary-alias deletion slices.
   `tracedecay lsp servers|bridge`; the old `--no-lsp`/environment/config/module
   proposal is not a missing plan requirement.
 - `36-git-aware-change-context-and-index-transactions.md`: carries an open
-  portability gap recorded 2026-07-27. The daemon canonicalizes
-  `repository_root` before building the assembler
-  (`src/daemon/git_transactions/owner.rs`, around line 460) while callers
-  capture snapshots from uncanonicalized paths. On Linux with a real `/tmp`
-  the two agree, so the defect is latent there; on any host whose repository
-  path traverses a symlink — macOS `/tmp` → `/private/tmp` is the canonical
-  case — daemon recapture and caller snapshot diverge and `git_preview` would
-  misreport `stale_preview`. The honest repair is to canonicalize consistently
-  at snapshot construction. Loosening the comparison to make the paths match is
-  the wrong fix and must not be adopted.
+  portability gap recorded 2026-07-27 and closed by canonicalizing repository/
+  worktree roots through `canonicalize_repository_root` at owner mount and
+  snapshot construction. Callers and daemon now share one filesystem identity
+  across symlink aliases (including macOS `/tmp` → `/private/tmp`); exact
+  preview CAS is unchanged and still rejects genuine drift. Unix symlink-alias
+  fixtures cover capture parity and owner reuse. Do not reopen by loosening
+  snapshot comparison.
 - `38-storage-retention-size-and-efficiency.md` and `NEXT.md`: raw LCM
   offload/drop, projected-message dedupe, legacy session/raw pruning, and
   observation-evidence release now have bounded defaults. Superseded

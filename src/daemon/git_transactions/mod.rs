@@ -12,6 +12,8 @@ mod registry;
 mod service;
 mod store;
 
+use std::path::{Path, PathBuf};
+
 use tracedecay_application::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexPreviewPortResultV1,
     GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionPort,
@@ -20,6 +22,18 @@ use tracedecay_application::{
 use tracedecay_domain::{GitIndexTransactionReceiptV1, UtcMicros};
 use tracedecay_policy::GitEffectClassifier;
 use tracedecay_store::GitIndexTransactionStore;
+
+/// Canonical filesystem identity for a Git repository/worktree root.
+///
+/// Preview CAS compares snapshots byte-for-byte. The daemon owner resolves
+/// roots through this form before mounting an assembler; snapshot capture must
+/// use the same resolution so alias paths (macOS `/tmp` → `/private/tmp`, and
+/// other symlink roots) do not produce equal repository state that fails as
+/// `stale_preview`. Comparison stays exact — callers must not loosen identity
+/// equality to paper over divergent path forms.
+pub(crate) fn canonicalize_repository_root(repository_root: &Path) -> std::io::Result<PathBuf> {
+    repository_root.canonicalize()
+}
 
 pub(crate) use journal::{DurableGitIndexJournal, GitIndexJournalError};
 #[cfg(all(unix, any(test, feature = "test-transport")))]
