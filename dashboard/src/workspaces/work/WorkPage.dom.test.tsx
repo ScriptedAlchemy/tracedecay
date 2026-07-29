@@ -26,6 +26,18 @@ describe('WorkPage contract gate', () => {
     expect(screen.queryByText('Partial')).toBeNull();
   });
 
+  it('scrolls inside a named region and leaves the shell its own main landmark', () => {
+    const { container } = render(<WorkPage />);
+
+    // The shell renders `main#td-main`; a workspace that adds a second `main`
+    // nests a landmark that may not nest.
+    expect(container.querySelector('main')).toBeNull();
+    const region = container.querySelector('[data-work-authority]');
+    expect(region?.getAttribute('role')).toBe('region');
+    expect(region?.getAttribute('aria-label')).toBe('Work content');
+    expect(region?.getAttribute('tabindex')).toBe('0');
+  });
+
   it('explains exactly which state is withheld', () => {
     render(<WorkPage />);
 
@@ -52,12 +64,13 @@ describe('WorkPage contract gate', () => {
 
   it('renders no measurement, no fabricated zero, and no unavailable command', () => {
     const { container } = render(<WorkPage />);
-    const main = container.querySelector('main');
+    const ledger = container.querySelector('[data-work-ledger]');
 
     // The channel number in the header is a real reading; the data plane below
     // it must carry no figure at all, because there is nothing to measure.
-    expect(main?.querySelectorAll('[data-cell="numeric"]')).toHaveLength(0);
-    expect(main?.textContent).not.toMatch(/\b0(?:\.0+)?\b/);
+    expect(ledger).not.toBeNull();
+    expect(ledger?.querySelectorAll('[data-cell="numeric"]')).toHaveLength(0);
+    expect(ledger?.textContent).not.toMatch(/\b0(?:\.0+)?\b/);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
     expect(screen.queryAllByRole('link')).toHaveLength(0);
     expect(screen.queryByRole('button', { name: /create|admit|accept|cancel/i })).toBeNull();
