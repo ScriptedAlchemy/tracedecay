@@ -724,7 +724,7 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
 }
 
 #[test]
-fn database_owner_registry_hides_bounded_insert_until_owner_registration_finishes() {
+fn database_owner_registry_hides_bounded_insert_until_core_publication() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profile"),
@@ -750,12 +750,12 @@ fn database_owner_registry_hides_bounded_insert_until_owner_registration_finishe
     assert!(inserted);
     assert!(
         registry.get_route_and_touch(&route).is_none(),
-        "a route must remain hidden until every project-open owner is registered"
+        "a route must remain hidden until its core server is constructed"
     );
     assert!(registry.mark_ready(&key));
     assert!(
         registry.get_route_and_touch(&route).is_some(),
-        "completed owner registration must publish the cached route"
+        "core publication must expose the route while optional owners warm"
     );
 }
 
