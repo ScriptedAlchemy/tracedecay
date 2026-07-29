@@ -15,10 +15,10 @@ function page<T extends string>(path: T, label: string, load: () => Promise<{ de
   return { path, label, Page: lazy(load) } as const;
 }
 
-// The twelve PR14 workspaces (plan 11), each its own lazy code-split chunk:
-// the shell stays light and a surface loads on first navigation. Every
-// workspace is wired to real data — the plan admits no navigation stubs at
-// ship time, so there is no unwired branch to fall back to.
+// The twelve existing Plan 11 workspaces plus PR14 Work, each its own lazy
+// code-split chunk. The existing surfaces remain wired to real data. Work
+// remains an explicit contract-gated surface until its generated Plan 24/32
+// read model lands; it never substitutes fixture or browser-owned state.
 export const WORKSPACES = [
   page('brain', 'Brain', () =>
     import('../workspaces/brain/BrainPage.tsx').then((m) => ({ default: m.BrainPage }))),
@@ -44,6 +44,8 @@ export const WORKSPACES = [
     import('../workspaces/costs/CostsPage.tsx').then((m) => ({ default: m.CostsPage }))),
   page('settings', 'Settings', () =>
     import('../workspaces/settings/SettingsPage.tsx').then((m) => ({ default: m.SettingsPage }))),
+  page('work', 'Work', () =>
+    import('../workspaces/work/WorkPage.tsx').then((m) => ({ default: m.WorkPage }))),
 ] as const;
 
 export type WorkspacePath = (typeof WORKSPACES)[number]['path'];
