@@ -19,6 +19,7 @@ mod automation_jobs;
 mod automation_skills;
 mod code_diagnostics;
 mod delivery;
+mod doctor;
 mod explorer;
 mod graph;
 mod lcm;
