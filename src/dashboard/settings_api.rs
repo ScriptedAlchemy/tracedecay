@@ -2,18 +2,22 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
-use tracedecay_application::ApplicationProblemKind;
+use tracedecay_api::configuration::{
+    DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
+    SETTINGS_REFRESH_OPERATION, USER_SETTINGS_APPLY_OPERATION,
+    configuration_application_problem_error, configuration_authority_unavailable_error,
+    configuration_revision_conflict_error, parse_project_settings_patch,
+    parse_user_settings_patch, settings_validation_error, validate_user_settings_patch,
+};
 
 use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
     DashboardLegalActionRefV1, scope_from_state,
 };
-use super::util::{JsonError, http_detail};
 use crate::application::configuration::{
     DirectConfigurationMutation, UserSettingsAuthorityError, UserSettingsMutationV1,
     UserSettingsSnapshotV1,
@@ -33,66 +37,12 @@ use crate::daemon_client::RequestedOutputFormat;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::user_config;
 
-type ApiResult = std::result::Result<Json<DashboardEnvelopeV1<SettingsPayloadV1>>, JsonError>;
+pub(crate) use tracedecay_api::configuration::{ProjectSettingsPatch, UserSettingsPatch};
+
+type ApiResult =
+    std::result::Result<Json<DashboardEnvelopeV1<SettingsPayloadV1>>, DashboardConfigurationRouteErrorV1>;
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
-
-/// Owning operations behind the two settings write scopes. They are advertised
-/// separately because their authorities differ: the project batch needs the
-/// daemon-owned configuration control plane, while user settings are written
-/// through the profile authority every dashboard state carries.
-const PROJECT_APPLY_OPERATION: &str = "configuration_batch";
-const USER_APPLY_OPERATION: &str = "user_settings_mutate";
-
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProjectSettingsPatch {
-    expected_revision_id: String,
-    #[serde(default)]
-    include: Option<Vec<String>>,
-    #[serde(default)]
-    exclude: Option<Vec<String>>,
-    #[serde(default)]
-    max_file_size: Option<u64>,
-    #[serde(default)]
-    extract_docstrings: Option<bool>,
-    #[serde(default)]
-    track_call_sites: Option<bool>,
-    #[serde(default)]
-    git_ignore: Option<bool>,
-    #[serde(default)]
-    telemetry: Option<TelemetrySettingsPatch>,
-    #[serde(default)]
-    sync: Option<SyncSettingsPatch>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-struct SyncSettingsPatch {
-    #[serde(default)]
-    auto_track_pr_branches: Option<bool>,
-    #[serde(default)]
-    auto_track_pr_poll_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-struct TelemetrySettingsPatch {
-    #[serde(default)]
-    timings: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct UserSettingsPatch {
-    expected_revision_id: String,
-    #[serde(default)]
-    upload_enabled: Option<bool>,
-    #[serde(default)]
-    watcher_debounce: Option<String>,
-    #[serde(default)]
-    extraction_timeout_secs: Option<u64>,
-}
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 pub(crate) struct SettingsPayloadV1 {
@@ -259,17 +209,16 @@ pub(crate) async fn patch_project_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<ProjectSettingsPatch>(patch)
-        .map_err(|err| patch_shape_error("project settings", &err))?;
+    let patch = parse_project_settings_patch(patch)?;
     let current = crate::config::cached_runtime_configuration(&state.project_root)
-        .map_err(|err| configuration_unavailable(&err))?;
+        .map_err(|_| configuration_authority_unavailable_error())?;
     let project_id = state
         .project_id
         .as_deref()
-        .ok_or_else(|| configuration_unavailable(&"project authority is unavailable"))
+        .ok_or_else(configuration_authority_unavailable_error)
         .and_then(|project_id| {
             tracedecay_domain::ProjectId::new(project_id)
-                .map_err(|error| configuration_unavailable(&error))
+                .map_err(|_| configuration_authority_unavailable_error())
         })?;
     let preview = preview_project_settings(
         &project_id,
@@ -296,18 +245,16 @@ pub(crate) async fn patch_project_settings(
         let executor = state
             .application_invocation_executor
             .as_deref()
-            .ok_or_else(|| configuration_unavailable(&"application transport is unavailable"))?;
+            .ok_or_else(configuration_authority_unavailable_error)?;
         let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
-            return Err(configuration_unavailable(
-                &"project settings preview is invalid",
-            ));
+            return Err(configuration_authority_unavailable_error());
         };
         let mutations = mutations
             .into_iter()
             .map(surface_mutation)
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
-            .map_err(|error| configuration_unavailable(&error))?;
+            .map_err(|_| configuration_authority_unavailable_error())?;
         let outcome = resolve_dashboard_application_surface(
             ApplicationSurfaceOperation::ConfigurationBatch,
             request_id,
@@ -321,9 +268,9 @@ pub(crate) async fn patch_project_settings(
             Some(executor),
         )
         .await
-        .map_err(|error| configuration_unavailable(&error))?;
+        .map_err(|_| configuration_authority_unavailable_error())?;
         if let Err(problem) = outcome.result {
-            return Err(application_problem(problem));
+            return Err(configuration_application_problem_error(problem));
         }
     }
 
@@ -336,27 +283,10 @@ pub(crate) async fn patch_user_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<UserSettingsPatch>(patch)
-        .map_err(|err| patch_shape_error("user settings", &err))?;
-
-    let mut errors = Vec::new();
-    if let Some(debounce) = &patch.watcher_debounce
-        && user_config::parse_duration(debounce).is_none()
-    {
-        errors.push(validation_error(
-            "watcher_debounce",
-            "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
-        ));
-    }
-    if patch.extraction_timeout_secs == Some(0) {
-        errors.push(validation_error(
-            "extraction_timeout_secs",
-            "extraction_timeout_secs must be at least 1 second",
-        ));
-    }
-    if !errors.is_empty() {
-        return Err(validation_failed(&errors));
-    }
+    let patch = parse_user_settings_patch(patch)?;
+    validate_user_settings_patch(&patch, |value| {
+        user_config::parse_duration(value).is_some()
+    })?;
 
     let mutation = match state
         .user_settings
@@ -372,9 +302,13 @@ pub(crate) async fn patch_user_settings(
     {
         Ok(mutation) => mutation,
         Err(UserSettingsAuthorityError::RevisionConflict { expected, actual }) => {
-            return Err(user_revision_conflict(&expected, &actual));
+            return Err(configuration_revision_conflict_error(
+                "user settings changed after this edit began; refresh and retry",
+                &expected,
+                &actual,
+            ));
         }
-        Err(error) => return Err(configuration_unavailable(&error)),
+        Err(_) => return Err(configuration_authority_unavailable_error()),
     };
     if let Some(backup) = mutation.recovered_backup_path {
         tracing::warn!(backup, "corrupt user config backed up before regeneration");
@@ -389,15 +323,18 @@ async fn settings_envelope(
     state: &DashboardState,
     resync_recommended: Option<bool>,
     restart_recommended: Option<bool>,
-) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, JsonError> {
+) -> std::result::Result<
+    DashboardEnvelopeV1<SettingsPayloadV1>,
+    DashboardConfigurationRouteErrorV1,
+> {
     let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
-        .map_err(|err| configuration_unavailable(&err))?;
+        .map_err(|_| configuration_authority_unavailable_error())?;
     let legacy_config_path = state.config_path.clone();
     let user = state
         .user_settings
         .read()
         .await
-        .map_err(|error| configuration_unavailable(&error))?;
+        .map_err(|_| configuration_authority_unavailable_error())?;
     let automation = automation_settings_payload(
         &user.automation,
         automation_config::load_project_config(&state.dashboard_root)
@@ -454,16 +391,16 @@ async fn settings_envelope(
     if state.application_invocation_executor.is_some() {
         legal_actions.push(DashboardLegalActionRefV1::new(
             DashboardLegalActionKindV1::RequestApply,
-            PROJECT_APPLY_OPERATION,
+            PROJECT_SETTINGS_APPLY_OPERATION,
         ));
     }
     legal_actions.push(DashboardLegalActionRefV1::new(
         DashboardLegalActionKindV1::RequestApply,
-        USER_APPLY_OPERATION,
+        USER_SETTINGS_APPLY_OPERATION,
     ));
     legal_actions.push(DashboardLegalActionRefV1::new(
         DashboardLegalActionKindV1::Refresh,
-        "configuration_list",
+        SETTINGS_REFRESH_OPERATION,
     ));
 
     Ok(DashboardEnvelopeV1::ready(
@@ -652,19 +589,12 @@ fn validation_error(field: &str, message: &str) -> Value {
     json!({ "field": field, "message": message })
 }
 
-fn validation_failed(errors: &[Value]) -> JsonError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": "settings validation failed",
-            "validation_errors": errors,
-        })),
-    )
-}
-
 fn surface_mutation(
     mutation: DirectConfigurationMutation,
-) -> std::result::Result<ConfigurationDirectMutationSurfaceRequest, JsonError> {
+) -> std::result::Result<
+    ConfigurationDirectMutationSurfaceRequest,
+    DashboardConfigurationRouteErrorV1,
+> {
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
             Ok(ConfigurationDirectMutationSurfaceRequest::Set { layer, key, value })
@@ -672,102 +602,26 @@ fn surface_mutation(
         DirectConfigurationMutation::Unset { layer, key } => {
             Ok(ConfigurationDirectMutationSurfaceRequest::Unset { layer, key })
         }
-        DirectConfigurationMutation::Batch { .. } => Err(configuration_unavailable(
-            &"nested settings batch is invalid",
-        )),
-    }
-}
-
-fn project_preview_error(error: ProjectSettingsPreviewErrorV1) -> JsonError {
-    match error {
-        ProjectSettingsPreviewErrorV1::Validation(issues) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "detail": "settings validation failed",
-                "validation_errors": issues,
-            })),
-        ),
-        ProjectSettingsPreviewErrorV1::RevisionConflict { expected, actual } => (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "code": "configuration_revision_conflict",
-                "detail": "settings changed after this edit began; refresh and retry",
-                "expected_revision_id": expected,
-                "actual_revision_id": actual,
-            })),
-        ),
-        ProjectSettingsPreviewErrorV1::InvalidAuthority => {
-            configuration_unavailable(&"project settings authority is unavailable")
+        DirectConfigurationMutation::Batch { .. } => {
+            Err(configuration_authority_unavailable_error())
         }
     }
 }
 
-fn application_problem(problem: tracedecay_application::ApplicationProblemEnvelope) -> JsonError {
-    let status = match problem.problem.kind {
-        ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-        ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        ApplicationProblemKind::Cancelled => StatusCode::CONFLICT,
-        ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-    };
-    let payload = serde_json::to_value(problem)
-        .unwrap_or_else(|_| json!({ "detail": "configuration mutation was rejected" }));
-    (status, Json(payload))
-}
-
-fn user_revision_conflict(expected: &str, actual: &str) -> JsonError {
-    (
-        StatusCode::CONFLICT,
-        Json(json!({
-            "code": "configuration_revision_conflict",
-            "detail": "user settings changed after this edit began; refresh and retry",
-            "expected_revision_id": expected,
-            "actual_revision_id": actual,
-        })),
-    )
-}
-
-fn patch_shape_error(scope: &str, err: &serde_json::Error) -> JsonError {
-    let message = format!("invalid {scope} patch: {err}");
-    let field = serde_error_field(&message).unwrap_or_else(|| "patch".to_string());
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": message,
-            "validation_errors": [{ "field": field, "message": message }],
-        })),
-    )
-}
-
-fn serde_error_field(message: &str) -> Option<String> {
-    ["unknown field `", "missing field `"]
-        .into_iter()
-        .find_map(|prefix| {
-            let start = message.find(prefix)? + prefix.len();
-            let rest = &message[start..];
-            let end = rest.find('`')?;
-            Some(rest[..end].to_string())
-        })
-}
-
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
-    )
-}
-
-fn configuration_unavailable(_err: &impl ToString) -> JsonError {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "code": "configuration_authority_unavailable",
-            "detail": "configuration authority is unavailable",
-        })),
-    )
+fn project_preview_error(
+    error: ProjectSettingsPreviewErrorV1,
+) -> DashboardConfigurationRouteErrorV1 {
+    match error {
+        ProjectSettingsPreviewErrorV1::Validation(issues) => settings_validation_error(issues),
+        ProjectSettingsPreviewErrorV1::RevisionConflict { expected, actual } => {
+            configuration_revision_conflict_error(
+                "settings changed after this edit began; refresh and retry",
+                &expected,
+                &actual,
+            )
+        }
+        ProjectSettingsPreviewErrorV1::InvalidAuthority => configuration_authority_unavailable_error(),
+    }
 }
 
 #[cfg(test)]

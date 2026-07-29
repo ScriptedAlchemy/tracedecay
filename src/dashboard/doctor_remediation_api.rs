@@ -2,10 +2,7 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use tracedecay_application::doctor::DoctorOwningOperationRefV1;
-use tracedecay_application::{IdempotencyKey, PreviewId, RequestId};
+use tracedecay_application::RequestId;
 
 pub(crate) use crate::application::doctor_remediation::{
     Dispatch, DoctorRemediationAuthorityV1, DoctorRemediationDispatchCommandV1,
@@ -16,40 +13,18 @@ pub(crate) use crate::application::doctor_remediation::{
 use crate::application::operation_stream::OperationId;
 
 use super::DashboardState;
-use super::read_model::{
-    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
-    scope_from_state,
-};
+use super::read_model::{DashboardDomainStateV1, DashboardEnvelopeV1, scope_from_state};
 
 pub(crate) type DoctorRemediationDispatcherV1 = DoctorRemediationAuthorityV1;
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DoctorRemediationPreviewRequestV1 {
-    operation: DoctorOwningOperationRefV1,
-    target: DoctorRemediationTargetV1,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DoctorRemediationApplyRequestV1 {
-    operation: DoctorOwningOperationRefV1,
-    target: DoctorRemediationTargetV1,
-    preview_id: Option<PreviewId>,
-    idempotency_key: IdempotencyKey,
-    confirmed: bool,
-}
-
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum DoctorRemediationPayloadV1 {
-    Operation {
-        operation: DoctorRemediationOperationV1,
-    },
-    Unavailable {
-        reason: DoctorRemediationDispatchErrorV1,
-    },
-}
+pub(crate) type DoctorRemediationPreviewRequestV1 =
+    tracedecay_api::remediation::DoctorRemediationPreviewRequestV1<DoctorRemediationTargetV1>;
+pub(crate) type DoctorRemediationApplyRequestV1 =
+    tracedecay_api::remediation::DoctorRemediationApplyRequestV1<DoctorRemediationTargetV1>;
+pub(crate) type DoctorRemediationPayloadV1 =
+    tracedecay_api::remediation::DoctorRemediationPayloadV1<
+        DoctorRemediationOperationV1,
+        DoctorRemediationDispatchErrorV1,
+    >;
 
 pub(crate) async fn preview(
     State(state): State<DashboardState>,
@@ -113,9 +88,8 @@ fn response(
     state: &DashboardState,
     result: Result<DoctorRemediationOperationV1, DoctorRemediationDispatchErrorV1>,
 ) -> Json<DashboardEnvelopeV1<DoctorRemediationPayloadV1>> {
-    let scope = scope_from_state(state);
-    match result {
-        Ok(operation) => {
+    let result = result
+        .map(|operation| {
             let domain_state = operation_domain_state(&operation);
             let complete = matches!(
                 operation.phase,
@@ -125,23 +99,15 @@ fn response(
                 DoctorRemediationVerificationV1::Verified { .. }
                     | DoctorRemediationVerificationV1::NotRequired
             );
-            Json(DashboardEnvelopeV1::new(
-                scope,
-                domain_state,
-                if complete {
-                    DashboardCoverageV1::complete(1, "doctor_remediation_operation")
-                } else {
-                    DashboardCoverageV1::unknown()
-                },
-                if complete {
-                    DashboardFreshnessV1::fresh_now()
-                } else {
-                    DashboardFreshnessV1::unknown()
-                },
-                DoctorRemediationPayloadV1::Operation { operation },
-            ))
-        }
-        Err(error) => {
+            (
+                operation,
+                tracedecay_api::remediation::DoctorRemediationOperationPresentationV1::new(
+                    domain_state,
+                    complete,
+                ),
+            )
+        })
+        .map_err(|error| {
             let domain_state = match error {
                 DoctorRemediationDispatchErrorV1::Unsupported => {
                     DashboardDomainStateV1::Unsupported
@@ -155,23 +121,18 @@ fn response(
                     DashboardDomainStateV1::Offline
                 }
             };
-            Json(DashboardEnvelopeV1::new(
-                scope,
-                domain_state,
-                if error == DoctorRemediationDispatchErrorV1::Unsupported {
-                    DashboardCoverageV1::unsupported()
-                } else {
-                    DashboardCoverageV1::unknown()
-                },
-                if error == DoctorRemediationDispatchErrorV1::Unsupported {
-                    DashboardFreshnessV1::unsupported()
-                } else {
-                    DashboardFreshnessV1::unknown()
-                },
-                DoctorRemediationPayloadV1::Unavailable { reason: error },
-            ))
-        }
-    }
+            (
+                error,
+                tracedecay_api::remediation::DoctorRemediationErrorPresentationV1::new(
+                    domain_state,
+                    error == DoctorRemediationDispatchErrorV1::Unsupported,
+                ),
+            )
+        });
+    Json(tracedecay_api::remediation::doctor_remediation_envelope(
+        scope_from_state(state),
+        result,
+    ))
 }
 
 fn operation_domain_state(operation: &DoctorRemediationOperationV1) -> DashboardDomainStateV1 {
