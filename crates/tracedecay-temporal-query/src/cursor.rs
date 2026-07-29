@@ -422,7 +422,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::temporal::ports::{
+    use crate::ports::{
         BindingDigest, CursorKeyError, CursorSignature, KernelVersions, SessionCursorAuthenticator,
         TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
         TemporalParticipantManifest, TemporalSnapshotRequest, TemporalSourceAccess,

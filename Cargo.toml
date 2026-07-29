@@ -11,6 +11,7 @@ members = [
     "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
     "crates/tracedecay-query",
+    "crates/tracedecay-temporal-query",
     "crates/tracedecay-sessions",
     "crates/tracedecay-rusqlite-parity",
     "crates/tracedecay-rusqlite-runtime",
@@ -269,6 +270,7 @@ tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
+tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0" }
 tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
 tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0" }
@@ -371,6 +373,7 @@ static_assertions = "1.1.0"
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
