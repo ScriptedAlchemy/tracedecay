@@ -742,6 +742,12 @@ fn is_within_source_roots(path: &Path, source_roots: &BTreeSet<PathBuf>) -> bool
         .any(|ancestor| source_roots.contains(ancestor))
 }
 
+/// Collects every `.rs` source reachable from `source_roots`.
+///
+/// A root may name a directory or a single file. File roots must be honored
+/// here because [`git_tracked_rust_sources`] already accepts them through
+/// [`is_within_source_roots`]; dropping them would let a guard scoped to one
+/// file scan nothing and pass vacuously.
 pub(crate) fn filesystem_rust_sources(
     repository: &Path,
     source_roots: &BTreeSet<PathBuf>,
@@ -752,7 +758,12 @@ pub(crate) fn filesystem_rust_sources(
         .collect();
     let mut sources = BTreeSet::new();
     while let Some(path) = pending.pop() {
-        if path.is_dir() {
+        if path.is_file() && path.extension() == Some(OsStr::new("rs")) {
+            let relative = path
+                .strip_prefix(repository)
+                .map_err(|_| format!("source path is outside repository: {}", path.display()))?;
+            sources.insert(normalize_relative(relative)?);
+        } else if path.is_dir() {
             let entries = fs::read_dir(&path).map_err(|error| {
                 format!("cannot read source directory '{}': {error}", path.display())
             })?;
@@ -1087,6 +1098,40 @@ fn git_tracked_rust_sources_are_reachable_from_cargo_targets() {
             .map(|path| format!("  - {}", path.display()))
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// A guard scoped to a single file must actually read that file. Silently
+/// discarding file roots turns such a guard into an assertion over an empty
+/// set, which passes no matter what the file contains.
+#[test]
+fn filesystem_rust_sources_resolves_file_roots_and_not_only_directories() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let file_root = PathBuf::from("src/lsp_bridge.rs");
+    assert!(
+        repository.join(&file_root).is_file(),
+        "fixture root must name a real file: {}",
+        file_root.display()
+    );
+
+    let roots = [file_root.clone()].into_iter().collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(repository, &roots).expect("resolve a single-file source root");
+
+    assert!(
+        sources.contains(&file_root),
+        "a file root must resolve to itself, otherwise guards scoped to one file scan nothing: \
+         {sources:?}"
+    );
+
+    let ignored = [PathBuf::from("Cargo.toml")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        filesystem_rust_sources(repository, &ignored)
+            .expect("resolve a non-Rust file root")
+            .is_empty(),
+        "only Rust sources belong in the scanned set"
     );
 }
 
