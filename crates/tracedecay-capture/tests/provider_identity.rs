@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use tracedecay_capture::{claude, codex, cursor, cursor_composer};
+use tracedecay_capture::{claude, codex, cursor, cursor_composer, vibe};
 use tracedecay_domain::ObservationSourceRangeV1;
 
 #[test]
@@ -147,4 +147,45 @@ fn cursor_composer_checked_in_bubble_preserves_projection() {
     assert_eq!(actual["evidence"], expected["evidence"]);
     assert_eq!(actual["relations"]["message_id"], record_id.as_str());
     assert_eq!(actual_kinds, expected_kinds);
+}
+
+#[test]
+fn vibe_checked_in_message_preserves_projection_without_workflow_inference() {
+    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/provider_normalization/vibe");
+    let native: Value = serde_json::from_str(
+        &fs::read_to_string(fixture_root.join("workflow_lookalike.input.json")).unwrap(),
+    )
+    .unwrap();
+    let range = ObservationSourceRangeV1::new(0, 64).unwrap();
+    let record_id = vibe::native_record_id("vibe-lookalike", range).unwrap();
+    let actual = serde_json::to_value(
+        vibe::normalize_observation(
+            &native,
+            "vibe-lookalike",
+            Some("vibe-model"),
+            record_id.clone(),
+            range,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(actual["provider"], "vibe");
+    assert_eq!(actual["stable_record_id"], record_id.as_str());
+    assert_eq!(actual["relations"]["session_id"], "vibe-lookalike");
+    assert_eq!(actual["relations"]["message_id"], record_id.as_str());
+    assert_eq!(actual["evidence"]["ordering_domain"], "file_bytes");
+    assert_eq!(actual["facts"][0]["kind"], "message");
+    assert_eq!(
+        actual["facts"][0]["content"],
+        "Vibe workflow lookalike remains an ordinary message"
+    );
+    assert!(
+        actual["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|fact| fact["kind"] != "workflow_lifecycle")
+    );
 }
