@@ -1,11 +1,8 @@
-#![allow(unused_imports)] // test scaffolding imports
-
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
