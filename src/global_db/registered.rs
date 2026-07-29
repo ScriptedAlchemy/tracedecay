@@ -296,23 +296,6 @@ impl RegisteredGlobalDb {
             })
     }
 
-    pub(crate) async fn session_lcm_retention_report(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-        config: &crate::sessions::lcm::retention::LcmRetentionConfig,
-        now: i64,
-    ) -> crate::errors::Result<crate::sessions::lcm::retention::LcmRetentionReport> {
-        self.run_session_lcm_retention(
-            provider,
-            session_id,
-            config,
-            crate::sessions::lcm::retention::RetentionMode::DryRun,
-            now,
-        )
-        .await
-    }
-
     pub(crate) async fn run_session_lcm_retention(
         &self,
         provider: &str,
