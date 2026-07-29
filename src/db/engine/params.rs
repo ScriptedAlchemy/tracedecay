@@ -73,7 +73,10 @@ impl Params {
     }
 }
 
-pub(crate) trait IntoParams {
+// Visible outside the crate: integration suites calling the fixture-facing
+// `Database::execute_write` need this bound visible for their param types.
+#[doc(hidden)]
+pub trait IntoParams {
     fn into_params(self) -> Result<Vec<Value>>;
 }
 
