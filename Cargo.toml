@@ -389,11 +389,6 @@ harness = false
 # `--list --format terse` probe used by `cargo test` and nextest.
 test = false
 
-[[bench]]
-name = "code_index_chunks"
-harness = false
-test = false
-
 [profile.bench]
 opt-level = 3
 debug = false

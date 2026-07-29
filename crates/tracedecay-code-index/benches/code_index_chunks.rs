@@ -9,16 +9,16 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay::code_index::chunks::{
+use tracedecay_code_index::chunks::{
     CodeChunker, CodeFileChunksV1, DeterministicCodeChunker, content_digest,
 };
-use tracedecay::code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
-use tracedecay::code_index::incremental::{GenerationChunkManifestV1, plan_chunk_increment};
-use tracedecay::code_index::intake::{
+use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
+use tracedecay_code_index::incremental::{GenerationChunkManifestV1, plan_chunk_increment};
+use tracedecay_code_index::intake::{
     CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake,
 };
-use tracedecay::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use tracedecay::code_index::projection::{
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
+use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
     expected_request_digest, project_for_publication,
 };
@@ -31,9 +31,9 @@ use tracedecay_domain::{
     UtcMicros, ValidatedCodeFileV1,
 };
 
-const WORKLOAD_PATH: &str = "benchmarks/pr9-code-index/workload-v1.json";
-const EXPECTED_PATH: &str = "benchmarks/pr9-code-index/expected-v1.json";
-const DEFAULT_RESULT_PATH: &str = "benchmarks/pr9-code-index/result-provisional.json";
+const WORKLOAD_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../benchmarks/pr9-code-index/workload-v1.json");
+const EXPECTED_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../benchmarks/pr9-code-index/expected-v1.json");
+const DEFAULT_RESULT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../benchmarks/pr9-code-index/result-provisional.json");
 const CHUNKER_V1: &str = "chunker.pr9-benchmark.v1";
 const CHUNKER_REPLAY: &str = "chunker.pr9-benchmark.replay";
 const CHUNKER_INCOMPATIBLE: &str = "chunker.pr9-benchmark.incompatible";
@@ -865,7 +865,7 @@ fn chunker(
         id::<SanitizerRevision>("sanitizer.pr9-benchmark.v1")?,
         id::<PolicyRevisionId>("policy.pr9-benchmark.v1")?,
         chunker_revision,
-        tracedecay::extraction::LanguageRegistry::new(),
+        tracedecay_code_index::extraction::LanguageRegistry::new(),
     ))
 }
 
