@@ -89,7 +89,7 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_session_boundary",
 ];
 
-const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(30);
+const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_TOOL_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
 
@@ -122,7 +122,10 @@ fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
 
 fn is_truncation_envelope(value: &Value) -> bool {
     value.get("truncated").and_then(Value::as_bool) == Some(true)
-        && value.get("original_chars").and_then(Value::as_u64).is_some()
+        && value
+            .get("original_chars")
+            .and_then(Value::as_u64)
+            .is_some()
         && value.get("preview").and_then(Value::as_str).is_some()
 }
 
