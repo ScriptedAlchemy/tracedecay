@@ -36,6 +36,18 @@ impl HostComponentRegistrationDelegate {
         lifecycle_root: &Path,
         operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     ) -> crate::errors::Result<Self> {
+        let tracedecay_bin =
+            crate::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+        Self::new_with_tracedecay_bin(agent_id, home, lifecycle_root, operation, tracedecay_bin)
+    }
+
+    pub fn new_with_tracedecay_bin(
+        agent_id: &str,
+        home: &Path,
+        lifecycle_root: &Path,
+        operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
+        tracedecay_bin: String,
+    ) -> crate::errors::Result<Self> {
         let project_path = std::env::current_dir().unwrap_or_else(|_| home.to_path_buf());
         let integration = crate::agents::get_integration(agent_id)?;
         let registration_path = integration.primary_config_path(home);
@@ -43,8 +55,7 @@ impl HostComponentRegistrationDelegate {
             integration,
             context: crate::agents::InstallContext {
                 home: home.to_path_buf(),
-                tracedecay_bin: crate::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string()),
+                tracedecay_bin,
                 tool_permissions: crate::agents::expected_tool_perms(),
                 project_root: None,
                 dashboard: true,

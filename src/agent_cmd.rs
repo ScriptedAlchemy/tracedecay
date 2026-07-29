@@ -146,6 +146,19 @@ fn canonical_host_component_set(
 ) -> tracedecay::errors::Result<
     Option<tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1>,
 > {
+    let tracedecay_bin =
+        tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    canonical_host_component_set_with_tracedecay_bin(agent, component, now_unix, &tracedecay_bin)
+}
+
+fn canonical_host_component_set_with_tracedecay_bin(
+    agent: &str,
+    component: Option<crate::cli::HostBundleComponentArg>,
+    now_unix: u64,
+    tracedecay_bin: &str,
+) -> tracedecay::errors::Result<
+    Option<tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1>,
+> {
     let host = match host_kind_for_agent(agent) {
         Ok(host) => host,
         Err(_) => return Ok(None),
@@ -160,8 +173,11 @@ fn canonical_host_component_set(
     if requested.is_empty() {
         return Ok(None);
     }
-    tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set(
-        host, &requested, now_unix,
+    tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
+        host,
+        &requested,
+        now_unix,
+        tracedecay_bin,
     )
     .map(Some)
     .map_err(|error| tracedecay::errors::TraceDecayError::Config {
@@ -461,6 +477,28 @@ fn apply_canonical_component_set(
     home: &Path,
     lifecycle_root: &Path,
 ) -> tracedecay::errors::Result<()> {
+    let tracedecay_bin =
+        tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
+    apply_canonical_component_set_with_tracedecay_bin(
+        agent_id,
+        operation,
+        component_set,
+        options,
+        home,
+        lifecycle_root,
+        &tracedecay_bin,
+    )
+}
+
+fn apply_canonical_component_set_with_tracedecay_bin(
+    agent_id: &str,
+    operation: HostBundleCliOperation,
+    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
+    options: &crate::cli::HostBundleCliOptions,
+    home: &Path,
+    lifecycle_root: &Path,
+    tracedecay_bin: &str,
+) -> tracedecay::errors::Result<()> {
     let request = component_set_request(
         component_set,
         operation,
@@ -474,11 +512,12 @@ fn apply_canonical_component_set(
         .map_err(host_bundle_error)?;
     let mut transaction =
         tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
-    let mut registration = CompatibilityAgentRegistrationDelegate::new(
+    let mut registration = CompatibilityAgentRegistrationDelegate::new_with_tracedecay_bin(
         agent_id,
         home,
         lifecycle_root,
         request.lifecycle.operation,
+        tracedecay_bin.to_string(),
     )?;
     let preview = transaction
         .preview(
@@ -2324,9 +2363,10 @@ mod tests {
 
     use super::{
         AgentReinstallOutcome, CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
-        apply_canonical_component_set, broker_codex_daemon_automation_project,
-        canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
-        reinstall_agent_integrations,
+        apply_canonical_component_set, apply_canonical_component_set_with_tracedecay_bin,
+        broker_codex_daemon_automation_project, canonical_host_component_set,
+        canonical_host_component_set_with_tracedecay_bin, component_set_request,
+        finish_legacy_hermes_migration, reinstall_agent_integrations,
     };
 
     const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
@@ -2840,18 +2880,24 @@ mod tests {
     fn explicit_core_component_lifecycle_preserves_opencode_companions() {
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
+        let tracedecay_bin = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         let config_path = home.path().join(".config/opencode/opencode.json");
-        let context_set = canonical_host_component_set(
+        let context_set = canonical_host_component_set_with_tracedecay_bin(
             "opencode",
             Some(crate::cli::HostBundleComponentArg::ContextMcp),
             0,
+            &tracedecay_bin,
         )
         .unwrap()
         .unwrap();
-        let agent_set = canonical_host_component_set(
+        let agent_set = canonical_host_component_set_with_tracedecay_bin(
             "opencode",
             Some(crate::cli::HostBundleComponentArg::Agent),
             0,
+            &tracedecay_bin,
         )
         .unwrap()
         .unwrap();
@@ -2867,10 +2913,11 @@ mod tests {
         std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
         std::fs::write(&context_path, b"context-sentinel\n").unwrap();
         std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
-        let core_set = canonical_host_component_set(
+        let core_set = canonical_host_component_set_with_tracedecay_bin(
             "opencode",
             Some(crate::cli::HostBundleComponentArg::Core),
             0,
+            &tracedecay_bin,
         )
         .unwrap()
         .unwrap();
@@ -2886,13 +2933,14 @@ mod tests {
             HostBundleCliOperation::Repair,
             HostBundleCliOperation::Uninstall,
         ] {
-            apply_canonical_component_set(
+            apply_canonical_component_set_with_tracedecay_bin(
                 "opencode",
                 operation,
                 &core_set,
                 &options,
                 home.path(),
                 lifecycle.path(),
+                &tracedecay_bin,
             )
             .unwrap();
             let config: serde_json::Value =
@@ -2909,12 +2957,10 @@ mod tests {
             if operation == HostBundleCliOperation::Uninstall {
                 assert!(config["lsp"].get("tracedecay").is_none());
             } else {
-                let tracedecay_bin = tracedecay::agents::which_tracedecay()
-                    .unwrap_or_else(|| "tracedecay".to_string());
                 assert_eq!(
                     config["lsp"]["tracedecay"]["command"],
                     serde_json::json!([
-                        tracedecay_bin,
+                        tracedecay_bin.clone(),
                         "lsp",
                         "bridge",
                         "--stdio",
