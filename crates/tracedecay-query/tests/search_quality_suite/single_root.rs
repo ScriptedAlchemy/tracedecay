@@ -21,7 +21,7 @@ use tracedecay_query::retrieval::graph::{
     GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
 };
 use tracedecay_query::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
     HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
 };
 use tracedecay_query::retrieval::lexical::{
@@ -608,7 +608,7 @@ fn exact_lexical_and_graph_rank_before_hydrating_only_the_selected_prefix() {
     hydration_budget.max_hydrated_results = 3;
     let mut source = RecordingHydrationSource::default();
     assert!(source.reads.is_empty());
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate(
             &fixture.request,
             &output.ranked_candidates,

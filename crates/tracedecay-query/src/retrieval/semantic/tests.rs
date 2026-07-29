@@ -24,7 +24,7 @@ use crate::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageInput, RetrievalCursorKeyringV1,
 };
 use crate::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
     HydrationReadOutcomeV1, HydrationWorkPermitV1, LateHydrationSource,
 };
 use crate::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError};
@@ -1137,7 +1137,7 @@ fn admitted_semantic_lane_uses_shared_fusion_cursor_and_hydration_stages() {
     let mut hydration_budget = request.budget;
     hydration_budget.max_hydrated_results = 1;
     let mut source = DenyingHydrationSource::default();
-    let hydrated = DeterministicLateHydration::new(&mut source)
+    let hydrated = CanonicalLateHydration::new(&mut source)
         .hydrate(&request.base, &first.ranked_candidates, &hydration_budget)
         .expect("denial is a positional hydration result");
     assert_eq!(hydrated.results.len(), 1);
