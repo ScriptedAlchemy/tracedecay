@@ -14,7 +14,7 @@
 use tracedecay_application::{
     DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1, converge_derived_memory,
 };
-use tracedecay_store::FactCompatibilityStore;
+use tracedecay_store::{CompatibilityFeedbackRepairProgressV1, FactCompatibilityStore};
 
 use super::MemoryApplication;
 use super::context::MemoryOperationContext;
@@ -22,7 +22,31 @@ use super::error::MemoryApplicationError;
 
 pub use tracedecay_application::{
     DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1,
+    DerivedMemoryFeedbackHistoryRepairV1,
 };
+
+const fn feedback_history_repair(
+    progress: CompatibilityFeedbackRepairProgressV1,
+) -> DerivedMemoryFeedbackHistoryRepairV1 {
+    match progress {
+        CompatibilityFeedbackRepairProgressV1::Unknown => {
+            DerivedMemoryFeedbackHistoryRepairV1::Unknown
+        }
+        CompatibilityFeedbackRepairProgressV1::NotRequired => {
+            DerivedMemoryFeedbackHistoryRepairV1::NotRequired
+        }
+        CompatibilityFeedbackRepairProgressV1::Complete { processed } => {
+            DerivedMemoryFeedbackHistoryRepairV1::Complete { processed }
+        }
+        CompatibilityFeedbackRepairProgressV1::Incomplete {
+            processed,
+            remaining,
+        } => DerivedMemoryFeedbackHistoryRepairV1::Incomplete {
+            processed,
+            remaining,
+        },
+    }
+}
 
 impl<A: FactCompatibilityStore> DerivedMemoryRepairPort for MemoryApplication<A> {
     type Error = MemoryApplicationError;
@@ -37,7 +61,10 @@ impl<A: FactCompatibilityStore> DerivedMemoryRepairPort for MemoryApplication<A>
             stats.missing_vectors_repaired(),
             stats.banks_rebuilt(),
             stats.saturated(),
-        ))
+        )
+        .with_feedback_history_repair(feedback_history_repair(
+            stats.feedback_history_repair(),
+        )))
     }
 }
 
@@ -61,5 +88,45 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             );
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_application::DerivedMemoryFeedbackHistoryRepairV1;
+    use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
+
+    use super::feedback_history_repair;
+
+    #[test]
+    fn feedback_history_repair_projection_retains_each_authoritative_state() {
+        let cases = [
+            (
+                CompatibilityFeedbackRepairProgressV1::Unknown,
+                DerivedMemoryFeedbackHistoryRepairV1::Unknown,
+            ),
+            (
+                CompatibilityFeedbackRepairProgressV1::NotRequired,
+                DerivedMemoryFeedbackHistoryRepairV1::NotRequired,
+            ),
+            (
+                CompatibilityFeedbackRepairProgressV1::Complete { processed: 2 },
+                DerivedMemoryFeedbackHistoryRepairV1::Complete { processed: 2 },
+            ),
+            (
+                CompatibilityFeedbackRepairProgressV1::Incomplete {
+                    processed: 3,
+                    remaining: Some(7),
+                },
+                DerivedMemoryFeedbackHistoryRepairV1::Incomplete {
+                    processed: 3,
+                    remaining: Some(7),
+                },
+            ),
+        ];
+
+        for (authoritative, expected) in cases {
+            assert_eq!(feedback_history_repair(authoritative), expected);
+        }
     }
 }
