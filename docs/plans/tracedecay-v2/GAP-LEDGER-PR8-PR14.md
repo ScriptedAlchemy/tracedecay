@@ -33,7 +33,9 @@ not inherited merely because the superseded branch entered history.
   conflicting since 05:13 UTC. Roughly 60 commits, including every repair
   recorded below, are locally verified only. See the verification-status section
   below before treating any of them as proven.
-- Plan 32 is PR17-only and SCOPE-OUT for PR8–PR14 audits.
+- Plan 32 is split by the approved 2026-07-28 decision: its minimal real
+  provider/runtime and Work projection path is PR14 scope; residual advanced
+  workflow capability is PR17 scope.
 - Plan 34 is split: the published read-only rename preview is implemented and
   reachable; apply-grade rename is not certified by that preview, and the
   unimplemented API-migration planner/apply journey is a PR11–PR12 band
@@ -159,10 +161,12 @@ the absent page-size parameter as a parity gap.
 
 ### Later-plan placement
 
-Plan 32 belongs to PR17 and must not be filed as unmet PR14 work. Plan 34 is
-listed in both PR11–PR12 and PR19: the callable API-migration planner/apply
-journey belongs to the active PR11–PR12 band, while PR19 consumes it and owns
-the temporary-alias deletion slices.
+Plan 32's minimal real provider/runtime path belongs to PR14; workflow
+definitions, fan-out/synthesis/recovery, advanced placement,
+expertise/calibration, automation controls, and host/LSP handoff belong to
+PR17. Plan 34 is listed in both PR11–PR12 and PR19: the callable API-migration
+planner/apply journey belongs to the active PR11–PR12 band, while PR19 consumes
+it and owns the temporary-alias deletion slices.
 
 ## Numbered-plan corrections
 

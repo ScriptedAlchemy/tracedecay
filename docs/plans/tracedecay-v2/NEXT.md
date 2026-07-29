@@ -19,6 +19,15 @@ The authoritative PR8–PR14 plan-status adjudications and retractions live in
 [`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) as a companion, not a
 replacement. This file remains the active PR12/PR13 execution slice.
 
+The canonical delivery and root-breakup execution authority is
+[`docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`](../../superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md).
+Publish and measure a clean integration `BASE_SHA`, create
+`codex/v2-root-breakup` from that exact pushed commit, then execute Plan 12
+leaves-first extraction. Query and code-index Gate A work may precede and then
+run alongside the remaining PR12/PR13 closure; speculative adapter/runtime
+crates do not block it. Core Work/Plans 24+32 and desktop-first dashboard
+acceptance are PR14; residual advanced workflow capability is PR17.
+
 ## Current outcome
 
 Ship one production path in which:
@@ -158,6 +167,10 @@ the usability study. See
 
 ## Active implementation order
 
+0. Publish the clean integration baseline, materialize the canonical/child
+   plans, and bootstrap the exact-SHA `codex/v2-root-breakup` worktree. Extract
+   domain DTO/RequestContext, query, and code index under Gate A before
+   speculative adapter extraction; continue PR12/PR13 closure after Gate A.
 1. Clear root and SQLite runtime compile blockers without weakening contracts.
    *(Landed 2026-07-23: the rusqlite storage runtime is cut over and
    repository reads route through the daemon-owned runtime port; the

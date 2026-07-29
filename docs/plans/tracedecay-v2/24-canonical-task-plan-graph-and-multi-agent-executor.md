@@ -1,14 +1,11 @@
 # TraceDecay V2 canonical task/work graph and Kanban plan
 
-**Status:** required product work. Current plan authority assigns the complete
-callable product journey to PR17 with
-[Plan 32](32-dynamic-workflow-runtime-and-sdk.md). PR18 stabilizes public SDK
-names for the same accepted operations; it does not add missing semantics.
-The user explicitly requires this first-class product feature, inspired by
-Hermes Kanban but more powerful and not dependent on GitHub. He asked "ahat
-about kanban/task graph etc" while PR14 was active and did not record acceptance
-of PR17 deferral, so delivery timing remains an open owner question rather than
-a user-stated sequencing decision.
+**Status:** required product work. The approved 2026-07-28 delivery decision
+assigns the canonical graph, core Work projections, proposal review, separate
+admission/accept-reject-replan operations, and minimal real-provider
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md) runtime to PR14. PR17 extends
+those authorities with advanced workflow behavior. PR18 stabilizes public SDK
+names for accepted operations; it does not add missing semantics.
 
 Earlier task-schema names, operation registries, fixture catalogs, packet
 gates, and milestone/file inventories are historical evidence, not
@@ -25,21 +22,19 @@ DAG, timeline, causal, critical-path, workload, executor/model,
 repository/delivery, evidence, and history views are projections over the same
 versioned graph, not separate stores or authorities.
 
-By current plan authority, PR14 does not own or deliver this graph, Kanban, or a
-Work workspace; its dashboard scope is the twelve pre-Work workspaces, and PR17
-delivers Work and these projections over Plan 24 state. The user neither
-enumerated those twelve workspaces nor agreed to that deferral in recorded
-speech. This allocation stays binding until the owner resolves the open timing
-question, but must not be presented as a user quote. Session-derived tasks, an
-independent Kanban database, or a dashboard-owned task authority remain
-rejected substitutes under either timing.
+PR14 owns and delivers this graph, Kanban, DAG, timeline, causal, workload,
+basic topology read, canonical TaskId selection, `task_activity` SSE, and deep
+links. PR17 consumes the same graph/runtime authorities for advanced topology,
+placement, workflow definitions, automation execution, expertise/calibration,
+fan-out/synthesis/recovery, and host/LSP handoff. Session-derived tasks, an
+independent Kanban database, or dashboard-owned task authority remain rejected.
 
 Roadmap Markdown, `NEXT.md`, PR sequences, contributor checklists, and
 completion ledgers are documentation and Git evidence only. PR17 never parses,
 imports, schedules, or executes them. Product work enters through explicit
 application commands or an authorized product-data import.
 
-## PR17 user outcome
+## PR14 core and PR17 residual outcome
 
 An authorized user can create work, inspect it through every retained Work
 view, retrieve exact evidence, review an explained decomposition/sizing/route
@@ -255,7 +250,7 @@ serialization, queue/defer reasons, deadlines, tokens, cost, and outcome
 coverage. Executor/model views show recommendation evidence and actual route
 without exposing private prompts or credentials.
 
-## End-to-end PR17 production path
+## End-to-end PR14 core production path
 
 1. **Create and view work.** The user creates an initiative/work plan/item with
    dependency and acceptance semantics, then inspects it in Kanban, DAG,
@@ -287,7 +282,7 @@ this journey.
 
 ## Implementation slices
 
-1. Deliver create/change/history plus all retained Work projections on one
+1. In PR14, deliver create/change/history plus core Work projections on one
    immutable owner-shard graph.
 2. Deliver TaskId-rooted bounded evidence retrieval and exact expansion through
    existing evidence authorities.
@@ -295,10 +290,10 @@ this journey.
    explicit review.
 4. Deliver one accepted-attempt mapping to a supported real provider through
    Plan 32, with progress/outcome projection and safe control.
-5. Deliver outcome/calibration updates, governed recall/handoff, and
+5. In PR17, deliver outcome/calibration updates, governed recall/handoff, and
    non-auto-applied live replanning through the same surfaces.
-6. Deliver optional placement/stack/review/integration behavior through the
-   same work identity and explicit effect flow when selected by the journey.
+6. In PR17, deliver optional advanced placement/stack/review/integration
+   behavior through the same work identity and explicit effect flow.
 
 Each slice includes the minimum domain, store, application, surface, and direct
 tests it uses. No standalone schema, registry, port, exact type/file inventory,
@@ -309,7 +304,7 @@ fixture framework, or contract-only phase counts as delivery.
 - Remove duplicate task stores, card-status authority, readiness calculators,
   model defaults, proposal engines, runtime schedulers, and view-specific
   filters after the canonical path works.
-- Remove scaffold-only PR17 milestones, operation registries, generated
+- Remove scaffold-only PR14/PR17 milestones, operation registries, generated
   inventories, declaration parity checks, giant fixture catalogs, repeated
   ownership prose, and compatibility paths that own logic.
 - Preserve every retained operation and semantic state through the canonical
@@ -340,7 +335,8 @@ fixture framework, or contract-only phase counts as delivery.
 
 ## Direct acceptance
 
-One aggregate production journey must execute all seven steps above through
+The PR14 aggregate production journey must execute the core seven-step path
+through
 CLI, MCP, HTTP, and dashboard application bindings and run one supported real
 provider adapter. It must demonstrate every retained Work projection against
 the same graph selection, exact evidence expansion, explained proposal and
