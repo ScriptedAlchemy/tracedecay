@@ -157,7 +157,7 @@ impl Default for SemanticResourceCeilings {
             max_tokenizer_bytes: 64 * 1024 * 1024,
             max_resident_bytes: 2 * 1024 * 1024 * 1024,
             max_threads: 4,
-            max_concurrent_sessions: 2,
+            max_concurrent_sessions: 1,
             max_batch_size: 32,
             max_sequence_length: 512,
             load_deadline_ms: 30_000,
