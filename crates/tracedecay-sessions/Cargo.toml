@@ -7,6 +7,7 @@ description = "TraceDecay session contracts and provider-neutral ports"
 include = ["/src/**", "/tests/**"]
 
 [dependencies]
+base64 = "0.22"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
