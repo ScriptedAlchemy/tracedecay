@@ -32,21 +32,21 @@ pub enum ClaudeRecordParseErrorV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ParsedPolicyLimitViolation {
+pub enum ParsedPolicyLimitViolation {
     RecordSize,
     NestingDepth,
     ValueCount,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ParseLimits {
-    pub(super) record_bytes: usize,
-    pub(super) depth: usize,
-    pub(super) values: usize,
+pub struct ParseLimits {
+    pub record_bytes: usize,
+    pub depth: usize,
+    pub values: usize,
 }
 
 impl ParseLimits {
-    pub(super) const fn default_policy() -> Self {
+    pub const fn default_policy() -> Self {
         Self {
             record_bytes: MAX_OBSERVATION_RECORD_BYTES,
             depth: MAX_OBSERVATION_STRUCTURE_DEPTH,
@@ -88,19 +88,19 @@ impl ParsedClaudeRecordV1 {
         self.encoded_len
     }
 
-    pub(super) fn into_value(self) -> Value {
+    pub fn into_value(self) -> Value {
         self.value
     }
 
-    pub(super) fn raw_digest(&self) -> &[u8; 32] {
+    pub fn raw_digest(&self) -> &[u8; 32] {
         &self.raw_digest
     }
 
-    pub(crate) fn canonical_provider(&self) -> Option<&ProviderId> {
+    pub fn canonical_provider(&self) -> Option<&ProviderId> {
         self.canonical_provider.as_ref()
     }
 
-    pub(super) fn verify_limits(
+    pub fn verify_limits(
         &self,
         limits: ParseLimits,
     ) -> Result<(), ParsedPolicyLimitViolation> {
