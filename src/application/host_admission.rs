@@ -2370,12 +2370,11 @@ impl HostAdmissionTestRuntimeV1 {
                 message: "registered ProjectSessions mount is unavailable".to_string(),
             }
         })?;
-        Ok(crate::sessions::workflow_ingest::ingest_workflow_runs(
-            database,
-            project_id,
-            project_root,
+        Ok(
+            crate::store::GlobalDbWorkflowStore::new(database)
+                .ingest_workflow_runs(project_id, project_root)
+                .await,
         )
-        .await)
     }
 
     /// Records one git span through this runtime's retained ProjectSessions authority.
@@ -5131,13 +5130,7 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self.project_database_for_test().map_err(|error| {
             crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
         })?;
-        crate::sessions::git_correlation::run_backfill_on_registered(
-            database,
-            analytics_events,
-            git,
-            options,
-        )
-        .await
+        database.git_run_backfill(analytics_events, git, options).await
     }
 
     #[doc(hidden)]

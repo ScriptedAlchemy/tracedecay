@@ -13,7 +13,6 @@ use tracedecay_domain::ProjectId;
 
 use crate::accounting::parser::parse_timestamp;
 use crate::application::host_admission::DEFAULT_MAX_RECORDS;
-use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::ProjectRootMatcher;
 use crate::sessions::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -57,41 +56,9 @@ struct DiscoveredRun {
 /// cannot be resolved, or an individual malformed run all degrade to "ingest
 /// less", never an error. Returns the number of runs and agents upserted.
 ///
-/// Production callers pass the concrete registered database; the store adapter
-/// implements [`WorkflowIngestSink`] so spawn paths keep inherent `Send`
-/// futures instead of HRTB trait RPITIT on `&RegisteredGlobalDb`.
-pub(crate) async fn ingest_workflow_runs(
-    db: &RegisteredGlobalDb,
-    project_id: &ProjectId,
-    project_root: &Path,
-) -> WorkflowIngestStats {
-    let Some(home) = crate::sessions::home_dir() else {
-        return WorkflowIngestStats::default();
-    };
-    ingest_workflow_runs_from(
-        db,
-        project_id,
-        project_root,
-        &home.join(".claude").join("projects"),
-    )
-    .await
-}
-
-pub(crate) async fn ingest_workflow_runs_from(
-    db: &RegisteredGlobalDb,
-    project_id: &ProjectId,
-    project_root: &Path,
-    projects_dir: &Path,
-) -> WorkflowIngestStats {
-    ingest_workflow_runs_with_sink(
-        &GlobalDbWorkflowStore::new(db),
-        project_id,
-        project_root,
-        projects_dir,
-    )
-    .await
-}
-
+/// The registered-database entry points live on the store adapter, which
+/// implements [`WorkflowIngestSink`]; taking the concrete adapter here keeps
+/// spawn paths on inherent `Send` futures instead of HRTB trait RPITIT.
 pub(crate) async fn ingest_workflow_runs_with_sink(
     sink: &GlobalDbWorkflowStore<'_>,
     project_id: &ProjectId,

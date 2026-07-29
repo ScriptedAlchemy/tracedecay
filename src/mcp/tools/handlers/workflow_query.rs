@@ -10,6 +10,7 @@ use crate::sessions::git_correlation::GitScopeFilter;
 use crate::sessions::workflow_index::{
     MAX_WORKFLOW_LIMIT, RegisteredWorkflowIndexSnapshot, WorkflowIndexError,
 };
+use crate::store::GlobalDbWorkflowStore;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -103,7 +104,8 @@ pub(super) async fn handle_workflows(
             || "No workflow index available.".to_string(),
         ));
     };
-    let database = RegisteredWorkflowIndexSnapshot::new(database)
+    let database = GlobalDbWorkflowStore::new(database)
+        .open_workflow_index_snapshot()
         .await
         .map_err(workflow_error)?;
 
