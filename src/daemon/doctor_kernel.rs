@@ -787,6 +787,66 @@ struct CollectedStoreTelemetryV1 {
 }
 
 const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
+
+fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
+    let mut pending = vec![root.to_path_buf()];
+    let mut observed_bytes = 0_u64;
+    let mut observed_entries = 0_usize;
+    while let Some(path) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            observed_entries = observed_entries.saturating_add(1);
+            if observed_entries > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES {
+                return false;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                return false;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                return false;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                return false;
+            };
+            observed_bytes = observed_bytes.saturating_add(metadata.len());
+            if observed_bytes > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn permits_synchronous_session_retention_backlog(database_path: &Path) -> bool {
+    ["", "-wal", "-shm"]
+        .into_iter()
+        .try_fold(0_u64, |total, suffix| {
+            let mut path = database_path.as_os_str().to_os_string();
+            path.push(suffix);
+            match std::fs::metadata(PathBuf::from(path)) {
+                Ok(metadata) => total
+                    .checked_add(metadata.len())
+                    .filter(|size| *size <= MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(total),
+                Err(_) => None,
+            }
+        })
+        .is_some()
+}
 
 fn permits_synchronous_table_growth(
     read: &tracedecay_application::storage::StorageTelemetryReadV1,
@@ -970,6 +1030,9 @@ pub async fn collect_retention_backlog_findings(
     retention: &crate::config::RetentionConfig,
     observed_at_secs: i64,
 ) -> DoctorStorageFamilyReadV1 {
+    if !permits_synchronous_session_retention_backlog(profile_sessions.db_path()) {
+        return DoctorStorageFamilyReadV1::Unknown;
+    }
     let Some(file_name) = profile_sessions
         .db_path()
         .file_name()
@@ -1025,6 +1088,9 @@ pub async fn collect_code_generation_retention_findings(
         .is_file()
     {
         return DoctorStorageFamilyReadV1::Absent;
+    }
+    if !permits_synchronous_exhaustive_scan(&code_index_store_root.join("code-generations-v1")) {
+        return DoctorStorageFamilyReadV1::Unknown;
     }
     let Ok(store) = DatabaseVectorGenerationStoreV1::open_legacy_migration(graph).await else {
         return DoctorStorageFamilyReadV1::Unknown;
@@ -1324,25 +1390,33 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .and_then(|days| days.checked_mul(24 * 60 * 60))
                 .unwrap_or(i64::MAX);
             let now = now_secs();
-            let orphan = collect_orphan_store_findings(
-                registry.as_ref(),
-                &profile_root,
-                retention_secs,
-                now,
-            )
-            .await;
-            let unregistered = collect_unregistered_store_findings(
-                registry.as_ref(),
-                &profile_root,
-                retention_secs,
-                now,
-            )
-            .await;
+            let permits_profile_census =
+                permits_synchronous_exhaustive_scan(&profile_root.join("projects"));
+            let orphan = if permits_profile_census {
+                collect_orphan_store_findings(registry.as_ref(), &profile_root, retention_secs, now)
+                    .await
+            } else {
+                DoctorStorageFamilyReadV1::Unknown
+            };
+            let unregistered = if permits_profile_census {
+                collect_unregistered_store_findings(
+                    registry.as_ref(),
+                    &profile_root,
+                    retention_secs,
+                    now,
+                )
+                .await
+            } else {
+                DoctorStorageFamilyReadV1::Unknown
+            };
             let store_telemetry =
                 collect_over_budget_store_findings(&context, &telemetry_ports, &retention).await;
             let stale_branches = collect_stale_branch_store_findings(&project_root, &layout);
-            let incident_debris =
-                collect_incident_debris_findings(registry.as_ref(), &profile_root, now).await;
+            let incident_debris = if permits_profile_census {
+                collect_incident_debris_findings(registry.as_ref(), &profile_root, now).await
+            } else {
+                DoctorStorageFamilyReadV1::Unknown
+            };
             let profile_retention_backlog =
                 collect_retention_backlog_findings(profile_sessions.as_ref(), &retention, now)
                     .await;
