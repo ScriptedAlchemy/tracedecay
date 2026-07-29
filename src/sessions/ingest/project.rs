@@ -7,10 +7,8 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::TranscriptSource;
-use crate::sessions::{
-    SessionProvider, claude_observation, git_correlation, vibe, workflow_ingest,
-};
-use crate::store::GlobalDbTranscriptStore;
+use crate::sessions::{SessionProvider, claude_observation, git_correlation, vibe};
+use crate::store::{GlobalDbTranscriptStore, GlobalDbWorkflowStore};
 use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
 
@@ -322,7 +320,9 @@ pub(crate) async fn finalize_project_ingest(
     // sessions' git spans already exist and each run inherits them. Fail-open:
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
     // Runs live in their own tables, so they do not affect `stats`.
-    let _ = workflow_ingest::ingest_workflow_runs(db, project_id, project_root).await;
+    let _ = GlobalDbWorkflowStore::new(db)
+        .ingest_workflow_runs(project_id, project_root)
+        .await;
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.

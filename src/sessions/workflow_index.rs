@@ -23,9 +23,7 @@ use std::fmt::Write as _;
 use crate::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
-use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
-use crate::store::GlobalDbWorkflowStore;
 
 /// Scopes a `tracedecay_message_search` to the agent transcripts of one
 /// workflow run, mirroring [`GitScopeFilter`] as a search-only concern. The
@@ -528,12 +526,6 @@ pub(crate) struct RegisteredWorkflowIndexSnapshot {
 impl RegisteredWorkflowIndexSnapshot {
     pub(crate) fn from_snapshot(snapshot: RegisteredReadSnapshot) -> Self {
         Self { snapshot }
-    }
-
-    pub(crate) async fn new(database: &RegisteredGlobalDb) -> Result<Self, WorkflowIndexError> {
-        GlobalDbWorkflowStore::new(database)
-            .open_workflow_index_snapshot()
-            .await
     }
 
     pub(crate) async fn from_port(

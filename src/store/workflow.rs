@@ -107,13 +107,24 @@ impl<'a> GlobalDbWorkflowStore<'a> {
         let Some(home) = crate::sessions::home_dir() else {
             return WorkflowIngestStats::default();
         };
-        ingest_workflow_runs_with_sink(
-            self,
+        self.ingest_workflow_runs_from(
             project_id,
             project_root,
             &home.join(".claude").join("projects"),
         )
         .await
+    }
+
+    /// Ingest sweep against an explicit Claude `projects` directory, so callers
+    /// that already resolved (or must isolate) that root do not re-derive it
+    /// from the operator's real home.
+    pub(crate) async fn ingest_workflow_runs_from(
+        &self,
+        project_id: &ProjectId,
+        project_root: &Path,
+        projects_dir: &Path,
+    ) -> WorkflowIngestStats {
+        ingest_workflow_runs_with_sink(self, project_id, project_root, projects_dir).await
     }
 }
 
