@@ -35,10 +35,10 @@ fn extraction_to_chunks_is_deterministic_and_covers_all_grains() {
     );
 
     let first = chunker
-        .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
         .expect("chunk source");
     let second = chunker
-        .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
         .expect("chunk source again");
 
     assert_eq!(first, second);
@@ -74,7 +74,7 @@ fn partial_extraction_never_chunks_unsupported_tail_bytes() {
     let batch = TreeSitterExtractor::new()
         .extract(&file, &descriptor, &NeverCancelled)
         .expect("bounded extraction");
-    let parsed_end = batch.parsed_ranges[0].end_byte;
+    let parsed_end = batch.batch().parsed_ranges[0].end_byte;
     let result = DeterministicCodeChunker::new(
         file.generation_id.clone(),
         id::<RepositoryId>("repo.fixture"),
@@ -83,7 +83,7 @@ fn partial_extraction_never_chunks_unsupported_tail_bytes() {
         id::<ChunkerRevision>("chunker.v1"),
         tracedecay::extraction::LanguageRegistry::new(),
     )
-    .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+    .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
     .expect("chunk bounded evidence");
 
     assert!(matches!(
@@ -123,7 +123,7 @@ fn exact_term_kinds_cover_the_frozen_plan25_contract() {
         id::<ChunkerRevision>("chunker.v1"),
         tracedecay::extraction::LanguageRegistry::new(),
     )
-    .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+    .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
     .expect("chunk exact-term fixture");
     let kinds: BTreeSet<_> = result
         .chunks
@@ -187,10 +187,10 @@ fn oversized_symbol_bodies_use_bounded_deterministic_fallback_windows() {
     );
 
     let first = chunker
-        .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
         .expect("chunk oversized body");
     let second = chunker
-        .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
         .expect("chunk oversized body again");
     let bodies: Vec<_> = first
         .chunks
@@ -230,10 +230,10 @@ fn multiple_file_windows_have_unique_stable_ids_and_ordinals() {
     );
 
     let first = chunker
-        .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
         .expect("chunk multiple file windows");
     let second = chunker
-        .chunk_file(&file, &batch, &descriptor, &NeverCancelled)
+        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
         .expect("replay multiple file windows");
     let first_windows: Vec<_> = first
         .chunks

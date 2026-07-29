@@ -27,13 +27,19 @@ fn extraction_is_deterministic_and_revision_bound() {
         .extract(&file, &descriptor, &NeverCancelled)
         .expect("second extraction");
 
-    assert_eq!(first, second);
-    assert_eq!(first.parse_outcome, ParseOutcomeV1::Complete);
-    assert_eq!(first.descriptor_revision, descriptor.descriptor_revision);
-    assert_eq!(first.grammar_revision, descriptor.grammar_revision);
-    assert_eq!(first.extractor_revision, descriptor.extractor_revision);
-    assert!(first.coverage.symbols_extracted > 0);
-    assert!(first.coverage.relations_extracted > 0);
+    assert_eq!(first.batch(), second.batch());
+    assert_eq!(first.batch().parse_outcome, ParseOutcomeV1::Complete);
+    assert_eq!(
+        first.batch().descriptor_revision,
+        descriptor.descriptor_revision
+    );
+    assert_eq!(first.batch().grammar_revision, descriptor.grammar_revision);
+    assert_eq!(
+        first.batch().extractor_revision,
+        descriptor.extractor_revision
+    );
+    assert!(first.batch().coverage.symbols_extracted > 0);
+    assert!(first.batch().coverage.relations_extracted > 0);
 }
 
 #[test]
@@ -42,10 +48,10 @@ fn extraction_reports_cancellation_after_sanitized_intake() {
     let descriptor = rust_descriptor();
     let source = validated_rust_file(RUST_SOURCE.as_bytes());
 
-    assert_eq!(
+    assert!(matches!(
         extractor.extract(&source, &descriptor, &AlwaysCancelled),
         Err(ExtractionFailureV1::Cancelled)
-    );
+    ));
 }
 
 #[test]
@@ -55,9 +61,10 @@ fn extraction_caps_large_sources_as_partial_evidence() {
     let source = RUST_SOURCE.repeat((MAX_EXTRACTION_SOURCE_BYTES / RUST_SOURCE.len()) + 2);
     let file = validated_rust_file(source.as_bytes());
 
-    let batch = extractor
+    let extraction = extractor
         .extract(&file, &descriptor, &NeverCancelled)
         .expect("bounded extraction succeeds");
+    let batch = extraction.batch();
 
     assert!(matches!(
         &batch.parse_outcome,
