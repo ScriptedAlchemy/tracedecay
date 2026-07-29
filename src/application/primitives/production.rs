@@ -125,7 +125,10 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
             eligible: None,
             returned: 0,
             completeness: CoverageCompleteness::Unknown,
-            domains: Vec::new(),
+            domains: vec![CoverageDomainState {
+                domain,
+                completeness: CoverageCompleteness::Unknown,
+            }],
         },
         omissions: Vec::new(),
         scores: Vec::new(),
@@ -173,7 +176,10 @@ fn diagnostics_unavailable(
             eligible: None,
             returned: 0,
             completeness: CoverageCompleteness::Unknown,
-            domains: Vec::new(),
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Diagnostic,
+                completeness: CoverageCompleteness::Unknown,
+            }],
         },
         omissions: vec![Omission {
             domain: EvidenceDomain::Diagnostic,
@@ -2273,6 +2279,41 @@ pub fn locator_digest_for_project(
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "PR12 primitive project locator digest",
     })
+}
+
+#[cfg(test)]
+mod unavailable_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn generic_failure_preserves_unknown_domain_coverage() {
+        let outcome: RetrievalPortOutcome<()> = failed(EvidenceDomain::Graph, UtcMicros(1));
+        let coverage = &outcome.evidence().coverage;
+
+        assert!(coverage.validate().is_ok());
+        assert_eq!(
+            coverage.domains,
+            vec![CoverageDomainState {
+                domain: EvidenceDomain::Graph,
+                completeness: CoverageCompleteness::Unknown,
+            }]
+        );
+    }
+
+    #[test]
+    fn diagnostic_unavailability_preserves_unknown_domain_coverage() {
+        let outcome = diagnostics_unavailable(UtcMicros(1), OmissionReason::Unavailable);
+        let coverage = &outcome.evidence().coverage;
+
+        assert!(coverage.validate().is_ok());
+        assert_eq!(
+            coverage.domains,
+            vec![CoverageDomainState {
+                domain: EvidenceDomain::Diagnostic,
+                completeness: CoverageCompleteness::Unknown,
+            }]
+        );
+    }
 }
 
 #[cfg(test)]
