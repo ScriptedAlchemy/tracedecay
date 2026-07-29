@@ -5574,7 +5574,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
  "tracedecay-application",
  "tracedecay-domain",
 ]
