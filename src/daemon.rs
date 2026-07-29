@@ -4463,7 +4463,7 @@ async fn production_project_server(
     if let Some(attempts) = project_open_attempts {
         attempts.fetch_add(1, Ordering::Relaxed);
     }
-    let cg = Box::pin(open_project_for_handshake(
+    let (cg, deferred_post_open_health) = Box::pin(open_project_for_handshake(
         canonical_project_path,
         handshake,
         store_administration,
@@ -4805,6 +4805,9 @@ async fn production_project_server(
                 message: "project server disappeared before core publication completed"
                     .to_owned(),
             });
+        }
+        if let Some(database) = deferred_post_open_health {
+            let _ = database.repair_fts_after_open().await?;
         }
         ensure_git_index_transactions_for_mutation_owners(
             store_administration,
@@ -6063,7 +6066,7 @@ async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<crate::tracedecay::TraceDecay> {
+) -> Result<(crate::tracedecay::TraceDecay, Option<crate::db::Database>)> {
     let open_options = handshake.open_options();
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) =
@@ -6134,7 +6137,7 @@ async fn open_project_for_handshake(
         .registered_project_session_database(project_path, &store_layout)
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
-    match crate::tracedecay::TraceDecay::open_with_registered_configuration(
+    match crate::tracedecay::TraceDecay::open_with_registered_configuration_deferred_post_open_health(
         project_path,
         open_options.clone(),
         store_layout.clone(),
@@ -6144,7 +6147,10 @@ async fn open_project_for_handshake(
     )
     .await
     {
-        Ok(cg) => Ok(cg),
+        Ok(cg) => {
+            let deferred_post_open_health = cg.db().clone();
+            Ok((cg, Some(deferred_post_open_health)))
+        }
         Err(open_err) if is_readonly_database_error(&open_err) => {
             match crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
                 project_path,
@@ -6158,7 +6164,7 @@ async fn open_project_for_handshake(
             {
                 Ok(cg) => {
                     cg.ensure_schema_current().await?;
-                    Ok(cg)
+                    Ok((cg, None))
                 }
                 Err(_) => Err(open_err),
             }
@@ -6178,6 +6184,7 @@ async fn open_project_for_handshake(
                 runtime_registry,
             )
             .await
+            .map(|cg| (cg, None))
         }
         Err(open_err) => Err(open_err),
     }
