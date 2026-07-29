@@ -29,7 +29,7 @@ pub(crate) type DatabaseOwnerReconciler = Arc<
 /// Keeping these values together makes explicit that all of them describe one
 /// server instance, rather than independent configuration parameters.
 pub(crate) struct McpServerConstructionContext {
-    pub(crate) cg: TraceDecay,
+    pub(crate) cg: Arc<TraceDecay>,
     pub(crate) scope_prefix: Option<String>,
     pub(crate) profile_root: Option<PathBuf>,
     pub(crate) profile_identity:
@@ -111,6 +111,16 @@ pub(crate) struct McpServerDaemonAuthority {
     pub(crate) writers: McpServerWriters,
 }
 
+pub(crate) struct McpServerDaemonCoreAuthority {
+    pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    pub(crate) transcript_source_home: Option<PathBuf>,
+    pub(crate) accounting: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) registry: Arc<RegisteredGlobalDb>,
+    pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
+    pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
+    pub(crate) writers: McpServerWriters,
+}
+
 impl McpServerWriters {
     pub(crate) fn daemon_owned(
         dashboard_automation: crate::dashboard::DashboardAutomationWriter,
@@ -126,9 +136,9 @@ impl McpServerWriters {
 }
 
 impl McpServerConstructionContext {
-    pub(crate) fn direct(cg: TraceDecay, scope_prefix: Option<String>) -> Self {
+    pub(crate) fn direct(cg: impl Into<Arc<TraceDecay>>, scope_prefix: Option<String>) -> Self {
         Self {
-            cg,
+            cg: cg.into(),
             scope_prefix,
             profile_root: None,
             profile_identity: None,
@@ -186,7 +196,7 @@ impl McpServerConstructionContext {
     }
 
     pub(crate) fn daemon_owned(
-        cg: TraceDecay,
+        cg: impl Into<Arc<TraceDecay>>,
         scope_prefix: Option<String>,
         authority: McpServerDaemonAuthority,
     ) -> Self {
@@ -204,7 +214,7 @@ impl McpServerConstructionContext {
         let profile_root = profile_identity.profile_root().to_path_buf();
         let registry = databases.registry;
         Self {
-            cg,
+            cg: cg.into(),
             scope_prefix,
             profile_root: Some(profile_root),
             profile_identity: Some(profile_identity),
@@ -221,6 +231,62 @@ impl McpServerConstructionContext {
             user_session_refresh_wake: Some(user_session_refresh_wake),
             own_project_host_admission_replay: true,
             startup_catch_up_enabled: true,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: Some(database_owner_reconciler),
+            dashboard_automation_writer: writers.dashboard_automation,
+            dashboard_doctor_report_reader: None,
+            dashboard_doctor_remediation_dispatcher: None,
+            dashboard_code_index_freshness_reader: None,
+            dashboard_feedback_status_reader: None,
+            diagnostics_lsp: None,
+            hook_branch_writer: writers.hook_branch,
+            background_refresh_writer: writers.background_refresh,
+            code_index_hook_sink: None,
+            code_index_publication_identity: None,
+            code_index_search_executor: None,
+            code_index_search_authority: None,
+            retained_project_graph_resolver: None,
+            project_routes,
+            application_invocation_executor: None,
+            project_server_live: None,
+            #[cfg(any(test, feature = "test-transport"))]
+            host_admission_test_runtime: None,
+        }
+    }
+
+    pub(crate) fn daemon_owned_core(
+        cg: impl Into<Arc<TraceDecay>>,
+        scope_prefix: Option<String>,
+        authority: McpServerDaemonCoreAuthority,
+    ) -> Self {
+        let McpServerDaemonCoreAuthority {
+            profile_identity,
+            transcript_source_home,
+            accounting,
+            registry,
+            database_owner_reconciler,
+            project_routes,
+            writers,
+        } = authority;
+        let profile_root = profile_identity.profile_root().to_path_buf();
+        Self {
+            cg: cg.into(),
+            scope_prefix,
+            profile_root: Some(profile_root),
+            profile_identity: Some(profile_identity),
+            transcript_source_home,
+            global_db: Some(Arc::clone(&registry)),
+            accounting_db: accounting,
+            registry_db: Some(registry),
+            session_db: None,
+            user_session_db: None,
+            registered_session_db: None,
+            registered_user_session_db: None,
+            host_admission_broker: None,
+            project_session_refresh_wake: None,
+            user_session_refresh_wake: None,
+            own_project_host_admission_replay: false,
+            startup_catch_up_enabled: false,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,

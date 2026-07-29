@@ -760,6 +760,62 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
 }
 
 #[test]
+fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliases() {
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_id: Some("upgrade".to_owned()),
+            store_root: PathBuf::from("/store/upgrade"),
+            graph_db_path: PathBuf::from("/store/upgrade/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    let route = |project_path: &str| ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from(project_path),
+        scope_prefix: None,
+    };
+    let core = Arc::new(1_u8);
+    let full = Arc::new(2_u8);
+    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
+    registry.insert_pending_route(route("/project"), key.clone(), Arc::clone(&core));
+    registry.bind_route(route("/project-alias"), key.clone());
+
+    assert!(
+        !registry.replace_ready_if(&key, Arc::clone(&full), |current| {
+            Arc::ptr_eq(current, &core)
+        }),
+        "an unpublished core must not be upgraded"
+    );
+    assert!(registry.mark_ready(&key));
+    assert!(
+        !registry.replace_ready_if(&key, Arc::clone(&full), |_| false),
+        "a stale core comparison must not replace the current server"
+    );
+    assert!(
+        registry.replace_ready_if(&key, Arc::clone(&full), |current| {
+            Arc::ptr_eq(current, &core)
+        })
+    );
+    assert!(Arc::ptr_eq(
+        registry
+            .get_route(&route("/project"))
+            .expect("primary route")
+            .1,
+        &full
+    ));
+    assert!(Arc::ptr_eq(
+        registry
+            .get_route(&route("/project-alias"))
+            .expect("alias route")
+            .1,
+        &full
+    ));
+}
+
+#[test]
 fn database_owner_registry_removal_retires_every_route_alias() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
@@ -784,6 +840,35 @@ fn database_owner_registry_removal_retires_every_route_alias() {
     assert!(registry.remove(&key).is_some());
     assert!(registry.get_route(&route("/project")).is_none());
     assert!(registry.get_route(&route("/project-alias")).is_none());
+}
+
+#[test]
+fn failed_core_upgrade_retires_the_rekeyed_owner_without_quarantine() {
+    let old = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_id: Some("upgrade-failure".to_owned()),
+            store_root: PathBuf::from("/store/upgrade-failure"),
+            graph_db_path: PathBuf::from("/store/upgrade-failure/main.db"),
+        },
+        scope_prefix: None,
+    };
+    let mut new = old.clone();
+    new.owner.graph_db_path = PathBuf::from("/store/upgrade-failure/feature.db");
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project"),
+        scope_prefix: None,
+    };
+    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
+    registry.insert_route(route.clone(), old.clone(), Arc::new(1));
+
+    assert!(registry.rekey(&old, &new));
+    assert_eq!(registry.remove_owner(&new.owner).len(), 1);
+    assert!(registry.get_route(&route).is_none());
+    assert!(!registry.requires_synchronous_health(&new.owner));
 }
 
 #[test]

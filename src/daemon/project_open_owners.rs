@@ -733,10 +733,10 @@ fn install_project_open_source_edit_owners(
 
 pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
+    graph: Arc<crate::tracedecay::TraceDecay>,
     project_root: &Path,
     project_id: &str,
 ) -> Result<Arc<SourceEditMutationGate>> {
-    let graph = server.cg().await;
     let project_id =
         ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
             message: "project-open source edit preview requires authoritative project identity"
