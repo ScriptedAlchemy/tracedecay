@@ -13,9 +13,10 @@ use serde_json::Value;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::{
-    WorkflowAgentView, WorkflowIndexReadPort, WorkflowRunDetailCommand, WorkflowRunDetailFuture,
-    WorkflowRunDetailOutcome, WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture,
-    WorkflowRunListOutcome, WorkflowRunScope,
+    WorkflowAgentView, WorkflowIndexReadPort, WorkflowIndexUnavailableReason,
+    WorkflowRunDetailCommand, WorkflowRunDetailFuture, WorkflowRunDetailOutcome,
+    WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture, WorkflowRunListOutcome,
+    WorkflowRunScope,
 };
 use crate::sessions::workflow_index::{RegisteredWorkflowIndexSnapshot, WorkflowIndexError};
 use crate::store::GlobalDbWorkflowStore;
@@ -54,12 +55,45 @@ impl DaemonWorkflowIndexReadService {
             .map_err(workflow_error)
     }
 
+    /// Names what is missing before querying, so an unbuilt index is never
+    /// reported as a built index that happens to be empty.
+    ///
+    /// Order matters. The workflow index is the subject of the read, so its
+    /// absence wins even when correlation is also absent; reporting correlation
+    /// first would send a caller to rebuild git history when there is no
+    /// workflow index to correlate against.
+    async fn missing_prerequisite(
+        snapshot: &RegisteredWorkflowIndexSnapshot,
+        git_scoped: bool,
+    ) -> Result<Option<WorkflowIndexUnavailableReason>> {
+        if !snapshot
+            .workflow_tables_present()
+            .await
+            .map_err(workflow_error)?
+        {
+            return Ok(Some(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt));
+        }
+        if git_scoped
+            && !snapshot
+                .git_correlation_tables_present()
+                .await
+                .map_err(workflow_error)?
+        {
+            return Ok(Some(WorkflowIndexUnavailableReason::GitCorrelationNotBuilt));
+        }
+        Ok(None)
+    }
+
     async fn execute_runs(
         &self,
         command: WorkflowRunListCommand,
     ) -> Result<WorkflowRunListOutcome> {
         let WorkflowRunListCommand { scope, limit } = command;
         let snapshot = self.snapshot().await?;
+        let git_scoped = matches!(scope, WorkflowRunScope::GitScope { .. });
+        if let Some(reason) = Self::missing_prerequisite(&snapshot, git_scoped).await? {
+            return Ok(WorkflowRunListOutcome::Unavailable(reason));
+        }
         let runs = match &scope {
             WorkflowRunScope::Session { session_id } => snapshot
                 .runs_for_session(session_id, limit)
@@ -82,6 +116,11 @@ impl DaemonWorkflowIndexReadService {
     ) -> Result<WorkflowRunDetailOutcome> {
         let WorkflowRunDetailCommand { run_id, limit } = command;
         let snapshot = self.snapshot().await?;
+        // Without this, an unbuilt index answers `NotFound`, which claims the
+        // index looked and the run is absent. It cannot know that yet.
+        if let Some(reason) = Self::missing_prerequisite(&snapshot, false).await? {
+            return Ok(WorkflowRunDetailOutcome::Unavailable(reason));
+        }
         let Some(run) = snapshot.run_for_id(&run_id).await.map_err(workflow_error)? else {
             return Ok(WorkflowRunDetailOutcome::NotFound);
         };

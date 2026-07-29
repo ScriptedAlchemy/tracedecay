@@ -55,9 +55,10 @@ pub(crate) use session::{
     SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
 };
 pub(crate) use workflow_index::{
-    WorkflowAgentView, WorkflowIndexReadPort, WorkflowRunDetailCommand, WorkflowRunDetailFuture,
-    WorkflowRunDetailOutcome, WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture,
-    WorkflowRunListOutcome, WorkflowRunScope,
+    WorkflowAgentView, WorkflowIndexReadPort, WorkflowIndexUnavailableReason,
+    WorkflowRunDetailCommand, WorkflowRunDetailFuture, WorkflowRunDetailOutcome,
+    WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture, WorkflowRunListOutcome,
+    WorkflowRunScope,
 };
 
 use std::collections::BTreeSet;

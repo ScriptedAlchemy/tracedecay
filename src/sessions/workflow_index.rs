@@ -557,6 +557,22 @@ impl RegisteredWorkflowIndexSnapshot {
         Ok(row.get::<i64>(0)? == i64::try_from(names.len()).unwrap_or(i64::MAX))
     }
 
+    /// Whether the workflow index exists in this store yet.
+    ///
+    /// The query methods below already treat an absent index as empty, which is
+    /// safe but indistinguishable from a built index holding nothing. Callers
+    /// that report to a user ask this first so they can say which one it is.
+    pub(crate) async fn workflow_tables_present(&self) -> Result<bool, WorkflowIndexError> {
+        self.has_tables(&["workflow_runs", "workflow_agents"]).await
+    }
+
+    /// Whether git correlation exists in this store yet. Only git-scope reads
+    /// need it; a project can have a complete workflow index and none of this.
+    pub(crate) async fn git_correlation_tables_present(&self) -> Result<bool, WorkflowIndexError> {
+        self.has_tables(&["session_git_spans", "commit_sessions"])
+            .await
+    }
+
     pub(crate) async fn runs_for_session(
         &self,
         parent_session_id: &str,
