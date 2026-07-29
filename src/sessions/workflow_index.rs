@@ -19,13 +19,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
-use tracedecay_store::StoreShardScopeV1;
 
 use crate::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
+use crate::store::GlobalDbWorkflowStore;
 
 /// Scopes a `tracedecay_message_search` to the agent transcripts of one
 /// workflow run, mirroring [`GitScopeFilter`] as a search-only concern. The
@@ -526,18 +526,20 @@ pub(crate) struct RegisteredWorkflowIndexSnapshot {
 }
 
 impl RegisteredWorkflowIndexSnapshot {
+    pub(crate) fn from_snapshot(snapshot: RegisteredReadSnapshot) -> Self {
+        Self { snapshot }
+    }
+
     pub(crate) async fn new(database: &RegisteredGlobalDb) -> Result<Self, WorkflowIndexError> {
-        if !matches!(
-            &database.binding().shard_id.scope,
-            StoreShardScopeV1::ProjectSessions { .. }
-        ) {
-            return Err(WorkflowIndexError::InvalidArgument(
-                "workflow index requires ProjectSessions authority".to_string(),
-            ));
-        }
-        Ok(Self {
-            snapshot: database.read_snapshot().await?,
-        })
+        GlobalDbWorkflowStore::new(database)
+            .open_workflow_index_snapshot()
+            .await
+    }
+
+    pub(crate) async fn from_port(
+        port: &impl WorkflowIndexPort,
+    ) -> Result<Self, WorkflowIndexError> {
+        port.open_workflow_index_snapshot().await
     }
 
     async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
@@ -848,6 +850,9 @@ pub(crate) fn workflow_scope_exists_predicate(
     predicate.push(')');
     (predicate, params)
 }
+
+mod port;
+pub(crate) use port::{WorkflowIndexPort, WorkflowIngestSink, WorkflowIngestWriteTxn};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
