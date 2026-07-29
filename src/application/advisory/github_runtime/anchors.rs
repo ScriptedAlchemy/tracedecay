@@ -25,7 +25,9 @@ use super::{
 use crate::application::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
 use crate::db::Database;
 use crate::db::engine::params;
-use crate::git_intelligence::{GitHistoricalBlobRequestV1, GitReadPort, NativeGitIntelligence};
+use crate::git_intelligence::{
+    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, NativeGitIntelligence,
+};
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.code-anchor.v1";
@@ -891,7 +893,7 @@ fn git_historical_blob(
         scope.repository_id.clone(),
         scope.worktree_id.clone(),
     );
-    let blob = GitReadPort::historical_blob(
+    let blob = GitHistoricalBlobReadPort::historical_blob(
         &port,
         &GitHistoricalBlobRequestV1 {
             commit: commit.clone(),
