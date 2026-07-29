@@ -376,67 +376,6 @@ impl RegisteredGlobalDb {
     ) -> super::git_index_transactions::GlobalDbGitIndexTransactionStore<'_> {
         super::git_index_transactions::GlobalDbGitIndexTransactionStore::new(self)
     }
-
-    pub(crate) async fn git_record_span_observation(
-        &self,
-        observation: &crate::sessions::git_correlation::SpanObservation,
-        merge_gap_secs: i64,
-    ) -> Result<i64, crate::sessions::git_correlation::GitCorrelationError> {
-        crate::store::GlobalDbGitCorrelationStore::new(self)
-            .record_span_observation(observation, merge_gap_secs)
-            .await
-    }
-
-    pub(crate) async fn git_run_backfill(
-        &self,
-        analytics_events: &[crate::global_db::AnalyticsEventRecord],
-        git: &dyn crate::sessions::git_correlation::GitReflogSource,
-        opts: &crate::sessions::git_correlation::BackfillOptions,
-    ) -> Result<
-        crate::sessions::git_correlation::BackfillStats,
-        crate::sessions::git_correlation::GitCorrelationError,
-    > {
-        crate::store::GlobalDbGitCorrelationStore::new(self)
-            .run_backfill(analytics_events, git, opts)
-            .await
-    }
-
-    pub(crate) async fn git_run_incremental_backfill(
-        &self,
-        git: &dyn crate::sessions::git_correlation::GitReflogSource,
-        limit_sessions: usize,
-    ) -> Result<
-        crate::sessions::git_correlation::BackfillStats,
-        crate::sessions::git_correlation::GitCorrelationError,
-    > {
-        crate::store::GlobalDbGitCorrelationStore::new(self)
-            .run_incremental_backfill(git, limit_sessions)
-            .await
-    }
-
-    pub(crate) async fn git_correlation_index_health(
-        &self,
-    ) -> Result<
-        crate::sessions::git_correlation::CorrelationIndexHealth,
-        crate::sessions::git_correlation::GitCorrelationError,
-    > {
-        crate::store::GlobalDbGitCorrelationStore::new(self)
-            .correlation_index_health()
-            .await
-    }
-
-    pub(crate) async fn git_sessions_for_with_relation(
-        &self,
-        query: &crate::sessions::git_correlation::SessionsForQuery,
-        relation: crate::sessions::git_correlation::CommitRelationFilter,
-    ) -> Result<
-        Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
-        crate::sessions::git_correlation::GitCorrelationError,
-    > {
-        crate::store::GlobalDbGitCorrelationStore::new(self)
-            .sessions_for_with_relation(query, relation)
-            .await
-    }
 }
 
 impl MigrationSqlWriteAuthority for DatabaseAuthority {

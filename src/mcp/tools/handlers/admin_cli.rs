@@ -647,8 +647,8 @@ async fn sessions_git_backfill(
         })
         .await
         .unwrap_or_default();
-    let stats = session_db
-        .git_run_backfill(
+    let stats = crate::store::GlobalDbGitCorrelationStore::new(session_db)
+        .run_backfill(
             &analytics_events,
             &SystemGit,
             &BackfillOptions {

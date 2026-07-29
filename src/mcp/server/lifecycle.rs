@@ -382,8 +382,8 @@ impl McpServer {
                     // history here — one bounded, watermarked pass per startup
                     // — so correlation self-heals without a manual invocation.
                     let git = crate::sessions::git_correlation::SystemGit;
-                    let _ = db
-                        .git_run_incremental_backfill(
+                    let _ = crate::store::GlobalDbGitCorrelationStore::new(&db)
+                        .run_incremental_backfill(
                             &git,
                             crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
                         )
