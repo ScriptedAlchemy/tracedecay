@@ -1,13 +1,12 @@
-use tracedecay_store::StoreShardScopeV1;
-
 use crate::db::engine::{QueryExecutor, Row, params};
-use crate::global_db::RegisteredGlobalDb;
+
+use crate::store::GlobalDbGitCorrelationStore;
 
 use super::{
-    AUTO_BACKFILL_WATERMARK_KEY, CommitEvidence, CommitRelation, CommitSessionRecord,
-    DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, ScannedCommit, SpanObservation,
-    SpanOverlapKind, SpanScanTarget, SpanSource, TargetScan, normalize_worktree,
-    run_commit_attribution_sweep,
+    AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
+    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, GitCorrelationWriteTxn,
+    ScannedCommit, SpanObservation, SpanOverlapKind, SpanScanTarget, SpanSource, TargetScan,
+    normalize_worktree, run_commit_attribution_sweep,
 };
 
 // Historical backfill for sessions that predate live span recording.
@@ -349,26 +348,26 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 
 /// Runs the historical backfill against one project's session store.
 ///
-/// `session_store` is the per-project `sessions.db` (already open, and — for a
-/// real run — writable). `analytics_events` are global analytics rows whose
-/// `session_id` matches a scanned session; only their timestamps are consumed
-/// (branch data is never assumed present). `git` supplies the reflog/log
+/// `session_store` is the per-project sessions authority (already open, and —
+/// for a real run — writable). `analytics_events` contribute only
+/// provider/session timestamps (via [`AnalyticsSessionTimestampSource`]);
+/// branch data is never assumed present. `git` supplies the reflog/log
 /// subprocess surface. Fail-open: a broken repo or session is counted and
 /// skipped, never aborting the run.
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-pub(crate) async fn run_backfill(
-    session_store: &RegisteredGlobalDb,
-    analytics_events: &[crate::global_db::AnalyticsEventRecord],
+pub(crate) async fn run_backfill<E>(
+    session_store: &GlobalDbGitCorrelationStore<'_>,
+    analytics_events: &[E],
     git: &dyn GitReflogSource,
     opts: &BackfillOptions,
-) -> Result<BackfillStats, GitCorrelationError> {
-    require_project_sessions_authority(session_store)?;
-    let snapshot = session_store
-        .read_snapshot()
-        .await
-        .map_err(GitCorrelationError::from)?;
+) -> Result<BackfillStats, GitCorrelationError>
+where
+    E: AnalyticsSessionTimestampSource,
+{
+    session_store.require_project_sessions_authority()?;
+    let snapshot = session_store.read_snapshot().await?;
     let rows = session_activity_rows(&snapshot, opts.limit_sessions)
         .await
         .map_err(GitCorrelationError::Db)?;
@@ -409,19 +408,16 @@ pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
 /// analytics-aware path); auto-backfill relies on session and reflog
 /// timestamps alone, which is enough to populate branch/worktree spans.
 pub(crate) async fn run_incremental_backfill(
-    session_store: &RegisteredGlobalDb,
+    session_store: &GlobalDbGitCorrelationStore<'_>,
     git: &dyn GitReflogSource,
     limit_sessions: usize,
 ) -> Result<BackfillStats, GitCorrelationError> {
-    require_project_sessions_authority(session_store)?;
+    session_store.require_project_sessions_authority()?;
     let mut stats = BackfillStats::default();
     if limit_sessions == 0 {
         return Ok(stats);
     }
-    let snapshot = session_store
-        .read_snapshot()
-        .await
-        .map_err(GitCorrelationError::from)?;
+    let snapshot = session_store.read_snapshot().await?;
     let watermark = super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)
         .await?
         .unwrap_or(0);
@@ -440,7 +436,8 @@ pub(crate) async fn run_incremental_backfill(
         dry_run: false,
     };
     if !rows.is_empty() {
-        backfill_rows(session_store, git, &opts, &rows, &[], &mut stats).await?;
+        let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
+        backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
 
         // Advance the watermark to the newest activity attempted this pass.
         // Rows are ordered oldest-first, so the last row carries the max; fall
@@ -452,16 +449,10 @@ pub(crate) async fn run_incremental_backfill(
         if let Some(new_watermark) = new_watermark
             && new_watermark > watermark
         {
-            let transaction = session_store
-                .begin_write_transaction()
-                .await
-                .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+            let transaction = session_store.open_write_transaction().await?;
             super::write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
                 .await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+            GitCorrelationWriteTxn::commit(transaction).await?;
         }
     }
 
@@ -472,19 +463,13 @@ pub(crate) async fn run_incremental_backfill(
     // would stay unattributed until a transcript ingest happens to run. The
     // sweep keeps its own watermark and is idempotent, so running it on every
     // pass (including passes with zero new session rows) is safe.
-    let transaction = session_store
-        .begin_write_transaction()
-        .await
-        .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+    let transaction = session_store.open_write_transaction().await?;
     stats.commits_attributed +=
         run_commit_attribution_sweep(&transaction, opts.merge_gap_secs, |target| {
             scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo)
         })
         .await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+    GitCorrelationWriteTxn::commit(transaction).await?;
     Ok(stats)
 }
 
@@ -526,23 +511,26 @@ fn scan_span_target(
 /// [`run_backfill`] and the incremental [`run_incremental_backfill`]. Indexes
 /// the supplied analytics timestamps once, then folds each row into the span
 /// and commit tables, counting skips instead of aborting.
-async fn backfill_rows(
-    session_store: &RegisteredGlobalDb,
+async fn backfill_rows<E>(
+    session_store: &GlobalDbGitCorrelationStore<'_>,
     git: &dyn GitReflogSource,
     opts: &BackfillOptions,
     rows: &[SessionActivityRow],
-    analytics_events: &[crate::global_db::AnalyticsEventRecord],
+    analytics_events: &[E],
     stats: &mut BackfillStats,
-) -> Result<(), GitCorrelationError> {
+) -> Result<(), GitCorrelationError>
+where
+    E: AnalyticsSessionTimestampSource,
+{
     // Index analytics timestamps by (provider, session_id) for O(1) lookup.
     let mut analytics_ts: std::collections::HashMap<(String, String), Vec<i64>> =
         std::collections::HashMap::new();
     for event in analytics_events {
-        if let Some(session_id) = event.session_id.as_deref() {
+        if let Some(timestamp) = event.as_analytics_session_timestamp() {
             analytics_ts
-                .entry((event.provider.clone(), session_id.to_string()))
+                .entry((timestamp.provider, timestamp.session_id))
                 .or_default()
-                .push(event.timestamp);
+                .push(timestamp.timestamp);
         }
     }
 
@@ -558,7 +546,7 @@ async fn backfill_rows(
 }
 
 async fn backfill_one_session(
-    session_store: &RegisteredGlobalDb,
+    session_store: &GlobalDbGitCorrelationStore<'_>,
     git: &dyn GitReflogSource,
     opts: &BackfillOptions,
     row: &SessionActivityRow,
@@ -617,7 +605,7 @@ async fn backfill_one_session(
         for &ts in &segment_ts {
             if !opts.dry_run {
                 let transaction = session_store
-                    .begin_write_transaction()
+                    .open_write_transaction()
                     .await
                     .map_err(|_| BackfillSkipReason::GitError)?;
                 super::record_span_observation_in_transaction(
@@ -635,8 +623,7 @@ async fn backfill_one_session(
                 )
                 .await
                 .map_err(|_| BackfillSkipReason::GitError)?;
-                transaction
-                    .commit()
+                GitCorrelationWriteTxn::commit(transaction)
                     .await
                     .map_err(|_| BackfillSkipReason::GitError)?;
             }
@@ -659,7 +646,7 @@ async fn backfill_one_session(
                 continue;
             }
             let transaction = session_store
-                .begin_write_transaction()
+                .open_write_transaction()
                 .await
                 .map_err(|_| BackfillSkipReason::GitError)?;
             let inserted = super::upsert_commit_session(
@@ -681,8 +668,7 @@ async fn backfill_one_session(
             )
             .await
             .map_err(|_| BackfillSkipReason::GitError)?;
-            transaction
-                .commit()
+            GitCorrelationWriteTxn::commit(transaction)
                 .await
                 .map_err(|_| BackfillSkipReason::GitError)?;
             if inserted {
@@ -693,8 +679,8 @@ async fn backfill_one_session(
     Ok(())
 }
 
-/// Reads per-session activity windows for the backfill. See
-/// [`crate::global_db::RegisteredGlobalDb`].
+/// Reads per-session activity windows for the backfill from a project-sessions
+/// snapshot opened through [`GitCorrelationStore`].
 pub(crate) async fn session_activity_rows(
     conn: &(impl QueryExecutor + ?Sized),
     limit: usize,
@@ -796,17 +782,3 @@ fn decode_session_activity_row(row: &Row) -> Result<SessionActivityRow, String> 
     })
 }
 
-fn require_project_sessions_authority(
-    session_store: &RegisteredGlobalDb,
-) -> Result<(), GitCorrelationError> {
-    if matches!(
-        &session_store.binding().shard_id.scope,
-        StoreShardScopeV1::ProjectSessions { .. }
-    ) {
-        Ok(())
-    } else {
-        Err(GitCorrelationError::Db(
-            "git correlation requires registered ProjectSessions authority".to_string(),
-        ))
-    }
-}

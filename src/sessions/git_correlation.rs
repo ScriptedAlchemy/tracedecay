@@ -1865,12 +1865,39 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 }
 
 mod backfill;
+mod store;
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry,
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
     WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
 };
+pub use store::AnalyticsSessionTimestamp;
 pub(crate) use backfill::{run_backfill, run_incremental_backfill};
+pub(crate) use store::{
+    AnalyticsSessionTimestampSource, GitCorrelationStore, GitCorrelationWriteTxn,
+};
+
+/// Concrete registered-DB entry points that preserve spawn-safe `Send` futures.
+pub(crate) async fn run_backfill_on_registered(
+    session_store: &crate::global_db::RegisteredGlobalDb,
+    analytics_events: &[impl AnalyticsSessionTimestampSource],
+    git: &dyn GitReflogSource,
+    opts: &BackfillOptions,
+) -> Result<BackfillStats, GitCorrelationError> {
+    crate::store::GlobalDbGitCorrelationStore::new(session_store)
+        .run_backfill(analytics_events, git, opts)
+        .await
+}
+
+pub(crate) async fn run_incremental_backfill_on_registered(
+    session_store: &crate::global_db::RegisteredGlobalDb,
+    git: &dyn GitReflogSource,
+    limit_sessions: usize,
+) -> Result<BackfillStats, GitCorrelationError> {
+    crate::store::GlobalDbGitCorrelationStore::new(session_store)
+        .run_incremental_backfill(git, limit_sessions)
+        .await
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

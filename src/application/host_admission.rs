@@ -5131,8 +5131,13 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self.project_database_for_test().map_err(|error| {
             crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
         })?;
-        crate::sessions::git_correlation::run_backfill(database, analytics_events, git, options)
-            .await
+        crate::sessions::git_correlation::run_backfill_on_registered(
+            database,
+            analytics_events,
+            git,
+            options,
+        )
+        .await
     }
 
     #[doc(hidden)]
