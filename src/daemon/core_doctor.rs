@@ -19,6 +19,7 @@ pub(crate) const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 24;
 #[derive(Debug)]
 pub(crate) struct DoctorRuntimeRequest {
     id: serde_json::Value,
+    startup_health_only: bool,
 }
 
 pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
@@ -28,20 +29,28 @@ pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntime
     }
     let (tool_name, arguments) = projectless_tool_call(request.params.as_ref()).ok()?;
     if tool_name != "tracedecay_runtime"
-        || arguments
-            .get("authority_audit")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        || arguments
-            .get("session_ingest_health")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
         || arguments.get("format").and_then(serde_json::Value::as_str) != Some("json")
     {
         return None;
     }
+    let startup_health_only = arguments
+        .get("startup_health")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let full_doctor = arguments
+        .get("authority_audit")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && arguments
+            .get("session_ingest_health")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    if !startup_health_only && !full_doctor {
+        return None;
+    }
     Some(DoctorRuntimeRequest {
         id: request.id.unwrap_or(serde_json::Value::Null),
+        startup_health_only,
     })
 }
 
@@ -216,13 +225,20 @@ fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
 async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
+    startup_health_only: bool,
 ) -> serde_json::Value {
-    doctor_runtime_value_inner(handshake, Some(store_administration)).await
+    doctor_runtime_value_inner(
+        handshake,
+        Some(store_administration),
+        startup_health_only,
+    )
+    .await
 }
 
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
     store_administration: Option<&super::StoreAdministration>,
+    startup_health_only: bool,
 ) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
         return doctor_runtime_unavailable(None, "project_path_missing");
@@ -307,6 +323,9 @@ async fn doctor_runtime_value_inner(
             "read_only": true,
         },
     });
+    if startup_health_only {
+        return value;
+    }
 
     let registry = store_administration
         .registered_profile_database()
@@ -441,7 +460,7 @@ fn doctor_semantic_runtime_status(
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
     // Owned stores are never path-opened as a fallback. Without the daemon's
     // retained runtime authority Doctor reports explicit unavailability.
-    doctor_runtime_value_inner(handshake, None).await
+    doctor_runtime_value_inner(handshake, None, false).await
 }
 
 pub(crate) async fn write_doctor_runtime_response(
@@ -450,8 +469,14 @@ pub(crate) async fn write_doctor_runtime_response(
     store_administration: &super::StoreAdministration,
     request: DoctorRuntimeRequest,
 ) -> Result<()> {
-    let result =
-        doctor_runtime_tool_result(doctor_runtime_value(handshake, store_administration).await);
+    let result = doctor_runtime_tool_result(
+        doctor_runtime_value(
+            handshake,
+            store_administration,
+            request.startup_health_only,
+        )
+        .await,
+    );
     write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
 }
 
@@ -637,9 +662,27 @@ mod doctor_runtime_route_tests {
         .to_string();
         let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
         assert_eq!(parsed.id, serde_json::json!(7));
+        assert!(!parsed.startup_health_only);
 
         let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
         assert!(doctor_runtime_request(&ordinary).is_none());
+
+        let startup = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_runtime",
+                "arguments": {
+                    "format": "json",
+                    "startup_health": true,
+                },
+            },
+        })
+        .to_string();
+        let parsed = doctor_runtime_request(&startup).expect("startup health runtime request");
+        assert_eq!(parsed.id, serde_json::json!(8));
+        assert!(parsed.startup_health_only);
     }
 
     #[test]

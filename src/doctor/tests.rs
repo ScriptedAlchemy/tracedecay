@@ -1208,6 +1208,7 @@ fn daemon_runtime_request_keeps_startup_probe_bounded() {
         super::daemon_runtime_args(),
         serde_json::json!({
             "format": "json",
+            "startup_health": true,
             "authority_audit": false,
             "doctor_report": false,
             "session_ingest_health": false,
@@ -2118,6 +2119,7 @@ fn daemon_startup_health_classifies_sqlite_corruption_spellings_as_terminal() {
 fn startup_runtime_probe_defers_exhaustive_audits() {
     let args = super::daemon_runtime_args();
 
+    assert_eq!(args["startup_health"], serde_json::json!(true));
     assert_eq!(args["authority_audit"], serde_json::json!(false));
     assert_eq!(args["doctor_report"], serde_json::json!(false));
     assert_eq!(args["session_ingest_health"], serde_json::json!(false));
