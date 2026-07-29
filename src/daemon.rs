@@ -2469,6 +2469,24 @@ impl ProjectOpenTasks {
         }
     }
 
+    #[cfg(test)]
+    async fn wait_for_completion(
+        mut state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
+    ) -> Result<()> {
+        loop {
+            let current = state.borrow().clone();
+            match current {
+                ProjectOpenTaskState::Opening => {
+                    state.changed().await.map_err(|_| TraceDecayError::Config {
+                        message: "project open task ended before reporting an outcome".to_string(),
+                    })?;
+                }
+                ProjectOpenTaskState::Ready => return Ok(()),
+                ProjectOpenTaskState::Failed(failure) => return Err(failure.to_error()),
+            }
+        }
+    }
+
     async fn shutdown(&self) -> bool {
         self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)
             .await
