@@ -2849,13 +2849,51 @@ impl ProjectOpenTasks {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectServerRequirement {
+    Core,
+    RegisteredHostIngest,
+}
+
+fn project_server_requirement(request_line: &str) -> ProjectServerRequirement {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
+        return ProjectServerRequirement::Core;
+    };
+    match classify_mcp_method(&request.method) {
+        McpMethod::HookEvent => ProjectServerRequirement::RegisteredHostIngest,
+        McpMethod::ToolsCall
+            if projectless_tool_call(request.params.as_ref())
+                .is_ok_and(|(tool_name, _)| tool_name == "tracedecay_hook_runtime") =>
+        {
+            ProjectServerRequirement::RegisteredHostIngest
+        }
+        _ => ProjectServerRequirement::Core,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectServerPublication {
+    Pending,
+    Core,
+    RegisteredHostIngest,
+}
+
+impl ProjectServerPublication {
+    fn satisfies(self, requirement: ProjectServerRequirement) -> bool {
+        match requirement {
+            ProjectServerRequirement::Core => self != Self::Pending,
+            ProjectServerRequirement::RegisteredHostIngest => self == Self::RegisteredHostIngest,
+        }
+    }
+}
+
 /// Scope-specific MCP servers routed through one canonical physical DB owner.
 /// `Database` performs the actual same-process handle sharing; this registry
 /// keeps daemon cache aliases and branch-drift rekeys consistent with it.
 struct DatabaseOwnerEntry<Server> {
     server: Server,
     last_used: Instant,
-    ready: bool,
+    publication: ProjectServerPublication,
 }
 
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
@@ -2882,7 +2920,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn get_ready(&self, key: &ProjectServerKey) -> Option<&Server> {
         self.servers
             .get(key)
-            .filter(|entry| entry.ready)
+            .filter(|entry| entry.publication.satisfies(ProjectServerRequirement::Core))
             .map(|entry| &entry.server)
     }
 
@@ -2896,7 +2934,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             DatabaseOwnerEntry {
                 server,
                 last_used,
-                ready: true,
+                publication: ProjectServerPublication::RegisteredHostIngest,
             },
         );
     }
@@ -2904,16 +2942,27 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn get_route(&self, route: &ProjectRouteKey) -> Option<(&ProjectServerKey, &Server)> {
         let key = self.aliases.get(route)?;
         let (key, entry) = self.servers.get_key_value(key)?;
-        entry.ready.then_some((key, &entry.server))
+        entry
+            .publication
+            .satisfies(ProjectServerRequirement::Core)
+            .then_some((key, &entry.server))
     }
 
     fn get_route_and_touch(
         &mut self,
         route: &ProjectRouteKey,
     ) -> Option<(&ProjectServerKey, &Server)> {
+        self.get_route_and_touch_for(route, ProjectServerRequirement::Core)
+    }
+
+    fn get_route_and_touch_for(
+        &mut self,
+        route: &ProjectRouteKey,
+        requirement: ProjectServerRequirement,
+    ) -> Option<(&ProjectServerKey, &Server)> {
         let key = self.aliases.get(route)?.clone();
         let entry = self.servers.get_mut(&key)?;
-        if !entry.ready {
+        if !entry.publication.satisfies(requirement) {
             return None;
         }
         entry.last_used = Instant::now();
@@ -2924,7 +2973,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         let Some(entry) = self.servers.get_mut(key) else {
             return false;
         };
-        entry.ready = true;
+        entry.publication = ProjectServerPublication::Core;
         entry.last_used = Instant::now();
         true
     }
@@ -2941,10 +2990,11 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         let Some(entry) = self.servers.get_mut(key) else {
             return false;
         };
-        if !entry.ready || !matches(&entry.server) {
+        if !entry.publication.satisfies(ProjectServerRequirement::Core) || !matches(&entry.server) {
             return false;
         }
         entry.server = replacement;
+        entry.publication = ProjectServerPublication::RegisteredHostIngest;
         entry.last_used = Instant::now();
         true
     }
@@ -3020,7 +3070,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             DatabaseOwnerEntry {
                 server,
                 last_used: Instant::now(),
-                ready: false,
+                publication: ProjectServerPublication::Pending,
             },
         );
         self.aliases.insert(route, key);
@@ -3057,7 +3107,10 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         F: FnMut(&Server) -> bool,
     {
         if let Some(existing) = self.servers.get_mut(&key) {
-            if existing.ready {
+            if existing
+                .publication
+                .satisfies(ProjectServerRequirement::Core)
+            {
                 let server = existing.server.clone();
                 self.bind_route(route, key);
                 return Some((server, false));
@@ -3748,11 +3801,20 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
+        self.cached_project_server_for_requirement(handshake, ProjectServerRequirement::Core)
+            .await
+    }
+
+    async fn cached_project_server_for_requirement(
+        &self,
+        handshake: &DaemonHandshake,
+        requirement: ProjectServerRequirement,
+    ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
         let (project_path, route) = Self::project_route(handshake)?;
         let cached = {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
-                .get_route_and_touch(&route)
+                .get_route_and_touch_for(&route, requirement)
                 .map(|(_, server)| Arc::clone(server))
         };
         let Some(server) = cached else {
@@ -3822,8 +3884,12 @@ impl DaemonEngine {
     async fn project_server_for_request(
         &self,
         handshake: &DaemonHandshake,
+        requirement: ProjectServerRequirement,
     ) -> Result<Arc<crate::mcp::McpServer>> {
-        if let Some(server) = self.cached_project_server(handshake).await? {
+        if let Some(server) = self
+            .cached_project_server_for_requirement(handshake, requirement)
+            .await?
+        {
             return Ok(server);
         }
         let (project_path, _) = Self::project_route(handshake)?;
@@ -3835,7 +3901,10 @@ impl DaemonEngine {
             ProjectOpenTaskClaim::InFlight(mut state) => {
                 let publication = async {
                     loop {
-                        if let Some(server) = self.cached_project_server(handshake).await? {
+                        if let Some(server) = self
+                            .cached_project_server_for_requirement(handshake, requirement)
+                            .await?
+                        {
                             return Ok(server);
                         }
                         let current = state.borrow().clone();
@@ -4634,12 +4703,13 @@ async fn portable_cached_project_server(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
+    requirement: ProjectServerRequirement,
 ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
     let server = {
         let mut servers = store_administration.project_servers().lock().await;
         servers
-            .get_route_and_touch(&route)
+            .get_route_and_touch_for(&route, requirement)
             .map(|(_, server)| Arc::clone(server))
     };
     let Some(server) = server else {
@@ -4718,9 +4788,14 @@ async fn schedule_portable_project_server_warmup(
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     let (canonical_project_path, route) = project_route_for_handshake(&handshake)?;
-    if portable_cached_project_server(&store_administration, &canonical_project_path, &handshake)
-        .await?
-        .is_some()
+    if portable_cached_project_server(
+        &store_administration,
+        &canonical_project_path,
+        &handshake,
+        ProjectServerRequirement::Core,
+    )
+    .await?
+    .is_some()
     {
         return Ok(());
     }
@@ -4753,12 +4828,17 @@ async fn portable_project_server_for_request(
     invocation: DaemonInvocationState,
     http_application_registry: http_application::DaemonHttpApplicationRegistry,
     handshake: &DaemonHandshake,
+    requirement: ProjectServerRequirement,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
     let (canonical_project_path, route) = project_route_for_handshake(handshake)?;
-    if let Some(server) =
-        portable_cached_project_server(&store_administration, &canonical_project_path, handshake)
-            .await?
+    if let Some(server) = portable_cached_project_server(
+        &store_administration,
+        &canonical_project_path,
+        handshake,
+        requirement,
+    )
+    .await?
     {
         return Ok(server);
     }
@@ -4787,6 +4867,7 @@ async fn portable_project_server_for_request(
                         &store_administration,
                         &canonical_project_path,
                         handshake,
+                        requirement,
                     )
                     .await?
                     {
@@ -6249,7 +6330,7 @@ async fn serve_broker_socket_client(
     if let Some(request) = parse_branch_add_request(&first_request_line) {
         let response = match await_project_owner_or_disconnect(
             &mut transport,
-            engine.project_server_for_request(&handshake),
+            engine.project_server_for_request(&handshake, ProjectServerRequirement::Core),
         )
         .await
         {
@@ -6371,7 +6452,10 @@ async fn serve_broker_socket_client(
     let server = if handshake.project_path.is_some() && !user_session_request {
         match await_project_owner_or_disconnect(
             &mut transport,
-            engine.project_server_for_request(&handshake),
+            engine.project_server_for_request(
+                &handshake,
+                project_server_requirement(&first_request_line),
+            ),
         )
         .await
         {
@@ -6598,6 +6682,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                 invocation.clone(),
                 http_application_registry.clone(),
                 &handshake,
+                ProjectServerRequirement::Core,
                 #[cfg(test)]
                 project_open_attempts.clone(),
             ),
@@ -6738,6 +6823,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
                 invocation.clone(),
                 http_application_registry,
                 &handshake,
+                project_server_requirement(&first_request_line),
                 #[cfg(test)]
                 project_open_attempts.clone(),
             ),
@@ -6813,6 +6899,7 @@ async fn execute_portable_daemon_invocation(
             invocation.clone(),
             http_application_registry,
             handshake,
+            ProjectServerRequirement::Core,
             #[cfg(test)]
             project_open_attempts,
         ))
@@ -7221,7 +7308,11 @@ async fn execute_daemon_invocation(
     let git_operation = invocation_is_git_operation(request.operation());
     let mut project_path = None;
     if request.requires_project() {
-        if engine.project_server_for_request(handshake).await.is_err() {
+        if engine
+            .project_server_for_request(handshake, ProjectServerRequirement::Core)
+            .await
+            .is_err()
+        {
             return DaemonInvocationResponse::problem(
                 request_id,
                 if git_operation {
