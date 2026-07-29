@@ -5,6 +5,7 @@ pub mod codex;
 pub mod cursor;
 pub mod cursor_composer;
 pub mod kiro;
+pub mod vibe;
 mod parse;
 mod timestamp;
 
