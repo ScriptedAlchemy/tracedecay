@@ -4751,6 +4751,23 @@ async fn production_project_server(
             resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
         }
+        // The constructed server already owns the exact graph, configuration,
+        // session authorities, and fail-closed late-bound capability slots.
+        // Publish that core now so lexical/graph/search reads can serve while
+        // code-index, semantic, LSP, advisory, HTTP, and edit owners finish
+        // mounting. Mutation executors remain absent until their authorization
+        // is complete.
+        let marked_core_ready = store_administration
+            .project_servers()
+            .lock()
+            .await
+            .mark_ready(&key);
+        if !marked_core_ready {
+            return Err(TraceDecayError::Config {
+                message: "project server disappeared before core publication completed"
+                    .to_owned(),
+            });
+        }
         invocation
             .mount_code_index(
                 canonical_project_path,
@@ -4787,17 +4804,6 @@ async fn production_project_server(
                 canonical_project_path,
             )
             .await?;
-        }
-        let marked_ready = store_administration
-            .project_servers()
-            .lock()
-            .await
-            .mark_ready(&key);
-        if !marked_ready {
-            return Err(TraceDecayError::Config {
-                message: "project server disappeared before owner registration completed"
-                    .to_owned(),
-            });
         }
     }
     Ok(ProductionProjectComposition {
