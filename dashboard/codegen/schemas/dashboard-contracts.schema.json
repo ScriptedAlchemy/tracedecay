@@ -9428,7 +9428,7 @@
         },
         "table_growth": {
           "$ref": "#/$defs/TableGrowthDimensionV1",
-          "description": "Per-table payload growth from the SQLite `dbstat` watermarks retained by\nthe production telemetry port."
+          "description": "Per-table payload growth from the `SQLite` `dbstat` watermarks retained by\nthe production telemetry port."
         },
         "total_bytes": {
           "format": "uint64",
