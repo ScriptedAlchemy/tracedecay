@@ -8,10 +8,8 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkV1, ProjectionBatchRequestV1, ProjectionKeyV1,
     VectorGenerationIdV1,
 };
-
-use crate::application::semantic_runtime::SemanticFallbackReasonV1;
-use crate::query::retrieval::ports::RetrievalPortError;
-use crate::query::retrieval::semantic::{
+use tracedecay_query::retrieval::ports::RetrievalPortError;
+use tracedecay_query::retrieval::semantic::{
     EphemeralQueryEmbeddingV1, SemanticExecutionControl, SemanticQueryEmbeddingPort,
     SemanticQueryEmbeddingRequestV1,
 };
@@ -24,6 +22,7 @@ use self::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation,
     prepare_vector_generation_async,
 };
+use self::root_adapter::{SemanticFallbackReasonV1, SemanticResourceCeilings};
 use self::runtime_query::{
     CurrentSemanticQueryRuntimeV1, PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory,
 };
@@ -38,8 +37,11 @@ pub(crate) mod legacy_migration;
 mod manifest;
 mod model_catalog;
 mod model_lifecycle;
+#[cfg(test)]
+mod ownership_test;
 pub(crate) mod projector;
 pub(crate) mod rerank_adapter;
+mod root_adapter;
 mod runtime_query;
 mod runtime_service;
 pub(crate) mod session_pool;
@@ -82,16 +84,14 @@ type FastEmbedArtifactLoaderV1 = Box<
 pub(crate) struct LoadedSemanticArtifactV1(Arc<AdmittedProjectionArtifactV1>);
 
 impl LoadedSemanticArtifactV1 {
-    pub(in crate::semantic_code) fn from_admitted(
-        authority: Arc<AdmittedProjectionArtifactV1>,
-    ) -> Self {
+    fn from_admitted(authority: Arc<AdmittedProjectionArtifactV1>) -> Self {
         Self(authority)
     }
 
     pub(crate) fn from_lifecycle(
         lifecycle: &SemanticModelLifecycleOwnerV1,
         manifest: &tracedecay_domain::CodeGenerationManifestV1,
-        resources: crate::config::SemanticResourceCeilings,
+        resources: SemanticResourceCeilings,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
         let status = lifecycle.status();
         let state = status
@@ -139,7 +139,7 @@ impl LoadedSemanticArtifactV1 {
     pub(crate) fn from_lifecycle_projection(
         lifecycle: &SemanticModelLifecycleOwnerV1,
         projection: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
-        resources: crate::config::SemanticResourceCeilings,
+        resources: SemanticResourceCeilings,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
         let status = lifecycle.status();
         let state = status
@@ -175,7 +175,7 @@ impl LoadedSemanticArtifactV1 {
     pub(crate) fn lifecycle_projection(
         lifecycle: &SemanticModelLifecycleOwnerV1,
         manifest: &tracedecay_domain::CodeGenerationManifestV1,
-        resources: crate::config::SemanticResourceCeilings,
+        resources: SemanticResourceCeilings,
     ) -> Result<tracedecay_domain::AdmittedEmbeddingProjectionKeyV1, SemanticRuntimeScheduleFailureV1>
     {
         let status = lifecycle.status();

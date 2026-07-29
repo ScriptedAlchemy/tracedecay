@@ -11,22 +11,21 @@ use fastembed::{
     RerankInitOptionsUserDefined, RerankerModel, TextRerank, TokenizerFiles,
     UserDefinedRerankingModel,
 };
+use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{
     AuthorizedRerankView, CodeSearchChunkId, CodeSearchChunkV1, EphemeralSanitizedQueryViewV1,
     FreshnessCompatibilityV1, ManifestDigest, RankedCandidate, RerankPolicy, RetrievalAnchorId,
     RetrievalRequest, SanitizedStageFailure, SymbolOccurrenceId, canonical_sha256,
 };
-
-use super::artifact_store::AdmittedArtifactV1;
-use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1};
-use crate::code_index::production::CodeIndexPublishedGenerationV1;
-use crate::config::retrieval::RerankCompatibilityPinsV1;
-use crate::query::retrieval::rerank::{
+use tracedecay_query::retrieval::rerank::{
     BoundedRerankOutcomeV1, BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1,
     EphemeralRerankViewSourceV1, LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1,
     RerankExecutionControlV1, RerankViewOutcomeV1, RerankViewPermitV1,
 };
-use crate::search_eval::pr10_native::AdmittedNativeRerankExecutorV1;
+
+use super::artifact_store::AdmittedArtifactV1;
+use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1};
+use super::root_adapter::{AdmittedNativeRerankExecutorV1, RerankCompatibilityPinsV1};
 
 pub(super) const RERANK_IMPLEMENTATION_REVISION_V1: &str = "rerank.fastembed.production.v1";
 pub(super) const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str =
@@ -483,7 +482,7 @@ pub(crate) struct ProductionCodeRerankAuthorityV1 {
 }
 
 impl ProductionCodeRerankAuthorityV1 {
-    pub(in crate::semantic_code) fn from_admitted(
+    pub(super) fn from_admitted(
         artifact: AdmittedArtifactV1,
         pins: RerankCompatibilityPinsV1,
     ) -> Result<Self, RerankArtifactAdmissionErrorV1> {
