@@ -361,9 +361,9 @@ impl McpServer {
                     registered_user_session_db,
                     registry_db,
                     profile_identity,
-                    project_root,
+                    project_root.clone(),
                     project_id,
-                    cancellation,
+                    cancellation.clone(),
                 )
                 .await
                 {
