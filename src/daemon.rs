@@ -2790,6 +2790,126 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     }
 }
 
+/// The retirement steps a published project server has to support.
+///
+/// Once core publication exposes a route, any later failure must stop that
+/// server from answering before its registry entry disappears. Keeping the
+/// steps behind a trait lets the funnel below run against a recording double
+/// instead of a whole daemon composition.
+trait RetirableProjectServer: Send + Sync + 'static {
+    /// Stops the server from writing further responses and cancels its startup
+    /// transcript ingest.
+    fn revoke_and_cancel_ingest(&self);
+
+    /// Waits for responses already in flight when revocation landed.
+    fn wait_for_response_drain(&self) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl RetirableProjectServer for crate::mcp::McpServer {
+    fn revoke_and_cancel_ingest(&self) {
+        self.revoke_project_server();
+        self.cancel_startup_transcript_ingest();
+    }
+
+    fn wait_for_response_drain(&self) -> impl std::future::Future<Output = ()> + Send {
+        self.wait_for_project_server_response_drain()
+    }
+}
+
+/// Retires every server published under one store owner after a failure that
+/// landed once the core was already routable.
+///
+/// Revocation runs first so no further response can be written, then in-flight
+/// responses drain, and only then is the owner quarantined and removed so its
+/// next open re-validates health synchronously. The drain and removal run on a
+/// detached task: a project-open future dropped mid-retirement must not leave a
+/// half-mounted owner bound to its route.
+async fn retire_published_project_owner<S>(
+    project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry<Arc<S>>>>,
+    owner: StoreOwnerKey,
+    published: Vec<Arc<S>>,
+) -> Result<usize>
+where
+    S: RetirableProjectServer,
+{
+    for server in &published {
+        server.revoke_and_cancel_ingest();
+    }
+    let retirement = tokio::spawn(async move {
+        for server in &published {
+            server.wait_for_response_drain().await;
+        }
+        let removed = project_servers
+            .lock()
+            .await
+            .quarantine_and_remove_owner(&owner);
+        for server in &removed {
+            server.revoke_and_cancel_ingest();
+        }
+        for server in &removed {
+            server.wait_for_response_drain().await;
+        }
+        removed.len()
+    });
+    retirement
+        .await
+        .map_err(|join_error| TraceDecayError::Config {
+            message: format!(
+                "failed to retire the published project server owner after project open failed: {join_error}"
+            ),
+        })
+}
+
+/// Post-open FTS health for one project publication.
+#[derive(Debug, PartialEq, Eq)]
+enum PostOpenHealthOutcome {
+    /// The open owed publication nothing. It either applied its own post-open
+    /// policy — including the crash preflight's skip, which proved the store
+    /// healthy under both recovery locks and must not be re-spent on a second
+    /// full `quick_check` — or opened read-only, where FTS damage cannot be
+    /// repaired in place.
+    SettledDuringOpen,
+    /// The deferred check ran and found the retained handle intact.
+    Intact,
+    /// The deferred check rebuilt proven FTS-only damage. The report is the
+    /// evidence publication has to make daemon-visible.
+    Repaired(String),
+}
+
+fn repaired_post_open_health_log_fields(
+    project_path: &Path,
+    problem: &str,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project", project_path.display().to_string()),
+        ("outcome", "fts_repaired".to_owned()),
+        ("problem", problem.to_owned()),
+    ]
+}
+
+/// Settles the post-open FTS health a deferred open handed to publication.
+///
+/// A deferred open publishes the core before its retained-handle check runs, so
+/// publication owns what is left. `health` is absent exactly when the open owed
+/// nothing. Repaired corruption is real evidence — an operator has to be able
+/// to see that a store was rebuilt — so it is logged rather than discarded.
+async fn settle_deferred_post_open_health(
+    project_path: &Path,
+    health: Option<impl std::future::Future<Output = Result<Option<String>>>>,
+) -> Result<PostOpenHealthOutcome> {
+    let Some(health) = health else {
+        return Ok(PostOpenHealthOutcome::SettledDuringOpen);
+    };
+    let Some(problem) = health.await? else {
+        return Ok(PostOpenHealthOutcome::Intact);
+    };
+    log_daemon_event(
+        "project_open_health",
+        &repaired_post_open_health_log_fields(project_path, &problem),
+    );
+    Ok(PostOpenHealthOutcome::Repaired(problem))
+}
+
 fn project_server_capacity_error() -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -4902,7 +5022,7 @@ async fn production_project_server(
             resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
         }
-        let source_edit_mutation_ready = if project_database_is_read_only {
+        let source_edit_mutation = if project_database_is_read_only {
             None
         } else {
             Some(
@@ -4941,85 +5061,82 @@ async fn production_project_server(
                 ),
             ],
         );
-        if let Some(database) = deferred_post_open_health
-            && let Err(error) = database.repair_fts_after_open().await
-        {
-            for server in &owner_servers {
-                server.revoke_project_server();
-                server.cancel_startup_transcript_ingest();
+        // Every step below runs against a route clients can already reach, so
+        // they share one failure funnel instead of returning early: an owner
+        // that stopped half-mounted must be revoked, drained, and removed, not
+        // left routable behind a published core.
+        let mounted = Box::pin(async {
+            settle_deferred_post_open_health(
+                canonical_project_path,
+                deferred_post_open_health
+                    .as_ref()
+                    .map(crate::db::Database::repair_fts_after_open),
+            )
+            .await?;
+            ensure_git_index_transactions_for_mutation_owners(
+                store_administration,
+                registered_project_session_db,
+                canonical_project_path,
+                key.owner.project_id.as_deref(),
+            )
+            .await?;
+            invocation
+                .mount_code_index(
+                    canonical_project_path,
+                    code_index_store_root,
+                    Some(&semantic_runtime),
+                    Some(semantic_database),
+                    semantic_lifecycle,
+                    Some(*semantic_resources),
+                )
+                .await?;
+            project_open_cancellation_checkpoint(cancellation)?;
+            match invocation
+                .semantic_runtime_registrar()
+                .register(canonical_project_path.to_path_buf(), semantic_runtime)
+                .await
+            {
+                Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
             }
-            for server in &owner_servers {
-                server.wait_for_project_server_response_drain().await;
+            if !project_database_is_read_only {
+                project_open_owners::register_project_open_production_owners(
+                    invocation,
+                    store_administration.git_index_transaction_services(),
+                    canonical_project_path,
+                    &project_id,
+                    resolved.as_ref(),
+                    Arc::clone(
+                        source_edit_mutation
+                            .as_ref()
+                            .expect("writable projects install source edit preview authority"),
+                    ),
+                )
+                .await?;
+                mount_http_application_router(
+                    http_application_registry,
+                    &project_id,
+                    canonical_project_path,
+                )
+                .await?;
             }
-            let project_servers = Arc::clone(store_administration.project_servers());
-            let unhealthy_owner = key.owner.clone();
-            let cleanup = tokio::spawn(async move {
-                let removed = project_servers
-                    .lock()
-                    .await
-                    .quarantine_and_remove_owner(&unhealthy_owner);
-                for server in &removed {
-                    server.revoke_project_server();
-                    server.cancel_startup_transcript_ingest();
-                }
-                for server in &removed {
-                    server.wait_for_project_server_response_drain().await;
-                }
-                removed.len()
-            });
-            let removed = cleanup.await.map_err(|join_error| TraceDecayError::Config {
-                message: format!(
-                    "failed to retire unhealthy project server owner after health validation: {join_error}"
-                ),
-            })?;
-            debug_assert!(removed > 0);
+            Ok::<(), TraceDecayError>(())
+        })
+        .await;
+        if let Err(error) = mounted {
+            // The preview executors stay installed on a server that is being
+            // retired. Retire their mutation lane with it so a caller reads a
+            // terminal failure instead of an authority that warms forever.
+            if let Some(mutation) = &source_edit_mutation {
+                mutation.mark_failed();
+            }
+            let retired = retire_published_project_owner(
+                Arc::clone(store_administration.project_servers()),
+                key.owner.clone(),
+                owner_servers,
+            )
+            .await?;
+            debug_assert!(retired > 0);
             return Err(error);
-        }
-        ensure_git_index_transactions_for_mutation_owners(
-            store_administration,
-            registered_project_session_db,
-            canonical_project_path,
-            key.owner.project_id.as_deref(),
-        )
-        .await?;
-        invocation
-            .mount_code_index(
-                canonical_project_path,
-                code_index_store_root,
-                Some(&semantic_runtime),
-                Some(semantic_database),
-                semantic_lifecycle,
-                Some(*semantic_resources),
-            )
-            .await?;
-        if cancellation.is_cancelled() {
-            resolved.cancel_startup_transcript_ingest();
-            return Err(project_open_cancellation_error());
-        }
-        match invocation
-            .semantic_runtime_registrar()
-            .register(canonical_project_path.to_path_buf(), semantic_runtime)
-            .await
-        {
-            Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
-        }
-        if !project_database_is_read_only {
-            project_open_owners::register_project_open_production_owners(
-                invocation,
-                store_administration.git_index_transaction_services(),
-                canonical_project_path,
-                &project_id,
-                resolved.as_ref(),
-                source_edit_mutation_ready
-                    .expect("writable projects install source edit preview authority"),
-            )
-            .await?;
-            mount_http_application_router(
-                http_application_registry,
-                &project_id,
-                canonical_project_path,
-            )
-            .await?;
         }
     }
     Ok(ProductionProjectComposition {

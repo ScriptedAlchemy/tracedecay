@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -613,26 +613,100 @@ async fn invoke_project_open_source_edit_reconciliation(
     .await
 }
 
+/// Publication state of the daemon-owned source-edit mutation lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceEditMutationState {
+    /// Owner registration is still mounting the exact mutation authority. A
+    /// caller that retries later can succeed.
+    Warming,
+    /// The mutation authority is published.
+    Ready,
+    /// Owner registration failed. This server's mutation lane never opens, so
+    /// retrying the same request against it cannot succeed.
+    Failed,
+}
+
+/// Gates source-edit mutations on the state of their daemon-owned authority.
+///
+/// The preview executors are installed with the read-only core, so a mutation
+/// request can arrive before owner registration reaches the Git transaction
+/// authority — or after registration failed outright. Both cases fail closed,
+/// but only the first is retryable: reporting a failed publication as "warming"
+/// invites a caller to retry a lane that will never open.
+#[derive(Debug)]
+pub(crate) struct SourceEditMutationGate {
+    state: AtomicU8,
+}
+
+impl SourceEditMutationGate {
+    const WARMING: u8 = 0;
+    const READY: u8 = 1;
+    const FAILED: u8 = 2;
+
+    pub(crate) fn warming() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU8::new(Self::WARMING),
+        })
+    }
+
+    #[cfg(feature = "test-transport")]
+    pub(crate) fn ready() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU8::new(Self::READY),
+        })
+    }
+
+    pub(crate) fn state(&self) -> SourceEditMutationState {
+        match self.state.load(Ordering::Acquire) {
+            Self::READY => SourceEditMutationState::Ready,
+            Self::FAILED => SourceEditMutationState::Failed,
+            _ => SourceEditMutationState::Warming,
+        }
+    }
+
+    pub(crate) fn mark_ready(&self) {
+        self.state.store(Self::READY, Ordering::Release);
+    }
+
+    /// Retires the mutation lane. A publication that failed after opening the
+    /// lane still retires the whole server, so this overwrites `Ready` rather
+    /// than leaving mutations authorized against a server being torn down.
+    pub(crate) fn mark_failed(&self) {
+        self.state.store(Self::FAILED, Ordering::Release);
+    }
+
+    pub(crate) fn authorize_mutation(&self, lane: &str) -> Result<()> {
+        match self.state() {
+            SourceEditMutationState::Ready => Ok(()),
+            SourceEditMutationState::Warming => Err(TraceDecayError::Config {
+                message: format!("daemon-owned source edit {lane} authority is warming"),
+            }),
+            SourceEditMutationState::Failed => Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon-owned source edit {lane} authority failed to publish; reopen the project"
+                ),
+            }),
+        }
+    }
+}
+
 fn install_project_open_source_edit_owners(
     server: &McpServer,
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
-    mutation_ready: Arc<AtomicBool>,
+    mutation: Arc<SourceEditMutationGate>,
 ) -> Result<()> {
     let source_edit_graph = Arc::clone(&graph);
     let source_edit_reconciliation_authorization = authorization.clone();
-    let source_edit_mutation_ready = Arc::clone(&mutation_ready);
+    let source_edit_mutation = Arc::clone(&mutation);
     server
         .install_source_edit_executor(Arc::new(move |request| {
             let graph = Arc::clone(&source_edit_graph);
             let authorization = authorization.clone();
-            let mutation_ready = Arc::clone(&source_edit_mutation_ready);
+            let mutation = Arc::clone(&source_edit_mutation);
             Box::pin(async move {
-                if !request.edit.dry_run() && !mutation_ready.load(Ordering::Acquire) {
-                    return Err(TraceDecayError::Config {
-                        message: "daemon-owned source edit mutation authority is warming"
-                            .to_owned(),
-                    });
+                if !request.edit.dry_run() {
+                    mutation.authorize_mutation("mutation")?;
                 }
                 invoke_project_open_source_edit(graph, authorization, request).await
             })
@@ -644,14 +718,9 @@ fn install_project_open_source_edit_owners(
         .install_source_edit_reconciliation_executor(Arc::new(move |request| {
             let graph = Arc::clone(&graph);
             let authorization = source_edit_reconciliation_authorization.clone();
-            let mutation_ready = Arc::clone(&mutation_ready);
+            let mutation = Arc::clone(&mutation);
             Box::pin(async move {
-                if !mutation_ready.load(Ordering::Acquire) {
-                    return Err(TraceDecayError::Config {
-                        message: "daemon-owned source edit reconciliation authority is warming"
-                            .to_owned(),
-                    });
-                }
+                mutation.authorize_mutation("reconciliation")?;
                 invoke_project_open_source_edit_reconciliation(graph, authorization, request).await
             })
         }))
@@ -666,7 +735,7 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
     project_root: &Path,
     project_id: &str,
-) -> Result<Arc<AtomicBool>> {
+) -> Result<Arc<SourceEditMutationGate>> {
     let graph = server.cg().await;
     let project_id =
         ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
@@ -683,14 +752,9 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
         scope,
         configuration: Arc::clone(graph.configuration_runtime()),
     };
-    let mutation_ready = Arc::new(AtomicBool::new(false));
-    install_project_open_source_edit_owners(
-        server,
-        graph,
-        authorization,
-        Arc::clone(&mutation_ready),
-    )?;
-    Ok(mutation_ready)
+    let mutation = SourceEditMutationGate::warming();
+    install_project_open_source_edit_owners(server, graph, authorization, Arc::clone(&mutation))?;
+    Ok(mutation)
 }
 
 #[cfg(feature = "test-transport")]
@@ -718,7 +782,7 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
         server,
         graph,
         authorization,
-        Arc::new(AtomicBool::new(true)),
+        SourceEditMutationGate::ready(),
     )
 }
 
@@ -862,7 +926,7 @@ pub(crate) async fn register_project_open_production_owners(
     project_root: &Path,
     project_id: &str,
     server: &McpServer,
-    source_edit_mutation_ready: Arc<AtomicBool>,
+    source_edit_mutation: Arc<SourceEditMutationGate>,
 ) -> Result<()> {
     let project_id =
         ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
@@ -935,7 +999,9 @@ pub(crate) async fn register_project_open_production_owners(
     }
     // Preview executors were published with the read-only core. Open their
     // mutation lane only after the exact Git transaction authority exists.
-    source_edit_mutation_ready.store(true, Ordering::Release);
+    // A later failure in this function retires the whole server, and project
+    // open marks the lane failed as it does so, so the lane never stays warming.
+    source_edit_mutation.mark_ready();
     let configuration_policy_digest = canonical_sha256(&(
         "tracedecay.daemon.configuration-policy.v1",
         &scope.scope_digest,
