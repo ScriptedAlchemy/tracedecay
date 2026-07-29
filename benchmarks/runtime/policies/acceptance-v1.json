@@ -1,0 +1,1 @@
+{"hard_failures":["digest_mismatch","unexpected_error","timeout_rate_regression","daemon_death","process_leak","unwired_remote_success"],"latency_mode":"advisory","percentile_minimum_matching_samples":{"p95":40,"p99":100},"policy_id":"runtime-acceptance-v1","policy_version":1,"schema_version":1}
