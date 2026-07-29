@@ -71,6 +71,21 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
         scope, &expected,
         "the routed scope must equal the canonical exact-root resolution"
     );
+    let target = super::requests::invocation_target_for_route(Some(&first));
+    assert_eq!(
+        target.resolved(),
+        Some(scope),
+        "handler admission must consume the exact scope resolved at routing"
+    );
+    assert_eq!(
+        super::requests::accounting_project_root(
+            first.graph.project_root(),
+            Some(&first.owner),
+            Some(scope),
+        ),
+        Some(std::path::Path::new(&first.owner.project.canonical_root)),
+        "accounting must retain the selected route authority instead of the active project"
+    );
 }
 
 #[tokio::test]

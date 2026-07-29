@@ -21,10 +21,10 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, LegalAction, OpaqueCursor,
-    OperationReceipt, OperationTermination, PageRequest, ProblemOwningLayer, RequestContext,
-    RequestId, ResolvedScope, ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic,
-    StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, InvocationTarget, LegalAction,
+    OpaqueCursor, OperationReceipt, OperationTermination, PageRequest, ProblemOwningLayer,
+    RequestContext, RequestId, ResolvedScope, ResultContractRef, ResumeToken, RetryDirective,
+    SafeDiagnostic, StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
@@ -673,6 +673,57 @@ impl OperationEventAuthority {
         observed_at: UtcMicros,
         resume_token: Option<&ResumeToken>,
     ) -> Result<RequestContext, OperationEventError> {
+        self.resolve_invocation_context_inner(
+            operation_id,
+            Some(active_project_id),
+            None,
+            request_id,
+            deadline,
+            cancellation,
+            observed_at,
+            resume_token,
+        )
+        .await
+    }
+
+    /// Daemon invocation admission resolves authority from the retained
+    /// operation and only revalidates a caller-carried exact scope.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resolve_invocation_context(
+        &self,
+        operation_id: &OperationId,
+        target: &InvocationTarget,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+        observed_at: UtcMicros,
+        resume_token: Option<&ResumeToken>,
+    ) -> Result<RequestContext, OperationEventError> {
+        self.resolve_invocation_context_inner(
+            operation_id,
+            None,
+            target.resolved(),
+            request_id,
+            deadline,
+            cancellation,
+            observed_at,
+            resume_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_invocation_context_inner(
+        &self,
+        operation_id: &OperationId,
+        expected_project_id: Option<&ProjectId>,
+        expected_scope: Option<&ResolvedScope>,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+        observed_at: UtcMicros,
+        resume_token: Option<&ResumeToken>,
+    ) -> Result<RequestContext, OperationEventError> {
         let state = self.inner.state.lock().await;
         let Some(record) = state.operations.get(operation_id) else {
             return Err(if resume_token.is_some() {
@@ -691,7 +742,9 @@ impl OperationEventAuthority {
         else {
             return Err(OperationEventError::NotFoundOrNotAuthorized);
         };
-        if scope.project_id != *active_project_id {
+        if expected_project_id.is_some_and(|project_id| scope.project_id != *project_id)
+            || expected_scope.is_some_and(|expected| scope != expected)
+        {
             return Err(OperationEventError::NotFoundOrNotAuthorized);
         }
         let grant = CapabilityGrantSnapshot::new(

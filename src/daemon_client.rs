@@ -13,30 +13,26 @@ use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::sync::Mutex as AsyncMutex;
 
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemKind, CancellationSignal, CancellationStage, Deadline,
-    LegalAction, OpaqueCursor, PageRequest, RequestId, RetryDirective, SafeDiagnostic, StreamEvent,
-    StreamEventKind, StreamTermination,
+    ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
+    ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
+    ApplicationResponse, CancellationSignal, CancellationStage, Deadline, InvocationError,
+    InvocationTarget, LegalAction, OpaqueCursor, PageRequest, RequestId, RetryDirective,
+    SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
 };
-use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros};
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
     BindingId, BindingSurface, CatalogSnapshotV1, FeatureId, ProfileId, SchemaRef,
     SurfaceOperationName,
 };
 
-use crate::application::feedback::observations::Plan26FeedbackSourceEventV1;
+use crate::application::feedback::observations::{
+    Plan26DeliveryRouteV1, Plan26FeedbackSourceEventV1,
+};
 use crate::request_identity::{
     ConnectionLocalRequestSequence, GlobalRequestSurface, mint_global_request_id,
 };
 
-/// A path-free project selector accepted by adapters before daemon resolution.
-///
-/// Paths, labels, and other mutable local spellings are deliberately absent:
-/// the daemon resolves this selector to its authoritative scope before any
-/// application operation is admitted.
-pub enum ScopeSelector {
-    CurrentProject,
-    Project(ProjectId),
-}
+pub type ScopeSelector = InvocationTarget;
 
 /// Presentation-only format requested by an adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,7 +120,7 @@ impl<T> BoundInvocation<T> {
     }
 
     /// Separates presentation from the application call boundary.
-    pub fn into_application_invocation(self) -> (ApplicationInvocation<T>, RequestedOutputFormat) {
+    pub fn into_application_invocation(self) -> (AdapterInvocation<T>, RequestedOutputFormat) {
         let Self {
             binding_id,
             request_schema: _,
@@ -141,7 +137,7 @@ impl<T> BoundInvocation<T> {
         } = invocation;
 
         (
-            ApplicationInvocation {
+            AdapterInvocation {
                 binding_id,
                 request,
                 scope,
@@ -158,7 +154,7 @@ impl<T> BoundInvocation<T> {
 ///
 /// This type deliberately omits presentation format and transport request
 /// framing.
-pub struct ApplicationInvocation<T> {
+pub struct AdapterInvocation<T> {
     pub binding_id: BindingId,
     pub request: T,
     pub scope: ScopeSelector,
@@ -423,7 +419,7 @@ pub type DaemonInvocationExecutorFuture<'a, T> = Pin<Box<dyn Future<Output = T> 
 /// Request correlation is already present on `DaemonInvocationRequest`; effect
 /// idempotency remains owned by each operation payload and is never reminted
 /// by this transport boundary.
-pub trait DaemonInvocationExecutor: Send + Sync {
+pub trait DaemonInvocationExecutor: ApplicationInvocationExecutor + Send + Sync {
     fn invoke_controlled(
         &self,
         request: crate::daemon::DaemonInvocationRequest,
@@ -711,6 +707,190 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
             observed_at,
             event,
         ))
+    }
+}
+
+impl ApplicationInvocationExecutor for DaemonInvocationClient {
+    fn invoke(
+        &self,
+        invocation: ApplicationInvocation,
+    ) -> ApplicationInvocationFuture<'_, Result<ApplicationResponse, InvocationError>> {
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let (request_id, target, deadline, cancellation) = context.into_parts();
+            match request {
+                ApplicationRequest::Surface { binding, payload } => {
+                    let (_binding_id, surface, operation, result_contract, _page) =
+                        binding.into_parts();
+                    let operation =
+                        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(
+                            operation.as_str(),
+                        )
+                        .ok_or(InvocationError::InvalidRequest)?;
+                    let typed = crate::application_surface::parse_application_surface_request(
+                        operation, payload,
+                    )
+                    .map_err(|_| InvocationError::InvalidRequest)?;
+                    let observed_at = invocation_now_micros();
+                    let cancellation_context = cancellation.context();
+                    let scope = match target {
+                        InvocationTarget::CurrentProject => None,
+                        InvocationTarget::Resolved(scope) => Some(scope),
+                    };
+                    let policy = if operation
+                        == crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                    {
+                        InvocationCancellationPolicy::AuthoritativeEffect
+                    } else {
+                        InvocationCancellationPolicy::ReadOnly
+                    };
+                    let request = match (operation, typed) {
+                        (
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
+                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                                request,
+                            ),
+                        )
+                        | (
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                                request,
+                            ),
+                        ) => crate::daemon::DaemonInvocationRequest::configuration(
+                            request_id.as_str(),
+                            operation,
+                            request,
+                            observed_at,
+                            deadline.clone(),
+                            cancellation_context,
+                        )
+                        .with_resolved_scope(scope),
+                        (
+                            crate::application_surface::ApplicationSurfaceOperation::FeedbackGet,
+                            crate::application_surface::ApplicationSurfaceRequest::Feedback(
+                                request,
+                            ),
+                        ) => crate::daemon::DaemonInvocationRequest::feedback(
+                            request_id.as_str(),
+                            operation,
+                            request.request_handle,
+                            observed_at,
+                            deadline.clone(),
+                            cancellation_context,
+                        )
+                        .with_resolved_scope(scope),
+                        _ => return Err(InvocationError::InvalidRequest),
+                    }
+                    .with_delivery_route(application_delivery_route(surface));
+                    let response = self
+                        .invoke_controlled(request, deadline, cancellation, policy)
+                        .await
+                        .map_err(map_invocation_error)?;
+                    application_response(request_id, result_contract, response.outcome)
+                }
+                ApplicationRequest::FeedbackObservation {
+                    configuration_digest,
+                    observed_at,
+                    event,
+                } => {
+                    let event = serde_json::from_value(event)
+                        .map_err(|_| InvocationError::InvalidRequest)?;
+                    self.observe_plan26_feedback(configuration_digest, observed_at, event)
+                        .await
+                        .map_err(|_| InvocationError::Unavailable)?;
+                    Ok(ApplicationResponse::ObservationAccepted)
+                }
+                ApplicationRequest::OperationEvents { .. }
+                | ApplicationRequest::OperationCancel { .. } => Err(InvocationError::Unavailable),
+            }
+        })
+    }
+}
+
+pub(crate) fn invocation_now_micros() -> UtcMicros {
+    UtcMicros(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_micros()).ok())
+            .unwrap_or(i64::MAX),
+    )
+}
+
+pub(crate) fn application_delivery_route(surface: BindingSurface) -> Plan26DeliveryRouteV1 {
+    match surface {
+        BindingSurface::Cli => Plan26DeliveryRouteV1::Cli,
+        BindingSurface::Mcp => Plan26DeliveryRouteV1::Mcp,
+        BindingSurface::Http | BindingSurface::Dashboard => Plan26DeliveryRouteV1::Http,
+        BindingSurface::Lsp => Plan26DeliveryRouteV1::Lsp,
+    }
+}
+
+pub(crate) fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
+    match error {
+        DaemonInvocationError::Cancelled { .. } => InvocationError::Cancelled,
+        DaemonInvocationError::TimedOut { .. } => InvocationError::DeadlineExceeded,
+        DaemonInvocationError::Saturated { .. } | DaemonInvocationError::Backpressured { .. } => {
+            InvocationError::Unavailable
+        }
+        DaemonInvocationError::Unavailable => InvocationError::Unavailable,
+    }
+}
+
+pub(crate) fn application_response(
+    request_id: RequestId,
+    result_contract: tracedecay_application::ResultContractRef,
+    outcome: crate::daemon::DaemonInvocationOutcome,
+) -> Result<ApplicationResponse, InvocationError> {
+    let envelope = match outcome {
+        crate::daemon::DaemonInvocationOutcome::Feedback { scope, result } => {
+            ApplicationEnvelope::evidence(
+                result_contract,
+                request_id,
+                scope,
+                result.into_application(),
+            )
+        }
+        crate::daemon::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+            ApplicationEnvelope {
+                contract: result_contract,
+                request_id,
+                scope,
+                outcome,
+            }
+        }
+        crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            return Err(invocation_error_from_problem(&problem));
+        }
+        crate::daemon::DaemonInvocationOutcome::Problem { problem } => {
+            return Err(match problem {
+                crate::daemon::DaemonInvocationProblem::InvalidRequest
+                | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+                    InvocationError::InvalidRequest
+                }
+                crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                    InvocationError::Denied
+                }
+                crate::daemon::DaemonInvocationProblem::Unavailable => InvocationError::Unavailable,
+            });
+        }
+        _ => return Err(InvocationError::Unavailable),
+    };
+    Ok(ApplicationResponse::unary(envelope))
+}
+
+fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationError {
+    match problem.kind() {
+        ApplicationProblemKind::NotFoundOrNotAuthorized => InvocationError::Denied,
+        ApplicationProblemKind::Cancelled => InvocationError::Cancelled,
+        ApplicationProblemKind::TimedOut => InvocationError::DeadlineExceeded,
+        ApplicationProblemKind::InvalidRequest => InvocationError::InvalidRequest,
+        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
+            InvocationError::Conflict
+        }
+        ApplicationProblemKind::Unavailable
+        | ApplicationProblemKind::Unsupported
+        | ApplicationProblemKind::Saturated => InvocationError::Unavailable,
     }
 }
 

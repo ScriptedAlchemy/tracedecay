@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
+use tokio_stream::StreamExt;
 
 use crate::application::context::CancellationToken;
 use crate::client_identity::DaemonClientIdentity;
@@ -1958,6 +1959,7 @@ struct InProcessDaemonInvocationExecutor {
     invocation: DaemonInvocationState,
     store_administration: StoreAdministration,
     project_path: PathBuf,
+    scope: tracedecay_application::ResolvedScope,
 }
 
 impl InProcessDaemonInvocationExecutor {
@@ -1965,11 +1967,13 @@ impl InProcessDaemonInvocationExecutor {
         invocation: DaemonInvocationState,
         store_administration: StoreAdministration,
         project_path: PathBuf,
+        scope: tracedecay_application::ResolvedScope,
     ) -> Self {
         Self {
             invocation,
             store_administration,
             project_path,
+            scope,
         }
     }
 
@@ -1981,6 +1985,297 @@ impl InProcessDaemonInvocationExecutor {
                 request,
             )
             .await
+    }
+}
+
+impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonInvocationExecutor {
+    fn invoke(
+        &self,
+        invocation: tracedecay_application::ApplicationInvocation,
+    ) -> tracedecay_application::ApplicationInvocationFuture<
+        '_,
+        std::result::Result<
+            tracedecay_application::ApplicationResponse,
+            tracedecay_application::InvocationError,
+        >,
+    > {
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let (request_id, target, deadline, cancellation) = context.into_parts();
+            if target.resolved().is_some_and(|scope| scope != &self.scope) {
+                return Err(tracedecay_application::InvocationError::Denied);
+            }
+            let target = match target {
+                tracedecay_application::InvocationTarget::CurrentProject => {
+                    tracedecay_application::InvocationTarget::Resolved(self.scope.clone())
+                }
+                target => target,
+            };
+            match request {
+                tracedecay_application::ApplicationRequest::Surface { binding, payload } => {
+                    let (_binding_id, surface, operation, result_contract, _page) =
+                        binding.into_parts();
+                    let operation =
+                        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(
+                            operation.as_str(),
+                        )
+                        .ok_or(tracedecay_application::InvocationError::InvalidRequest)?;
+                    let typed = crate::application_surface::parse_application_surface_request(
+                        operation, payload,
+                    )
+                    .map_err(|_| tracedecay_application::InvocationError::InvalidRequest)?;
+                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let cancellation_context = cancellation.context();
+                    let scope = match target {
+                        tracedecay_application::InvocationTarget::CurrentProject => None,
+                        tracedecay_application::InvocationTarget::Resolved(scope) => Some(scope),
+                    };
+                    let policy = if operation
+                        == crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                    {
+                        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect
+                    } else {
+                        crate::daemon_client::InvocationCancellationPolicy::ReadOnly
+                    };
+                    let request = match (operation, typed) {
+                        (
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
+                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                                request,
+                            ),
+                        )
+                        | (
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                                request,
+                            ),
+                        ) => DaemonInvocationRequest::configuration(
+                            request_id.as_str(),
+                            operation,
+                            request,
+                            observed_at,
+                            deadline.clone(),
+                            cancellation_context,
+                        )
+                        .with_resolved_scope(scope),
+                        (
+                            crate::application_surface::ApplicationSurfaceOperation::FeedbackGet,
+                            crate::application_surface::ApplicationSurfaceRequest::Feedback(
+                                request,
+                            ),
+                        ) => DaemonInvocationRequest::feedback(
+                            request_id.as_str(),
+                            operation,
+                            request.request_handle,
+                            observed_at,
+                            deadline.clone(),
+                            cancellation_context,
+                        )
+                        .with_resolved_scope(scope),
+                        _ => {
+                            return Err(
+                                tracedecay_application::InvocationError::InvalidRequest,
+                            );
+                        }
+                    }
+                    .with_delivery_route(crate::daemon_client::application_delivery_route(surface));
+                    let response =
+                        <Self as crate::daemon_client::DaemonInvocationExecutor>::invoke_controlled(
+                            self,
+                            request,
+                            deadline,
+                            cancellation,
+                            policy,
+                        )
+                        .await
+                        .map_err(crate::daemon_client::map_invocation_error)?;
+                    crate::daemon_client::application_response(
+                        request_id,
+                        result_contract,
+                        response.outcome,
+                    )
+                }
+                tracedecay_application::ApplicationRequest::FeedbackObservation {
+                    configuration_digest,
+                    observed_at,
+                    event,
+                } => {
+                    let event = serde_json::from_value(event)
+                        .map_err(|_| tracedecay_application::InvocationError::InvalidRequest)?;
+                    let response = self
+                        .invoke_once(DaemonInvocationRequest::feedback_observation(
+                            request_id.as_str(),
+                            configuration_digest,
+                            observed_at,
+                            event,
+                        ))
+                        .await;
+                    if matches!(
+                        response.outcome,
+                        DaemonInvocationOutcome::ObservationAccepted
+                    ) {
+                        Ok(tracedecay_application::ApplicationResponse::ObservationAccepted)
+                    } else {
+                        Err(tracedecay_application::InvocationError::Unavailable)
+                    }
+                }
+                tracedecay_application::ApplicationRequest::OperationEvents {
+                    operation_id,
+                    max_events,
+                    after_sequence,
+                } => {
+                    let operation_id =
+                        crate::application::operation_stream::OperationId::from_request(
+                            operation_id.clone(),
+                        );
+                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let authority = self.invocation.service.operation_events();
+                    let admitted = authority
+                        .resolve_invocation_context(
+                            &operation_id,
+                            &target,
+                            request_id,
+                            deadline,
+                            cancellation.context(),
+                            observed_at,
+                            None,
+                        )
+                        .await
+                        .map_err(map_operation_event_invocation_error)?;
+                    let requested_next_sequence =
+                        after_sequence.map_or(0, |sequence| sequence.saturating_add(1));
+                    let subscription = authority
+                        .subscribe(
+                            &operation_id,
+                            &admitted,
+                            observed_at,
+                            requested_next_sequence,
+                            None,
+                        )
+                        .await
+                        .map_err(map_operation_event_invocation_error)?;
+                    let (_correlation_id, frontier, mut stream) = subscription.into_sse_parts();
+                    let mut events = Vec::with_capacity(max_events as usize);
+                    let mut terminated = false;
+                    for _ in 0..max_events {
+                        let Ok(Some(event)) =
+                            timeout(Duration::from_millis(1), stream.next()).await
+                        else {
+                            break;
+                        };
+                        terminated = matches!(
+                            &event.kind,
+                            tracedecay_application::StreamEventKind::Terminal(_)
+                        );
+                        let kind = match event.kind {
+                            tracedecay_application::StreamEventKind::Item(item) => {
+                                tracedecay_application::StreamEventKind::Item(
+                                    serde_json::to_value(item).map_err(|_| {
+                                        tracedecay_application::InvocationError::Unavailable
+                                    })?,
+                                )
+                            }
+                            tracedecay_application::StreamEventKind::Progress {
+                                completed,
+                                total,
+                            } => tracedecay_application::StreamEventKind::Progress {
+                                completed,
+                                total,
+                            },
+                            tracedecay_application::StreamEventKind::Gap(gap) => {
+                                tracedecay_application::StreamEventKind::Gap(gap)
+                            }
+                            tracedecay_application::StreamEventKind::Terminal(terminal) => {
+                                tracedecay_application::StreamEventKind::Terminal(terminal)
+                            }
+                        };
+                        events.push(tracedecay_application::StreamEvent {
+                            sequence: event.sequence,
+                            kind,
+                        });
+                        if terminated {
+                            break;
+                        }
+                    }
+                    let next_sequence = (!terminated).then_some(frontier.next_sequence);
+                    Ok(tracedecay_application::ApplicationResponse::Stream(
+                        tracedecay_application::ApplicationStreamResponse {
+                            stream: tracedecay_application::ApplicationStream {
+                                operation_id: operation_id.request_id().clone(),
+                                events,
+                                frontier,
+                                next_sequence,
+                                terminated,
+                            },
+                        },
+                    ))
+                }
+                tracedecay_application::ApplicationRequest::OperationCancel { operation_id } => {
+                    let operation_id =
+                        crate::application::operation_stream::OperationId::from_request(
+                            operation_id.clone(),
+                        );
+                    let observed_at = crate::daemon_client::invocation_now_micros();
+                    let authority = self.invocation.service.operation_events();
+                    let admitted = authority
+                        .resolve_invocation_context(
+                            &operation_id,
+                            &target,
+                            request_id,
+                            deadline,
+                            cancellation.context(),
+                            observed_at,
+                            None,
+                        )
+                        .await
+                        .map_err(map_operation_event_invocation_error)?;
+                    let cancelled = match authority
+                        .cancel(&operation_id, &admitted, observed_at)
+                        .await
+                        .map_err(map_operation_event_invocation_error)?
+                    {
+                        crate::application::operation_stream::OperationCancelOutcome::Requested
+                        | crate::application::operation_stream::OperationCancelOutcome::AlreadyRequested => true,
+                        crate::application::operation_stream::OperationCancelOutcome::AlreadyTerminal => false,
+                    };
+                    Ok(tracedecay_application::ApplicationResponse::Cancellation(
+                        tracedecay_application::InvocationCancellation {
+                            operation_id: operation_id.request_id().clone(),
+                            cancelled,
+                        },
+                    ))
+                }
+            }
+        })
+    }
+}
+
+fn map_operation_event_invocation_error(
+    error: crate::application::operation_stream::OperationEventError,
+) -> tracedecay_application::InvocationError {
+    match error {
+        crate::application::operation_stream::OperationEventError::NotFoundOrNotAuthorized => {
+            tracedecay_application::InvocationError::Denied
+        }
+        crate::application::operation_stream::OperationEventError::RequestNotAdmitted => {
+            tracedecay_application::InvocationError::DeadlineExceeded
+        }
+        crate::application::operation_stream::OperationEventError::InvalidFrontier
+        | crate::application::operation_stream::OperationEventError::FrontierExpired
+        | crate::application::operation_stream::OperationEventError::ResumeExpired => {
+            tracedecay_application::InvocationError::Conflict
+        }
+        crate::application::operation_stream::OperationEventError::InvalidConfiguration
+        | crate::application::operation_stream::OperationEventError::InvalidContext(_)
+        | crate::application::operation_stream::OperationEventError::AlreadyBound
+        | crate::application::operation_stream::OperationEventError::Saturated
+        | crate::application::operation_stream::OperationEventError::ResumeUnavailable
+        | crate::application::operation_stream::OperationEventError::InvalidProgress
+        | crate::application::operation_stream::OperationEventError::TerminalAlreadyPublished
+        | crate::application::operation_stream::OperationEventError::InvalidTerminal(_)
+        | crate::application::operation_stream::OperationEventError::InvalidTestRunEvent => {
+            tracedecay_application::InvocationError::Unavailable
+        }
     }
 }
 
@@ -4932,6 +5227,7 @@ async fn production_project_server(
             invocation.clone(),
             store_administration.clone(),
             canonical_project_path.to_path_buf(),
+            code_search_scope,
         ));
     let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
     let retained_graph_resolver = retained_project_graph_resolver(store_administration.clone());
