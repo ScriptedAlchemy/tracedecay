@@ -6,13 +6,12 @@ use tracedecay_store::{
     ObservationProjection, ProjectedObservation, ProjectionPersistOutcome,
     ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, SessionMessageRecord,
-    SessionRecord, WorkflowFactProjection,
+    SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
 };
 
 use super::super::session_temporal::record_canonical_observation_effect;
 use super::apply::{
     apply_effect, derive_projection_for_rebuild, derive_projection_with_alias, verify_effect,
-    workflow_semantic_kind,
 };
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,

@@ -4,6 +4,7 @@
 //! Connection ownership, transaction boundaries, recovery policy, and storage
 //! resolution remain with the application crate's authoritative store adapter.
 
+mod canonical_projection;
 pub mod configuration;
 pub mod diagnostics;
 pub mod evidence_assembly;
@@ -19,6 +20,9 @@ pub mod runtime;
 pub mod session;
 pub mod transcript;
 
+pub use canonical_projection::{
+    canonical_fact_text, derive_canonical_projection, workflow_semantic_kind,
+};
 pub use configuration::{
     ConfigurationCommitV1, ConfigurationMutationReceiptV1, ConfigurationRevisionRecordV1,
     ConfigurationRevisionStore, ConfigurationStoreError, ConfigurationStoreResult,
