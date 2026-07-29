@@ -353,4 +353,21 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn application_catalog_and_handlers_reach_every_scout_operation() {
+        let contributions = crate::application_catalog_contributions().unwrap();
+        let handlers = crate::application_handler_descriptors().unwrap();
+        handlers.validate_against(&contributions).unwrap();
+
+        for spec in CONTEXT_SCOUT_SPECS {
+            let operation = context_scout_surface_operation(spec.operation)
+                .unwrap()
+                .expect("Scout operation is application-reachable");
+            let handler = handlers
+                .get(operation.use_case_id())
+                .expect("Scout operation has one canonical handler");
+            assert_eq!(handler.operation(), &operation);
+        }
+    }
 }
