@@ -331,8 +331,19 @@ impl<'a> DiagnosticsQuery<'a> {
         request: &DiagnosticPageRequest,
     ) -> Result<DiagnosticPage, DiagnosticQueryError> {
         let operation = "diagnostics query current_by_generation";
-        match self.store.current_records(generation).await {
-            Ok(records) => Ok(paginate_sorted(records, request)),
+        match self
+            .store
+            .current_records_page(
+                generation,
+                None,
+                request.cursor.as_ref().map(DiagnosticQueryCursor::anchor),
+                normalize_limit(request.limit),
+            )
+            .await
+        {
+            Ok((records, total, has_more)) => {
+                Ok(page_from_bounded_records(records, total, has_more))
+            }
             Err(error) => Ok(DiagnosticPage::unavailable(operation, error)),
         }
     }
@@ -348,10 +359,17 @@ impl<'a> DiagnosticsQuery<'a> {
         let operation = "diagnostics query current_by_file";
         match self
             .store
-            .current_records_for_file(generation, file_occurrence_id)
+            .current_records_page(
+                generation,
+                Some(file_occurrence_id),
+                request.cursor.as_ref().map(DiagnosticQueryCursor::anchor),
+                normalize_limit(request.limit),
+            )
             .await
         {
-            Ok(records) => Ok(paginate_sorted(records, request)),
+            Ok((records, total, has_more)) => {
+                Ok(page_from_bounded_records(records, total, has_more))
+            }
             Err(error) => Ok(DiagnosticPage::unavailable(operation, error)),
         }
     }
@@ -802,6 +820,30 @@ fn paginate_sorted(
         records,
         total,
         coverage,
+        next_cursor,
+    }
+}
+
+fn page_from_bounded_records(
+    records: Vec<GenerationDiagnosticV1>,
+    total: usize,
+    has_more: bool,
+) -> DiagnosticPage {
+    let next_cursor = has_more
+        .then(|| {
+            records
+                .last()
+                .map(|record| DiagnosticQueryCursor::after_anchor(&record.diagnostic_anchor))
+        })
+        .flatten();
+    DiagnosticPage {
+        records,
+        total,
+        coverage: if has_more {
+            DiagnosticQueryCoverage::Truncated
+        } else {
+            DiagnosticQueryCoverage::Complete
+        },
         next_cursor,
     }
 }
