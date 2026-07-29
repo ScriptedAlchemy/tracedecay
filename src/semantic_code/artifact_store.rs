@@ -550,7 +550,9 @@ struct RecoveryJournalV1 {
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum RecoveryActionV1 {
     Install {
-        record: ArtifactInventoryRecordV1,
+        // Boxed to keep this variant from dominating the enum's size; `Box<T>`
+        // is serde-transparent, so the on-disk journal encoding is unchanged.
+        record: Box<ArtifactInventoryRecordV1>,
         staging_id: String,
     },
     Gc {
@@ -1101,7 +1103,7 @@ impl ModelArtifactStore {
         self.write_recovery_locked(&RecoveryJournalV1 {
             schema: RECOVERY_SCHEMA_V1.to_string(),
             action: RecoveryActionV1::Install {
-                record: record.clone(),
+                record: Box::new(record.clone()),
                 staging_id: session.staging_id.clone(),
             },
         })?;
@@ -1790,7 +1792,7 @@ impl ModelArtifactStore {
             }
             match journal.action {
                 RecoveryActionV1::Install { record, staging_id } => {
-                    self.recover_install_locked(record, &staging_id)?;
+                    self.recover_install_locked(*record, &staging_id)?;
                 }
                 RecoveryActionV1::Gc {
                     recorded_at_unix,
@@ -2184,7 +2186,7 @@ fn stream_local_member(
         return Err(ArtifactImportErrorV1::LengthMismatch);
     }
     let mut file = File::open(path).map_err(|_| ArtifactImportErrorV1::SourceInterrupted)?;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
