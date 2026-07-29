@@ -86,10 +86,7 @@ impl WorkflowIndexUnavailableReason {
     /// anything. Admission reinstalls the workflow DDL on the next mount, so an
     /// absent index resolves on its own; an unretained authority does not.
     pub(crate) const fn is_retryable(self) -> bool {
-        match self {
-            Self::AuthorityNotRetained => false,
-            Self::WorkflowIndexNotBuilt => true,
-        }
+        matches!(self, Self::WorkflowIndexNotBuilt)
     }
 
     pub(crate) const fn message(self) -> &'static str {
