@@ -249,18 +249,31 @@ fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
 
     let health = request(&store.binding, OperationPriorityV1::Health);
     let health_probe = Probe::for_request(&health);
-    let outcome = pool
-        .execute(&health, &health_probe, Duration::from_millis(20))
-        .unwrap();
-    assert!(healthy(&outcome));
+    {
+        let mut lease = pool
+            .acquire(&health, &health_probe, Duration::from_millis(20))
+            .unwrap();
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        assert!(matches!(
+            snapshot.execute(health.clone(), &health_probe).unwrap().value(),
+            Some(RuntimeReadResultV1::GraphQuickCheck { .. })
+        ));
+    }
 
     pressure_tx
         .send(crate::CheckpointPressure::Open)
         .expect("reader holds pressure receiver");
-    let outcome = pool
-        .execute(&general, &general_probe, Duration::from_millis(20))
+    let mut lease = pool
+        .acquire(&general, &general_probe, Duration::from_millis(20))
         .unwrap();
-    assert!(healthy(&outcome));
+    let mut snapshot = lease.begin_snapshot().unwrap();
+    assert!(matches!(
+        snapshot
+            .execute(general.clone(), &general_probe)
+            .unwrap()
+            .value(),
+        Some(RuntimeReadResultV1::GraphQuickCheck { .. })
+    ));
 }
 
 #[test]
