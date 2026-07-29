@@ -25,7 +25,9 @@ const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "serde",
     "serde_json",
     "sha2",
+    "static_assertions",
     "thiserror",
+    "tracedecay-code-index",
     "tracedecay-domain",
     "tracedecay-policy",
     "tracedecay-store",
@@ -354,6 +356,10 @@ fn validate_contract_package_dependencies(
         let alias_matches_package = allowed_packages.iter().any(|allowed| {
             normalize_identifier(allowed) == normalized_alias
                 && normalize_identifier(allowed) == normalize_identifier(&dependency.name)
+        }) || dependency.rename.as_deref().is_some_and(|alias| {
+            ALLOWED_ROOT_PACKAGE_ALIASES.iter().any(|(allowed_alias, package)| {
+                alias == *allowed_alias && dependency.name == *package
+            })
         });
         if !package_allowed || !alias_matches_package {
             violations.insert(format!(

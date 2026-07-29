@@ -100,7 +100,7 @@ mod path_scope;
 mod path_tree;
 pub mod privacy;
 pub mod project_registry;
-pub mod query;
+pub use tracedecay_query as query;
 pub mod redundancy;
 mod repository_provenance;
 pub mod request_identity;

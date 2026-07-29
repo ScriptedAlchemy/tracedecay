@@ -184,6 +184,41 @@ fn root_uses_code_index_facades_instead_of_inline_sources() {
 }
 
 #[test]
+fn query_dependencies_are_explicit_and_root_free() {
+    let metadata = cargo_metadata();
+    let direct = direct_dependencies(&metadata, "tracedecay-query");
+    let expected = [
+        "hex",
+        "hmac",
+        "serde",
+        "serde_json",
+        "sha2",
+        "static_assertions",
+        "thiserror",
+        "tracedecay-code-index",
+        "tracedecay-domain",
+        "tracedecay-policy",
+        "zeroize",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(direct, expected);
+    assert!(!direct.contains("tracedecay"));
+}
+
+#[test]
+fn root_uses_query_facade_instead_of_inline_sources() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("src/query").exists(),
+        "root must not retain extracted query source"
+    );
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).expect("read root lib facade");
+    assert!(lib.contains("pub use tracedecay_query as query;"));
+}
+
+#[test]
 fn domain_dependencies_are_exactly_the_pure_value_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-domain");

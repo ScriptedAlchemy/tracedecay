@@ -1,9 +1,9 @@
 #![allow(clippy::collapsible_if)] // test scaffolding
 //! Query kernel source guards.
 //!
-//! Validates that `src/query` stays pure: only allowlisted dependency roots,
+//! Validates that `crates/tracedecay-query/src` stays pure: only allowlisted dependency roots,
 //! macros, attributes, and derives; conventional module layout reachable from
-//! `src/query/mod.rs`; and no generated or out-of-repository sources.
+//! `crates/tracedecay-query/src/lib.rs`; and no generated or out-of-repository sources.
 
 use crate::manifest::{
     cargo_source_layout, filesystem_rust_sources, git_tracked_paths,
@@ -30,17 +30,12 @@ const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "static_assertions",
     "std",
     "thiserror",
+    "tracedecay_code_index",
     "tracedecay_domain",
     "tracedecay_policy",
     "tracedecay_store",
     "zeroize",
 ];
-const QUERY_ALLOWED_CRATE_PATHS: &[&[&str]] = &[&[
-    "crate",
-    "code_index",
-    "chunks",
-    "ExtractionAdmittedCodeSearchChunkV1",
-]];
 /// Pure compile-time macros re-exported from allowlisted crates. Unlike the
 /// built-in macros in [`QUERY_ALLOWED_MACROS`], these must be imported before
 /// use, so the import-shadowing guard deliberately does not flag them.
@@ -233,15 +228,6 @@ fn validate_graph_query_path(
     let Some(root) = path.first() else {
         return true;
     };
-    if QUERY_ALLOWED_CRATE_PATHS.iter().any(|allowed| {
-        path.len() >= allowed.len()
-            && path
-                .iter()
-                .zip(allowed.iter())
-                .all(|(actual, expected)| actual == expected)
-    }) {
-        return true;
-    }
     let normalized = normalize_identifier(root);
     if QUERY_ALLOWED_ROOTS.contains(&normalized.as_str())
         || QUERY_ALLOWED_PRELUDE_PATH_ROOTS.contains(&root.as_str())
@@ -341,9 +327,7 @@ fn local_path_base<'a>(
     graph: &QueryModuleGraph,
 ) -> Option<(Vec<String>, &'a [String])> {
     match path.first().map(String::as_str) {
-        Some("crate") if path.get(1).is_some_and(|segment| segment == "query") => {
-            Some((Vec::new(), &path[2..]))
-        }
+        Some("crate") => Some((Vec::new(), &path[1..])),
         Some("self") => Some((current_module.to_vec(), &path[1..])),
         Some("super") => {
             let ascents = path
@@ -387,9 +371,9 @@ fn graph_module_symbols(graph: &QueryModuleGraph, module: &[String]) -> BTreeSet
 
 fn display_query_module(module: &[String]) -> String {
     if module.is_empty() {
-        "crate::query".to_string()
+        "crate".to_string()
     } else {
-        format!("crate::query::{}", module.join("::"))
+        format!("crate::{}", module.join("::"))
     }
 }
 
@@ -731,9 +715,13 @@ fn validate_query_path(
     };
     let normalized_root = normalize_identifier(root);
     if normalized_root == "crate" {
-        if path.get(1).map(|segment| normalize_identifier(segment)) != Some("query".to_string()) {
+        if !path
+            .get(1)
+            .map(|segment| normalize_identifier(segment))
+            .is_some_and(|segment| matches!(segment.as_str(), "retrieval" | "temporal"))
+        {
             violations.insert(format!(
-                "crate path must remain under crate::query: {}",
+                "crate path escapes query kernel: {}",
                 path.join("::")
             ));
         }
@@ -745,7 +733,10 @@ fn validate_query_path(
             .take_while(|segment| normalize_identifier(segment) == "super")
             .count();
         if ascents > module_depth {
-            violations.insert(format!("super path escapes src/query: {}", path.join("::")));
+            violations.insert(format!(
+                "super path escapes crates/tracedecay-query/src: {}",
+                path.join("::")
+            ));
         }
         return;
     }
@@ -1092,7 +1083,9 @@ fn is_path_separator(tokens: &[Token], index: usize) -> bool {
 }
 
 pub(crate) fn query_kernel_sources(repository: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    let source_roots = [PathBuf::from("src/query")].into_iter().collect();
+    let source_roots = [PathBuf::from("crates/tracedecay-query/src")]
+        .into_iter()
+        .collect();
     let mut sources = filesystem_rust_sources(repository, &source_roots)?;
     if let Ok(tracked) = git_tracked_paths(repository) {
         let physical = inspect_physical_manifest_paths(repository, &tracked)?;
@@ -1107,7 +1100,7 @@ pub(crate) fn query_kernel_sources(repository: &Path) -> Result<BTreeSet<PathBuf
             physical
                 .symlinked_rust_sources
                 .into_iter()
-                .filter(|path| path.starts_with("src/query")),
+                .filter(|path| path.starts_with("crates/tracedecay-query/src")),
         );
     }
     Ok(sources)
@@ -1153,17 +1146,18 @@ fn build_query_module_graph(
     repository: &Path,
     sources: &BTreeSet<PathBuf>,
 ) -> Result<QueryModuleGraph, String> {
-    let query_root = repository.join("src/query");
+    let query_root = repository.join("crates/tracedecay-query/src");
     fs::canonicalize(&query_root)
         .map_err(|error| format!("cannot canonicalize {}: {error}", query_root.display()))?;
     let canonical_repository = fs::canonicalize(repository)
         .map_err(|error| format!("cannot canonicalize {}: {error}", repository.display()))?;
-    let root = PathBuf::from("src/query/mod.rs");
+    let root = PathBuf::from("crates/tracedecay-query/src/lib.rs");
     let mut graph = QueryModuleGraph::default();
     if !sources.contains(&root) {
-        graph
-            .violations
-            .insert("src/query/mod.rs is required as the single query module root".to_string());
+        graph.violations.insert(
+            "crates/tracedecay-query/src/lib.rs is required as the single query module root"
+                .to_string(),
+        );
         return Ok(graph);
     }
 
@@ -1171,7 +1165,7 @@ fn build_query_module_graph(
     let mut scanned = BTreeSet::new();
     let mut pending = VecDeque::from([QueryScanContext {
         path: root,
-        module_dir: PathBuf::from("src/query"),
+        module_dir: PathBuf::from("crates/tracedecay-query/src"),
         module_path: Vec::new(),
     }]);
 
@@ -1242,7 +1236,7 @@ fn build_query_module_graph(
                     ..
                 } => {
                     graph.violations.insert(format!(
-                        "{}: #[path = {path:?}] is forbidden; query modules must follow the src/query file convention",
+                        "{}: #[path = {path:?}] is forbidden; query modules must follow the crates/tracedecay-query/src file convention",
                         context.path.display()
                     ));
                 }
@@ -1309,7 +1303,7 @@ fn build_query_module_graph(
 
     for unreachable in sources.difference(&reachable) {
         graph.violations.insert(format!(
-            "{} is not reachable from src/query/mod.rs through conventional mod declarations",
+            "{} is not reachable from crates/tracedecay-query/src/lib.rs through conventional mod declarations",
             unreachable.display()
         ));
     }
@@ -1479,7 +1473,7 @@ fn query_source_guard_allows_comments_strings_and_query_contracts() {
         use {::serde::Serialize, std::collections::BTreeSet};
         use tracedecay_domain::session::SessionId;
         use tracedecay_store::memory::StorePort;
-        use crate::query::temporal::ports::TemporalReadPort;
+        use crate::temporal::ports::TemporalReadPort;
 
         #[derive(Clone, Debug, Serialize)]
         struct Contract;
@@ -1531,9 +1525,9 @@ fn query_source_guard_allows_proven_local_macros_and_exact_serde_forms() {
 fn query_kernel_guard_rejects_generated_source_and_unresolved_modules() {
     let temporary = tempfile::tempdir().expect("create query source fixture");
     let repository = temporary.path();
-    fs::create_dir_all(repository.join("src/query")).unwrap();
+    fs::create_dir_all(repository.join("crates/tracedecay-query/src")).unwrap();
     fs::write(
-        repository.join("src/query/mod.rs"),
+        repository.join("crates/tracedecay-query/src/lib.rs"),
         r#"
         #[path = "../outside.rs"]
         mod path_dependency;
@@ -1561,15 +1555,19 @@ fn query_kernel_guard_rejects_generated_source_and_unresolved_modules() {
 fn query_kernel_guard_accepts_only_conventional_reachable_modules() {
     let temporary = tempfile::tempdir().expect("create query module fixture");
     let repository = temporary.path();
-    fs::create_dir_all(repository.join("src/query/temporal")).unwrap();
-    fs::write(repository.join("src/query/mod.rs"), "pub mod temporal;\n").unwrap();
+    fs::create_dir_all(repository.join("crates/tracedecay-query/src/temporal")).unwrap();
     fs::write(
-        repository.join("src/query/temporal/mod.rs"),
+        repository.join("crates/tracedecay-query/src/lib.rs"),
+        "pub mod temporal;\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.join("crates/tracedecay-query/src/temporal/mod.rs"),
         "mod ports;\nuse self::ports::Port;\nstruct Kernel(Port);\n",
     )
     .unwrap();
     fs::write(
-        repository.join("src/query/temporal/ports.rs"),
+        repository.join("crates/tracedecay-query/src/temporal/ports.rs"),
         "pub struct Port;\n",
     )
     .unwrap();
@@ -1628,7 +1626,7 @@ fn pr8_temporal_kernel_has_one_scope_cursor_and_payload_path() {
     let sources = query_kernel_sources(&repository).expect("resolve temporal kernel sources");
     let temporal_sources = sources
         .iter()
-        .filter(|path| path.starts_with("src/query/temporal"))
+        .filter(|path| path.starts_with("crates/tracedecay-query/src/temporal"))
         .collect::<Vec<_>>();
     assert!(
         !temporal_sources.is_empty(),
@@ -1637,7 +1635,8 @@ fn pr8_temporal_kernel_has_one_scope_cursor_and_payload_path() {
     assert_eq!(
         temporal_sources
             .iter()
-            .filter(|path| path.as_path() == Path::new("src/query/temporal/cursor.rs"))
+            .filter(|path| path.as_path()
+                == Path::new("crates/tracedecay-query/src/temporal/cursor.rs"))
             .count(),
         1,
         "PR8 must retain exactly one canonical cursor module"
