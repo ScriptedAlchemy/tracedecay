@@ -381,6 +381,7 @@ pub struct MigrationSqlHandle {
     writer: Option<tokio_mpsc::Sender<WriterCommand>>,
     query: Arc<MigrationQuery>,
     snapshot: Arc<MigrationSnapshotFactory>,
+    health_snapshot: Arc<MigrationSnapshotFactory>,
     store_size_telemetry: Arc<StoreSizeTelemetryRead>,
     table_size_telemetry: Arc<TableSizeTelemetryRead>,
     last_insert_rowid: Arc<AtomicI64>,
@@ -433,6 +434,7 @@ impl MigrationSqlHandle {
     ) -> Self {
         let query_readers = readers.downgrade();
         let snapshot_readers = readers.downgrade();
+        let health_snapshot_readers = readers.downgrade();
         let store_size_readers = readers.downgrade();
         let table_size_readers = readers.downgrade();
         Self {
@@ -458,6 +460,16 @@ impl MigrationSqlHandle {
                         )
                     })?
                     .begin_migration_snapshot(max_wait)
+            }),
+            health_snapshot: Arc::new(move |max_wait| {
+                health_snapshot_readers
+                    .upgrade()
+                    .ok_or_else(|| {
+                        MigrationSqlError::ReaderUnavailable(
+                            "migration SQL reader pool is closed".to_owned(),
+                        )
+                    })?
+                    .begin_migration_health_snapshot(max_wait)
             }),
             store_size_telemetry: Arc::new(move |max_wait, interrupted| {
                 store_size_readers
@@ -495,6 +507,7 @@ impl MigrationSqlHandle {
             writer: None,
             query: Arc::clone(&self.query),
             snapshot: Arc::clone(&self.snapshot),
+            health_snapshot: Arc::clone(&self.health_snapshot),
             store_size_telemetry: Arc::clone(&self.store_size_telemetry),
             table_size_telemetry: Arc::clone(&self.table_size_telemetry),
             last_insert_rowid: Arc::clone(&self.last_insert_rowid),
@@ -623,6 +636,13 @@ impl MigrationSqlHandle {
         max_wait: Duration,
     ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
         (self.snapshot)(max_wait)
+    }
+
+    pub fn begin_health_read_snapshot(
+        &self,
+        max_wait: Duration,
+    ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
+        (self.health_snapshot)(max_wait)
     }
 
     pub fn begin_immediate(&self) -> Result<MigrationSqlTransaction, MigrationSqlError> {
@@ -3541,5 +3561,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(current.rows[0].values, vec![MigrationSqlValue::Integer(2)]);
+    }
+
+    #[test]
+    fn health_snapshot_retires_the_reserved_reader() {
+        let fixture = fixture('a', 'a');
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+
+        let snapshot = channel
+            .begin_health_read_snapshot(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(fixture.readers.snapshot().leased_health, 1);
+        drop(snapshot);
+
+        let pool = fixture.readers.snapshot();
+        assert_eq!(pool.leased_health, 0);
+        assert_eq!(pool.health_workers, 0);
     }
 }
