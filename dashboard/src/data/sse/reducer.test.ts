@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { createSseReducer } from "./reducer.ts";
-import type { SseEventEnvelope } from "./types.ts";
+import {
+  MAX_OBSERVED_IDENTITIES,
+  MAX_QUEUED_EVENTS,
+  type SseEventEnvelope,
+} from "./types.ts";
 
 interface Body {
   n: number;
@@ -168,12 +172,13 @@ describe("SSE reducer — overflow => stale + single invalidation", () => {
     expect(second.events).toHaveLength(0);
   });
 
-  it("clears stale after reset (post-refetch reseed)", () => {
+  it("clears stale when the canonical refresh commits", () => {
     const r = createSseReducer<Body>({ maxEvents: 1, sizeOf: () => 1 });
     r.ingest(ev({ event_revision: 1, event_id: "e1" }));
     r.ingest(ev({ event_revision: 2, event_id: "e2" }));
     expect(r.takeBatch().stale).toBe(true);
-    r.reset();
+    const token = r.beginReseed();
+    expect(r.commitReseed(token)).toEqual({ status: "committed", epoch: 1 });
     expect(r.stats().stale).toBe(false);
     // Fresh baseline after the canonical refetch is accepted.
     expect(r.ingest(ev({ generation: 2, event_revision: 101, event_id: "e101" }))).toBe(true);
@@ -182,13 +187,13 @@ describe("SSE reducer — overflow => stale + single invalidation", () => {
 });
 
 describe("SSE reducer — receipt retention", () => {
-  it("retains a receipt and keeps it across reset (survives reload/restart)", () => {
+  it("retains a receipt and keeps it across a reseed (survives reload/restart)", () => {
     const r = createSseReducer<Body>();
     r.ingest(ev({ event_revision: 1, event_id: "r1", is_receipt: true, n: 7 }));
     expect(r.getRetainedReceipts().map((e) => e.event_id)).toEqual(["r1"]);
     r.takeBatch();
-    // Reset (post-refetch reseed) must preserve retained receipts.
-    r.reset();
+    // A committed canonical reseed must preserve retained receipts.
+    r.commitReseed(r.beginReseed());
     expect(r.getRetainedReceipts().map((e) => e.event_id)).toEqual(["r1"]);
   });
 
@@ -212,6 +217,109 @@ describe("SSE reducer — receipt retention", () => {
   });
 });
 
+describe("SSE reducer — canonical refresh transaction", () => {
+  it("detects a gap that spans the reseed boundary", () => {
+    const r = createSseReducer<Body>();
+    r.ingest(ev({ event_revision: 1, event_id: "e1" }));
+    r.ingest(ev({ event_revision: 2, event_id: "e2" }));
+    expect(r.takeBatch().refetch).toBe(false);
+    // A canonical refresh commits mid-stream...
+    expect(r.commitReseed(r.beginReseed()).status).toBe("committed");
+    // ...and the next event skips revisions. With the watermark cleared there
+    // would be nothing left to compare against, so the gap would go unseen and
+    // the client would believe it had the whole sequence.
+    expect(r.ingest(ev({ event_revision: 9, event_id: "e9" }))).toBe(true);
+    const batch = r.takeBatch();
+    expect(batch.refetch).toBe(true);
+    expect(batch.events).toHaveLength(1);
+  });
+
+  it("still dedupes an event redelivered after a commit", () => {
+    const r = createSseReducer<Body>();
+    expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(true);
+    expect(r.ingest(ev({ event_revision: 2, event_id: "e2" }))).toBe(true);
+    r.takeBatch();
+    expect(r.commitReseed(r.beginReseed()).status).toBe("committed");
+    // The same envelope arrives again, as a reconnect replays it. Clearing the
+    // dedupe identities on reseed let an applied event be applied twice.
+    expect(r.ingest(ev({ event_revision: 2, event_id: "e2" }))).toBe(false);
+    const batch = r.takeBatch();
+    expect(batch.events).toHaveLength(0);
+    expect(batch.refetch).toBe(false);
+    expect(r.stats().observedEvents).toBe(2);
+  });
+
+  it("clears nothing when a signal supersedes the refresh in flight", () => {
+    const r = createSseReducer<Body>({ maxEvents: 2, sizeOf: () => 1 });
+    r.ingest(ev({ event_revision: 1, event_id: "e1" }));
+    r.ingest(ev({ event_revision: 2, event_id: "e2" }));
+    r.ingest(ev({ event_revision: 3, event_id: "e3" })); // overflow -> stale
+    expect(r.takeBatch().stale).toBe(true);
+
+    const token = r.beginReseed();
+    // A reconnect lands after the refresh was issued, so the data it fetched
+    // cannot account for it.
+    r.ingest(ev({ generation: 2, event_revision: 1, event_id: "g2-e1" }));
+
+    expect(r.commitReseed(token)).toEqual({
+      status: "superseded",
+      epoch: 1,
+      outstandingEpoch: 2,
+    });
+    const superseded = r.stats();
+    expect(superseded.stale).toBe(true);
+    expect(superseded.canonicalRefreshOutstanding).toBe(true);
+    expect(superseded.reseed).toEqual({ phase: "superseded", epoch: 1, outstandingEpoch: 2 });
+
+    // Exactly one follow-up is owed, and it is the one that clears staleness.
+    expect(r.commitReseed(r.beginReseed())).toEqual({ status: "committed", epoch: 2 });
+    expect(r.stats().stale).toBe(false);
+    expect(r.stats().canonicalRefreshOutstanding).toBe(false);
+  });
+
+  it("keeps a failed refresh distinct from a successful one", () => {
+    const r = createSseReducer<Body>({ maxEvents: 1, sizeOf: () => 1 });
+    r.ingest(ev({ event_revision: 1, event_id: "e1" }));
+    r.ingest(ev({ event_revision: 2, event_id: "e2" })); // overflow -> stale
+    expect(r.takeBatch().stale).toBe(true);
+
+    const token = r.beginReseed();
+    expect(r.abortReseed(token, "network error")).toEqual({
+      status: "failed",
+      epoch: 1,
+      reason: "network error",
+    });
+
+    const failed = r.stats();
+    expect(failed.stale).toBe(true);
+    expect(failed.reseed).toEqual({ phase: "failed", epoch: 1, reason: "network error" });
+    // A refresh that never happened superseded nothing.
+    expect(failed.supersededEpoch).toBe(0);
+    expect(failed.lastEventRevision).toBe(1);
+    expect(failed.refetchReason).toBe("overflow");
+    // The identical refresh is not retried on the next tick...
+    expect(failed.canonicalRefreshOutstanding).toBe(false);
+    // ...but a genuinely newer signal is a new attempt.
+    r.ingest(ev({ generation: 2, event_revision: 1, event_id: "g2-e1" }));
+    expect(r.stats().canonicalRefreshOutstanding).toBe(true);
+  });
+
+  it("ignores a token that no longer names the active transaction", () => {
+    const r = createSseReducer<Body>({ maxEvents: 1, sizeOf: () => 1 });
+    r.ingest(ev({ event_revision: 1, event_id: "e1" }));
+    r.ingest(ev({ event_revision: 2, event_id: "e2" })); // overflow -> stale
+    r.takeBatch();
+    const token = r.beginReseed();
+    expect(r.commitReseed(token).status).toBe("committed");
+
+    r.ingest(ev({ event_revision: 9, event_id: "e9" })); // gap -> a newer signal
+    // Settling the same transaction twice must not claim to have covered it.
+    expect(r.commitReseed(token)).toEqual({ status: "stale_token", epoch: 1 });
+    expect(r.stats().canonicalRefreshOutstanding).toBe(true);
+    expect(r.stats().reseed).toEqual({ phase: "committed", epoch: 1 });
+  });
+});
+
 describe("SSE reducer — housekeeping", () => {
   it("reports pending state for the coalescing scheduler", () => {
     const r = createSseReducer<Body>();
@@ -220,5 +328,24 @@ describe("SSE reducer — housekeeping", () => {
     expect(r.hasPending()).toBe(true);
     r.takeBatch();
     expect(r.hasPending()).toBe(false);
+  });
+
+  it("bounds remembered identities without forgetting the watermark", () => {
+    const r = createSseReducer<Body>({ sizeOf: () => 1 });
+    // Past the identity cap, drained on the batch grid so the queue ceiling is
+    // never the binding constraint: only the identity set grows.
+    for (let revision = 1; revision <= MAX_OBSERVED_IDENTITIES + 1; revision += 1) {
+      r.ingest(ev({ event_revision: revision, event_id: `e${revision}` }));
+      if (revision % MAX_QUEUED_EVENTS === 0) r.takeBatch();
+    }
+    r.takeBatch();
+
+    const stats = r.stats();
+    expect(stats.observedEvents).toBe(MAX_OBSERVED_IDENTITIES + 1);
+    expect(stats.observedIdentities).toBe(MAX_OBSERVED_IDENTITIES);
+    // The evicted identity is still refused, because the per-stream watermark —
+    // which a reseed no longer clears — is the primary guard.
+    expect(r.ingest(ev({ event_revision: 1, event_id: "e1" }))).toBe(false);
+    expect(r.takeBatch().events).toHaveLength(0);
   });
 });
