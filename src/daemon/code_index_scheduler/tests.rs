@@ -2586,6 +2586,31 @@ fn threshold_expiry_without_change_skips_full_reconcile() {
     );
 }
 
+#[test]
+fn ready_query_expiry_defers_even_an_unchanged_tree() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let policy = CodeIndexHintPolicyV1 {
+        staleness_threshold: Duration::ZERO,
+    };
+    let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
+    published(scheduler.reconcile_now().expect("baseline"));
+
+    assert!(
+        scheduler
+            .latest_complete_ready_for_query()
+            .expect("ready query")
+            .is_none(),
+        "latency-sensitive admission must abstain instead of scanning the worktree"
+    );
+    assert_eq!(
+        scheduler.pending_hint_count(),
+        None,
+        "ready admission schedules an overflow reconcile in the background"
+    );
+}
+
 /// A git operation from another process (commit here stands in for pull/rebase)
 /// is detected instantly by the tier-1 .git-metadata check, without waiting for
 /// the staleness bound and without any watcher.

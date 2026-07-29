@@ -1100,16 +1100,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
         if self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold {
-            match self.worktree_stat_signature() {
-                Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
-                    self.last_reconciled_at = Instant::now();
-                    self.last_reconciled_at_micros = now_micros().0;
-                }
-                _ => {
-                    self.request_background_reconcile();
-                    return Ok(None);
-                }
-            }
+            self.request_background_reconcile();
+            return Ok(None);
         }
         Ok(self.latest_complete())
     }
