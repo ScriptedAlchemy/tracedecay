@@ -3903,10 +3903,7 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
 
     let receipt = wait_for_event_to_ready(&registry).await;
     assert!(
-        matches!(
-            receipt.outcome,
-            CodeIndexCadenceOutcomeV1::Published { .. }
-        ),
+        matches!(receipt.outcome, CodeIndexCadenceOutcomeV1::Published { .. }),
         "stale retained generation must publish a refreshed generation"
     );
     registry.shutdown().await;
