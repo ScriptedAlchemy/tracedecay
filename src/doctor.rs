@@ -202,6 +202,7 @@ fn check_host_component_receipts(
             "No installed host component receipts in {}",
             lifecycle_root.display()
         ));
+        report_native_edit_stop_conformance(dc, &report, agent_filter);
         return report;
     }
     for component in &report.components {
@@ -243,7 +244,39 @@ fn check_host_component_receipts(
             dc.info(&format!("{}: {:?}", artifact.relative_path, artifact.state));
         }
     }
+    report_native_edit_stop_conformance(dc, &report, agent_filter);
     report
+}
+
+/// Surface the checked-in native edit/stop fixture behind each packaged host so
+/// a host whose fixture proves neither boundary is visible here rather than
+/// silently relying on a documented-but-uncaptured protocol.
+fn report_native_edit_stop_conformance(
+    dc: &mut DoctorCounters,
+    report: &agents::host_bundle_v2::HostBundleDoctorReportV1,
+    agent_filter: Option<&str>,
+) {
+    use agents::host_bundle_v2::HostCapabilityStateV1 as State;
+
+    for evidence in &report.native_edit_stop_conformance {
+        if agent_filter
+            .is_some_and(|filter| agents::integration_id_for_host(evidence.host) != filter)
+        {
+            continue;
+        }
+        let label = format!(
+            "{:?} native {} fixture ({})",
+            evidence.host, evidence.evidenced_event, evidence.source_path
+        );
+        match (evidence.edit, evidence.stop) {
+            (State::Supported, State::Supported) => {
+                dc.pass(&format!("{label} proves saved-edit and stop"));
+            }
+            (edit, stop) => dc.info(&format!(
+                "{label} proves edit={edit:?}, stop={stop:?}; unproven boundaries stay unavailable"
+            )),
+        }
+    }
 }
 
 fn doctor_result(
