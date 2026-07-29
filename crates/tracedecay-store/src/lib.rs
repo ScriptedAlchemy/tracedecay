@@ -10,7 +10,12 @@ pub mod cursor_dispatch;
 pub mod diagnostics;
 pub mod evidence_assembly;
 pub mod external_source;
+// The crash harness has to hold a live daemon inside a persistence boundary, so
+// it needs the filesystem and thread authority that these contracts refuse.
+// Keeping it outside `src/` is what makes that split structural rather than a
+// guard exception, while the cfg keeps it out of every ordinary build.
 #[cfg(tracedecay_observation_fault_harness)]
+#[path = "../test-support/fault_harness.rs"]
 pub mod fault_harness;
 pub mod git_index_transactions;
 pub mod memory;

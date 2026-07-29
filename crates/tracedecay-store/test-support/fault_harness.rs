@@ -8,7 +8,9 @@
 //! lives here, where both can reach it.
 //!
 //! The whole module is compiled only under
-//! `--cfg tracedecay_observation_fault_harness`.
+//! `--cfg tracedecay_observation_fault_harness`, and it sits outside
+//! `src/` because the barrier needs the filesystem and thread authority that
+//! the store contracts in that tree are forbidden to hold.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
