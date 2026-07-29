@@ -506,10 +506,10 @@ pub fn code_index_read(signal: CodeIndexMountSignalV1) -> CodeIndexMountReadV1 {
 /// Read the real code-index mount state from the daemon scheduler registry.
 ///
 /// An unmounted worktree reports `Unmounted`; a mounted worktree whose freshness
-/// ladder yields a complete generation reports `Mounted` (the ladder already
-/// reconciled it, so it is current); a mounted worktree with no published
-/// generation is still `Indexing`. No signal is fabricated — the registry is the
-/// authority for what is mounted.
+/// ladder has already proven a complete generation current reports `Mounted`;
+/// stale, restored-unverified, or busy schedulers report `Indexing` and schedule
+/// background reconciliation. Doctor never performs code-index catch-up on its
+/// request path.
 pub(in crate::daemon) async fn code_index_read_from_registry(
     registry: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -517,7 +517,7 @@ pub(in crate::daemon) async fn code_index_read_from_registry(
     if !registry.is_worktree_mounted(project_root).await {
         return code_index_read(CodeIndexMountSignalV1::Unmounted);
     }
-    let signal = if registry.latest_complete_fresh(project_root).await.is_some() {
+    let signal = if registry.latest_complete_ready(project_root).await.is_some() {
         CodeIndexMountSignalV1::MountedFresh
     } else {
         CodeIndexMountSignalV1::Indexing
@@ -1358,7 +1358,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 .await,
             );
             let current_generation = schedulers
-                .latest_complete_fresh(&project_root)
+                .latest_complete_ready(&project_root)
                 .await
                 .map(|latest| latest.generation().manifest().generation_id.clone());
             let advisory_feedback = match feedback_runtimes.doctor_read_store(&project_root).await {
