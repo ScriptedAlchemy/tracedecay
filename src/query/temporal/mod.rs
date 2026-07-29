@@ -257,14 +257,13 @@ pub async fn execute_temporal_kernel(
     check_control(snapshot)?;
     let plan = if let Some(anchor_id) = request.direct_anchor.as_ref() {
         candidates::plan_anchor(anchor_id)
-    } else if snapshot.request().semantic_filter().goals {
-        candidates::plan_scope_candidates()
-    } else if request.query.trim().is_empty()
-        && snapshot.temporal_mode() == TemporalModeV1::Forensic
-        && matches!(
-            snapshot.request().retrieval_scope(),
-            TemporalRetrievalScope::Session(_)
-        )
+    } else if snapshot.request().semantic_filter().goals
+        || (request.query.trim().is_empty()
+            && snapshot.temporal_mode() == TemporalModeV1::Forensic
+            && matches!(
+                snapshot.request().retrieval_scope(),
+                TemporalRetrievalScope::Session(_)
+            ))
     {
         candidates::plan_scope_candidates()
     } else {

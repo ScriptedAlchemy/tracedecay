@@ -838,7 +838,6 @@ async fn issued_registered_writer_rejects_autocommit_after_scope_drop() {
         .await
         .expect_err("issued writer outlived daemon write authority");
     assert!(error.to_string().contains("active daemon"), "{error}");
-    drop(writer);
     assert!(
         !table_exists(&db, "stale_daemon_writer_must_not_persist").await,
         "rejected autocommit write persisted"

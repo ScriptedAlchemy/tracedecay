@@ -797,8 +797,10 @@ mod tests {
 
     #[test]
     fn automation_settings_payload_preserves_effective_resolution_failure() {
-        let mut global = automation_config::AutomationConfig::default();
-        global.timeout_secs = 0;
+        let global = automation_config::AutomationConfig {
+            timeout_secs: 0,
+            ..automation_config::AutomationConfig::default()
+        };
         let payload = automation_settings_payload(&global, Ok(None));
         let payload = serde_json::to_value(payload).expect("serialize automation settings");
 

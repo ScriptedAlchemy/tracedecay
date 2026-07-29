@@ -1924,7 +1924,7 @@ mod tests {
         assert!(first.poll_changes(&root, &subscriptions).is_empty());
         assert!(second.poll_changes(&root, &subscriptions).is_empty());
 
-        first.update_subscriptions(&root, &Default::default());
+        first.update_subscriptions(&root, &BTreeSet::default());
         first.update_subscriptions(&root, &subscriptions);
         assert_eq!(first.poll_changes(&root, &subscriptions).len(), 1);
         assert!(second.poll_changes(&root, &subscriptions).is_empty());

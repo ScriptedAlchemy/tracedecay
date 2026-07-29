@@ -1579,8 +1579,6 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
         )
         .await
         .unwrap();
-    drop(writer);
-
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
     assert_eq!(report["status"], "partial");
     let findings = report["findings"].as_array().unwrap();
@@ -1625,7 +1623,6 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
         )
         .await
         .unwrap();
-    drop(writer);
     db.checkpoint_result().await.unwrap();
 
     let before = std::fs::read(&db_path).unwrap();
@@ -1726,7 +1723,6 @@ async fn temporal_fts_repair_accepts_exact_blob_index_damage() {
         )
         .await
         .unwrap();
-    drop(writer);
     db.checkpoint_result().await.unwrap();
 
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
@@ -1775,7 +1771,6 @@ async fn temporal_health_detects_cross_session_ownership() {
         )
         .await
         .unwrap();
-    drop(writer);
     db.checkpoint_result().await.unwrap();
 
     let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();

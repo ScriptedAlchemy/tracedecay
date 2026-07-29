@@ -442,8 +442,6 @@ async fn seed_v1_legacy_claude_projection(
         )
         .await
         .unwrap();
-    drop(store);
-    drop(writer);
     drop(runtime);
     LegacyClaudeProjectionSeed {
         observation_id,
@@ -654,8 +652,6 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         )
         .await
         .unwrap();
-    drop(store);
-    drop(writer);
     drop(runtime);
 
     let reopened = registered_runtime(&profile_root).await.unwrap();
@@ -711,8 +707,6 @@ async fn v2_upgrade_materializes_the_complete_v3_effect_before_authority_audit()
         projected += 1;
     }
     assert_eq!(projected, 1);
-    drop(store);
-    drop(reopened_writer);
     drop(reopened);
 
     let converged = registered_runtime(&profile_root).await.unwrap();
@@ -787,8 +781,6 @@ async fn v2_upgrade_preserves_changed_generation_lineage_and_future_supersession
         )
         .await
         .unwrap();
-    drop(store);
-    drop(writer);
     drop(runtime);
 
     let reopened = registered_runtime(&profile_root).await.unwrap();
@@ -1028,8 +1020,6 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
         )
         .await
         .unwrap();
-    drop(store);
-    drop(writer);
     drop(runtime);
 
     // Every reopen must succeed (never fail closed) and the daemon-owned
@@ -1069,7 +1059,6 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
             superseded = true;
             break;
         }
-        drop(writer);
         drop(open);
     }
     assert!(
@@ -1138,8 +1127,6 @@ async fn schema_open_defers_rebuild_until_background_migration_advances_it() {
         .await
         .unwrap();
 
-    drop(store);
-    drop(writer);
     drop(runtime);
 
     let first_open = registered_runtime(&profile_root).await.unwrap();
@@ -1181,7 +1168,6 @@ async fn schema_open_defers_rebuild_until_background_migration_advances_it() {
         )
         .await
         .unwrap();
-    drop(first_writer);
     drop(first_open);
 
     let second_open = registered_runtime(&profile_root).await.unwrap();
@@ -1208,7 +1194,6 @@ async fn schema_open_defers_rebuild_until_background_migration_advances_it() {
         Some(before),
         "reopening a store must leave the rebuild for the background worker"
     );
-    drop(second_writer);
     let database = registered_database(&second_open);
     let cancelled = AtomicBool::new(true);
     assert!(
@@ -1234,7 +1219,6 @@ async fn schema_open_defers_rebuild_until_background_migration_advances_it() {
         .unwrap()
         .map(|row| (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()));
     drop(rows);
-    drop(writer);
     assert_eq!(
         cancelled_progress,
         Some(before),
@@ -1312,8 +1296,6 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
         )
         .await
         .unwrap();
-    drop(store);
-    drop(writer);
     drop(runtime);
 
     let first_open = registered_runtime(&profile_root).await.unwrap();
@@ -1348,7 +1330,6 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     assert_eq!(page.get::<i64>(3).unwrap(), 0);
     drop(page);
     drop(page_rows);
-    drop(first_writer);
     drop(first_open);
 
     let second_open = registered_runtime(&profile_root).await.unwrap();
@@ -1385,7 +1366,6 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     assert_eq!(row.get::<i64>(4).unwrap(), 0);
     drop(row);
     drop(rows);
-    drop(second_writer);
     drop(second_open);
 
     let final_open = registered_runtime(&profile_root).await.unwrap();
@@ -1422,7 +1402,6 @@ async fn v2_upgrade_runs_one_page_per_open_and_resumes() {
     assert_eq!(row.get::<i64>(4).unwrap(), 1);
     drop(row);
     drop(rows);
-    drop(final_writer);
     drop(final_open);
 
     let converged = registered_runtime(&profile_root).await.unwrap();
@@ -1494,8 +1473,6 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
         )
         .await
         .unwrap();
-    drop(store);
-    drop(writer);
     drop(runtime);
 
     let reopened = registered_runtime(&profile_root).await.unwrap();

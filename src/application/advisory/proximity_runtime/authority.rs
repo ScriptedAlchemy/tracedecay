@@ -424,8 +424,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
             }
             let path_nodes = graph_nodes
                 .get(&candidate.path)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+                .map_or(&[], Vec::as_slice);
             let blast_radius_size = if path_nodes.is_empty() {
                 partial = true;
                 1

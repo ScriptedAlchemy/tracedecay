@@ -2514,7 +2514,7 @@ mod tests {
                 tracedecay_hooks::HookHostV1::ClaudeCode,
                 now,
             ),
-            [envelope.clone()]
+            std::slice::from_ref(&envelope)
         );
         let pending_sequence = {
             let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
@@ -2554,7 +2554,7 @@ mod tests {
                 tracedecay_hooks::HookHostV1::ClaudeCode,
                 now,
             ),
-            [envelope.clone()]
+            std::slice::from_ref(&envelope)
         );
 
         assert!(complete_hook_v2_pending_work(

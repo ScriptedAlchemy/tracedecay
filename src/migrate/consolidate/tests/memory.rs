@@ -79,7 +79,7 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
     assert_eq!(row.get::<String>(0).unwrap(), "decision");
     let tags: Vec<String> = serde_json::from_str(&row.get::<String>(1).unwrap()).unwrap();
     assert_eq!(tags, vec!["source", "target"]);
-    assert_eq!(row.get::<f64>(2).unwrap(), 0.9);
+    assert!((row.get::<f64>(2).unwrap() - 0.9).abs() <= f64::EPSILON);
     assert_eq!(row.get::<i64>(3).unwrap(), 5);
     assert_eq!(row.get::<i64>(4).unwrap(), 7);
     assert_eq!(row.get::<i64>(5).unwrap(), 2);
@@ -165,7 +165,6 @@ async fn overlapping_facts_merge_tags_metadata_and_feedback_without_duplication(
             .len(),
         2
     );
-    drop(store);
     drop(memory);
     graph.close();
 }

@@ -800,7 +800,7 @@ mod tests {
         .unwrap();
         let first = fixture["response"].clone();
         let mut second = first.clone();
-        second["id"] = json!(3556767424_u64);
+        second["id"] = json!(3_556_767_424_u64);
         second["node_id"] = json!("PRRC_kwDOSzKG2s7T__bA");
         second["body"] = json!("Batch the shared source anchor lookup.");
         second["html_url"] =

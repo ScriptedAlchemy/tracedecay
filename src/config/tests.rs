@@ -2266,15 +2266,19 @@ mod retention_config_tests {
 
     #[test]
     fn retention_rejects_immediate_collection_and_invalid_compaction_ratio() {
+        let retention = RetentionConfig {
+            orphan_store_gc_days: Some(0),
+            ..RetentionConfig::default()
+        };
+        assert!(retention.validate().is_err());
+
+        let retention = RetentionConfig {
+            incident_debris_retention_days: Some(0),
+            ..RetentionConfig::default()
+        };
+        assert!(retention.validate().is_err());
+
         let mut retention = RetentionConfig::default();
-        retention.orphan_store_gc_days = Some(0);
-        assert!(retention.validate().is_err());
-
-        retention = RetentionConfig::default();
-        retention.incident_debris_retention_days = Some(0);
-        assert!(retention.validate().is_err());
-
-        retention = RetentionConfig::default();
         retention
             .compaction
             .as_mut()

@@ -2121,7 +2121,6 @@ mod tests {
             .expect("cross-session hydration");
         assert_eq!(output, canonical_payload.as_bytes());
 
-        drop(adapter);
         drop(read);
         runtime
             .move_hydration_session_outside_root_for_test(provider, "session-2")

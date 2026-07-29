@@ -1060,7 +1060,10 @@ mod tests {
         .await
         .unwrap();
         let graph = gdb
-            .initialize_project_graph_for_test(&project_root, Default::default())
+            .initialize_project_graph_for_test(
+                &project_root,
+                crate::tracedecay::TraceDecayOpenOptions::default(),
+            )
             .await
             .unwrap();
         drop(graph);

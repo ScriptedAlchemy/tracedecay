@@ -1164,7 +1164,9 @@ mod tests {
                 | StoreGrowthDimensionV1::Observed { coverage, .. } => {
                     assert!(coverage.contains("since-daemon-start"));
                 }
-                other => panic!("store {} growth should be real, got {other:?}", entry.store),
+                StoreGrowthDimensionV1::Unknown { reason } => {
+                    panic!("store {} growth should be real, got {reason}", entry.store)
+                }
             }
             assert!(!entry.roles.is_empty());
             assert!(entry.roles.contains(&entry.role));

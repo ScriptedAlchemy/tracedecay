@@ -201,7 +201,10 @@ mod tests {
         .await
         .expect("a paged scan must not exceed the runtime materialization limit");
 
-        assert!(ROWS > FULL_SCAN_PAGE_ROWS, "the fixture must span pages");
+        assert!(
+            std::hint::black_box(ROWS) > FULL_SCAN_PAGE_ROWS,
+            "the fixture must span pages"
+        );
         assert_eq!(i64::try_from(labels.len()).expect("row count"), ROWS);
         assert_eq!(labels.first().map(String::as_str), Some("row-00001"));
         assert_eq!(labels.last().map(String::as_str), Some("row-10001"));
