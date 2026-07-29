@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use super::baseline::HookTelemetryReadiness;
 use crate::sessions::claude_observation::ClaudeObservationIngestStats;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::timeutil::nearest_rank;
 
 pub(super) const PROVIDER_PARSE_SCOPE: &str = "native_provider_format_decode";
 pub(super) const PROVIDER_COMMIT_SCOPE: &str =
@@ -37,14 +36,19 @@ impl Distribution {
         Self {
             repetitions: sorted.len(),
             min_ns: sorted[0],
-            p50_ns: nearest_rank(&sorted, 50).expect("non-empty benchmark sample"),
-            p95_ns: nearest_rank(&sorted, 95).expect("non-empty benchmark sample"),
-            p99_ns: nearest_rank(&sorted, 99).expect("non-empty benchmark sample"),
+            p50_ns: percentile(&sorted, 50),
+            p95_ns: percentile(&sorted, 95),
+            p99_ns: percentile(&sorted, 99),
             max_ns: *sorted.last().expect("last benchmark sample"),
             mean_ns: mean,
             sample_stddev_ns: variance.sqrt(),
         }
     }
+}
+
+fn percentile(sorted: &[u64], percentile: usize) -> u64 {
+    let rank = (percentile * sorted.len()).div_ceil(100);
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
