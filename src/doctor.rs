@@ -1089,8 +1089,16 @@ fn authority_audit_unavailable_message(reason: &str) -> &'static str {
 
 fn check_session_temporal_health(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
     eprintln!("\n\x1b[1mSession temporal health\x1b[0m");
-    let diagnosis =
-        temporal_health::diagnose(status.and_then(|status| status.get("session_temporal_health")));
+    let recovery_pending = status.is_some_and(|status| {
+        status
+            .pointer("/doctor_report/reason")
+            .and_then(serde_json::Value::as_str)
+            == Some("doctor_report_owner_warming")
+    });
+    let diagnosis = temporal_health::diagnose_with_recovery(
+        status.and_then(|status| status.get("session_temporal_health")),
+        recovery_pending,
+    );
     for line in diagnosis.lines() {
         match line.level {
             temporal_health::TemporalHealthLineLevel::Pass => dc.pass(&line.text),

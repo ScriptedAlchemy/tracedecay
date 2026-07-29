@@ -1308,6 +1308,40 @@ fn temporal_health_diagnosis_distinguishes_non_clean_availability() {
 }
 
 #[test]
+fn cursor_key_recovery_is_advisory_only_while_the_report_owner_is_warming() {
+    let diagnosis = super::temporal_health::diagnose_with_recovery(
+        Some(&serde_json::json!({
+            "status": "complete",
+            "findings": [{
+                "kind": "cursor_key_absent",
+                "count": 8,
+            }],
+        })),
+        true,
+    );
+
+    assert_eq!(
+        diagnosis.lines()[0].level,
+        super::temporal_health::TemporalHealthLineLevel::Warn
+    );
+    assert!(
+        super::temporal_health::diagnose_with_recovery(
+            Some(&serde_json::json!({
+                "status": "complete",
+                "findings": [{
+                    "kind": "cursor_key_absent",
+                    "count": 8,
+                }],
+            })),
+            false,
+        )
+        .lines()
+        .iter()
+        .all(|line| line.level == super::temporal_health::TemporalHealthLineLevel::Fail)
+    );
+}
+
+#[test]
 fn temporal_health_diagnosis_is_bounded_and_redacts_payload_keys_and_text() {
     let canary = "sk-live-temporal-doctor-secret";
     let findings = (0..=super::temporal_health::MAX_DIAGNOSIS_FINDINGS)
