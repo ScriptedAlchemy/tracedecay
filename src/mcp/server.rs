@@ -1015,7 +1015,7 @@ impl McpServer {
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
         let server = Arc::new(Self {
-            cg: tokio::sync::RwLock::new(Arc::new(cg)),
+            cg: tokio::sync::RwLock::new(cg),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
