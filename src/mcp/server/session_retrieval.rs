@@ -3,30 +3,36 @@
 //! describe/expand execution, and result filtering for the
 //! `SessionRetrievalServicePort` implementation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::{
     ActorId, HydrationStateV1, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalAnchorId,
-    RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1, WorktreeId,
+    RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
 };
 use tracedecay_store::StoreShardIdV1;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionDataFreshness, SessionRetrievalConfiguration, SessionRetrievalOutcome,
-    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalQuery,
+    SessionDataFreshness, SessionRequestBinding, SessionRetrievalConfiguration,
+    SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
+    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
+    SessionTemporalQuery,
 };
 use crate::daemon::session_temporal_refresh_scheduler::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
@@ -305,11 +311,12 @@ impl SessionScopeAuthorizer for DaemonSessionRetrievalAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
-        if context.actor_id().as_str() != MESSAGE_SEARCH_ACTOR_ID
-            || request.actor_id() != context.actor_id()
-            || context.identity() != &self.identity
+        if context.actor().as_str() != MESSAGE_SEARCH_ACTOR_ID
+            || request.actor_id() != context.actor()
+            || binding.identity() != &self.identity
             || request.identity() != &self.identity
         {
             return Err(SessionAuthorizationError::WrongContext);
@@ -327,6 +334,7 @@ impl SessionScopeAuthorizer for DaemonSessionRetrievalAuthorizer {
             AuthorizationGrantId::new(self.grant_id)?,
             1,
             context,
+            binding,
             request,
         )
     }
@@ -449,8 +457,14 @@ impl DaemonSessionRetrievalService {
         ))
     }
 
-    fn request_context(&self, provider: Option<&str>) -> Option<RequestContext> {
+    fn request_context(
+        &self,
+        provider: Option<&str>,
+    ) -> Option<(RequestContext, SessionRequestBinding)> {
         let request_id = mint_global_request_id(GlobalRequestSurface::McpSessionRetrieval).ok()?;
+        let request_id = RequestId::new(request_id.as_str()).ok()?;
+        let actor = ActorId::new(MESSAGE_SEARCH_ACTOR_ID).ok()?;
+        let scope = self.root.identity.application_scope().ok()?;
         let capability = message_search_digest(
             b"tracedecay.mcp.message-search.capability.v1\0",
             &self.root.identity,
@@ -462,29 +476,64 @@ impl DaemonSessionRetrievalService {
             &self.root.identity,
             None,
         );
-        Some(RequestContext::new(
-            ActorId::new(MESSAGE_SEARCH_ACTOR_ID).ok()?,
-            RequestId::new(request_id.as_str()).ok()?,
-            self.root.identity.clone(),
-            CapabilityDigest::new(capability),
-            PolicyDigest::new(policy),
-            ConfigurationDigest::new(configuration),
-            MonotonicDeadline::at(Instant::now() + MESSAGE_SEARCH_TIMEOUT),
-            CancellationToken::new(),
-            RequestBudgets::new(
-                MESSAGE_SEARCH_MAX_RESULTS,
-                MESSAGE_SEARCH_MAX_BYTES,
-                MESSAGE_SEARCH_MAX_WORK_UNITS,
+        let capability = CapabilityDigest::new(capability);
+        let policy = PolicyDigest::new(policy);
+        let configuration = ConfigurationDigest::new(configuration);
+        let cancellation = CancellationToken::for_application_request(&request_id);
+        let budgets = RequestBudgets::new(
+            MESSAGE_SEARCH_MAX_RESULTS,
+            MESSAGE_SEARCH_MAX_BYTES,
+            MESSAGE_SEARCH_MAX_WORK_UNITS,
+        )
+        .ok()?;
+        let observed_at = application_observed_at();
+        let timeout_micros = i64::try_from(MESSAGE_SEARCH_TIMEOUT.as_micros()).unwrap_or(i64::MAX);
+        let expires_at = UtcMicros(observed_at.0.saturating_add(timeout_micros));
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.mcp.message-search").ok()?,
+            1,
+            session_application_grant_digest(
+                capability,
+                policy,
+                configuration,
+                &cancellation,
+                budgets,
             )
             .ok()?,
-        ))
+            actor.clone(),
+            observed_at,
+            expires_at,
+            scope.clone(),
+            BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").ok()?]),
+            BTreeSet::from([UseCaseId::new("use-case.mcp.message-search").ok()?]),
+            DisclosureClass::Evidence,
+        )
+        .ok()?;
+        let context = RequestContext::new(
+            actor,
+            scope,
+            grant,
+            request_id,
+            Deadline::new(expires_at).ok()?,
+            CancellationContext::active(cancellation.application_token_id()?).ok()?,
+        )
+        .ok()?;
+        let binding = SessionRequestBinding::new(
+            self.root.identity.clone(),
+            capability,
+            policy,
+            configuration,
+            cancellation,
+            budgets,
+        );
+        Some((context, binding))
     }
 
     async fn execute_temporal_query(
         &self,
         query: SessionTemporalQuery,
     ) -> SessionRetrievalOutcome<TemporalKernelResult> {
-        let Some(context) = self.request_context(query.provider()) else {
+        let Some((context, binding)) = self.request_context(query.provider()) else {
             return SessionRetrievalOutcome::Unavailable;
         };
         let grant_id = match self.root.store_scope {
@@ -509,7 +558,7 @@ impl DaemonSessionRetrievalService {
             MessageSearchWordEstimator,
             self.configuration,
         )
-        .retrieve(&context, query)
+        .retrieve(&context, &binding, query)
         .await
     }
 
