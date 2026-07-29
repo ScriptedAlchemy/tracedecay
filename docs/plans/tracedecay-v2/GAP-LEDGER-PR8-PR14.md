@@ -254,7 +254,9 @@ it and owns the temporary-alias deletion slices.
   import APIs remain production-unwired. Semantic results remain omitted on the
   live profile because its configuration snapshot is invalid; Plan 20 owns
   snapshot repair and this plan owns successful semantic activation.
-- `32-dynamic-workflow-runtime-and-sdk.md`: explicitly PR17-only.
+- `32-dynamic-workflow-runtime-and-sdk.md`: PR14 owns the minimal real
+  provider/runtime path and Work projection; PR17 owns residual advanced
+  workflow capability over the same authority.
 - `34-workspace-refactoring-and-api-migration.md`: rename preview is live;
   API migration is an unimplemented PR11–PR12 deliverable consumed by PR19,
   while only temporary-alias deletion is later PR19 scope.

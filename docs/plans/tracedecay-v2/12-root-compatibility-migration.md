@@ -57,6 +57,12 @@ comparison. This section owns the dependency order and root-compatibility
 mechanics; it does not declare that every named boundary is already, or must
 become, a package.
 
+The executable slice registry, gates, commit policy, and exact-SHA worktree
+procedure are in the canonical
+[`docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`](../../superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md)
+and its `v2/` child plans. Those plans apply this section; they do not replace
+its leaves-first dependency authority.
+
 The sequencing evidence came from a read-only source scan of `crate::` and
 `pub(crate)` edges with `rg`. The TraceDecay MCP server was unavailable and
 the equivalent CLI graph calls timed out, so these counts are useful
