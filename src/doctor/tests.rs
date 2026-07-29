@@ -1205,12 +1205,26 @@ fn selected_not_downloaded_is_offline_healthy_with_retry_guidance() {
 #[test]
 fn daemon_runtime_request_keeps_startup_probe_bounded() {
     assert_eq!(
-        super::daemon_runtime_args(),
+        super::daemon_startup_runtime_args(),
         serde_json::json!({
             "format": "json",
             "startup_health": true,
             "authority_audit": false,
             "doctor_report": false,
+            "session_ingest_health": false,
+        })
+    );
+}
+
+#[test]
+fn daemon_doctor_request_uses_comprehensive_ready_owner() {
+    assert_eq!(
+        super::daemon_doctor_runtime_args(),
+        serde_json::json!({
+            "format": "json",
+            "startup_health": false,
+            "authority_audit": true,
+            "doctor_report": true,
             "session_ingest_health": false,
         })
     );
@@ -2117,7 +2131,7 @@ fn daemon_startup_health_classifies_sqlite_corruption_spellings_as_terminal() {
 
 #[test]
 fn startup_runtime_probe_defers_exhaustive_audits() {
-    let args = super::daemon_runtime_args();
+    let args = super::daemon_startup_runtime_args();
 
     assert_eq!(args["startup_health"], serde_json::json!(true));
     assert_eq!(args["authority_audit"], serde_json::json!(false));
