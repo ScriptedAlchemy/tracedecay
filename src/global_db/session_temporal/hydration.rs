@@ -11,6 +11,7 @@ use tracedecay_domain::{
     AnchorDurabilityClass, CanonicalObservationEnvelopeV1, DurableObservationV1, HydrationStateV1,
     ObservationScopeV1, PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
 };
+use tracedecay_store::SessionMessageRecord;
 use zeroize::Zeroizing;
 
 use crate::db::engine;
@@ -22,7 +23,6 @@ use crate::query::temporal::hydration::{
 use crate::query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
 };
-use crate::sessions::SessionMessageRecord;
 use crate::application::session::lcm::contracts::validate_payload_ref;
 use crate::sessions::lcm::payload::read_verified_payload_content;
 
