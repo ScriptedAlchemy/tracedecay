@@ -1,3 +1,9 @@
+//! Planning vocabulary for a migration preflight scan.
+//!
+//! These records describe what a scan found — stores, roles, artifacts,
+//! registry state, and integrity outcomes — without performing the scan. The
+//! scanners that open databases and read the registry stay in the root crate.
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

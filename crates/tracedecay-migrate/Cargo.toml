@@ -1,0 +1,17 @@
+[package]
+name = "tracedecay-migrate"
+version = "0.1.0"
+edition.workspace = true
+description = "Database-independent migration planning, manifest, checkpoint, and durability contracts for TraceDecay"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+[dev-dependencies]
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

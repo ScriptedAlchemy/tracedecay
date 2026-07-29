@@ -5488,6 +5488,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-hooks",
  "tracedecay-lsp",
+ "tracedecay-migrate",
  "tracedecay-policy",
  "tracedecay-query",
  "tracedecay-rusqlite-parity",
@@ -5583,6 +5584,15 @@ dependencies = [
 [[package]]
 name = "tracedecay-lsp"
 version = "0.1.0"
+
+[[package]]
+name = "tracedecay-migrate"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tracedecay-domain",
+ "tracedecay-store",
+]
 
 [[package]]
 name = "tracedecay-policy"

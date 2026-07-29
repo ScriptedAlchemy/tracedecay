@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::model::{GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome};
+use tracedecay_migrate::inventory::{GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome};
 use crate::db::engine::{Error as EngineError, QueryExecutor, params};
 use crate::global_db::{self, RegisteredGlobalDb};
 
