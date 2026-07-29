@@ -1,27 +1,32 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
 use tracedecay_domain::{
     ActorId, HydrationStateV1, ProjectId, RepositoryId, RetrievalAnchorId, RetrievalGrainV1,
-    SessionId, TemporalModeV1, WorktreeId,
+    SessionId, TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::harness::{
     EXTERNAL_PAYLOAD, INLINE_PAYLOAD, PRIVACY_CANARY, PROJECT_ID, RegisteredTemporalHarness,
     SAFE_PRIVACY_PAYLOAD,
 };
 use crate::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, MonotonicDeadline,
-    PolicyDigest, ProfileId, RequestBudgets, RequestContext, RequestId, ResolvedGitRoute,
-    ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionDataFreshness, SessionRetrievalConfiguration, SessionRetrievalOutcome,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalQuery,
+    SessionRequestBinding, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalQuery,
 };
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::query::temporal::TemporalKernelResult;
@@ -39,12 +44,14 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         SessionAuthorizationGrant::issue(
             AuthorizationGrantId::new("grant.temporal.privacy").unwrap(),
             1,
             context,
+            binding,
             request,
         )
     }
@@ -56,6 +63,7 @@ impl SessionScopeAuthorizer for DenyAuthorizer {
     fn authorize(
         &self,
         _context: &RequestContext,
+        _binding: &SessionRequestBinding,
         _request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         Err(SessionAuthorizationError::Denied)
@@ -87,6 +95,7 @@ impl SessionScopeAuthorizer for RevocableAuthorizer {
     fn authorize(
         &self,
         context: &RequestContext,
+        binding: &SessionRequestBinding,
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         if !self.authorized.load(Ordering::SeqCst) {
@@ -96,6 +105,7 @@ impl SessionScopeAuthorizer for RevocableAuthorizer {
             AuthorizationGrantId::new("grant.temporal.revocable").unwrap(),
             2,
             context,
+            binding,
             request,
         )
     }
@@ -125,8 +135,9 @@ async fn registered_authorized_retrieval_returns_only_sanitized_context() {
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
+    let (context, binding) = request_context(policy_digest);
     let outcome = service
-        .retrieve(&request_context(policy_digest), privacy_query())
+        .retrieve(&context, &binding, privacy_query())
         .await;
     let SessionRetrievalOutcome::Complete { items, freshness } = &outcome else {
         panic!("authorized registered retrieval was not complete: {outcome:?}");
@@ -164,8 +175,9 @@ async fn registered_denied_retrieval_never_exposes_private_context() {
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
+    let (context, binding) = request_context(policy_digest);
     let outcome = service
-        .retrieve(&request_context(policy_digest), privacy_query())
+        .retrieve(&context, &binding, privacy_query())
         .await;
     assert!(matches!(outcome, SessionRetrievalOutcome::Denied));
     assert!(!format!("{outcome:?}").contains(PRIVACY_CANARY));
@@ -228,7 +240,7 @@ async fn registered_quarantined_legacy_source_reaches_no_full_text_sink() {
 async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
     let harness = RegisteredTemporalHarness::open("registered-privacy-reopen").await;
     let policy_digest = harness.seed_privacy_fixture().await;
-    let context = request_context(policy_digest);
+    let (context, binding) = request_context(policy_digest);
 
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
@@ -237,7 +249,7 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
-    let before = service.retrieve(&context, privacy_query()).await;
+    let before = service.retrieve(&context, &binding, privacy_query()).await;
 
     let remounted = harness.remount().await;
     let reopened_execution = RegisteredGlobalDbSessionTemporalExecution::new(remounted.as_ref());
@@ -247,7 +259,9 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
-    let after = reopened_service.retrieve(&context, privacy_query()).await;
+    let after = reopened_service
+        .retrieve(&context, &binding, privacy_query())
+        .await;
 
     let (
         SessionRetrievalOutcome::Complete {
@@ -281,7 +295,7 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
 async fn registered_sanitized_temporal_state_is_stable_across_execution_replay() {
     let harness = RegisteredTemporalHarness::open("registered-privacy-replay").await;
     let policy_digest = harness.seed_privacy_fixture().await;
-    let context = request_context(policy_digest);
+    let (context, binding) = request_context(policy_digest);
     let first_execution =
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let first_service = SessionRetrievalService::new(
@@ -290,7 +304,9 @@ async fn registered_sanitized_temporal_state_is_stable_across_execution_replay()
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
-    let first = first_service.retrieve(&context, privacy_query()).await;
+    let first = first_service
+        .retrieve(&context, &binding, privacy_query())
+        .await;
     let replay_execution =
         RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let replay_service = SessionRetrievalService::new(
@@ -299,7 +315,9 @@ async fn registered_sanitized_temporal_state_is_stable_across_execution_replay()
         Words,
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
-    let replay = replay_service.retrieve(&context, privacy_query()).await;
+    let replay = replay_service
+        .retrieve(&context, &binding, privacy_query())
+        .await;
     let (
         SessionRetrievalOutcome::Complete {
             items: first_items, ..
@@ -329,7 +347,7 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     let policy_digest = harness.seed_application_fixture().await;
     let raw_store_id = harness.raw_store_id("message-1").await;
     let baseline = storage_fingerprint(&harness);
-    let context = request_context(policy_digest);
+    let (context, binding) = request_context(policy_digest);
     let authorizer = RevocableAuthorizer::new();
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
@@ -348,7 +366,9 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     )
     .with_compatibility_filter_digest("surface.describe.v1".to_owned());
     assert_surface_completed(
-        &service.retrieve(&context, describe_query.clone()).await,
+        &service
+            .retrieve(&context, &binding, describe_query.clone())
+            .await,
         "describe",
     );
     let description = execution
@@ -364,7 +384,7 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     assert_storage_unchanged(&harness, &baseline, "describe");
     authorizer.revoke();
     assert!(matches!(
-        service.retrieve(&context, describe_query).await,
+        service.retrieve(&context, &binding, describe_query).await,
         SessionRetrievalOutcome::Denied
     ));
     assert_storage_unchanged(&harness, &baseline, "revoked describe");
@@ -392,7 +412,9 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     .with_compatibility_filter_digest("surface.expand.v1".to_owned())
     .with_direct_anchor(direct.anchor_id.clone());
     let expanded = only_result(
-        service.retrieve(&context, expand_query.clone()).await,
+        service
+            .retrieve(&context, &binding, expand_query.clone())
+            .await,
         "expand",
     );
     let canonical_content = available_content(&expanded, &direct.anchor_id);
@@ -418,7 +440,7 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     assert_storage_unchanged(&harness, &baseline, "expand");
     authorizer.revoke();
     assert!(matches!(
-        service.retrieve(&context, expand_query).await,
+        service.retrieve(&context, &binding, expand_query).await,
         SessionRetrievalOutcome::Denied
     ));
     assert_storage_unchanged(&harness, &baseline, "revoked expand");
@@ -433,7 +455,9 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     )
     .with_compatibility_filter_digest("surface.expand-query.v1".to_owned());
     let expanded_query = only_result(
-        service.retrieve(&context, expand_query.clone()).await,
+        service
+            .retrieve(&context, &binding, expand_query.clone())
+            .await,
         "expand-query",
     );
     assert!(expanded_query.context.rendered.contains(INLINE_PAYLOAD));
@@ -441,7 +465,7 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
     assert_storage_unchanged(&harness, &baseline, "expand-query");
     authorizer.revoke();
     assert!(matches!(
-        service.retrieve(&context, expand_query).await,
+        service.retrieve(&context, &binding, expand_query).await,
         SessionRetrievalOutcome::Denied
     ));
     assert_storage_unchanged(&harness, &baseline, "revoked expand-query");
@@ -452,7 +476,7 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
     let harness = RegisteredTemporalHarness::open("registered-lcm-read-replay").await;
     let policy_digest = harness.seed_application_fixture().await;
     let baseline = storage_fingerprint(&harness);
-    let context = request_context(policy_digest);
+    let (context, binding) = request_context(policy_digest);
     let authorizer = RevocableAuthorizer::new();
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
@@ -466,6 +490,7 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
         service
             .retrieve(
                 &context,
+                &binding,
                 application_query(
                     "inline occurrence",
                     None,
@@ -489,14 +514,16 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
     )
     .with_direct_anchor(anchor_id.clone());
     let direct = only_result(
-        service.retrieve(&context, direct_query.clone()).await,
+        service
+            .retrieve(&context, &binding, direct_query.clone())
+            .await,
         "direct-anchor",
     );
     assert_eq!(direct.ranked[0].anchor_id, anchor_id);
     assert_storage_unchanged(&harness, &baseline, "direct-anchor");
     authorizer.revoke();
     assert!(matches!(
-        service.retrieve(&context, direct_query).await,
+        service.retrieve(&context, &binding, direct_query).await,
         SessionRetrievalOutcome::Denied
     ));
     assert_storage_unchanged(&harness, &baseline, "revoked direct-anchor");
@@ -510,7 +537,9 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
         8,
     );
     let first = only_result(
-        service.retrieve(&context, replay_query.clone()).await,
+        service
+            .retrieve(&context, &binding, replay_query.clone())
+            .await,
         "replay first execution",
     );
     let replay_execution =
@@ -523,7 +552,7 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
     );
     let replay = only_result(
         replay_service
-            .retrieve(&context, replay_query.clone())
+            .retrieve(&context, &binding, replay_query.clone())
             .await,
         "replay reconstructed execution",
     );
@@ -543,7 +572,9 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
     assert_storage_unchanged(&harness, &baseline, "replay");
     authorizer.revoke();
     assert!(matches!(
-        replay_service.retrieve(&context, replay_query).await,
+        replay_service
+            .retrieve(&context, &binding, replay_query)
+            .await,
         SessionRetrievalOutcome::Denied
     ));
     assert_storage_unchanged(&harness, &baseline, "revoked replay");
@@ -553,6 +584,7 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
         service
             .retrieve(
                 &context,
+                &binding,
                 application_query(
                     "occurrence payload",
                     None,
@@ -578,14 +610,18 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
         1,
     );
     let continued = only_result(
-        service.retrieve(&context, continuation_query.clone()).await,
+        service
+            .retrieve(&context, &binding, continuation_query.clone())
+            .await,
         "continuation",
     );
     assert_ne!(continued.ranked[0].anchor_id, first_anchor);
     assert_storage_unchanged(&harness, &baseline, "continuation");
     authorizer.revoke();
     assert!(matches!(
-        service.retrieve(&context, continuation_query).await,
+        service
+            .retrieve(&context, &binding, continuation_query)
+            .await,
         SessionRetrievalOutcome::Denied
     ));
     assert_storage_unchanged(&harness, &baseline, "revoked continuation");
@@ -666,28 +702,66 @@ fn assert_storage_unchanged(
     );
 }
 
-fn request_context(policy_digest: [u8; 32]) -> RequestContext {
-    RequestContext::new(
-        ActorId::new("actor.temporal.privacy").unwrap(),
-        RequestId::new("request.temporal.privacy").unwrap(),
-        ResolvedSessionIdentity::for_project(
-            ProfileId::new("profile.primary").unwrap(),
-            ProjectId::new(PROJECT_ID).unwrap(),
-            SessionStoreId::new("store.project.tracedecay").unwrap(),
-            SessionRootId::new("root.one").unwrap(),
-            ResolvedGitRoute::new(
-                RepositoryId::new("repository.tracedecay").unwrap(),
-                WorktreeId::new("worktree.main").unwrap(),
-                BranchId::new("branch.temporal-privacy").unwrap(),
-            ),
+fn request_context(policy_digest: [u8; 32]) -> (RequestContext, SessionRequestBinding) {
+    let actor = ActorId::new("actor.temporal.privacy").unwrap();
+    let request_id = RequestId::new("request.temporal.privacy").unwrap();
+    let identity = ResolvedSessionIdentity::for_project(
+        ProfileId::new("profile.primary").unwrap(),
+        ProjectId::new(PROJECT_ID).unwrap(),
+        SessionStoreId::new("store.project.tracedecay").unwrap(),
+        SessionRootId::new("root.one").unwrap(),
+        ResolvedGitRoute::new(
+            RepositoryId::new("repository.tracedecay").unwrap(),
+            WorktreeId::new("worktree.main").unwrap(),
+            BranchId::new("branch.temporal-privacy").unwrap(),
         ),
-        CapabilityDigest::new(DIGEST),
-        PolicyDigest::new(policy_digest),
-        ConfigurationDigest::new(DIGEST),
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(30)),
-        CancellationToken::new(),
-        RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap(),
+    );
+    let scope = identity.application_scope().unwrap();
+    let capability = CapabilityDigest::new(DIGEST);
+    let policy = PolicyDigest::new(policy_digest);
+    let configuration = ConfigurationDigest::new(DIGEST);
+    let cancellation = CancellationToken::for_application_request(&request_id);
+    let budgets = RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap();
+    let observed_at = application_observed_at();
+    let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.temporal.privacy.application").unwrap(),
+        1,
+        session_application_grant_digest(
+            capability,
+            policy,
+            configuration,
+            &cancellation,
+            budgets,
+        )
+        .unwrap(),
+        actor.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.session.temporal-privacy-test").unwrap()]),
+        DisclosureClass::Evidence,
     )
+    .unwrap();
+    let context = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        request_id,
+        Deadline::new(expires_at).unwrap(),
+        CancellationContext::active(cancellation.application_token_id().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let binding = SessionRequestBinding::new(
+        identity,
+        capability,
+        policy,
+        configuration,
+        cancellation,
+        budgets,
+    );
+    (context, binding)
 }
 
 fn application_query(
