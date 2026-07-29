@@ -4,6 +4,7 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod cursor_composer;
+pub mod kiro;
 mod parse;
 mod timestamp;
 
