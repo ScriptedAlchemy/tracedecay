@@ -864,6 +864,8 @@ pub(crate) async fn register_project_open_production_owners(
     server: &McpServer,
     source_edit_mutation_ready: Arc<AtomicBool>,
 ) -> Result<()> {
+    let owner_registration_started = Instant::now();
+    let mut owner_phase_started = owner_registration_started;
     let project_id =
         ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
             message: "project-open owners require an authoritative project identity".to_owned(),
@@ -889,6 +891,14 @@ pub(crate) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration currentness failed: {error}"),
         })?;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "configuration_current",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
     let scout_configuration = crate::application::configuration::ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
@@ -912,6 +922,14 @@ pub(crate) async fn register_project_open_production_owners(
             });
         }
     };
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "context_scout_registered",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
     let access =
         daemon_owned_project_source_access_at(&scope, project_root, &configuration, now_micros())
             .map_err(|error| TraceDecayError::Config {
@@ -968,6 +986,14 @@ pub(crate) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "configuration_runtime_registered",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
     match invocation
         .feedback_runtime_registrar()
         .open_and_register(
@@ -986,6 +1012,14 @@ pub(crate) async fn register_project_open_production_owners(
             });
         }
     }
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "feedback_runtime_registered",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
 
     let admitted_root_uri =
         admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
@@ -1015,6 +1049,14 @@ pub(crate) async fn register_project_open_production_owners(
     {
         Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => {}
     }
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "primitive_runtime_registered",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
 
     let indexed_files =
         graph
@@ -1032,6 +1074,14 @@ pub(crate) async fn register_project_open_production_owners(
         .iter()
         .filter_map(AdmittedLspProvider::mounted)
         .collect::<Vec<_>>();
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "lsp_languages_discovered",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
 
     let feedback_cycle = register_production_feedback_cycle(
         invocation,
@@ -1045,6 +1095,14 @@ pub(crate) async fn register_project_open_production_owners(
         mounted_providers.clone(),
     )
     .await?;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "feedback_cycle_registered",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
+    owner_phase_started = Instant::now();
 
     // The LSP gateway can immediately emit post-edit feedback. Publish the
     // corresponding feedback cycle first so no admitted request observes a
@@ -1058,6 +1116,13 @@ pub(crate) async fn register_project_open_production_owners(
         admitted_root_uri.clone(),
     )
     .await?;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "lsp_owner_registered",
+        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+        elapsed_ms = owner_registration_started.elapsed().as_millis(),
+    );
 
     // Hook V2 envelopes that missed their synchronous budget are durable in
     // the per-host transport spool. Replay is project-scoped, not Git-scoped:
