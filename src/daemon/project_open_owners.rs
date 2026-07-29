@@ -855,7 +855,25 @@ async fn install_project_open_context_scout_configuration(
         })
 }
 
-/// Registers concrete production owners for one newly inserted project server.
+/// State retained after independent owners publish and consumed only after the
+/// durable code-index generation has mounted.
+pub(crate) struct ProjectOpenDependentOwnerState {
+    database: crate::db::Database,
+    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+    graph: Arc<crate::tracedecay::TraceDecay>,
+    scope: ResolvedScope,
+    access: ProjectSourceAccessSnapshot,
+    configuration: crate::config::PinnedRuntimeConfiguration,
+    requester: ActorId,
+    mounted_providers: Vec<MountedLspProvider>,
+    lsp_session_factory: Arc<crate::daemon::lsp_gateway::Pr12LspSessionFactory>,
+    scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
+    scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
+    admitted_root_uri: String,
+    indexed_files: Vec<String>,
+}
+
+/// Registers code-index-independent owners for one newly inserted project.
 pub(crate) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
@@ -863,7 +881,7 @@ pub(crate) async fn register_project_open_production_owners(
     project_id: &str,
     server: &McpServer,
     source_edit_mutation_ready: Arc<AtomicBool>,
-) -> Result<()> {
+) -> Result<ProjectOpenDependentOwnerState> {
     let owner_registration_started = Instant::now();
     let mut owner_phase_started = owner_registration_started;
     let project_id =
@@ -1099,30 +1117,9 @@ pub(crate) async fn register_project_open_production_owners(
     );
     owner_phase_started = Instant::now();
 
-    let feedback_cycle = register_production_feedback_cycle(
-        invocation,
-        project_root,
-        database.clone(),
-        Arc::clone(&session_db),
-        Arc::clone(&graph),
-        scope.clone(),
-        configuration,
-        requester,
-        mounted_providers.clone(),
-    )
-    .await?;
-    tracing::info!(
-        event = "project_open_owner_phase",
-        project = %project_root.display(),
-        phase = "feedback_cycle_registered",
-        step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
-        elapsed_ms = owner_registration_started.elapsed().as_millis(),
-    );
-    owner_phase_started = Instant::now();
-
-    // The LSP gateway can immediately emit post-edit feedback. Publish the
-    // corresponding feedback cycle first so no admitted request observes a
-    // gateway whose downstream owner is still absent.
+    // Feedback runtime registration installed a typed unavailable cycle. The
+    // LSP gateway can therefore publish now and switches to the exact
+    // production cycle after code-index mount.
     let lsp_session_factory = register_production_lsp_owner(
         invocation,
         project_root,
@@ -1154,6 +1151,89 @@ pub(crate) async fn register_project_open_production_owners(
         project = %project_root.display(),
         phase = "independent_owners_registered",
     );
+
+    Ok(ProjectOpenDependentOwnerState {
+        database,
+        session_db,
+        graph,
+        scope,
+        access,
+        configuration,
+        requester,
+        mounted_providers,
+        lsp_session_factory,
+        scout_registry,
+        scout_configuration,
+        admitted_root_uri,
+        indexed_files,
+    })
+}
+
+/// Registers owners whose exact authority depends on a mounted code index.
+pub(crate) async fn register_project_open_dependent_owners(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: ProjectOpenDependentOwnerState,
+) -> Result<()> {
+    let ProjectOpenDependentOwnerState {
+        database,
+        session_db,
+        graph,
+        scope,
+        access,
+        configuration,
+        requester,
+        mounted_providers,
+        lsp_session_factory,
+        scout_registry,
+        scout_configuration,
+        admitted_root_uri,
+        indexed_files,
+    } = state;
+    let feedback_cycle = register_production_feedback_cycle(
+        invocation,
+        project_root,
+        database.clone(),
+        Arc::clone(&session_db),
+        Arc::clone(&graph),
+        scope.clone(),
+        configuration,
+        requester,
+        mounted_providers,
+    )
+    .await?;
+    tracing::info!(
+        event = "project_open_owner_phase",
+        project = %project_root.display(),
+        phase = "feedback_cycle_registered",
+    );
+
+    if let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle {
+        register_production_advisory_owner(
+            invocation,
+            project_root,
+            database,
+            session_db,
+            Arc::clone(&graph),
+            scope.clone(),
+            access,
+            feedback_scope,
+            feedback_cycle,
+            feedback_lsp_input,
+            lsp_session_factory,
+            scout_registry,
+            scout_configuration.clone(),
+            admitted_root_uri,
+            indexed_files,
+        )
+        .await?;
+        tracing::info!(
+            event = "project_open_owner_phase",
+            project = %project_root.display(),
+            phase = "advisory_owner_registered",
+        );
+    }
+
     let semantic_activation_started = Instant::now();
     register_semantic_activation_owner(
         invocation,
@@ -1169,33 +1249,6 @@ pub(crate) async fn register_project_open_production_owners(
         phase = "semantic_activation_registered",
         elapsed_ms = semantic_activation_started.elapsed().as_millis(),
     );
-
-    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle else {
-        // Feedback and advisory evidence requires an exact Git branch, HEAD,
-        // and current saved document identity. Non-Git, unborn, and empty
-        // projects retain the observing unavailable cycle installed above; no
-        // repository or document identity is fabricated to mount producers.
-        return Ok(());
-    };
-    register_production_advisory_owner(
-        invocation,
-        project_root,
-        database,
-        session_db,
-        Arc::clone(&graph),
-        scope,
-        access,
-        feedback_scope,
-        feedback_cycle,
-        feedback_lsp_input,
-        lsp_session_factory,
-        scout_registry,
-        scout_configuration,
-        admitted_root_uri,
-        indexed_files,
-    )
-    .await?;
-
     Ok(())
 }
 
