@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use serde::{Deserialize, Serialize};
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -105,13 +108,96 @@ pub struct WorkflowAgent {
     pub ended_ts: Option<i64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowGitScope {
+    pub branch: Option<String>,
+    pub worktree: Option<String>,
+    pub commit: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowRunScope {
+    Session { session_id: String },
+    GitScope(WorkflowGitScope),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowRunListRequest {
+    pub scope: WorkflowRunScope,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowRunDetailRequest {
+    pub run_id: String,
+    pub limit: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkflowIndexState {
+    IndexNotBuilt,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowRunListOutcome {
+    Runs(Vec<WorkflowRun>),
+    Unavailable(WorkflowIndexState),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowRunDetail {
+    pub run: WorkflowRun,
+    pub agents: Vec<WorkflowAgent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowRunDetailOutcome {
+    Run(WorkflowRunDetail),
+    NotFound,
+    Unavailable(WorkflowIndexState),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowReadError {
+    message: String,
+}
+
+impl WorkflowReadError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WorkflowReadError {}
+
+pub type WorkflowRunListFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<WorkflowRunListOutcome, WorkflowReadError>> + Send + 'a>>;
+pub type WorkflowRunDetailFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<WorkflowRunDetailOutcome, WorkflowReadError>> + Send + 'a>>;
+
+pub trait WorkflowIndexReadPort: Send + Sync {
+    fn runs(&self, request: WorkflowRunListRequest) -> WorkflowRunListFuture<'_>;
+
+    fn run(&self, request: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_>;
+}
+
 fn matches_token(value: &str, tokens: &[&str]) -> bool {
     tokens.iter().any(|token| value.eq_ignore_ascii_case(token))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::WorkflowStatus;
+    use super::{
+        WorkflowIndexState, WorkflowRunDetailOutcome, WorkflowRunListOutcome, WorkflowStatus,
+    };
 
     #[test]
     fn workflow_status_preserves_unknown_values() {
@@ -121,5 +207,29 @@ mod tests {
             WorkflowStatus::from_disk("future-state"),
             WorkflowStatus::Unknown
         );
+    }
+
+    #[test]
+    fn workflow_list_distinguishes_empty_from_unbuilt() {
+        let empty = WorkflowRunListOutcome::Runs(Vec::new());
+        let unbuilt = WorkflowRunListOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt);
+
+        assert!(matches!(empty, WorkflowRunListOutcome::Runs(runs) if runs.is_empty()));
+        assert!(matches!(
+            unbuilt,
+            WorkflowRunListOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
+        ));
+    }
+
+    #[test]
+    fn workflow_detail_distinguishes_missing_from_unbuilt() {
+        assert!(matches!(
+            WorkflowRunDetailOutcome::NotFound,
+            WorkflowRunDetailOutcome::NotFound
+        ));
+        assert!(matches!(
+            WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt),
+            WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
+        ));
     }
 }
