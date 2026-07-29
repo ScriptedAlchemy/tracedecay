@@ -4,15 +4,18 @@
 //! module defines only compact transport DTOs and the read-only port used by
 //! one already-authorized, single-root LSP session.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::ContentDigest;
 
-use crate::gateway::AdmittedRoot;
-use crate::session::LspRequestId;
+use crate::gateway::operation_table::{
+    BoundedOperationCapacity, BoundedOperationTable, OperationAdmission, OperationPoll,
+};
+use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
+use crate::session::{LspRequestId, MAX_PENDING_REQUESTS};
 
 pub const TRACEDECAY_CONTEXT_REVISION: u32 = 1;
 pub const TRACEDECAY_CONTEXT_METHOD: &str = "tracedecay/context";
@@ -65,7 +68,7 @@ impl ContextProjectionKind {
         Self::is_valid_str(&self.0)
     }
 
-    pub fn is_pr12_supported(&self) -> bool {
+    pub fn is_supported(&self) -> bool {
         matches!(
             self.as_str(),
             Self::DIAGNOSTICS
@@ -285,6 +288,233 @@ pub enum ContextExpansionOutcome {
     Failed { reason: String },
 }
 
+pub const MAX_CONTEXT_OPERATIONS: usize = MAX_PENDING_REQUESTS * 2;
+
+/// Canonical application boundary for versioned context projections.
+pub trait CanonicalContextProjectionAuthority: Send + Sync {
+    fn registrations(&self) -> Vec<ContextProjectionRegistration>;
+
+    fn snapshot(
+        &self,
+        root: AdmittedRoot,
+        request_id: LspRequestId,
+        request: ContextProjectionRequest,
+    ) -> LspRuntimeFuture<ContextProjectionOutcome>;
+
+    fn expand(
+        &self,
+        _root: AdmittedRoot,
+        _request_id: LspRequestId,
+        _request: ContextExpansionRequest,
+    ) -> LspRuntimeFuture<ContextExpansionOutcome> {
+        Box::pin(async { ContextExpansionOutcome::Denied })
+    }
+
+    fn cancel_request(&self, _root: &AdmittedRoot, _request_id: &LspRequestId) -> bool {
+        false
+    }
+
+    fn poll_changes(
+        &self,
+        _root: &AdmittedRoot,
+        _subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) -> Vec<ContextProjectionChange> {
+        Vec::new()
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ContextRequestKey {
+    root_uri: String,
+    request_id: LspRequestId,
+}
+
+type DeliveredContextChanges =
+    BTreeMap<(String, Option<String>, ContextProjectionKind), ContextProjectionChange>;
+
+/// Bounded non-blocking broker for canonical context projection work.
+pub struct ContextProjectionAdapter {
+    runtime: Arc<dyn LspRuntimeSpawner>,
+    authority: Arc<dyn CanonicalContextProjectionAuthority>,
+    in_flight: BoundedOperationTable<ContextRequestKey, (), ContextProjectionOutcome>,
+    expansions: BoundedOperationTable<ContextRequestKey, (), ContextExpansionOutcome>,
+    delivered_changes: Mutex<DeliveredContextChanges>,
+}
+
+impl ContextProjectionAdapter {
+    pub fn new(
+        runtime: Arc<dyn LspRuntimeSpawner>,
+        authority: Arc<dyn CanonicalContextProjectionAuthority>,
+    ) -> Self {
+        let capacity = BoundedOperationCapacity::new(MAX_CONTEXT_OPERATIONS);
+        Self {
+            runtime,
+            authority,
+            in_flight: BoundedOperationTable::with_capacity(capacity.clone()),
+            expansions: BoundedOperationTable::with_capacity(capacity),
+            delivered_changes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn key(root: &AdmittedRoot, request_id: &LspRequestId) -> ContextRequestKey {
+        ContextRequestKey {
+            root_uri: root.uri().to_owned(),
+            request_id: request_id.clone(),
+        }
+    }
+}
+
+impl ContextProjectionPort for ContextProjectionAdapter {
+    fn registrations(&self) -> Vec<ContextProjectionRegistration> {
+        self.authority.registrations()
+    }
+
+    fn snapshot(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &ContextProjectionRequest,
+    ) -> ContextProjectionOutcome {
+        let key = Self::key(root, request_id);
+        let authority = Arc::clone(&self.authority);
+        let root = root.clone();
+        let request_id = request_id.clone();
+        let request = request.clone();
+        match self
+            .in_flight
+            .admit(key, (), self.runtime.as_ref(), move || {
+                authority.snapshot(root, request_id, request)
+            }) {
+            OperationAdmission::Started(()) | OperationAdmission::Existing(()) => {
+                ContextProjectionOutcome::Pending
+            }
+            OperationAdmission::Busy => ContextProjectionOutcome::Deferred {
+                reason: "runtime-busy".to_owned(),
+            },
+            OperationAdmission::Saturated => ContextProjectionOutcome::Deferred {
+                reason: "context-projection-capacity".to_owned(),
+            },
+        }
+    }
+
+    fn poll_snapshot(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+    ) -> Option<ContextProjectionOutcome> {
+        let key = Self::key(root, request_id);
+        match self.in_flight.poll(&key) {
+            OperationPoll::Ready {
+                metadata: (),
+                result,
+            } => Some(result),
+            OperationPoll::Dropped(()) => Some(ContextProjectionOutcome::Failed {
+                reason: "context-operation-dropped".to_owned(),
+            }),
+            OperationPoll::Pending(())
+            | OperationPoll::Missing
+            | OperationPoll::Busy
+            | OperationPoll::Mismatch(()) => None,
+        }
+    }
+
+    fn expand(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &ContextExpansionRequest,
+    ) -> ContextExpansionOutcome {
+        let key = Self::key(root, request_id);
+        let authority = Arc::clone(&self.authority);
+        let root = root.clone();
+        let request_id = request_id.clone();
+        let request = request.clone();
+        match self
+            .expansions
+            .admit(key, (), self.runtime.as_ref(), move || {
+                authority.expand(root, request_id, request)
+            }) {
+            OperationAdmission::Started(()) | OperationAdmission::Existing(()) => {
+                ContextExpansionOutcome::Pending
+            }
+            OperationAdmission::Busy => ContextExpansionOutcome::Failed {
+                reason: "runtime-busy".to_owned(),
+            },
+            OperationAdmission::Saturated => ContextExpansionOutcome::Failed {
+                reason: "context-expansion-capacity".to_owned(),
+            },
+        }
+    }
+
+    fn poll_expansion(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+    ) -> Option<ContextExpansionOutcome> {
+        let key = Self::key(root, request_id);
+        match self.expansions.poll(&key) {
+            OperationPoll::Ready {
+                metadata: (),
+                result,
+            } => Some(result),
+            OperationPoll::Dropped(()) => Some(ContextExpansionOutcome::Failed {
+                reason: "context-expansion-operation-dropped".to_owned(),
+            }),
+            OperationPoll::Pending(())
+            | OperationPoll::Missing
+            | OperationPoll::Busy
+            | OperationPoll::Mismatch(()) => None,
+        }
+    }
+
+    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+        let key = Self::key(root, request_id);
+        let cancelled_projection = self.in_flight.cancel(&key, true);
+        let cancelled_expansion = self.expansions.cancel(&key, true);
+        self.authority.cancel_request(root, request_id)
+            || cancelled_projection
+            || cancelled_expansion
+    }
+
+    fn poll_changes(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) -> Vec<ContextProjectionChange> {
+        let changes = self.authority.poll_changes(root, subscriptions);
+        let Ok(mut delivered) = self.delivered_changes.try_lock() else {
+            return Vec::new();
+        };
+        changes
+            .into_iter()
+            .filter(|change| {
+                let key = (
+                    change.root_uri.clone(),
+                    change.document_uri.clone(),
+                    change.kind.clone(),
+                );
+                !matches!(delivered.insert(key, change.clone()), Some(previous) if previous == *change)
+            })
+            .collect()
+    }
+
+    fn update_subscriptions(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) {
+        if let Ok(mut delivered) = self.delivered_changes.try_lock() {
+            delivered.retain(|(root_uri, _, kind), _| {
+                root_uri != root.uri()
+                    || subscriptions.contains(&ContextProjectionRegistration {
+                        kind: kind.clone(),
+                        revision: TRACEDECAY_CONTEXT_REVISION,
+                    })
+            });
+        }
+    }
+}
+
 pub trait ContextProjectionPort {
     /// Registrations currently mounted for this admitted daemon owner. The
     /// initialize response advertises only the intersection of these values,
@@ -405,5 +635,186 @@ where
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) {
         (**self).update_subscriptions(root, subscriptions);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::{LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct InlineTask;
+
+    impl LspRuntimeTask for InlineTask {
+        fn abort(&self) {}
+    }
+
+    struct InlineWake;
+
+    impl Wake for InlineWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    struct InlineSpawner;
+
+    impl LspRuntimeSpawner for InlineSpawner {
+        fn spawn(&self, mut future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
+            let waker = Waker::from(Arc::new(InlineWake));
+            let mut context = Context::from_waker(&waker);
+            assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
+            Box::new(InlineTask)
+        }
+    }
+
+    struct Authority;
+
+    fn identity() -> ContextProjectionIdentity {
+        ContextProjectionIdentity {
+            head_commit_id: "0123456789abcdef".to_owned(),
+            code_generation_id: "generation:7".to_owned(),
+            snapshot_digest: format!("sha256:{}", "a".repeat(64)),
+            invalidation_digest: format!("sha256:{}", "b".repeat(64)),
+            snapshot_content_digest: format!("sha256:{}", "c".repeat(64)),
+            document_content_digest: None,
+        }
+    }
+
+    impl CanonicalContextProjectionAuthority for Authority {
+        fn registrations(&self) -> Vec<ContextProjectionRegistration> {
+            vec![ContextProjectionRegistration {
+                kind: ContextProjectionKind::diagnostics(),
+                revision: TRACEDECAY_CONTEXT_REVISION,
+            }]
+        }
+
+        fn snapshot(
+            &self,
+            root: AdmittedRoot,
+            _request_id: LspRequestId,
+            request: ContextProjectionRequest,
+        ) -> LspRuntimeFuture<ContextProjectionOutcome> {
+            Box::pin(async move {
+                ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
+                    root_uri: root.uri().to_owned(),
+                    document_uri: request.document_uri,
+                    kind: request.kind,
+                    generation: 7,
+                    identity: identity(),
+                    freshness: ContextFreshness::Current,
+                    producer_state: ContextProducerState::Complete,
+                    coverage: ContextCoverage::Complete,
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                    items: Vec::new(),
+                    omitted_count: 0,
+                    omission_reasons: Vec::new(),
+                    retrieval_handle: None,
+                })
+            })
+        }
+
+        fn expand(
+            &self,
+            root: AdmittedRoot,
+            _request_id: LspRequestId,
+            _request: ContextExpansionRequest,
+        ) -> LspRuntimeFuture<ContextExpansionOutcome> {
+            Box::pin(async move {
+                ContextExpansionOutcome::Ready(ContextExpansionEnvelope {
+                    root_uri: root.uri().to_owned(),
+                    document_uri: None,
+                    kind: ContextProjectionKind::diagnostics(),
+                    stable_id: "finding.1".to_owned(),
+                    generation: 7,
+                    scope: ContextExpansionScope {
+                        scope_digest: "sha256:scope".to_owned(),
+                        identity: identity(),
+                    },
+                    expires_at: 10_000,
+                    coverage: ContextCoverage::Complete,
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                    evidence: Some(serde_json::json!({ "canonical": true })),
+                    omission_reason: None,
+                    next_retrieval_handle: None,
+                })
+            })
+        }
+
+        fn poll_changes(
+            &self,
+            root: &AdmittedRoot,
+            subscriptions: &BTreeSet<ContextProjectionRegistration>,
+        ) -> Vec<ContextProjectionChange> {
+            let registration = ContextProjectionRegistration {
+                kind: ContextProjectionKind::diagnostics(),
+                revision: TRACEDECAY_CONTEXT_REVISION,
+            };
+            subscriptions
+                .contains(&registration)
+                .then(|| ContextProjectionChange {
+                    root_uri: root.uri().to_owned(),
+                    document_uri: Some("file:///root/a.rs".to_owned()),
+                    kind: ContextProjectionKind::diagnostics(),
+                    generation: 7,
+                    identity: identity(),
+                    freshness: ContextFreshness::Current,
+                    producer_state: ContextProducerState::Complete,
+                    coverage: ContextCoverage::Complete,
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                    retrieval_handle: None,
+                })
+                .into_iter()
+                .collect()
+        }
+    }
+
+    #[test]
+    fn context_broker_correlates_pending_work_by_project_and_request() {
+        let adapter = ContextProjectionAdapter::new(Arc::new(InlineSpawner), Arc::new(Authority));
+        let root = AdmittedRoot::new("file:///root");
+        let request_id = LspRequestId::Number(4);
+        let request = ContextProjectionRequest::new(
+            ContextProjectionKind::diagnostics(),
+            Some("file:///root/a.rs".to_owned()),
+        );
+
+        assert_eq!(
+            adapter.snapshot(&root, &request_id, &request),
+            ContextProjectionOutcome::Pending
+        );
+        assert!(matches!(
+            adapter.poll_snapshot(&root, &request_id),
+            Some(ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
+                generation: 7,
+                ..
+            }))
+        ));
+
+        let expansion_id = LspRequestId::Number(5);
+        let expansion = ContextExpansionRequest {
+            retrieval_handle: "rh_0123456789abcdef01234567".to_owned(),
+        };
+        assert_eq!(
+            adapter.expand(&root, &expansion_id, &expansion),
+            ContextExpansionOutcome::Pending
+        );
+        assert!(matches!(
+            adapter.poll_expansion(&root, &expansion_id),
+            Some(ContextExpansionOutcome::Ready(ContextExpansionEnvelope {
+                evidence: Some(_),
+                ..
+            }))
+        ));
+
+        let subscriptions = [ContextProjectionRegistration {
+            kind: ContextProjectionKind::diagnostics(),
+            revision: TRACEDECAY_CONTEXT_REVISION,
+        }]
+        .into_iter()
+        .collect();
+        adapter.update_subscriptions(&root, &subscriptions);
+        assert_eq!(adapter.poll_changes(&root, &subscriptions).len(), 1);
+        assert!(adapter.poll_changes(&root, &subscriptions).is_empty());
     }
 }
