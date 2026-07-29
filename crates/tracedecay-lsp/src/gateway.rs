@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use url::Url;
 
-use super::capabilities::{CapabilityAvailability, EffectiveCapabilities, SemanticCapability};
-use super::diagnostics::{
+use crate::capabilities::{CapabilityAvailability, EffectiveCapabilities, SemanticCapability};
+use crate::diagnostics::{
     DiagnosticMerge, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition, LspRange,
 };
-use super::session::{LspRequestFailure, LspRequestId};
+use crate::session::{LspRequestFailure, LspRequestId};
 
 /// A single root that was authoritatively admitted before the LSP session was
 /// created. The gateway never chooses a root from CWD or client folder order.
@@ -550,7 +550,7 @@ impl SemanticRequest {
         }
     }
 
-    pub(crate) fn document_uri(&self) -> Option<&str> {
+    pub fn document_uri(&self) -> Option<&str> {
         match self {
             Self::Declaration { document_uri, .. }
             | Self::Definition { document_uri, .. }
@@ -1471,7 +1471,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::lsp_gateway::{
+    use crate::{
         ClientCapabilities, GatewayCapabilities, UpstreamCapabilities, negotiate_capabilities,
     };
     use std::cell::RefCell;

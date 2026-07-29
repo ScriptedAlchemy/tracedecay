@@ -209,7 +209,7 @@ impl GatewayDiagnostic {
     }
 }
 
-pub(super) fn safe_code_description_uri(value: &str) -> bool {
+pub(crate) fn safe_code_description_uri(value: &str) -> bool {
     if value.is_empty() || value.len() > MAX_DIAGNOSTIC_URI_BYTES {
         return false;
     }
@@ -224,7 +224,7 @@ pub(super) fn safe_code_description_uri(value: &str) -> bool {
         && uri.query().is_none()
 }
 
-pub(super) fn safe_related_uri(value: &str) -> bool {
+pub(crate) fn safe_related_uri(value: &str) -> bool {
     if value.is_empty() || value.len() > MAX_DIAGNOSTIC_URI_BYTES {
         return false;
     }
@@ -446,7 +446,7 @@ fn utf16_column_to_byte_offset(
     }
 }
 
-pub(super) fn truncate_utf8(value: &mut String, max_bytes: usize) {
+pub(crate) fn truncate_utf8(value: &mut String, max_bytes: usize) {
     if value.len() <= max_bytes {
         return;
     }

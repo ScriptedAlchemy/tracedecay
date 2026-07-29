@@ -5487,8 +5487,8 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-index",
  "tracedecay-domain",
- "tracedecay-host-integration",
  "tracedecay-hooks",
+ "tracedecay-host-integration",
  "tracedecay-lsp",
  "tracedecay-migrate",
  "tracedecay-policy",
@@ -5609,6 +5609,12 @@ dependencies = [
 [[package]]
 name = "tracedecay-lsp"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracedecay-domain",
+ "url",
+]
 
 [[package]]
 name = "tracedecay-migrate"

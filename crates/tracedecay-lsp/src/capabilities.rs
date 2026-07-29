@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::context::{
+use crate::context::{
     ContextProjectionKind, ContextProjectionRegistration, MAX_CONTEXT_PROJECTION_BYTES,
     MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES,
     MAX_CONTEXT_SUMMARY_BYTES, TRACEDECAY_CONTEXT_REVISION,
