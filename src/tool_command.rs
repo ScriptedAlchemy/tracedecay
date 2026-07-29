@@ -122,6 +122,8 @@ fn tool_timeout_error(tool_name: &str) -> TraceDecayError {
 
 fn is_truncation_envelope(value: &Value) -> bool {
     value.get("truncated").and_then(Value::as_bool) == Some(true)
+        && value.get("original_chars").and_then(Value::as_u64).is_some()
+        && value.get("preview").and_then(Value::as_str).is_some()
 }
 
 fn reject_truncation_envelope(value: &Value, tool_name: &str) -> Result<()> {
