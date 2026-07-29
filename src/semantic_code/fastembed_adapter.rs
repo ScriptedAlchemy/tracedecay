@@ -12,27 +12,26 @@
 //! opened through the digest-addressed artifact-store capability; it never
 //! selects a catalog model, imports an artifact, or discovers a cache.
 //!
-//! Design decisions recorded for the coordinator (plan-level ambiguities,
-//! flagged rather than guessed):
+//! Design decisions for this port, where Plan 31 leaves the choice open:
 //!
-//! - ESCALATION-1 (sync vs async): Plan 31 does not state whether the runtime
-//!   port is async. FastEmbed/ORT inference is blocking CPU work, and PR9's
+//! - Sync vs async: Plan 31 does not state whether the runtime port is async.
+//!   FastEmbed/ORT inference is blocking CPU work, and PR9's
 //!   `src/query/retrieval/ports.rs` sets the precedent that ports are
 //!   synchronous contracts with scheduling/cancellation above them. This port
 //!   is therefore synchronous; async wrapping is an integration concern.
-//! - ESCALATION-2 (manifest/domain vocabulary): the artifact manifest
-//!   and domain projection key remain separate authorities. Exhaustive bridge
-//!   matches below admit them into one private projection-artifact authority;
-//!   the runtime defines no duplicate metric/normalization/precision enums.
-//! - ESCALATION-3 (projection identity): sessions and runtime descriptors are
-//!   created only from the admitted projection-artifact authority. Callers
-//!   cannot pair an independent projection identity with an artifact.
-//! - ESCALATION-4 (budget type): Plan 31 says deadline/cancellation limits are
-//!   fields of the shared PR9 `RetrievalBudget` and PR10 introduces no
-//!   semantic-only budget type. That domain type is outside this root-private
-//!   module, so deadlines are modelled here as a `Duration` against the
-//!   injected pool clock and cancellation as the [`CancellationSignal`] trait;
-//!   the integrator adapts `RetrievalBudget` onto both.
+//! - Manifest/domain vocabulary: the artifact manifest and domain projection
+//!   key remain separate authorities. Exhaustive bridge matches below admit
+//!   them into one private projection-artifact authority; the runtime defines
+//!   no duplicate metric/normalization/precision enums.
+//! - Projection identity: sessions and runtime descriptors are created only
+//!   from the admitted projection-artifact authority. Callers cannot pair an
+//!   independent projection identity with an artifact.
+//! - Budget type: Plan 31 says deadline/cancellation limits are fields of the
+//!   shared PR9 `RetrievalBudget` and PR10 introduces no semantic-only budget
+//!   type. That domain type is outside this root-private module, so deadlines
+//!   are modelled here as a `Duration` against the injected pool clock and
+//!   cancellation as the [`CancellationSignal`] trait; the integrator adapts
+//!   `RetrievalBudget` onto both.
 #![allow(dead_code)] // PR10 fastembed adapter; Plan 31 — staged
 
 #[cfg(feature = "semantic-fastembed")]
