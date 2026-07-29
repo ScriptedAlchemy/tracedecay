@@ -913,6 +913,10 @@ impl McpServer {
         application_cancellation: Option<tracedecay_application::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
+        let workflow_index_reads = self
+            .registered_session_db
+            .as_ref()
+            .map(|database| DaemonWorkflowIndexReadService::new(Arc::clone(database)));
         let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
             self.identical_read_coalescer.claim(
                 engine_identity.to_string_lossy().as_ref(),
@@ -932,6 +936,9 @@ impl McpServer {
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_deref(),
                 project_registry_reads: self.project_registry_reads.as_deref(),
+                workflow_index_reads: workflow_index_reads
+                    .as_ref()
+                    .map(|service| service as &dyn WorkflowIndexReadPort),
                 accounting_db: self.accounting_db.as_deref(),
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),

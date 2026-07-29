@@ -35,8 +35,9 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, SessionRetrievalServicePort,
-    ToolCallRegistryOptions, ToolRegistryMode, default_catalog_discovery_authority,
-    explore_call_budget, get_catalog_filtered_tool_definitions_with_budget,
+    ToolCallRegistryOptions, ToolRegistryMode, WorkflowIndexReadPort,
+    default_catalog_discovery_authority, explore_call_budget,
+    get_catalog_filtered_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
@@ -56,8 +57,10 @@ mod session_refresh;
 mod session_retrieval;
 mod staleness;
 mod tool_errors;
+mod workflow_index;
 
 pub(crate) use project_registry::DaemonProjectRegistryReadService;
+pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;

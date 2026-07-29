@@ -1271,6 +1271,9 @@ impl HostAdmissionTestRuntimeV1 {
         let project_registry_reads = crate::mcp::server::DaemonProjectRegistryReadService::new(
             Arc::clone(&self.profile_database),
         );
+        let workflow_index_reads = self.project_registered.as_ref().map(|database| {
+            crate::mcp::server::DaemonWorkflowIndexReadService::new(Arc::clone(database))
+        });
         crate::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
             cg,
             tool_name,
@@ -1281,6 +1284,9 @@ impl HostAdmissionTestRuntimeV1 {
                 global_db: Some(self.profile_database.as_ref()),
                 accounting_db: Some(self.profile_database.as_ref()),
                 project_registry_reads: Some(&project_registry_reads),
+                workflow_index_reads: workflow_index_reads
+                    .as_ref()
+                    .map(|service| service as &dyn crate::mcp::tools::WorkflowIndexReadPort),
                 profile_root: Some(&self.profile_root),
                 implicit_project_path: Some(cg.project_root()),
                 session_authorities: self.mcp_session_authorities(),
