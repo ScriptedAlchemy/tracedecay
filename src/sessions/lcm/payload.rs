@@ -1,8 +1,8 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 pub use crate::application::session::lcm::contracts::validate_payload_ref;
 use crate::db::engine::{Executor, QueryExecutor, params};
-use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::SessionMessageRecord;
 use crate::tracedecay::current_timestamp;
 
@@ -46,19 +46,60 @@ pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, Lcm
     filesystem_authority::canonical_storage_root(storage_root)
 }
 
-pub struct LcmStore<'db> {
-    db: &'db RegisteredGlobalDb,
+/// Narrow authority for admitting one raw session message into the LCM store.
+///
+/// The implementation owns the write transaction and the payload-file rollback
+/// that must accompany it; the session store only names the capability.
+pub trait LcmRawMessagePort {
+    fn ingest_raw_message(
+        &self,
+        storage_root: &Path,
+        message: &SessionMessageRecord,
+    ) -> impl Future<Output = Result<(), LcmError>>;
+}
+
+/// Narrow authority for reading one externalized payload back out.
+///
+/// The implementation owns the read snapshot the expansion is served from, so
+/// ownership, integrity, and tombstone checks all observe a single consistent
+/// view of the store.
+pub trait LcmPayloadAuthorityPort {
+    fn expand_payload(
+        &self,
+        storage_root: &Path,
+        request: LcmPayloadExpandRequest<'_>,
+    ) -> impl Future<Output = Result<LcmPayloadExpansion, LcmError>>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LcmPayloadExpandRequest<'a> {
+    pub provider: &'a str,
+    pub session_id: &'a str,
+    pub payload_ref: &'a str,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// Storage-root-bound view of the LCM raw and payload authorities.
+pub struct LcmStore<'authority, A> {
+    authority: &'authority A,
     storage_root: PathBuf,
 }
 
-impl<'db> LcmStore<'db> {
-    pub(crate) fn new(db: &'db RegisteredGlobalDb, storage_root: PathBuf) -> Self {
-        Self { db, storage_root }
+impl<'authority, A> LcmStore<'authority, A>
+where
+    A: LcmRawMessagePort + LcmPayloadAuthorityPort,
+{
+    pub fn new(authority: &'authority A, storage_root: PathBuf) -> Self {
+        Self {
+            authority,
+            storage_root,
+        }
     }
 
     pub async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
-        self.db
-            .lcm_ingest_raw_message(&self.storage_root, message)
+        self.authority
+            .ingest_raw_message(&self.storage_root, message)
             .await
     }
 
@@ -70,17 +111,18 @@ impl<'db> LcmStore<'db> {
         offset: usize,
         limit: usize,
     ) -> Result<LcmPayloadExpansion, LcmError> {
-        let snapshot = self.db.read_snapshot().await?;
-        expand_payload(
-            &snapshot,
-            &self.storage_root,
-            provider,
-            session_id,
-            payload_ref,
-            offset,
-            limit,
-        )
-        .await
+        self.authority
+            .expand_payload(
+                &self.storage_root,
+                LcmPayloadExpandRequest {
+                    provider,
+                    session_id,
+                    payload_ref,
+                    offset,
+                    limit,
+                },
+            )
+            .await
     }
 }
 
@@ -477,6 +519,10 @@ pub(crate) async fn load_payload_metadata(
         metadata_json: row.get(9)?,
     })
 }
+
+#[cfg(test)]
+#[path = "payload/authority_port_tests.rs"]
+mod authority_port_tests;
 
 #[cfg(test)]
 #[path = "payload/rollback_tests.rs"]
