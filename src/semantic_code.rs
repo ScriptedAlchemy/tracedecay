@@ -557,12 +557,8 @@ impl DaemonSemanticRuntimeHandleV1 {
         Some(DaemonSemanticQueryFactoryV1 { inner })
     }
 
-    /// Bind a warmed query runtime to the atomically current pointer.
-    ///
-    /// Used after publication (and by tests) so application search can obtain a
-    /// `query_factory` without joining `FastEmbed` download/indexing into the
-    /// search path. The pointer must already be current and compatible with
-    /// the admitted projection authority.
+    /// Test-only binding for a pointer published without a production runtime.
+    #[cfg(test)]
     pub(crate) fn bind_query_runtime_for_current(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
@@ -628,6 +624,9 @@ impl DaemonSemanticRuntimeHandleV1 {
         let candidate =
             SemanticRuntimeService::new_owned(authority, factory, self.pool_config.clone())
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+        candidate
+            .warm_query_session()
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
         Ok(PreparedSemanticRuntimeRestoreV1 {
             runtime: CurrentSemanticQueryRuntimeV1::new(pointer.clone(), candidate),
             pointer,
