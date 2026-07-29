@@ -5,7 +5,10 @@ use std::sync::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::sessions::workflow_index::RegisteredWorkflowIndexSnapshot;
+use crate::global_db::RegisteredGlobalDb;
+use crate::sessions::workflow_index::{
+    INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, read_ingest_watermark,
+};
 
 static WORKFLOW_TEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
