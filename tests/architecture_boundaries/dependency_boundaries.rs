@@ -536,6 +536,41 @@ fn code_index_is_filesystem_store_model_and_transport_free() {
 }
 
 #[test]
+fn hook_v2_dispatch_uses_typed_daemon_delivery_ports() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let v2 = fs::read_to_string(repository.join("src/hooks/v2.rs")).expect("read hook v2");
+    let ports =
+        fs::read_to_string(repository.join("src/hooks/daemon_ports.rs")).expect("read daemon ports");
+    assert!(
+        v2.contains("deliver_hook_feedback"),
+        "hook v2 dispatch must close feedback through deliver_hook_feedback"
+    );
+    assert!(
+        v2.contains("DaemonAdmissionPort") && v2.contains("DaemonFeedbackNoticeDeliveryPort"),
+        "hook v2 dispatch must receive typed daemon admission and delivery ports"
+    );
+    assert!(
+        !v2.contains("acknowledge_advisory_feedback_notice"),
+        "hook v2 must not issue feedback-notice daemon_hook_action JSON itself"
+    );
+    let production_v2 = v2
+        .split("#[cfg(test)]")
+        .next()
+        .expect("hook v2 production source precedes tests");
+    assert!(
+        !production_v2.contains("\"hook_v2_feedback_notice_delivery\""),
+        "hook v2 production dispatch must not embed feedback-notice delivery action JSON"
+    );
+    assert!(
+        ports.contains("AsyncHookAdmissionPortV1")
+            && ports.contains("AsyncHookFeedbackDeliveryPortV1")
+            && ports.contains("hook_v2_feedback_notice_delivery")
+            && ports.contains("hook_v2_admit"),
+        "root daemon ports must own admit and feedback-notice delivery transport"
+    );
+}
+
+#[test]
 fn pr12_lsp_bridge_and_gateway_do_not_duplicate_store_or_transport_authority() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let roots = [
