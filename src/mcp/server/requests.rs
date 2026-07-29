@@ -55,7 +55,7 @@ struct ApplicationSurfaceDispatch<'a> {
     _registration: ApplicationCancellationRegistration<'a>,
 }
 
-fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
+pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     tracedecay_domain::UtcMicros(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
