@@ -129,13 +129,24 @@ where
 {
     let tick_started = Instant::now();
     let mut page_rows = SESSION_TEMPORAL_MIN_PAGE_ROWS;
+    let mut previous_stage = None;
     for _ in 0..SESSION_TEMPORAL_MAX_PAGES_PER_TICK {
         let page_started = Instant::now();
         let outcome = tick(page_rows).await?;
         let page_elapsed = page_started.elapsed();
         match outcome {
-            crate::global_db::SessionTemporalRepairOutcome::Pending { .. } => {
-                page_rows = next_session_temporal_page_rows(page_rows, page_elapsed);
+            crate::global_db::SessionTemporalRepairOutcome::Pending { stage } => {
+                page_rows = if previous_stage == Some(stage)
+                    && matches!(
+                        stage,
+                        crate::global_db::SessionTemporalRepairStage::AuthorityEffects
+                            | crate::global_db::SessionTemporalRepairStage::AuthorityReceipts
+                    ) {
+                    next_session_temporal_page_rows(page_rows, page_elapsed)
+                } else {
+                    SESSION_TEMPORAL_MIN_PAGE_ROWS
+                };
+                previous_stage = Some(stage);
             }
             crate::global_db::SessionTemporalRepairOutcome::Complete
             | crate::global_db::SessionTemporalRepairOutcome::NotRequired => {
@@ -843,6 +854,36 @@ mod tests {
 
         assert_eq!(decision, MemoryRepairPassDecision::Idle);
         assert!(outcomes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_temporal_pager_adapts_only_within_the_same_paged_stage() {
+        let outcomes = Arc::new(Mutex::new(VecDeque::from([
+            SessionTemporalRepairOutcome::Pending {
+                stage: SessionTemporalRepairStage::PrepareSchema,
+            },
+            SessionTemporalRepairOutcome::Pending {
+                stage: SessionTemporalRepairStage::AuthorityEffects,
+            },
+            SessionTemporalRepairOutcome::Pending {
+                stage: SessionTemporalRepairStage::AuthorityEffects,
+            },
+            SessionTemporalRepairOutcome::Complete,
+        ])));
+        let requested_rows = Arc::new(Mutex::new(Vec::new()));
+        run_session_temporal_repair_pager_with({
+            let outcomes = Arc::clone(&outcomes);
+            let requested_rows = Arc::clone(&requested_rows);
+            move |page_rows| {
+                requested_rows.lock().unwrap().push(page_rows);
+                let outcome = outcomes.lock().unwrap().pop_front().unwrap();
+                std::future::ready(Ok(outcome))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(*requested_rows.lock().unwrap(), vec![256, 256, 256, 512]);
     }
 
     #[tokio::test]
