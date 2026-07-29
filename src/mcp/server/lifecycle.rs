@@ -132,21 +132,29 @@ async fn run_startup_session_catch_up_with_home(
     registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     registry_db: Option<Arc<RegisteredGlobalDb>>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    project_root: &Path,
-    project_id: Option<&str>,
-    cancellation: &crate::application::observation::ObservationCancellation,
+    project_root: PathBuf,
+    project_id: Option<String>,
+    cancellation: crate::application::observation::ObservationCancellation,
 ) -> Option<Arc<RegisteredGlobalDb>> {
-    let catch_up = run_startup_session_catch_up(
-        session_db,
-        registered_session_db,
-        user_session_db,
-        registered_user_session_db,
-        registry_db,
-        profile_identity,
-        project_root,
-        project_id,
-        cancellation,
-    );
+    // Own every capture inside the future passed to
+    // `with_transcript_source_home`: `task_local::scope` returns
+    // `impl Future + Send`, and the auto-trait leak check cannot prove Send
+    // "general enough" while the wrapped future's type borrows these locals
+    // (E0477 notes on `&Path` / `&RegisteredGlobalDb`).
+    let catch_up = async move {
+        run_startup_session_catch_up(
+            session_db,
+            registered_session_db,
+            user_session_db,
+            registered_user_session_db,
+            registry_db,
+            profile_identity,
+            project_root.as_path(),
+            project_id.as_deref(),
+            &cancellation,
+        )
+        .await
+    };
     match transcript_source_home {
         Some(home) => crate::sessions::with_transcript_source_home(home, catch_up).await,
         None => catch_up.await,
@@ -353,9 +361,9 @@ impl McpServer {
                     registered_user_session_db,
                     registry_db,
                     profile_identity,
-                    &project_root,
-                    project_id.as_deref(),
-                    &cancellation,
+                    project_root,
+                    project_id,
+                    cancellation,
                 )
                 .await
                 {
