@@ -553,6 +553,10 @@ pub struct McpServer {
     /// side, so later responses fail closed while an already-authorized write
     /// is allowed to finish before revocation completes.
     project_server_response_gate: tokio::sync::RwLock<()>,
+    /// Cancels a pending notification/response transport write when retained
+    /// project health fails. Unlike a one-shot notification, cancellation is
+    /// remembered if revocation wins before the write future is polled.
+    project_server_response_revoked: crate::application::context::CancellationToken,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -1099,6 +1103,7 @@ impl McpServer {
             application_invocation_executor,
             project_server_live,
             project_server_response_gate: tokio::sync::RwLock::new(()),
+            project_server_response_revoked: crate::application::context::CancellationToken::new(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 

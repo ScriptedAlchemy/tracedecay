@@ -73,6 +73,26 @@ mod cancellable_queue_tests {
 }
 
 impl McpServer {
+    async fn write_response_line_or_revoke(
+        &self,
+        transport: &mut impl crate::mcp::transport::McpTransport,
+        output: &str,
+        revocable: bool,
+    ) -> std::io::Result<bool> {
+        let write = async {
+            transport.write_line(output).await?;
+            transport.flush().await
+        };
+        if !revocable {
+            return write.await.map(|()| true);
+        }
+        tokio::select! {
+            biased;
+            () = self.project_server_response_revoked.cancelled() => Ok(false),
+            result = write => result.map(|()| true),
+        }
+    }
+
     async fn handle_cancellable_application_request(
         &self,
         request: &JsonRpcRequest,
@@ -255,7 +275,7 @@ impl McpServer {
         let mut pending_lines = VecDeque::new();
         let mut pending_cancellations = HashSet::new();
 
-        loop {
+        'connection: loop {
             let line: String = if let Some(line) = pending_lines.pop_front() {
                 line
             } else {
@@ -460,12 +480,13 @@ impl McpServer {
                 break;
             }
 
-            let project_response_guard =
-                if revocable_tool_call.is_some() && self.project_server_live.is_some() {
-                    Some(self.project_server_response_gate.read().await)
-                } else {
-                    None
-                };
+            let revocable_response =
+                revocable_tool_call.is_some() && self.project_server_live.is_some();
+            let project_response_guard = if revocable_response {
+                Some(self.project_server_response_gate.read().await)
+            } else {
+                None
+            };
             let response = if let Some((id, tool_name)) = &revocable_tool_call {
                 self.project_server_revoked_response(id, tool_name)
                     .or(response)
@@ -482,13 +503,20 @@ impl McpServer {
                     .unwrap_or_default();
                 for notification in notifications {
                     if let Ok(s) = serde_json::to_string(&notification) {
-                        if let Err(e) = transport.write_line(&format!("{s}\n")).await {
-                            self.shutdown_if(shutdown_on_exit).await;
-                            return Err(e.into());
-                        }
-                        if let Err(e) = transport.flush().await {
-                            self.shutdown_if(shutdown_on_exit).await;
-                            return Err(e.into());
+                        match self
+                            .write_response_line_or_revoke(
+                                transport,
+                                &format!("{s}\n"),
+                                revocable_response,
+                            )
+                            .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => break 'connection,
+                            Err(error) => {
+                                self.shutdown_if(shutdown_on_exit).await;
+                                return Err(error.into());
+                            }
                         }
                     }
                 }
@@ -498,15 +526,17 @@ impl McpServer {
             if let Some(resp) = response {
                 let json_line = serialize_response_line(&resp);
                 let output = format!("{json_line}\n");
-                if let Err(e) = transport.write_line(&output).await {
-                    tracing::error!(error = %e, "failed to write MCP response");
-                    self.shutdown_if(shutdown_on_exit).await;
-                    return Err(e.into());
-                }
-                if let Err(e) = transport.flush().await {
-                    tracing::error!(error = %e, "failed to flush MCP transport");
-                    self.shutdown_if(shutdown_on_exit).await;
-                    return Err(e.into());
+                match self
+                    .write_response_line_or_revoke(transport, &output, revocable_response)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => break 'connection,
+                    Err(error) => {
+                        tracing::error!(error = %error, "failed to write MCP response");
+                        self.shutdown_if(shutdown_on_exit).await;
+                        return Err(error.into());
+                    }
                 }
             }
             drop(project_response_guard);
