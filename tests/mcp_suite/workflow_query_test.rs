@@ -208,6 +208,41 @@ async fn call(
     extract_json(&result)
 }
 
+#[tokio::test]
+async fn workflow_queries_distinguish_an_unbuilt_index_from_empty_results() {
+    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
+    let (env, project_root) = common::IsolatedEnv::acquire().await;
+    let cg = TraceDecay::init(&project_root)
+        .await
+        .unwrap_or_else(|error| panic!("init project: {error}"));
+    let marker = tracedecay::storage::read_enrollment_marker(cg.project_root())
+        .unwrap_or_else(|error| panic!("read project identity: {error}"))
+        .unwrap_or_else(|| panic!("project enrollment marker"));
+    let project_id =
+        ProjectId::new(marker.project_id).unwrap_or_else(|error| panic!("project id: {error}"));
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        env.home().join(".tracedecay"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("registered session runtime: {error}"));
+
+    for args in [
+        json!({"session_id": SESSION_ID}),
+        json!({"run_id": RUN_ID}),
+        json!({"branch": "main"}),
+    ] {
+        let payload = call(&cg, &runtime, "tracedecay_workflows", args).await;
+        assert_eq!(payload["status"], "unavailable");
+        assert_eq!(
+            payload["error"]["reason"], "workflow_index_not_built",
+            "an unbuilt workflow index must take precedence over empty or missing results"
+        );
+        assert_eq!(payload["error"]["retryable"], true);
+    }
+}
+
 /// Ingests the on-disk fixture and drives the three `tracedecay_workflows`
 /// modes plus the git-scope list end to end.
 #[tokio::test]
