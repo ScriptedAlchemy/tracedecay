@@ -139,6 +139,28 @@ pub(super) async fn handle_status(
     scope_prefix: Option<&str>,
     project_session_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
+    if status_arg_flag(&args, "admission_only", false) {
+        let mut output = json!({
+            "project_admitted": true,
+            "project_root": cg.project_root(),
+        });
+        if let Some(ss) = server_stats {
+            output["server"] = ss;
+        }
+        if let Some(prefix) = scope_prefix {
+            output["scope_prefix"] = json!(prefix);
+        }
+        let text = render::finalize(Some(cg.project_root()), &args, &output, || {
+            render::generic_md(&output)
+        });
+        return Ok(ToolResult::new(
+            json!({
+                "content": [{ "type": "text", "text": text }]
+            }),
+            vec![],
+        ));
+    }
+
     let include_branch_diagnostics = status_arg_flag(&args, "include_branch_diagnostics", true);
     let include_storage_health = status_arg_flag(&args, "include_storage_health", true);
     let include_session_ingest = status_arg_flag(&args, "include_session_ingest", true);

@@ -777,7 +777,11 @@ fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {
 fn daemon_admission_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
+        "admission_only": true,
         "include_branch_diagnostics": false,
+        "include_storage_health": false,
+        "include_session_ingest": false,
+        "include_staleness": false,
     })
 }
 

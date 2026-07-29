@@ -1945,12 +1945,16 @@ fn daemon_startup_health_gates_only_current_project_storage() {
 }
 
 #[test]
-fn daemon_startup_probe_skips_unrelated_profile_audits() {
+fn daemon_startup_probe_skips_all_expensive_status_reads() {
     assert_eq!(
         super::daemon_admission_args(),
         serde_json::json!({
             "format": "json",
+            "admission_only": true,
             "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
         })
     );
 }
