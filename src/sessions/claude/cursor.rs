@@ -57,4 +57,3 @@ fn claude_native_platform() -> &'static str {
 fn claude_native_platform() -> &'static str {
     "rust-os-str"
 }
-

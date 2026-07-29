@@ -60,15 +60,15 @@ pub(crate) use source_records::{
 };
 
 #[cfg(test)]
-use tracedecay_capture::claude::{
-    encode_cursor_key as encode_claude_cursor_key, encode_source_id as encode_claude_source_id,
-};
-#[cfg(test)]
 use record_metadata::append_git_operation_metadata;
 #[cfg(test)]
 use serde_json::Map;
 #[cfg(test)]
 use source_records::message_from_line;
+#[cfg(test)]
+use tracedecay_capture::claude::{
+    encode_cursor_key as encode_claude_cursor_key, encode_source_id as encode_claude_source_id,
+};
 
 const PROVIDER: &str = "claude";
 

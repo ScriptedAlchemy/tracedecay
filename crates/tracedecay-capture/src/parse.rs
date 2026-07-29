@@ -100,10 +100,7 @@ impl ParsedClaudeRecordV1 {
         self.canonical_provider.as_ref()
     }
 
-    pub fn verify_limits(
-        &self,
-        limits: ParseLimits,
-    ) -> Result<(), ParsedPolicyLimitViolation> {
+    pub fn verify_limits(&self, limits: ParseLimits) -> Result<(), ParsedPolicyLimitViolation> {
         if self.encoded_len > limits.record_bytes {
             return Err(ParsedPolicyLimitViolation::RecordSize);
         }
