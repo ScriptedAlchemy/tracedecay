@@ -3446,6 +3446,21 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    pub async fn drop_project_workflow_schema_for_test(&self) -> crate::errors::Result<()> {
+        self.project_database_for_test()?
+            .writer_connection()?
+            .execute_batch(
+                "DROP TABLE workflow_agents;
+                 DROP TABLE workflow_runs;",
+            )
+            .await
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "drop registered project workflow schema fixture".to_string(),
+                message: error.to_string(),
+            })
+    }
+
+    #[doc(hidden)]
     pub async fn set_project_parse_offset_for_test(
         &self,
         path: &str,

@@ -209,7 +209,7 @@ async fn call(
 }
 
 #[tokio::test]
-async fn workflow_queries_distinguish_an_unbuilt_index_from_empty_results() {
+async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
     let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let cg = TraceDecay::init(&project_root)
@@ -227,6 +227,10 @@ async fn workflow_queries_distinguish_an_unbuilt_index_from_empty_results() {
     )
     .await
     .unwrap_or_else(|error| panic!("registered session runtime: {error}"));
+    runtime
+        .drop_project_workflow_schema_for_test()
+        .await
+        .unwrap_or_else(|error| panic!("drop workflow schema: {error}"));
 
     for args in [
         json!({"session_id": SESSION_ID}),
@@ -237,9 +241,17 @@ async fn workflow_queries_distinguish_an_unbuilt_index_from_empty_results() {
         assert_eq!(payload["status"], "unavailable");
         assert_eq!(
             payload["error"]["reason"], "workflow_index_not_built",
-            "an unbuilt workflow index must take precedence over empty or missing results"
+            "a missing workflow schema must take precedence over empty or missing results"
         );
         assert_eq!(payload["error"]["retryable"], true);
+        assert!(
+            payload.get("count").is_none(),
+            "an unavailable index must not claim a zero count"
+        );
+        assert!(
+            payload.get("runs").is_none(),
+            "an unavailable index must not claim an empty run list"
+        );
     }
 }
 
