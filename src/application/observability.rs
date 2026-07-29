@@ -169,7 +169,7 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
                 .until_micros
                 .saturating_add(999_999)
                 .div_euclid(1_000_000);
-            let scan_limit = requested.max(OBSERVABILITY_SCAN_PAGE).min(EVENT_LIMIT);
+            let scan_limit = requested.clamp(OBSERVABILITY_SCAN_PAGE, EVENT_LIMIT);
             let mut eligible = Vec::with_capacity(requested.saturating_add(1));
             let mut watermark_id = None;
             let mut invalid_in_page = false;

@@ -579,9 +579,9 @@ fn block_overlapping_sites(sites: &mut [PendingSite]) {
                     && sites[left].start == sites[right].start))
         {
             sites[left].disposition = ApiMigrationSiteDispositionV1::Blocked;
-            sites[left].reason = "overlapping API migration sites".to_owned();
+            "overlapping API migration sites".clone_into(&mut sites[left].reason);
             sites[right].disposition = ApiMigrationSiteDispositionV1::Blocked;
-            sites[right].reason = "overlapping API migration sites".to_owned();
+            "overlapping API migration sites".clone_into(&mut sites[right].reason);
         }
     }
 }

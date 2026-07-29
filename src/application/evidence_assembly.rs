@@ -1267,7 +1267,9 @@ impl tracedecay_store::EvidenceAssemblyStore for RuntimeEvidenceAssemblyStore {
                 },
             )? {
                 tracedecay_store::EvidenceAssemblyReadResultV1::ContributionPage(page) => Ok(page),
-                _ => Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+                tracedecay_store::EvidenceAssemblyReadResultV1::Publication(_) => {
+                    Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable)
+                }
             }
         }
     }

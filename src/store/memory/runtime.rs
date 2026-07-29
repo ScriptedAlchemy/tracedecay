@@ -243,7 +243,7 @@ pub(super) fn query_fact_current(
         CURRENT_OPERATION,
     )? {
         FactReadResultV1::Current(fact) => Ok(*fact),
-        other => Err(runtime_error(
+        other @ FactReadResultV1::Lineage(_) => Err(runtime_error(
             CURRENT_OPERATION,
             format!("runtime returned the wrong fact result: {other:?}"),
         )),
@@ -261,7 +261,7 @@ pub(super) fn query_fact_lineage(
         LINEAGE_OPERATION,
     )? {
         FactReadResultV1::Lineage(events) => Ok(events),
-        other => Err(runtime_error(
+        other @ FactReadResultV1::Current(_) => Err(runtime_error(
             LINEAGE_OPERATION,
             format!("runtime returned the wrong fact result: {other:?}"),
         )),
