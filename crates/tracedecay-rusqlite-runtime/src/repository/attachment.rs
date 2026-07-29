@@ -172,10 +172,11 @@ impl RepositoryPhysicalAttachmentFactory {
             }
         };
         start_hook(AttachmentWorkerStartStage::BeforeReaders);
-        let readers_result = ReaderPool::start(
+        let readers_result = ReaderPool::start_with_checkpoint_pressure(
             reader_locator,
             admission.readers,
             RepositoryRuntimeReadExecutor::default(),
+            Some(writer.checkpoint_handle().pressure_subscription()),
         );
         start_hook(AttachmentWorkerStartStage::AfterReaders);
         let readers = match readers_result {
