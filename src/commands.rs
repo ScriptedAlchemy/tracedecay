@@ -5,6 +5,7 @@ mod gain;
 mod index;
 mod memory;
 mod migrate;
+mod scope;
 mod settings;
 mod storage;
 
