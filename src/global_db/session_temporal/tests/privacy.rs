@@ -24,8 +24,8 @@ use crate::application::context::{
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionDataFreshness, SessionRetrievalConfiguration, SessionRetrievalOutcome,
-    SessionRequestBinding, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionDataFreshness, SessionRequestBinding, SessionRetrievalConfiguration,
+    SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
@@ -136,9 +136,7 @@ async fn registered_authorized_retrieval_returns_only_sanitized_context() {
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
     let (context, binding) = request_context(policy_digest);
-    let outcome = service
-        .retrieve(&context, &binding, privacy_query())
-        .await;
+    let outcome = service.retrieve(&context, &binding, privacy_query()).await;
     let SessionRetrievalOutcome::Complete { items, freshness } = &outcome else {
         panic!("authorized registered retrieval was not complete: {outcome:?}");
     };
@@ -176,9 +174,7 @@ async fn registered_denied_retrieval_never_exposes_private_context() {
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
     let (context, binding) = request_context(policy_digest);
-    let outcome = service
-        .retrieve(&context, &binding, privacy_query())
-        .await;
+    let outcome = service.retrieve(&context, &binding, privacy_query()).await;
     assert!(matches!(outcome, SessionRetrievalOutcome::Denied));
     assert!(!format!("{outcome:?}").contains(PRIVACY_CANARY));
 }
@@ -727,14 +723,8 @@ fn request_context(policy_digest: [u8; 32]) -> (RequestContext, SessionRequestBi
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.temporal.privacy.application").unwrap(),
         1,
-        session_application_grant_digest(
-            capability,
-            policy,
-            configuration,
-            &cancellation,
-            budgets,
-        )
-        .unwrap(),
+        session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
+            .unwrap(),
         actor.clone(),
         observed_at,
         expires_at,
