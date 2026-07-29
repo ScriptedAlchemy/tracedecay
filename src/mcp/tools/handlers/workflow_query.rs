@@ -4,27 +4,21 @@ use std::fmt::Write as _;
 
 use serde_json::{Value, json};
 
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::errors::Result;
 use crate::sessions::git_correlation::GitScopeFilter;
-use crate::sessions::workflow_index::{
-    MAX_WORKFLOW_LIMIT, RegisteredWorkflowIndexSnapshot, WorkflowIndexError,
-};
-use crate::store::GlobalDbWorkflowStore;
+use crate::sessions::workflow_index::MAX_WORKFLOW_LIMIT;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::support::{argument_error, string_arg, tool_json_with_md};
+use super::workflow_index::{
+    WorkflowIndexReadPort, WorkflowRunDetailCommand, WorkflowRunDetailOutcome,
+    WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListOutcome, WorkflowRunScope,
+    list_workflow_runs, read_workflow_run,
+};
 
 const DEFAULT_WORKFLOWS_LIMIT: usize = 20;
-
-#[allow(clippy::needless_pass_by_value)] // used with `.map_err(workflow_error)`
-fn workflow_error(err: WorkflowIndexError) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: err.to_string(),
-    }
-}
 
 enum WorkflowMode {
     Run {
@@ -83,64 +77,76 @@ fn parse_mode(args: &Value) -> Result<WorkflowMode> {
     Ok(WorkflowMode::GitScope { filter: git_filter })
 }
 
+/// Reported when the daemon retained no project session authority. An
+/// unretained index is a state, so it never renders as a successful empty list.
+fn index_unavailable_payload() -> Value {
+    json!({
+        "status": "unavailable",
+        "message": "registered project session database is unavailable",
+        "runs": [],
+        "count": 0
+    })
+}
+
 pub(super) async fn handle_workflows(
     cg: &TraceDecay,
     args: Value,
-    database: Option<&RegisteredGlobalDb>,
+    workflow_index: Option<&dyn WorkflowIndexReadPort>,
 ) -> Result<ToolResult> {
     let mode = parse_mode(&args)?;
     let limit = bounded_limit(&args)?;
-
-    let Some(database) = database else {
-        return Ok(tool_json_with_md(
-            Some(cg.project_root()),
-            &args,
-            &json!({
-                "status": "unavailable",
-                "message": "registered project session database is unavailable",
-                "runs": [],
-                "count": 0
-            }),
-            || "No workflow index available.".to_string(),
-        ));
-    };
-    let database = GlobalDbWorkflowStore::new(database)
-        .open_workflow_index_snapshot()
-        .await
-        .map_err(workflow_error)?;
 
     let payload = match &mode {
         WorkflowMode::Run {
             run_id,
             agent_label,
-        } => run_payload(&database, run_id, agent_label.as_deref(), limit).await?,
+        } => run_payload(workflow_index, run_id, agent_label.as_deref(), limit).await?,
         WorkflowMode::Session { session_id } => {
-            let runs = database
-                .runs_for_session(session_id, limit)
-                .await
-                .map_err(workflow_error)?;
-            json!({
-                "status": "ok",
-                "mode": "session",
-                "session_id": session_id,
-                "count": runs.len(),
-                "runs": runs,
-            })
+            let command = WorkflowRunListCommand {
+                scope: WorkflowRunScope::Session {
+                    session_id: session_id.clone(),
+                },
+                limit,
+            };
+            match list_workflow_runs(workflow_index, command).await? {
+                WorkflowRunListOutcome::Runs(runs) => json!({
+                    "status": "ok",
+                    "mode": "session",
+                    "session_id": session_id,
+                    "count": runs.len(),
+                    "runs": runs,
+                }),
+                WorkflowRunListOutcome::IndexUnavailable => index_unavailable_payload(),
+            }
         }
         WorkflowMode::GitScope { filter } => {
-            let runs = database
-                .runs_for_git_scope(filter, limit)
-                .await
-                .map_err(workflow_error)?;
-            json!({
-                "status": "ok",
-                "mode": "git_scope",
-                "git_filter": filter,
-                "count": runs.len(),
-                "runs": runs,
-            })
+            let command = WorkflowRunListCommand {
+                scope: WorkflowRunScope::GitScope {
+                    filter: filter.clone(),
+                },
+                limit,
+            };
+            match list_workflow_runs(workflow_index, command).await? {
+                WorkflowRunListOutcome::Runs(runs) => json!({
+                    "status": "ok",
+                    "mode": "git_scope",
+                    "git_filter": filter,
+                    "count": runs.len(),
+                    "runs": runs,
+                }),
+                WorkflowRunListOutcome::IndexUnavailable => index_unavailable_payload(),
+            }
         }
     };
+
+    if render::field_str(&payload, "status") == "unavailable" {
+        return Ok(tool_json_with_md(
+            Some(cg.project_root()),
+            &args,
+            &payload,
+            || "No workflow index available.".to_string(),
+        ));
+    }
 
     Ok(tool_json_with_md(
         Some(cg.project_root()),
@@ -174,21 +180,29 @@ fn run_not_found_payload(run_id: &str) -> Value {
 }
 
 async fn run_payload(
-    database: &RegisteredWorkflowIndexSnapshot,
+    workflow_index: Option<&dyn WorkflowIndexReadPort>,
     run_id: &str,
     agent_label: Option<&str>,
     limit: usize,
 ) -> Result<Value> {
-    let Some(run) = database.run_for_id(run_id).await.map_err(workflow_error)? else {
-        return Ok(run_not_found_payload(run_id));
+    let command = WorkflowRunDetailCommand {
+        run_id: run_id.to_string(),
+        limit,
     };
-    let agents = database
-        .agents_for_run(run_id, limit)
-        .await
-        .map_err(workflow_error)?;
+    let WorkflowRunDetailView { run, agents } =
+        match read_workflow_run(workflow_index, command).await? {
+            WorkflowRunDetailOutcome::Run(detail) => detail,
+            WorkflowRunDetailOutcome::NotFound => return Ok(run_not_found_payload(run_id)),
+            WorkflowRunDetailOutcome::IndexUnavailable => {
+                return Ok(index_unavailable_payload());
+            }
+        };
     match agent_label {
         Some(label) => {
-            let agent = agents.iter().find(|a| a.agent_label == label);
+            let agent = agents
+                .iter()
+                .find(|agent| agent.agent_label == label)
+                .map(|agent| &agent.row);
             Ok(json!({
                 "status": "ok",
                 "mode": "agent",
@@ -199,15 +213,21 @@ async fn run_payload(
                 "agent": agent,
             }))
         }
-        None => Ok(json!({
-            "status": "ok",
-            "mode": "run",
-            "run_id": run_id,
-            "found": true,
-            "run": run,
-            "agents": agents,
-            "agent_count": agents.len(),
-        })),
+        None => {
+            let agents = agents
+                .into_iter()
+                .map(|agent| agent.row)
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "status": "ok",
+                "mode": "run",
+                "run_id": run_id,
+                "found": true,
+                "run": run,
+                "agents": agents,
+                "agent_count": agents.len(),
+            }))
+        }
     }
 }
 

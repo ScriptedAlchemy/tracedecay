@@ -31,6 +31,7 @@ pub mod session;
 pub mod skills;
 mod support;
 pub mod workflow;
+mod workflow_index;
 pub mod workflow_query;
 
 pub(crate) use project_registry::{
@@ -52,6 +53,11 @@ pub(crate) use session::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
     SessionRefreshFrontierView, SessionRefreshProgressView, SessionRefreshReceiptView,
     SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
+};
+pub(crate) use workflow_index::{
+    WorkflowAgentView, WorkflowIndexReadPort, WorkflowRunDetailCommand, WorkflowRunDetailFuture,
+    WorkflowRunDetailOutcome, WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListFuture,
+    WorkflowRunListOutcome, WorkflowRunScope,
 };
 
 use std::collections::BTreeSet;
@@ -502,6 +508,9 @@ pub struct ToolCallRegistryOptions<'a> {
     /// Daemon-owned project-registry reads. `None` is the typed
     /// missing-registry state, not an empty registry.
     pub project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
+    /// Daemon-owned workflow-index reads. `None` is an unavailable retained
+    /// project-session authority, not a successful empty index.
+    pub workflow_index_reads: Option<&'a dyn WorkflowIndexReadPort>,
     pub accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
@@ -543,6 +552,7 @@ impl Default for ToolCallRegistryOptions<'_> {
         Self {
             global_db: None,
             project_registry_reads: None,
+            workflow_index_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
             registered_savings_db: None,
@@ -1586,12 +1596,8 @@ async fn execute_project_retained_application_tool(
             .await
         }
         RetainedSurfaceOperation::Workflows => {
-            workflow_query::handle_workflows(
-                cg,
-                request.arguments,
-                options.session_authorities.project_registered,
-            )
-            .await
+            workflow_query::handle_workflows(cg, request.arguments, options.workflow_index_reads)
+                .await
         }
         RetainedSurfaceOperation::LcmStatus
         | RetainedSurfaceOperation::LcmDoctor
