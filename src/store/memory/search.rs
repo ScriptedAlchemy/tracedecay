@@ -30,7 +30,7 @@ use super::primitives::{
     compatibility_source_store_id, row_i64, row_string, storage_error, storage_message,
 };
 use super::projection::{
-    compatibility_required_mapping_tx, load_compatibility_projection_tx,
+    compatibility_required_mapping_tx, load_compatibility_projections_tx,
     resolve_compatibility_target_tx,
 };
 use super::scoring::{
@@ -191,14 +191,14 @@ async fn compatibility_search_candidates_tx(
         );
     }
     drop(rows);
-    let mut facts = Vec::with_capacity(fact_ids.len());
-    for fact_id in fact_ids {
-        if let Some(CompatibilityFactProjectionV1::Available(fact)) =
-            load_compatibility_projection_tx(transaction, query.owner(), &fact_id).await?
-        {
-            facts.push(fact.as_ref().clone());
-        }
-    }
+    let facts = load_compatibility_projections_tx(transaction, query.owner(), &fact_ids)
+        .await?
+        .into_iter()
+        .filter_map(|projection| match projection {
+            CompatibilityFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
+            CompatibilityFactProjectionV1::Unavailable(_) => None,
+        })
+        .collect();
     Ok(facts)
 }
 
@@ -573,10 +573,10 @@ pub(super) async fn related_compatibility_facts_tx(
         }
     }
     let mut ranked = Vec::new();
-    for fact_id in encountered {
-        let Some(CompatibilityFactProjectionV1::Available(fact)) =
-            load_compatibility_projection_tx(transaction, query.owner(), &fact_id).await?
-        else {
+    for projection in
+        load_compatibility_projections_tx(transaction, query.owner(), &encountered).await?
+    {
+        let CompatibilityFactProjectionV1::Available(fact) = projection else {
             continue;
         };
         let trust = compatibility_millionths(fact.fact().trust().as_f64());
@@ -779,24 +779,25 @@ async fn compatibility_replay_retrieval_tx(
                 "compatibility retrieval receipt fact ids are missing",
             )
         })?;
-    let mut facts = Vec::with_capacity(fact_ids.len());
+    let mut parsed_ids = Vec::with_capacity(fact_ids.len());
     for value in fact_ids {
-        let fact_id = FactId::new(value.as_str().ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility retrieval receipt fact id is malformed",
-            )
-        })?)
-        .map_err(FactStoreError::from)?;
-        let fact = load_compatibility_projection_tx(transaction, owner, &fact_id)
-            .await?
-            .ok_or_else(|| {
+        parsed_ids.push(
+            FactId::new(value.as_str().ok_or_else(|| {
                 storage_message(
                     COMPATIBILITY_WRITE_OPERATION,
-                    "compatibility retrieval replay fact is missing",
+                    "compatibility retrieval receipt fact id is malformed",
                 )
-            })?;
-        facts.push(fact);
+            })?)
+            .map_err(FactStoreError::from)?,
+        );
+    }
+    let facts = load_compatibility_projections_tx(transaction, owner, &parsed_ids).await?;
+    if facts.len() != parsed_ids.len() {
+        return Err(storage_message(
+            COMPATIBILITY_WRITE_OPERATION,
+            "compatibility retrieval replay fact is missing",
+        )
+        .into());
     }
     Ok(facts)
 }
@@ -863,18 +864,13 @@ pub(super) async fn record_compatibility_fact_retrieval_tx(
         )
         .await?;
     }
-    let mut facts = Vec::with_capacity(fact_ids.len());
-    for fact_id in &fact_ids {
-        facts.push(
-            load_compatibility_projection_tx(transaction, request.owner(), fact_id)
-                .await?
-                .ok_or_else(|| {
-                    storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "compatibility retrieval projection is missing",
-                    )
-                })?,
-        );
+    let facts = load_compatibility_projections_tx(transaction, request.owner(), &fact_ids).await?;
+    if facts.len() != fact_ids.len() {
+        return Err(storage_message(
+            COMPATIBILITY_WRITE_OPERATION,
+            "compatibility retrieval projection is missing",
+        )
+        .into());
     }
     let receipt = json!({
         "fact_ids": fact_ids.iter().map(FactId::as_str).collect::<Vec<_>>(),
