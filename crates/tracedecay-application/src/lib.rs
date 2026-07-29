@@ -19,6 +19,7 @@ pub mod framed_log;
 pub mod git;
 pub mod handlers;
 pub mod lsp_context_catalog;
+pub mod memory;
 pub mod observability;
 pub mod policy;
 pub mod result;
@@ -109,6 +110,10 @@ pub use handlers::{
     application_handler_descriptors,
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
+pub use memory::{
+    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1, DerivedMemoryRepairPort,
+    DerivedMemoryRepairStatsV1, converge_derived_memory,
+};
 pub use observability::*;
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
