@@ -6,6 +6,7 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
 use crate::sessions::{SessionProvider, claude_observation, codex, cursor, cursor_composer};
+use crate::store::GlobalDbTranscriptStore;
 use tracedecay_domain::{BrainId, ObservationScopeV1, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
 
@@ -347,7 +348,9 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
         .copied()
         .filter(|candidate| provider_selected(provider, *candidate))
         .collect();
-    let Some(frontier) = read_ingest_frontier(registered, USER_INGEST_PROVIDER_FRONTIER_KEY).await
+    let transcript_store = GlobalDbTranscriptStore::new(registered);
+    let Some(frontier) =
+        read_ingest_frontier(&transcript_store, USER_INGEST_PROVIDER_FRONTIER_KEY).await
     else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
@@ -394,7 +397,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
                 break 'providers;
             }
             let mut unit_result = run_user_provider(
-                registered,
+                &transcript_store,
                 profile_root,
                 &roots,
                 &facade,
@@ -499,7 +502,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
     let write = scheduling_write_required(coverage, attempted, cancelled);
     let scheduling_state_written = if write {
         write_ingest_frontier(
-            registered,
+            &transcript_store,
             USER_INGEST_PROVIDER_FRONTIER_KEY,
             frontier,
             attempted,

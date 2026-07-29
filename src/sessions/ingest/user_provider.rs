@@ -4,12 +4,12 @@ use tracedecay_domain::ObservationScopeV1;
 
 use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{
     self, TranscriptDiscoveryBounds, TranscriptSource, try_ingest_source,
 };
 use crate::sessions::{SessionProvider, claude_observation, cline_like, hermes, kiro, vibe};
+use crate::store::TranscriptIngestStore;
 
 use super::failure::{
     ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
@@ -20,8 +20,8 @@ use super::user::{
     try_ingest_user_codex_sessions_with_db_bounded, try_ingest_user_cursor_sessions_with_db_bounded,
 };
 
-pub(super) async fn run_user_provider(
-    registered: &RegisteredGlobalDb,
+pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
+    store: &S,
     profile_root: &Path,
     roots: &[PathBuf],
     facade: &HostAdmissionFacade<'_>,
@@ -30,7 +30,7 @@ pub(super) async fn run_user_provider(
     cancellation: &ObservationCancellation,
 ) -> ProviderRunOutcome {
     UserProviderUnit {
-        registered,
+        store,
         profile_root,
         roots,
         facade,
@@ -42,8 +42,8 @@ pub(super) async fn run_user_provider(
     .await
 }
 
-struct UserProviderUnit<'a> {
-    registered: &'a RegisteredGlobalDb,
+struct UserProviderUnit<'a, S> {
+    store: &'a S,
     profile_root: &'a Path,
     roots: &'a [PathBuf],
     facade: &'a HostAdmissionFacade<'a>,
@@ -52,7 +52,7 @@ struct UserProviderUnit<'a> {
     cancellation: &'a ObservationCancellation,
 }
 
-impl UserProviderUnit<'_> {
+impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
     async fn run(self) -> ProviderRunOutcome {
         match self.candidate {
             SessionProvider::Codex => self.run_codex().await,
@@ -243,7 +243,7 @@ impl UserProviderUnit<'_> {
         };
         let source = source.for_user_scope(self.roots.to_vec());
         match try_ingest_file_source_bounded(
-            self.registered,
+            self.store,
             &source,
             self.profile_root,
             self.max_new_bytes,
@@ -266,8 +266,8 @@ impl UserProviderUnit<'_> {
     }
 }
 
-pub(super) async fn try_ingest_file_source_bounded(
-    registered: &RegisteredGlobalDb,
+pub(super) async fn try_ingest_file_source_bounded<S: TranscriptIngestStore>(
+    store: &S,
     transcript_source: &dyn TranscriptSource,
     project_root: &Path,
     max_new_bytes: u64,
@@ -284,8 +284,7 @@ pub(super) async fn try_ingest_file_source_bounded(
             break;
         }
         let single = SinglePathSource::new(transcript_source, path.clone());
-        stats =
-            stats.merge(try_ingest_source(registered, &single, project_root, Some(grant)).await?);
+        stats = stats.merge(try_ingest_source(store, &single, project_root, Some(grant)).await?);
         remaining = remaining.saturating_sub(grant);
     }
     Ok(stats)

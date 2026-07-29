@@ -16,10 +16,13 @@ use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
 };
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationStoreError, ProjectionStoreError, TranscriptStoreError,
+    ObservationPersistOutcome, ObservationStoreError, ParseOffset, ProjectionStoreError,
+    TranscriptStoreError,
 };
 
-use crate::application::host_admission::HostAdmissionFacade;
+use crate::application::host_admission::{
+    ObservationCaptureAdmissionPort, TranscriptCursorAdmissionPort,
+};
 use crate::application::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
@@ -258,8 +261,8 @@ fn cursor_after_receipt(
 }
 
 /// Sanitize and commit one already-framed record before any V1 sink.
-async fn capture_frame(
-    admission: &HostAdmissionFacade<'_>,
+async fn capture_frame<A: ObservationCaptureAdmissionPort>(
+    admission: &A,
     frame: &mut ClaudeSourceFrame,
     expected_cursor: Option<ClaudeSourceCursorV1>,
     context: &FrameCaptureContext,
@@ -323,8 +326,8 @@ async fn capture_frame(
     }
 }
 
-async fn advance_non_durable_covered_range(
-    admission: &HostAdmissionFacade<'_>,
+async fn advance_non_durable_covered_range<A: ObservationCaptureAdmissionPort>(
+    admission: &A,
     context: &FrameCaptureContext,
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
     segment: NonDurableSegment,
@@ -435,19 +438,22 @@ fn scanned_segments(
     Ok(segments)
 }
 
-struct SourceProcessingContext<'a, 'authority> {
-    admission: &'a HostAdmissionFacade<'authority>,
+struct SourceProcessingContext<'a, A> {
+    admission: &'a A,
     source_adapter: &'a ClaudeSource,
     project_root: &'a Path,
     scope: &'a ObservationScopeV1,
     cancellation: &'a ObservationCancellation,
 }
 
-async fn prepare_source(
-    context: &SourceProcessingContext<'_, '_>,
+async fn prepare_source<A>(
+    context: &SourceProcessingContext<'_, A>,
     path: &Path,
     max_new_bytes: Option<u64>,
-) -> Result<SourcePreparation, ClaudeObservationIngestError> {
+) -> Result<SourcePreparation, ClaudeObservationIngestError>
+where
+    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+{
     if context.cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
     }
@@ -555,8 +561,8 @@ async fn prepare_source(
     })))
 }
 
-async fn apply_scanned_segment(
-    admission: &HostAdmissionFacade<'_>,
+async fn apply_scanned_segment<A: ObservationCaptureAdmissionPort>(
+    admission: &A,
     capture_context: &FrameCaptureContext,
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
     segment: ScannedSegment,
@@ -649,9 +655,9 @@ async fn apply_scanned_segment(
     Ok(true)
 }
 
-async fn apply_prepared_source(
+async fn apply_prepared_source<A: ObservationCaptureAdmissionPort>(
     prepared: PreparedSource,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &A,
     cancellation: &ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
     let PreparedSource {
@@ -679,11 +685,14 @@ async fn apply_prepared_source(
     Ok(stats)
 }
 
-async fn process_source(
-    context: &SourceProcessingContext<'_, '_>,
+async fn process_source<A>(
+    context: &SourceProcessingContext<'_, A>,
     path: &Path,
     max_new_bytes: Option<u64>,
-) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+{
     match prepare_source(context, path, max_new_bytes).await? {
         SourcePreparation::Finished(stats) => Ok(stats),
         SourcePreparation::Ready(prepared) => {
@@ -692,8 +701,8 @@ async fn process_source(
     }
 }
 
-pub(crate) async fn drain_projection_queue(
-    admission: &HostAdmissionFacade<'_>,
+pub(crate) async fn drain_projection_queue<A: ObservationCaptureAdmissionPort>(
+    admission: &A,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
@@ -725,8 +734,8 @@ fn frontier_store_error(
     .into()
 }
 
-async fn scheduled_source_paths(
-    admission: &HostAdmissionFacade<'_>,
+async fn scheduled_source_paths<A: TranscriptCursorAdmissionPort>(
+    admission: &A,
     scope: &ObservationScopeV1,
     source: &ClaudeSource,
     project_root: &Path,
@@ -755,8 +764,8 @@ async fn scheduled_source_paths(
     Ok((paths, deferred))
 }
 
-async fn advance_source_frontier(
-    admission: &HostAdmissionFacade<'_>,
+async fn advance_source_frontier<A: TranscriptCursorAdmissionPort>(
+    admission: &A,
     scope: &ObservationScopeV1,
     processed: usize,
 ) -> Result<(), ClaudeObservationIngestError> {
@@ -773,7 +782,7 @@ async fn advance_source_frontier(
         .advance_parse_offset(
             scope,
             CLAUDE_SOURCE_FRONTIER_KEY,
-            crate::global_db::ParseOffset {
+            ParseOffset {
                 byte_offset: previous.byte_offset.saturating_add(processed),
                 mtime: 0,
                 file_id: 1,
@@ -784,14 +793,17 @@ async fn advance_source_frontier(
 }
 
 /// Ingest one Claude source through caller-prepared project admission authority.
-pub(crate) async fn ingest_source_with_observations_with_admission(
+pub(crate) async fn ingest_source_with_observations_with_admission<A>(
     source: &ClaudeSource,
     project_root: &Path,
     scope: ObservationScopeV1,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &A,
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
-) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+{
     if cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
     }
@@ -857,14 +869,17 @@ pub(crate) async fn ingest_source_with_observations_with_admission(
     Ok(stats.merge(projection_stats))
 }
 
-pub(crate) async fn ingest_user_sessions_with_admission(
+pub(crate) async fn ingest_user_sessions_with_admission<A>(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &A,
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
-) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+{
     let Some(source) = ClaudeSource::new() else {
         return Ok(ClaudeObservationIngestStats::default());
     };
@@ -910,7 +925,7 @@ mod tests {
     ];
 
     #[test]
-    fn production_ingest_borrows_host_admission_authority() {
+    fn production_ingest_uses_capture_and_cursor_ports() {
         let production = include_str!("claude_observation.rs")
             .split_once("#[cfg(test)]")
             .expect("test module boundary")
@@ -922,6 +937,9 @@ mod tests {
         assert!(!production.contains("ObservationApplication::new"));
         assert!(!production.contains("ClaudeRecordSanitizerV1::"));
         assert!(!production.contains("HostAdmissionAuthorities::unregistered_"));
+        assert!(!production.contains("HostAdmissionFacade"));
+        assert!(production.contains("ObservationCaptureAdmissionPort"));
+        assert!(production.contains("TranscriptCursorAdmissionPort"));
         assert!(production.contains(".get_parse_offset("));
         assert!(production.contains(".drain_projection_queue("));
     }

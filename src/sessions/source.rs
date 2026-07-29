@@ -42,7 +42,6 @@ use thiserror::Error;
 use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
 use crate::application::host_admission::{WireReadOutcome, read_bounded_to_string};
-use crate::global_db::RegisteredGlobalDb;
 pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
 pub(crate) use crate::sessions::shared::{
@@ -51,7 +50,7 @@ pub(crate) use crate::sessions::shared::{
     usage_counters_from,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::store::{GlobalDbTranscriptStore, TranscriptIngestStore};
+use crate::store::TranscriptIngestStore;
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
 
@@ -340,21 +339,20 @@ pub trait TranscriptSource: Send + Sync {
 }
 
 /// Fallible production boundary that drives a single source to completion
-/// against `db`, ingesting every transcript it locates for `project_root`.
+/// against `store`, ingesting every transcript it locates for `project_root`.
 /// Source parse misses are skipped; authoritative store failures abort the
 /// pass.
 ///
 /// `max_new_bytes` bounds how much newly-appended content a byte-offset source
 /// will read in one call (used to keep per-prompt hot paths inside budget);
 /// pass `None` for an unbounded catch-up.
-pub async fn try_ingest_source(
-    db: &RegisteredGlobalDb,
+pub(crate) async fn try_ingest_source<S: TranscriptIngestStore>(
+    store: &S,
     source: &dyn TranscriptSource,
     project_root: &Path,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<TranscriptIngestStats> {
-    let store = GlobalDbTranscriptStore::new(db);
-    try_ingest_source_with_store(&store, source, project_root, max_new_bytes).await
+    try_ingest_source_with_store(store, source, project_root, max_new_bytes).await
 }
 
 pub(crate) async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
@@ -532,17 +530,9 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     // commits, so the dashboard never lights work that did not land. The project
     // id is left for the dashboard to resolve from the registry — ingest holds a
     // project root, not a registered identity, and must not pay a lookup here.
-    if let Some(observation_database) = store.registered_observation_database() {
-        crate::application::event_lane::publish(
-            observation_database,
-            crate::application::event_lane::ActivityFamilyV1::SessionIngest,
-            project_root,
-            None,
-            messages_upserted,
-            Some(provider),
-        )
+    store
+        .record_session_ingest_activity(project_root, messages_upserted, provider)
         .await;
-    }
     Ok(TranscriptIngestStats {
         sessions_upserted: 1,
         messages_upserted,

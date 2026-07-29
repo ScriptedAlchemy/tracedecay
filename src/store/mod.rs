@@ -4,8 +4,9 @@
 //! not discover paths, open connections, or own transaction state.
 
 use std::future::Future;
+use std::path::Path;
 
-use tracedecay_store::{TranscriptStore, TranscriptStoreResult, TranscriptWriteBatch};
+use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptStoreResult, TranscriptWriteBatch};
 
 use crate::sessions::SessionRecord;
 use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
@@ -52,10 +53,26 @@ pub mod vector_generation_test_support {
 /// application extends it with session merge reads and git evidence that must
 /// commit in the same authoritative transaction.
 pub(crate) trait TranscriptIngestStore: TranscriptStore {
-    /// Optional registered observation authority paired with this adapter.
-    /// Test stores and portable adapters remain observation-neutral.
-    fn registered_observation_database(&self) -> Option<&crate::global_db::RegisteredGlobalDb> {
-        None
+    fn advance_parse_offset_monotonic(
+        &self,
+        cursor_path: &Path,
+        offset: ParseOffset,
+    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+        async move {
+            let expected = self.get_parse_offset(cursor_path).await?;
+            let batch =
+                TranscriptWriteBatch::advance_offset(cursor_path.to_path_buf(), expected, offset)?;
+            self.persist_transcript_batch(batch).await
+        }
+    }
+
+    fn record_session_ingest_activity(
+        &self,
+        _project_root: &Path,
+        _units: u64,
+        _provider: &'static str,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
     }
 
     fn get_session(
