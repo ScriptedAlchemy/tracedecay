@@ -872,6 +872,48 @@ fn failed_core_upgrade_retires_the_rekeyed_owner_without_quarantine() {
 }
 
 #[test]
+fn failed_optional_upgrade_restores_the_ready_core() {
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_id: Some("degraded-upgrade".to_owned()),
+            store_root: PathBuf::from("/store/degraded-upgrade"),
+            graph_db_path: PathBuf::from("/store/degraded-upgrade/main.db"),
+        },
+        scope_prefix: None,
+    };
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project"),
+        scope_prefix: None,
+    };
+    let core = Arc::new(1_u8);
+    let full = Arc::new(2_u8);
+    let mut registry = DatabaseOwnerRegistry::default();
+    registry.insert_route(route.clone(), key.clone(), Arc::clone(&core));
+
+    assert!(
+        registry.replace_ready_if(&key, Arc::clone(&full), |current| {
+            Arc::ptr_eq(current, &core)
+        })
+    );
+    let failed = registry
+        .swap_ready_if(&key, Arc::clone(&core), |current| {
+            Arc::ptr_eq(current, &full)
+        })
+        .expect("published full server");
+
+    assert!(Arc::ptr_eq(&failed, &full));
+    assert!(
+        registry
+            .get_route(&route)
+            .is_some_and(|(_, current)| Arc::ptr_eq(current, &core))
+    );
+}
+
+#[test]
 fn failed_deferred_health_quarantines_only_the_exact_store_owner() {
     let key = ProjectServerKey {
         owner: StoreOwnerKey {
