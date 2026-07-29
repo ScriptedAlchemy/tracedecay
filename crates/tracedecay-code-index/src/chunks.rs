@@ -19,7 +19,8 @@ use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CodeSearchChunkV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, EdgeAuthorityV1,
-    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionBatchV1, FileIdentityDigest,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1,
+    ExtractionBatchV1, FileIdentityDigest,
     FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, ParseOutcomeV1, PolicyRevisionId,
     RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
     SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, ValidatedCodeFileV1, canonical_sha256,
@@ -135,6 +136,14 @@ impl ExtractionAdmittedCodeSearchChunkV1 {
 
     /// Consume the authority-bearing wrapper and return its admitted chunk.
     pub fn into_chunk(self) -> CodeSearchChunkV1 {
+        self.chunk
+    }
+}
+
+// SAFETY: values are only created by `ExactExtractionAuthorityV1::admit`,
+// after the parser-backed chunk digest has been validated.
+unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
+    fn into_admitted_chunk(self) -> CodeSearchChunkV1 {
         self.chunk
     }
 }
