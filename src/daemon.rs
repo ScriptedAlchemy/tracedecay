@@ -2144,10 +2144,11 @@ struct DaemonEngine {
 }
 
 /// Retain one daemon-owned Git index transaction service for the project store
-/// and reconcile any durable records before the project server can advertise
-/// tools. The service owns the store actor; constructing a second service for
-/// the same database is rejected by the registry.
-async fn ensure_git_index_transactions_before_advertising(
+/// and reconcile any durable records before mutation owners become available.
+/// Read-only core tools and edit previews do not depend on this service. The
+/// service owns the store actor; constructing a second service for the same
+/// database is rejected by the registry.
+async fn ensure_git_index_transactions_for_mutation_owners(
     store_administration: &StoreAdministration,
     session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     project_root: &Path,
@@ -4548,13 +4549,6 @@ async fn production_project_server(
     let registered_project_session_db = store_administration
         .registered_project_session_database(cg.project_root(), cg.store_layout())
         .await?;
-    ensure_git_index_transactions_before_advertising(
-        store_administration,
-        Arc::clone(&registered_project_session_db),
-        cg.project_root(),
-        key.owner.project_id.as_deref(),
-    )
-    .await?;
     let registered_user_session_db = store_administration
         .registered_profile_session_database()
         .await?;
@@ -4715,7 +4709,7 @@ async fn production_project_server(
                 registry: registry_db,
                 project_sessions: session_db,
                 user_sessions: user_session_db,
-                registered_project_sessions: registered_project_session_db,
+                registered_project_sessions: Arc::clone(&registered_project_session_db),
                 registered_user_sessions: registered_user_session_db,
             },
             host_admission_broker,
@@ -4812,6 +4806,13 @@ async fn production_project_server(
                     .to_owned(),
             });
         }
+        ensure_git_index_transactions_for_mutation_owners(
+            store_administration,
+            registered_project_session_db,
+            canonical_project_path,
+            key.owner.project_id.as_deref(),
+        )
+        .await?;
         invocation
             .mount_code_index(
                 canonical_project_path,
