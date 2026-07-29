@@ -1769,14 +1769,19 @@ impl McpServer {
         if fast_unavailable {
             return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
         }
-        self.complete_tool_call(
-            id,
-            tool_name,
-            analytics_arguments,
-            analytics_session_id,
-            dispatch,
-        )
-        .await
+        let response = self
+            .complete_tool_call(
+                id.clone(),
+                tool_name.clone(),
+                analytics_arguments,
+                analytics_session_id,
+                dispatch,
+            )
+            .await;
+        if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
+            return response;
+        }
+        response
     }
 }
 
