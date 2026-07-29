@@ -431,7 +431,7 @@ fn term_anchors(bytes: &[u8], terms: &[String]) -> Vec<HistoricalTermAnchorV1> {
                 .position(|window| window == term.as_bytes())?;
             Some(HistoricalTermAnchorV1 {
                 term: term.clone(),
-                line: bytes[..start].iter().filter(|byte| **byte == b'\n').count() as u32 + 1,
+                line: bytes[..start].split(|byte| *byte == b'\n').count() as u32,
                 byte_start: start as u64,
                 byte_end: (start + term.len()) as u64,
             })
