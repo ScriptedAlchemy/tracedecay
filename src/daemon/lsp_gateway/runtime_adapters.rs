@@ -1629,6 +1629,7 @@ mod tests {
     use super::super::gateway::GatewayResponse;
     use super::super::rpc::{response_value, semantic_response_value};
     use serde_json::json;
+    use std::collections::BTreeSet;
     use std::sync::atomic::AtomicBool;
 
     #[test]
