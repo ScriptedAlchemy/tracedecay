@@ -403,6 +403,24 @@ fn root_manifest_rejects_libsql_runtime_dependencies() {
 
 fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {
     match manifest_path.to_str() {
+        Some("crates/tracedecay-code-index/Cargo.toml") => &[
+            "ast-grep-core",
+            "cc",
+            "ignore",
+            "serde",
+            "serde_json",
+            "sha2",
+            "static_assertions",
+            "tempfile",
+            "thiserror",
+            "tokensave-large-treesitters",
+            "tokensave-medium-treesitters",
+            "tracedecay-application",
+            "tracedecay-domain",
+            "tree-sitter",
+            "tree-sitter-hlsl",
+            "tree-sitter-language",
+        ],
         Some("crates/tracedecay-api/Cargo.toml") => &[
             "axum",
             "futures-util",

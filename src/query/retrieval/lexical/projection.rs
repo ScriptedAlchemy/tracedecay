@@ -240,7 +240,7 @@ impl CodeLexicalProjectionAdapterV1 {
             metadata,
             chunks
                 .into_iter()
-                .map(ExtractionAdmittedCodeSearchChunkV1::into_inner)
+                .map(ExtractionAdmittedCodeSearchChunkV1::into_chunk)
                 .collect(),
             true,
         )
