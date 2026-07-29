@@ -1218,23 +1218,6 @@ impl ContextScoutReadSurfaceV1 {
     }
 }
 
-fn hook_v2_current_scout_read_locator(
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    current_session_id: Option<&SessionId>,
-) -> Option<[u8; 32]> {
-    let protected_session_id =
-        crate::hooks::hook_v2_protected_session_id_for_native(current_session_id?.as_str());
-    (protected_session_id == envelope.protected_session_id).then_some(protected_session_id)
-}
-
-async fn hook_v2_resolve_current_scout_read_locator(
-    args: &Value,
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Option<[u8; 32]> {
-    let lifecycle = hook_v2_context_scout_lifecycle(args, envelope).await?;
-    hook_v2_current_scout_read_locator(envelope, Some(&lifecycle.session_id))
-}
-
 async fn hook_v2_scout_read(cg: &TraceDecay, args: &Value, action: &str) -> Result<Value> {
     let surface = ContextScoutReadSurfaceV1::from_action(action)
         .ok_or_else(|| config_error("unknown Context Scout read surface"))?;
@@ -2981,44 +2964,6 @@ mod tests {
             assert_eq!(lifecycle.turn_id.as_str(), latest_call);
             assert_eq!(lifecycle.logical_message_id.as_str(), latest_call);
         }
-    }
-
-    #[test]
-    fn scout_read_locator_requires_current_daemon_lifecycle() {
-        let session_id = SessionId::new("native-session-1".to_owned()).unwrap();
-        let stale_session_id = SessionId::new("native-session-stale".to_owned()).unwrap();
-        let mut envelope = hook_v2_envelope_for_test();
-        envelope.protected_session_id =
-            crate::hooks::hook_v2_protected_session_id_for_native(session_id.as_str());
-
-        assert_eq!(
-            hook_v2_current_scout_read_locator(&envelope, Some(&session_id)),
-            Some(envelope.protected_session_id)
-        );
-        assert_eq!(hook_v2_current_scout_read_locator(&envelope, None), None);
-        assert_eq!(
-            hook_v2_current_scout_read_locator(&envelope, Some(&stale_session_id)),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn scout_read_locator_denies_missing_daemon_lifecycle() {
-        let session_id = "native-session-without-lifecycle";
-        let mut envelope = hook_v2_envelope_for_test();
-        envelope.project_id = [241; 16];
-        envelope.worktree_id = [242; 16];
-        envelope.protected_session_id =
-            crate::hooks::hook_v2_protected_session_id_for_native(session_id);
-
-        assert!(
-            hook_v2_resolve_current_scout_read_locator(
-                &json!({ "native_session_id": session_id }),
-                &envelope,
-            )
-            .await
-            .is_none()
-        );
     }
 
     fn hook_v2_snapshot() -> tracedecay_hooks::HookConfigurationSnapshotV1 {
