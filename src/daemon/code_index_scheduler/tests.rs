@@ -1206,6 +1206,52 @@ fn restart_restores_complete_generation_and_content_noop() {
 }
 
 #[test]
+fn restored_generation_abstains_and_schedules_background_truth() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("initial publish"));
+    }
+
+    let mut restarted = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    assert!(
+        restarted
+            .latest_complete_ready_for_query()
+            .expect("ready check")
+            .is_none(),
+        "restored bytes are not request-admissible before current truth is proven"
+    );
+    assert_eq!(
+        restarted.pending_hint_count(),
+        None,
+        "the ready check schedules one overflow reconcile for the background worker"
+    );
+    let first_wake_epoch = restarted.epoch.load(std::sync::atomic::Ordering::Acquire);
+    assert!(
+        restarted
+            .latest_complete_ready_for_query()
+            .expect("repeat ready check")
+            .is_none()
+    );
+    assert!(
+        restarted.epoch.load(std::sync::atomic::Ordering::Acquire) > first_wake_epoch,
+        "an earlier failed wake cannot strand a retained overflow marker"
+    );
+
+    let outcome = restarted.reconcile_now().expect("background truth");
+    assert!(matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_)));
+    assert!(
+        restarted
+            .latest_complete_ready_for_query()
+            .expect("ready check")
+            .is_some(),
+        "the unchanged restored generation becomes request-admissible after reconciliation"
+    );
+}
+
+#[test]
 fn restart_rejects_corrupt_sealed_generation() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -3429,6 +3475,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
             .await
             .expect("mount daemon-owned scheduler")
     );
+    wait_for_initial_generation(&registry, fixture.path()).await;
 
     // The one mint: file identity and generation both come from the registry.
     let identity =
