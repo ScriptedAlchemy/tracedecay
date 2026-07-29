@@ -1,5 +1,4 @@
-//! Store manifest round-trip and symlink-safety tests (split from
-//! `storage_resolver_test.rs`).
+//! Store manifest round-trip and symlink-safety tests.
 
 use super::*;
 

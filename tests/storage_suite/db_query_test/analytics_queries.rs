@@ -1,5 +1,5 @@
-//! Ranking/analytics query tests (ranked nodes, largest, coupling, inheritance, distribution, complexity, doc coverage, god classes, call counts) (split from
-//! `db_query_test.rs`).
+//! Ranking/analytics query tests (ranked nodes, largest, coupling, inheritance,
+//! distribution, complexity, doc coverage, god classes, call counts).
 
 use super::*;
 

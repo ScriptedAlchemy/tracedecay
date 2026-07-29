@@ -1,5 +1,4 @@
-//! File records, metadata keys, and test-annotation query tests (split from
-//! `db_query_test.rs`).
+//! File records, metadata keys, and test-annotation query tests.
 
 use std::collections::HashMap;
 

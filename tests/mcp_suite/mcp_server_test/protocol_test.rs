@@ -1,5 +1,4 @@
 #![allow(unused_imports)] // test scaffolding imports
-//! `protocol_test` domain tests, split mechanically from `mcp_server_test.rs`.
 
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};

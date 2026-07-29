@@ -1,5 +1,4 @@
-//! TraceDecay init/open profile-shard placement tests (split from
-//! `storage_resolver_test.rs`).
+//! TraceDecay init/open profile-shard placement tests.
 
 use super::*;
 
