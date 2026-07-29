@@ -73,7 +73,7 @@ impl AgentIntegration for ClaudeIntegration {
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
         install_clean_local_config();
-        sync_claude_plugin_cache(&ctx.home);
+        sync_claude_plugin_cache(&ctx.home, &ctx.tracedecay_bin);
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
@@ -171,7 +171,7 @@ impl AgentIntegration for ClaudeIntegration {
         // it current is how updated steering actually propagates.
         install_claude_md_rules(&claude_md_path)?;
 
-        sync_claude_plugin_cache(&ctx.home);
+        sync_claude_plugin_cache(&ctx.home, &ctx.tracedecay_bin);
 
         Ok(UpdatePluginOutcome::Refreshed(vec![deploy_dir]))
     }
@@ -393,15 +393,20 @@ fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     // exclusively own — confirmed by the deployed marketplace/plugin manifest
     // naming tracedecay — so an unrelated dir squatting on the path is never
     // nuked.
-    clean_replace_owned_deploy_dir(&deploy_dir)?;
-    for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
-        safe_write_text_file(&deploy_dir.join(relative), &rendered, None)?;
-    }
+    write_rendered_plugin_bundle(&deploy_dir, tracedecay_bin)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Deployed tracedecay plugin bundle to {}",
         deploy_dir.display()
     );
     Ok(deploy_dir)
+}
+
+fn write_rendered_plugin_bundle(deploy_dir: &Path, tracedecay_bin: &str) -> Result<()> {
+    clean_replace_owned_deploy_dir(deploy_dir)?;
+    for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
+        safe_write_text_file(&deploy_dir.join(relative), &rendered, None)?;
+    }
+    Ok(())
 }
 
 /// Canonical rendered Claude plugin inventory. The legacy installer and the
@@ -604,7 +609,7 @@ fn register_marketplace(home: &Path, deploy_dir: &Path) -> Result<()> {
 /// registry always follow Claude Code's current contract. Best-effort: only
 /// runs against the real user home (temp-home installs in tests skip it),
 /// and a missing/failed `claude` CLI degrades to the existing restart hint.
-fn sync_claude_plugin_cache(home: &Path) {
+fn sync_claude_plugin_cache(home: &Path, tracedecay_bin: &str) {
     let is_real_home = dirs::home_dir().is_some_and(|real| real == home);
     if !is_real_home {
         return;
@@ -635,6 +640,83 @@ fn sync_claude_plugin_cache(home: &Path) {
             eprintln!("  Could not run claude plugin {action}: {err}");
         }
     }
+    match refresh_registered_claude_plugin_cache(home, tracedecay_bin) {
+        Ok(0) => {}
+        Ok(refreshed) => {
+            eprintln!(
+                "\x1b[32m\u{2714}\x1b[0m Refreshed {refreshed} installed Claude Code plugin cache entr{}",
+                if refreshed == 1 { "y" } else { "ies" },
+            );
+        }
+        Err(error) => {
+            eprintln!("  Could not refresh installed Claude Code plugin cache: {error}");
+        }
+    }
+}
+
+fn refresh_registered_claude_plugin_cache(
+    home: &Path,
+    tracedecay_bin: &str,
+) -> Result<usize> {
+    let registry = load_json_file(&home.join(".claude/plugins/installed_plugins.json"));
+    let Some(entries) = registry
+        .get("plugins")
+        .and_then(|plugins| plugins.get(PLUGIN_IDENTIFIER))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(0);
+    };
+    let cache_root = home.join(".claude/plugins/cache");
+    let canonical_cache_root =
+        cache_root
+            .canonicalize()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to resolve Claude plugin cache root {}: {error}",
+                    cache_root.display()
+                ),
+            })?;
+    let mut install_paths = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(raw_install_path) = entry
+            .get("installPath")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let install_path = PathBuf::from(raw_install_path);
+        let canonical_install_path =
+            install_path
+                .canonicalize()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "failed to resolve installed Claude plugin cache {}: {error}",
+                        install_path.display()
+                    ),
+                })?;
+        if !canonical_install_path.starts_with(&canonical_cache_root) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing to refresh Claude plugin cache outside {}: {}",
+                    canonical_cache_root.display(),
+                    canonical_install_path.display()
+                ),
+            });
+        }
+        if !deploy_dir_is_tracedecay(&canonical_install_path) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing to refresh non-tracedecay Claude plugin cache {}",
+                    canonical_install_path.display()
+                ),
+            });
+        }
+        install_paths.push(canonical_install_path);
+    }
+    for install_path in &install_paths {
+        write_rendered_plugin_bundle(install_path, tracedecay_bin)?;
+    }
+    Ok(install_paths.len())
 }
 
 /// Remove the tracedecay marketplace entry from `known_marketplaces.json`,

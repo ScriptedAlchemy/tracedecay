@@ -195,6 +195,81 @@ fn deploy_is_a_clean_replace_dropping_stale_files() {
     );
 }
 
+#[test]
+fn registered_cache_refresh_replaces_same_version_stale_bundle() {
+    let home = tempfile::tempdir().unwrap();
+    let cache_dir = home.path().join(format!(
+        ".claude/plugins/cache/tracedecay/tracedecay/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    write_rendered_plugin_bundle(&cache_dir, "/old/bin/tracedecay").unwrap();
+    let hooks_path = cache_dir.join("hooks/hooks.json");
+    let mut hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] = json!(5);
+    std::fs::write(&hooks_path, serde_json::to_vec_pretty(&hooks).unwrap()).unwrap();
+    std::fs::write(cache_dir.join("stale-file"), "stale").unwrap();
+
+    let registry_path = home.path().join(".claude/plugins/installed_plugins.json");
+    std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+    let mut registry = json!({ "plugins": {} });
+    registry["plugins"][PLUGIN_IDENTIFIER] = json!([{
+        "installPath": cache_dir,
+        "version": env!("CARGO_PKG_VERSION"),
+        "scope": "user"
+    }]);
+    std::fs::write(
+        &registry_path,
+        serde_json::to_vec_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        refresh_registered_claude_plugin_cache(home.path(), "/new/bin/tracedecay").unwrap(),
+        1
+    );
+    let refreshed_hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    let prompt_hook = &refreshed_hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+    assert_eq!(prompt_hook["command"], json!("/new/bin/tracedecay"));
+    assert!(
+        prompt_hook.get("timeout").is_none(),
+        "same-version cache refresh must remove retired timeout masking"
+    );
+    assert!(
+        !cache_dir.join("stale-file").exists(),
+        "cache refresh must be an exact clean replacement"
+    );
+}
+
+#[test]
+fn registered_cache_refresh_refuses_registry_path_outside_cache_root() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude/plugins/cache")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    write_rendered_plugin_bundle(outside.path(), "/bin/tracedecay").unwrap();
+    let sentinel = outside.path().join("sentinel");
+    std::fs::write(&sentinel, "preserve").unwrap();
+    let registry_path = home.path().join(".claude/plugins/installed_plugins.json");
+    std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+    let mut registry = json!({ "plugins": {} });
+    registry["plugins"][PLUGIN_IDENTIFIER] = json!([{
+        "installPath": outside.path(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "scope": "user"
+    }]);
+    std::fs::write(
+        &registry_path,
+        serde_json::to_vec_pretty(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let error = refresh_registered_claude_plugin_cache(home.path(), "/bin/tracedecay")
+        .expect_err("an external registry path must be rejected");
+    assert!(error.to_string().contains("outside"));
+    assert!(sentinel.exists(), "rejected external paths must stay untouched");
+}
+
 /// The clean replace must refuse to delete a marketplace dir tracedecay
 /// does not own (no tracedecay plugin/marketplace manifest), so an
 /// unrelated dir squatting on the path is never nuked.
