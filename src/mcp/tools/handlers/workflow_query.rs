@@ -13,9 +13,9 @@ use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::support::{argument_error, string_arg, tool_json_with_md};
 use super::workflow_index::{
-    WorkflowIndexReadPort, WorkflowRunDetailCommand, WorkflowRunDetailOutcome,
-    WorkflowRunDetailView, WorkflowRunListCommand, WorkflowRunListOutcome, WorkflowRunScope,
-    list_workflow_runs, read_workflow_run,
+    WorkflowIndexReadPort, WorkflowIndexUnavailableReason, WorkflowRunDetailCommand,
+    WorkflowRunDetailOutcome, WorkflowRunDetailView, WorkflowRunListCommand,
+    WorkflowRunListOutcome, WorkflowRunScope, list_workflow_runs, read_workflow_run,
 };
 
 const DEFAULT_WORKFLOWS_LIMIT: usize = 20;
@@ -77,12 +77,23 @@ fn parse_mode(args: &Value) -> Result<WorkflowMode> {
     Ok(WorkflowMode::GitScope { filter: git_filter })
 }
 
-/// Reported when the daemon retained no project session authority. An
-/// unretained index is a state, so it never renders as a successful empty list.
-fn index_unavailable_payload() -> Value {
+/// Reported when the index cannot answer, whether because no authority was
+/// retained or because the index has not been built yet. Each case is a state,
+/// so none of them renders as a successful empty list.
+///
+/// `reason` and `retryable` follow the typed-error shape the session-retrieval
+/// surface already uses, so a caller reads unavailability the same way here.
+fn index_unavailable_payload(reason: WorkflowIndexUnavailableReason) -> Value {
     json!({
         "status": "unavailable",
-        "message": "registered project session database is unavailable",
+        "outcome": "unavailable",
+        "message": reason.message(),
+        "error": {
+            "code": "workflow_index_unavailable",
+            "message": reason.message(),
+            "reason": reason.as_str(),
+            "retryable": reason.is_retryable(),
+        },
         "runs": [],
         "count": 0
     })
@@ -116,7 +127,7 @@ pub(super) async fn handle_workflows(
                     "count": runs.len(),
                     "runs": runs,
                 }),
-                WorkflowRunListOutcome::IndexUnavailable => index_unavailable_payload(),
+                WorkflowRunListOutcome::Unavailable(reason) => index_unavailable_payload(reason),
             }
         }
         WorkflowMode::GitScope { filter } => {
@@ -134,17 +145,18 @@ pub(super) async fn handle_workflows(
                     "count": runs.len(),
                     "runs": runs,
                 }),
-                WorkflowRunListOutcome::IndexUnavailable => index_unavailable_payload(),
+                WorkflowRunListOutcome::Unavailable(reason) => index_unavailable_payload(reason),
             }
         }
     };
 
     if render::field_str(&payload, "status") == "unavailable" {
+        let message = render::field_str(&payload, "message").to_string();
         return Ok(tool_json_with_md(
             Some(cg.project_root()),
             &args,
             &payload,
-            || "No workflow index available.".to_string(),
+            || render_unavailable_md(&message),
         ));
     }
 
@@ -179,6 +191,15 @@ fn run_not_found_payload(run_id: &str) -> Value {
     })
 }
 
+/// Says which state was hit instead of a bare "no index" line, so the markdown
+/// reader learns whether to wait for ingest or to fix the mount.
+fn render_unavailable_md(message: &str) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Workflow Runs");
+    md.blank().empty_note(message);
+    md.render()
+}
+
 async fn run_payload(
     workflow_index: Option<&dyn WorkflowIndexReadPort>,
     run_id: &str,
@@ -193,8 +214,8 @@ async fn run_payload(
         match read_workflow_run(workflow_index, command).await? {
             WorkflowRunDetailOutcome::Run(detail) => detail,
             WorkflowRunDetailOutcome::NotFound => return Ok(run_not_found_payload(run_id)),
-            WorkflowRunDetailOutcome::IndexUnavailable => {
-                return Ok(index_unavailable_payload());
+            WorkflowRunDetailOutcome::Unavailable(reason) => {
+                return Ok(index_unavailable_payload(reason));
             }
         };
     match agent_label {
@@ -425,6 +446,56 @@ fn git_filter_summary(filter: &Value) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Each unavailable state must be legible on the wire and must never look
+    /// like a run list that came back empty. `count` and `runs` stay present so
+    /// a caller reading only those does not crash, but `status` is the field
+    /// that decides, and it never says `ok` here.
+    #[test]
+    fn unavailable_payload_names_the_state_instead_of_reporting_zero_runs() {
+        for (reason, wire, retryable) in [
+            (
+                WorkflowIndexUnavailableReason::AuthorityNotRetained,
+                "authority_not_retained",
+                false,
+            ),
+            (
+                WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt,
+                "workflow_index_not_built",
+                true,
+            ),
+            (
+                WorkflowIndexUnavailableReason::GitCorrelationNotBuilt,
+                "git_correlation_not_built",
+                true,
+            ),
+        ] {
+            let payload = index_unavailable_payload(reason);
+            assert_eq!(payload["status"], "unavailable");
+            assert_ne!(payload["status"], "ok");
+            assert_eq!(payload["error"]["code"], "workflow_index_unavailable");
+            assert_eq!(payload["error"]["reason"], wire);
+            assert_eq!(payload["error"]["retryable"], retryable);
+            assert_eq!(payload["count"], 0);
+            // The message must carry the state, not a generic absence.
+            let message = payload["message"].as_str().expect("message");
+            assert!(!message.is_empty());
+            assert_eq!(message, reason.message());
+        }
+    }
+
+    /// The unbuilt-index and unretained-authority states must not share a
+    /// message, or markdown readers cannot tell waiting from misconfiguration.
+    #[test]
+    fn unavailable_markdown_distinguishes_the_states() {
+        let not_built =
+            render_unavailable_md(WorkflowIndexUnavailableReason::WorkflowIndexNotBuilt.message());
+        let no_authority =
+            render_unavailable_md(WorkflowIndexUnavailableReason::AuthorityNotRetained.message());
+        assert_ne!(not_built, no_authority);
+        assert!(not_built.contains("has not been built"));
+        assert!(!not_built.contains('{'), "markdown must not leak JSON");
+    }
 
     #[test]
     fn parse_mode_requires_exactly_one_selector() {
