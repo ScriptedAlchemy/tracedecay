@@ -747,7 +747,10 @@ async fn project_open_shutdown_backstop_aborts_and_joins_noncooperative_task() {
 
     let cooperative = tokio::time::timeout(
         tokio::time::Duration::from_secs(1),
-        tasks.shutdown_with_deadline(tokio::time::Duration::ZERO),
+        tasks.shutdown_with_deadline(
+            tokio::time::Duration::ZERO,
+            tokio::time::Duration::from_secs(1),
+        ),
     )
     .await
     .expect("shutdown backstop must join the aborted task");
@@ -757,6 +760,47 @@ async fn project_open_shutdown_backstop_aborts_and_joins_noncooperative_task() {
         .await
         .expect("joined task must drop its owned resources before shutdown returns");
     assert_eq!(tasks.tracked_route_count().await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_open_shutdown_detaches_synchronous_work_after_abort_deadline() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("shutdown-synchronous-backstop");
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_started = Arc::clone(&started);
+    let task_release = Arc::clone(&release);
+    match tasks
+        .start_cancellable(route, move |_| async move {
+            task_started.store(true, std::sync::atomic::Ordering::Release);
+            while !task_release.load(std::sync::atomic::Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            Ok(())
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("synchronous task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("synchronous task must fit"),
+    }
+    while !started.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    let cooperative = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        tasks.shutdown_with_deadline(
+            tokio::time::Duration::ZERO,
+            tokio::time::Duration::from_millis(25),
+        ),
+    )
+    .await
+    .expect("shutdown must detach synchronous work after its abort deadline");
+
+    assert!(!cooperative, "synchronous work must reach the backstop");
+    assert_eq!(tasks.tracked_route_count().await, 0);
+    release.store(true, std::sync::atomic::Ordering::Release);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
