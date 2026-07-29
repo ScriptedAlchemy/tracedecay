@@ -159,6 +159,10 @@ impl McpServer {
         }
     }
 
+    pub(crate) async fn wait_for_project_server_response_drain(&self) {
+        let _guard = self.project_server_response_gate.write().await;
+    }
+
     pub(crate) fn cancel_startup_transcript_ingest(&self) {
         self.startup_transcript_ingest_cancellation.cancel();
     }
