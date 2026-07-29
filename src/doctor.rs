@@ -435,14 +435,25 @@ async fn daemon_project_status_with_deadline(
     // conceal a cached non-retryable warm-up failure here.
     let admission_deadline =
         (tokio::time::Instant::now() + std::time::Duration::from_secs(10)).min(startup_deadline);
-    crate::daemon::call_default_tool_within(
+    let admission = crate::daemon::call_default_tool_within(
         &handshake,
         "tracedecay_status",
         daemon_admission_args(),
         admission_deadline,
     )
-    .await?;
-    if report_admission {
+    .await;
+    let admitted = match admission {
+        Ok(_) => true,
+        Err(error)
+            if error
+                .to_string()
+                .contains(crate::daemon::PROJECT_WARMING_RETRY_HINT) =>
+        {
+            false
+        }
+        Err(error) => return Err(error),
+    };
+    if report_admission && admitted {
         eprintln!(
             "Daemon project admitted; waiting for runtime integrity telemetry within the startup deadline."
         );
@@ -767,6 +778,7 @@ fn daemon_admission_args() -> serde_json::Value {
 fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
+        "startup_health": true,
         "authority_audit": false,
         "doctor_report": false,
         "session_ingest_health": false,

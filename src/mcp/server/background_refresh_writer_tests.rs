@@ -104,6 +104,47 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
 }
 
 #[tokio::test]
+async fn startup_catchup_uses_configured_full_sync_escalation() {
+    let (cg, dir, authority) = init_indexed_repo().await;
+    let root = dir.path().to_path_buf();
+    let mut config = crate::config::load_config(&root).expect("load config");
+    config.sync.session_start_sync = true;
+    config.sync.full_sync_escalation_files = 37;
+    crate::config::save_config(&root, &config).expect("configure startup sync");
+    drop(cg);
+    let cg = authority.reopen_project_graph(&root).await;
+
+    let observed = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let observed = Arc::clone(&observed);
+        Arc::new(move |request: BackgroundRefreshRequest| {
+            observed
+                .lock()
+                .expect("recording lock")
+                .push(request.full_sync_escalation_files);
+            Box::pin(async { Ok(Some(HashMap::new())) })
+        })
+    };
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(cg, None)
+            .with_background_refresh_writer(refresh_writer),
+    )
+    .await;
+
+    assert!(
+        server
+            .wait_for_startup_catch_up(Duration::from_secs(5))
+            .await,
+        "startup catch-up must settle"
+    );
+    assert_eq!(
+        observed.lock().expect("recording lock").as_slice(),
+        &[37]
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn concurrent_startup_catchups_use_injected_writer_authority() {
     let (first_cg, dir, authority) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
