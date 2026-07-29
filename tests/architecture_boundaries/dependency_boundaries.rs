@@ -556,8 +556,8 @@ fn code_index_is_filesystem_store_model_and_transport_free() {
 fn hook_v2_dispatch_uses_typed_daemon_delivery_ports() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let v2 = fs::read_to_string(repository.join("src/hooks/v2.rs")).expect("read hook v2");
-    let ports =
-        fs::read_to_string(repository.join("src/hooks/daemon_ports.rs")).expect("read daemon ports");
+    let ports = fs::read_to_string(repository.join("src/hooks/daemon_ports.rs"))
+        .expect("read daemon ports");
     assert!(
         v2.contains("deliver_hook_feedback"),
         "hook v2 dispatch must close feedback through deliver_hook_feedback"
