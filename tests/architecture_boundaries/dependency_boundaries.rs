@@ -10,6 +10,7 @@ use crate::query_kernel::{scan_extern_crate_bindings, scan_qualified_paths, scan
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tempfile::tempdir;
 
 const FORBIDDEN_LIBSQL_CRATE: &str = "libsql";
 /// Structural search is the one module in the code-index package that reads
@@ -587,19 +588,23 @@ fn hook_v2_dispatch_uses_typed_daemon_delivery_ports() {
     );
 }
 
-/// The extracted bridge package declares no dependencies at all, so its manifest
-/// allowlist cannot express what the crate must not reach for. This guard covers
-/// the standard-library authority the manifest is blind to: the bridge moves
-/// opaque payload bytes over the stdio handles it is given and owns no
-/// filesystem, socket, process, thread, or JSON-parsing authority.
-#[test]
-fn lsp_bridge_package_owns_only_stdio_framing_authority() {
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let roots = [PathBuf::from("crates/tracedecay-lsp/src")]
+/// The stdio bridge moves opaque payload bytes between host stdio and one
+/// typed daemon session. It decides nothing, so it must not gain payload
+/// parsing even though the rest of its package now speaks JSON-RPC.
+///
+/// This guard is deliberately narrower than the package: it names the bridge
+/// module so the protocol modules extracted alongside it cannot quietly
+/// relocate framing decisions into a layer that is allowed to parse.
+const LSP_BRIDGE_MODULE: &str = "crates/tracedecay-lsp/src/bridge.rs";
+
+fn assert_lsp_bridge_module_owns_only_stdio_framing_authority(repository: &Path) {
+    assert!(
+        repository.join(LSP_BRIDGE_MODULE).is_file(),
+        "the bridge guard names {LSP_BRIDGE_MODULE}, which must exist for the guard to mean anything"
+    );
+    let sources = [PathBuf::from(LSP_BRIDGE_MODULE)]
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let sources = filesystem_rust_sources(&repository, &roots).expect("resolve LSP bridge sources");
-    assert!(!sources.is_empty(), "LSP bridge sources must exist");
 
     let forbidden: &[&[&str]] = &[
         &["tracedecay"],
@@ -620,6 +625,17 @@ fn lsp_bridge_package_owns_only_stdio_framing_authority() {
         &["lsp_types"],
         &["serde"],
         &["serde_json"],
+        &["url"],
+        &["crate", "capabilities"],
+        &["crate", "context"],
+        &["crate", "diagnostics"],
+        &["crate", "dispatch"],
+        &["crate", "gateway"],
+        &["crate", "overlay"],
+        &["crate", "protocol"],
+        &["crate", "provider"],
+        &["crate", "rpc"],
+        &["crate", "session"],
         &["std", "env"],
         &["std", "fs"],
         &["std", "net"],
@@ -636,11 +652,85 @@ fn lsp_bridge_package_owns_only_stdio_framing_authority() {
 }
 
 #[test]
+fn lsp_bridge_module_owns_only_stdio_framing_authority() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert_lsp_bridge_module_owns_only_stdio_framing_authority(&repository);
+}
+
+#[test]
+#[should_panic(expected = "the LSP bridge must stay a byte-level stdio framing adapter")]
+fn lsp_bridge_module_rejects_injected_forbidden_import() {
+    let temporary = tempdir().expect("create bridge guard fixture");
+    let bridge = temporary.path().join(LSP_BRIDGE_MODULE);
+    fs::create_dir_all(
+        bridge
+            .parent()
+            .expect("the bridge module path must have a parent directory"),
+    )
+    .expect("create bridge guard fixture directory");
+    fs::write(&bridge, "use tracedecay_store::memory::MemoryStore;\n")
+        .expect("write injected forbidden bridge import");
+
+    assert_lsp_bridge_module_owns_only_stdio_framing_authority(temporary.path());
+}
+
+/// The extracted package holds the protocol actor, session lifecycle,
+/// capability negotiation, overlays, diagnostic merge, and analyzer broker
+/// ports. Those may parse JSON-RPC, but they stay store-, socket-, analyzer-,
+/// and filesystem-free: every such authority reaches them as an injected port
+/// the daemon implements.
+#[test]
+fn lsp_package_owns_no_store_socket_process_or_daemon_authority() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [PathBuf::from("crates/tracedecay-lsp/src")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let sources =
+        filesystem_rust_sources(&repository, &roots).expect("resolve LSP package sources");
+    assert!(
+        sources.len() > 1,
+        "the LSP package guard must scan the extracted protocol modules, not the bridge alone"
+    );
+
+    let forbidden: &[&[&str]] = &[
+        &["tracedecay"],
+        &["tracedecay_api"],
+        &["tracedecay_application"],
+        &["tracedecay_code_index"],
+        &["tracedecay_hooks"],
+        &["tracedecay_store"],
+        &["tracedecay_rusqlite_runtime"],
+        &[FORBIDDEN_LIBSQL_CRATE],
+        &["rusqlite"],
+        &["sqlx"],
+        &["axum"],
+        &["tower"],
+        &["hyper"],
+        &["tokio"],
+        &["async_std"],
+        &["lsp_types"],
+        &["std", "env"],
+        &["std", "fs"],
+        &["std", "net"],
+        &["std", "process"],
+        &["std", "thread"],
+    ];
+    let violations = scan_sources_for_forbidden_paths(&repository, &sources, forbidden)
+        .expect("inspect LSP package sources");
+    assert!(
+        violations.is_empty(),
+        "the extracted LSP package must not own stores, sockets, analyzers, processes, or daemon composition:\n{}",
+        violations.into_iter().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
 fn pr12_lsp_bridge_and_gateway_do_not_duplicate_store_or_transport_authority() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let roots = [
         PathBuf::from("src/lsp_bridge.rs"),
         PathBuf::from("src/daemon/lsp_gateway"),
+        PathBuf::from("crates/tracedecay-lsp/src"),
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
@@ -665,4 +755,57 @@ fn pr12_lsp_bridge_and_gateway_do_not_duplicate_store_or_transport_authority() {
         "PR12 LSP bridge/gateway must not own stores, sockets, analyzers, or processes:\n{}",
         violations.into_iter().collect::<Vec<_>>().join("\n")
     );
+}
+
+/// The daemon keeps exactly what needs daemon authority. If the session
+/// registry, provider composition, or the adapters that bind application
+/// authorities ever disappear from the root, the extraction has moved daemon
+/// duties into a store-free package rather than injecting them.
+#[test]
+fn daemon_retains_lsp_registry_composition_and_application_adapters() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for (path, expected) in [
+        (
+            "src/daemon/lsp_gateway/endpoint.rs",
+            ["LspSessionRegistry", "LspSessionAdmissionPort"].as_slice(),
+        ),
+        (
+            "src/daemon/lsp_gateway/factory.rs",
+            ["DaemonLspProviderFactory", "Pr12LspSessionFactory"].as_slice(),
+        ),
+        (
+            "src/daemon/lsp_gateway/runtime_adapters.rs",
+            [
+                "Pr12FeedbackCycleAdapter",
+                "Pr12SemanticProviderAdapter",
+                "Pr12DiagnosticSnapshotAdapter",
+                "Pr12ContextProjectionAdapter",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        let source = fs::read_to_string(repository.join(path))
+            .unwrap_or_else(|_| panic!("read retained daemon LSP module {path}"));
+        for symbol in expected {
+            assert!(
+                source.contains(symbol),
+                "{path} must retain daemon-owned {symbol}"
+            );
+        }
+    }
+
+    let package = fs::read_to_string(repository.join("crates/tracedecay-lsp/src/lib.rs"))
+        .expect("read extracted LSP package root");
+    for daemon_owned in [
+        "LspSessionRegistry",
+        "LspSessionAdmissionPort",
+        "DaemonLspProviderFactory",
+        "Pr12FeedbackCycleAdapter",
+        "DiagnosticBroker",
+    ] {
+        assert!(
+            !package.contains(daemon_owned),
+            "the extracted LSP package must not re-declare daemon-owned {daemon_owned}"
+        );
+    }
 }
