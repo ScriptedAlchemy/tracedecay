@@ -357,14 +357,19 @@ impl ProductionSemanticRuntimeV1 {
         if artifact.projection() != &projection {
             return Ok(false);
         }
-        self.handle.restore_current(
-            SemanticGenerationPointerV1 {
-                generation: active.generation_id().clone(),
-                source_generation: active.source_generation().clone(),
-                projection_key: active.projection_key().clone(),
-            },
-            artifact,
-        )?;
+        let pointer = SemanticGenerationPointerV1 {
+            generation: active.generation_id().clone(),
+            source_generation: active.source_generation().clone(),
+            projection_key: active.projection_key().clone(),
+        };
+        let handle = self.handle.clone();
+        let prepared =
+            tokio::task::spawn_blocking(move || handle.prepare_restore(pointer, artifact))
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
+        if !self.handle.commit_restore(prepared) {
+            return Err(SemanticRuntimeScheduleFailureV1::Publication);
+        }
         let _ = self.lifecycle.mark_ready();
         Ok(true)
     }
@@ -1345,13 +1350,20 @@ impl ProductionSemanticRuntimeV1 {
             source_generation: generation.source_generation().clone(),
             projection_key: generation.projection_key().clone(),
         };
-        let prepared_runtime = self.handle.prepare_restore(pointer.clone(), artifact)?;
+        let handle = self.handle.clone();
+        let prepared_pointer = pointer.clone();
+        let prepared_runtime =
+            tokio::task::spawn_blocking(move || handle.prepare_restore(prepared_pointer, artifact))
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
         let publication = store
             .activate_generation(target, Some(expected_active))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         debug_assert_eq!(publication.generation_id, pointer.generation);
-        self.handle.commit_restore(prepared_runtime);
+        if !self.handle.commit_restore(prepared_runtime) {
+            return Err(SemanticRuntimeScheduleFailureV1::Publication);
+        }
         let _ = self.lifecycle.mark_ready();
         Ok(pointer)
     }

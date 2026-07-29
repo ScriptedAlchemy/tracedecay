@@ -491,6 +491,16 @@ where
         pool.acquire(&authority)
     }
 
+    /// Open and return one compatible session to the idle pool.
+    ///
+    /// Callers use this before publishing a replacement runtime so request
+    /// threads never pay model/session startup cost.
+    pub(super) fn warm_query_session(&self) -> Result<(), SessionAcquireError> {
+        let session = self.acquire()?;
+        drop(session);
+        Ok(())
+    }
+
     /// Recreate the active runtime from its current owned factory.
     pub(super) fn restart(&self) -> Result<RuntimeReloadReportV1, SemanticRuntimeServiceError> {
         let _lifecycle = self
@@ -644,6 +654,34 @@ mod tests {
         })
         .await
         .expect("scheduler reached expected state");
+    }
+
+    #[test]
+    fn query_warmup_opens_and_releases_one_reusable_session() {
+        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
+            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
+        let service = SemanticRuntimeService::new_owned(
+            Arc::new(authority()),
+            factory,
+            config(1, Duration::from_mins(1), 1 << 20),
+        )
+        .expect("runtime service");
+
+        service.warm_query_session().expect("warm query session");
+        assert_eq!(
+            service.stats(),
+            SessionPoolStats {
+                idle: 1,
+                live_sessions: 1,
+                resident_bytes: 1024,
+                sessions_opened: 1,
+                ..SessionPoolStats::default()
+            }
+        );
+
+        let session = service.acquire().expect("reuse warmed session");
+        assert_eq!(service.stats().sessions_opened, 1);
+        drop(session);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
