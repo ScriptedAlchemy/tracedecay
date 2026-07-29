@@ -940,7 +940,7 @@ fn validate_relative_locator(locator: &Path) -> Result<()> {
 }
 
 fn current_file_identity(path: &Path) -> Result<u64> {
-    crate::sessions::source::sqlite_generation_identity(path).map_err(|_| {
+    crate::db::sqlite_generation_identity(path).map_err(|_| {
         runtime_error(format!(
             "could not verify consolidation artifact file identity '{}'",
             path.display()

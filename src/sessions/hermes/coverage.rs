@@ -17,8 +17,8 @@ use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome,
 };
 use crate::application::observation::{CaptureObservationOutcome, ObservationCancellation};
+use crate::db::{SqliteFileIdentityError, sqlite_generation_identity};
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::SqliteFileIdentityError;
 
 use super::observation::{
     HermesAdmission, HermesAdmissionAction, HermesProjectionMetadata, observation_source,
@@ -30,18 +30,17 @@ use super::{MAX_HERMES_PROJECTIONS_PER_DRAIN, PROVIDER};
 pub(crate) fn sqlite_incarnation(
     path: &Path,
 ) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
-    let file_identity =
-        crate::sessions::source::sqlite_generation_identity(path).map_err(|error| {
-            match error {
-                SqliteFileIdentityError::Open => "could not open Hermes SQLite authority",
-                SqliteFileIdentityError::Inspect => "could not inspect Hermes SQLite authority",
-                SqliteFileIdentityError::Identify => "could not identify Hermes SQLite authority",
-                SqliteFileIdentityError::Unavailable => {
-                    "Hermes SQLite physical identity is unavailable"
-                }
+    let file_identity = sqlite_generation_identity(path).map_err(|error| {
+        match error {
+            SqliteFileIdentityError::Open => "could not open Hermes SQLite authority",
+            SqliteFileIdentityError::Inspect => "could not inspect Hermes SQLite authority",
+            SqliteFileIdentityError::Identify => "could not identify Hermes SQLite authority",
+            SqliteFileIdentityError::Unavailable => {
+                "Hermes SQLite physical identity is unavailable"
             }
-            .to_string()
-        })?;
+        }
+        .to_string()
+    })?;
     let resume_fingerprint = sqlite_resume_fingerprint(path, file_identity)?;
     let generation = ObservationSourceGenerationV1::new(file_identity)
         .map_err(|_| "invalid Hermes SQLite generation".to_string())?;

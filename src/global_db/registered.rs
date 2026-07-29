@@ -698,14 +698,15 @@ fn validate_registered_locator(
         expected_locator,
     )?;
     validate_registered_path(runtime.locator().path(), authority)?;
-    let current_file_identity =
-        crate::sessions::source::sqlite_generation_identity(authority.canonical_database_path())
-            .map_err(|error| {
-                registered_error(
-                    "verify registered global database file identity",
-                    sqlite_identity_error_message(error),
-                )
-            })?;
+    let current_file_identity = crate::db::sqlite_generation_identity(
+        authority.canonical_database_path(),
+    )
+    .map_err(|error| {
+        registered_error(
+            "verify registered global database file identity",
+            sqlite_identity_error_message(error),
+        )
+    })?;
     validate_opened_file_identity(runtime.opened_file_identity(), current_file_identity)
 }
 
@@ -767,16 +768,12 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
-fn sqlite_identity_error_message(
-    error: crate::sessions::source::SqliteFileIdentityError,
-) -> &'static str {
-    use crate::sessions::source::SqliteFileIdentityError;
-
+fn sqlite_identity_error_message(error: crate::db::SqliteFileIdentityError) -> &'static str {
     match error {
-        SqliteFileIdentityError::Open => "could not open SQLite file identity",
-        SqliteFileIdentityError::Inspect => "could not inspect SQLite file identity",
-        SqliteFileIdentityError::Identify => "could not identify SQLite file",
-        SqliteFileIdentityError::Unavailable => "SQLite file identity is unavailable",
+        crate::db::SqliteFileIdentityError::Open => "could not open SQLite file identity",
+        crate::db::SqliteFileIdentityError::Inspect => "could not inspect SQLite file identity",
+        crate::db::SqliteFileIdentityError::Identify => "could not identify SQLite file",
+        crate::db::SqliteFileIdentityError::Unavailable => "SQLite file identity is unavailable",
     }
 }
 

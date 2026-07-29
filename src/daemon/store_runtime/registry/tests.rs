@@ -319,8 +319,7 @@ fn migration_sql_authority_rechecks_opened_file_identity() {
     let authority =
         crate::db::DatabaseAuthority::acquire_test(&database_path, "migration SQL identity test")
             .unwrap();
-    let current_identity =
-        crate::sessions::source::sqlite_generation_identity(&database_path).unwrap();
+    let current_identity = crate::db::sqlite_generation_identity(&database_path).unwrap();
     let authority = RuntimeDatabaseWriteAuthority {
         authority,
         canonical_path: database_path.canonicalize().unwrap(),

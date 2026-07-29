@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(proof.path(), path);
         assert_eq!(
             proof.opened_file_identity(),
-            crate::sessions::source::sqlite_generation_identity(proof.path()).unwrap()
+            crate::db::sqlite_generation_identity(proof.path()).unwrap()
         );
         assert_eq!(proof.verified_locator().shard_id, binding.shard_id);
         assert!(matches!(
@@ -572,8 +572,7 @@ mod tests {
         let path = temporary.path().join("graph.db");
         create_graph_fixture_database_v1(&path).unwrap();
         let path = path.canonicalize().unwrap();
-        let opened_file_identity =
-            crate::sessions::source::sqlite_generation_identity(&path).unwrap();
+        let opened_file_identity = crate::db::sqlite_generation_identity(&path).unwrap();
         let attachment = Arc::new(BlockingCloseAttachment {
             opened_file_identity,
             drained: AtomicBool::new(false),
@@ -702,8 +701,7 @@ mod tests {
                     .and_then(|()| runtime.transition(RuntimeMaintenanceStateV1::Ready))
                     .unwrap();
                 let opened_file_identity =
-                    crate::sessions::source::sqlite_generation_identity(request.locator().path())
-                        .unwrap();
+                    crate::db::sqlite_generation_identity(request.locator().path()).unwrap();
                 Ok(PublishedShardRuntime::new(
                     runtime,
                     Arc::new(FailingAttachment {
