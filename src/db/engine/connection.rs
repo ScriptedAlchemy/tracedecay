@@ -21,6 +21,7 @@ pub(super) trait Runtime: Send + Sync {
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()>;
     fn last_insert_rowid(&self) -> i64;
     fn begin_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
+    fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
     fn begin_deferred(&self) -> Result<RuntimeTransaction>;
     fn begin_immediate(&self) -> Result<RuntimeTransaction>;
     fn begin_schema_migration_immediate(&self) -> Result<RuntimeTransaction>;
@@ -57,6 +58,10 @@ impl Runtime for MigrationSqlHandle {
 
     fn begin_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot> {
         self.begin_read_snapshot(READER_WAIT).map_err(Into::into)
+    }
+
+    fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot> {
+        self.begin_health_read_snapshot(READER_WAIT).map_err(Into::into)
     }
 
     fn begin_deferred(&self) -> Result<RuntimeTransaction> {
@@ -192,6 +197,14 @@ impl Connection {
     pub(crate) async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_read_snapshot())
+            .await
+            .map_err(join_error)?
+            .map(ReadSnapshot::from_runtime)
+    }
+
+    pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
+        let runtime = Arc::clone(&self.runtime);
+        tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot())
             .await
             .map_err(join_error)?
             .map(ReadSnapshot::from_runtime)

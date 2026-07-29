@@ -1656,7 +1656,7 @@ impl Database {
         let snapshot =
             self.inner
                 .conn
-                .read_snapshot()
+                .health_read_snapshot()
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to begin database health snapshot: {e}"),
