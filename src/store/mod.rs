@@ -11,18 +11,22 @@ use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptStoreResult, Tran
 use crate::sessions::SessionRecord;
 use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 
+pub mod git_correlation;
 pub mod global_db;
 pub mod memory;
 pub mod observation;
 pub mod session;
+pub mod workflow;
 pub(crate) mod vector_generations;
 
+pub use git_correlation::GlobalDbGitCorrelationStore;
 pub use global_db::GlobalDbTranscriptStore;
 pub use memory::DatabaseFactStore;
 pub use observation::GlobalDbObservationStore;
 pub use session::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
+pub use workflow::GlobalDbWorkflowStore;
 
 /// Typed integration-test surface for the vector-generation state machine.
 ///

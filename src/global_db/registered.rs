@@ -399,19 +399,23 @@ impl RegisteredGlobalDb {
         observation: &crate::sessions::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64, crate::sessions::git_correlation::GitCorrelationError> {
-        let transaction = self.begin_write_transaction().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        let span_id = crate::sessions::git_correlation::record_span_observation_in_transaction(
-            &transaction,
-            observation,
-            merge_gap_secs,
-        )
-        .await?;
-        transaction.commit().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        Ok(span_id)
+        crate::store::GlobalDbGitCorrelationStore::new(self)
+            .record_span_observation(observation, merge_gap_secs)
+            .await
+    }
+
+    pub(crate) async fn git_run_backfill(
+        &self,
+        analytics_events: &[crate::global_db::AnalyticsEventRecord],
+        git: &dyn crate::sessions::git_correlation::GitReflogSource,
+        opts: &crate::sessions::git_correlation::BackfillOptions,
+    ) -> Result<
+        crate::sessions::git_correlation::BackfillStats,
+        crate::sessions::git_correlation::GitCorrelationError,
+    > {
+        crate::store::GlobalDbGitCorrelationStore::new(self)
+            .run_backfill(analytics_events, git, opts)
+            .await
     }
 
     pub(crate) async fn git_run_incremental_backfill(
@@ -422,7 +426,9 @@ impl RegisteredGlobalDb {
         crate::sessions::git_correlation::BackfillStats,
         crate::sessions::git_correlation::GitCorrelationError,
     > {
-        crate::sessions::git_correlation::run_incremental_backfill(self, git, limit_sessions).await
+        crate::store::GlobalDbGitCorrelationStore::new(self)
+            .run_incremental_backfill(git, limit_sessions)
+            .await
     }
 
     pub(crate) async fn git_correlation_index_health(
@@ -431,10 +437,9 @@ impl RegisteredGlobalDb {
         crate::sessions::git_correlation::CorrelationIndexHealth,
         crate::sessions::git_correlation::GitCorrelationError,
     > {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        crate::sessions::git_correlation::correlation_index_health(&snapshot).await
+        crate::store::GlobalDbGitCorrelationStore::new(self)
+            .correlation_index_health()
+            .await
     }
 
     pub(crate) async fn git_sessions_for_with_relation(
@@ -445,10 +450,8 @@ impl RegisteredGlobalDb {
         Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
         crate::sessions::git_correlation::GitCorrelationError,
     > {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
-        })?;
-        crate::sessions::git_correlation::sessions_for_with_relation(&snapshot, query, relation)
+        crate::store::GlobalDbGitCorrelationStore::new(self)
+            .sessions_for_with_relation(query, relation)
             .await
     }
 }

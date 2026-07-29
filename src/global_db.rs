@@ -120,6 +120,18 @@ pub struct AnalyticsEventRecord {
     pub metadata_json: Option<String>,
 }
 
+impl crate::sessions::git_correlation::AnalyticsSessionTimestampSource for AnalyticsEventRecord {
+    fn as_analytics_session_timestamp(
+        &self,
+    ) -> Option<crate::sessions::git_correlation::AnalyticsSessionTimestamp> {
+        Some(crate::sessions::git_correlation::AnalyticsSessionTimestamp {
+            provider: self.provider.clone(),
+            session_id: self.session_id.clone()?,
+            timestamp: self.timestamp,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyticsToolCounts {
     pub tool_name: String,
