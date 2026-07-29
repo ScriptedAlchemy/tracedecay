@@ -6,9 +6,8 @@
 //! Filesystem watching, repository reads, snapshot coalescing, and redaction
 //! belong to capture, not this boundary (Plan 25, "Does not own").
 
-use std::{fmt::Write as _, ops::Deref};
+use std::ops::Deref;
 
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     ContentDigest, DomainError, IntakeRejectionV1, SanitizedCodeSnapshotV1, SanitizerRevision,
     SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1,
@@ -48,13 +47,7 @@ pub const INTAKE_DIGEST_SEPARATOR: &str = "tracedecay.code-index-intake.v1";
 
 /// Content digest over byte-exact sanitized source.
 pub fn content_digest(bytes: &[u8]) -> ContentDigest {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity("sha256:".len() + 64);
-    encoded.push_str("sha256:");
-    for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    ContentDigest::new(encoded).expect("sha256 hex is a valid content digest")
+    ContentDigest::of_bytes(bytes)
 }
 
 /// Opaque proof that [`CodeIndexIntake::admit`] accepted one exact sanitized

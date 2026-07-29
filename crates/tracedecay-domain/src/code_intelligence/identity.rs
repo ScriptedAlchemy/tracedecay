@@ -8,8 +8,10 @@
 //! mutable line numbers never affect identity.
 
 use std::fmt;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::research::DomainError;
 
@@ -162,6 +164,23 @@ code_id!(
 );
 
 code_digest_id!(ContentDigest, FileIdentityDigest, SymbolIdentityDigest,);
+
+impl ContentDigest {
+    /// Canonical content identity over byte-exact source.
+    ///
+    /// This is the single algorithm for content identity. Adapters that need a
+    /// content digest without depending on the code-index crate call it
+    /// directly rather than re-deriving the encoding.
+    pub fn of_bytes(bytes: &[u8]) -> Self {
+        let digest = Sha256::digest(bytes);
+        let mut encoded = String::with_capacity("sha256:".len() + 64);
+        encoded.push_str("sha256:");
+        for byte in digest {
+            write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+        }
+        Self::new(encoded).expect("sha256 hex is a valid content digest")
+    }
+}
 
 /// Byte range inside one sanitized source file. Mutable line numbers are
 /// never part of identity (Plan 25).

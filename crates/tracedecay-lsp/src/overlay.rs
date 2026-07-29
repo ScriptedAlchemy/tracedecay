@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use super::diagnostics::{LspRange, PositionError, utf16_position_to_byte_offset};
+use crate::diagnostics::{LspRange, PositionError, utf16_position_to_byte_offset};
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -342,7 +342,7 @@ impl OverlayDiagnosticDebouncer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::lsp_gateway::diagnostics::{LspPosition, LspRange};
+    use crate::diagnostics::{LspPosition, LspRange};
 
     fn range(start: u32, end: u32) -> LspRange {
         LspRange {

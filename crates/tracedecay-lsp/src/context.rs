@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::ContentDigest;
 
-use super::gateway::AdmittedRoot;
-use super::session::LspRequestId;
+use crate::gateway::AdmittedRoot;
+use crate::session::LspRequestId;
 
 pub const TRACEDECAY_CONTEXT_REVISION: u32 = 1;
 pub const TRACEDECAY_CONTEXT_METHOD: &str = "tracedecay/context";
@@ -149,6 +149,25 @@ pub struct ContextProjectionRequest {
     pub(crate) document_content_digest: Option<ContentDigest>,
 }
 
+impl ContextProjectionRequest {
+    /// Builds a request with no bound content identity. Only the protocol
+    /// actor may bind one, so a caller-constructed request always starts
+    /// unbound — the same state a decoded client payload starts in.
+    pub fn new(kind: ContextProjectionKind, document_uri: Option<String>) -> Self {
+        Self {
+            kind,
+            document_uri,
+            document_content_digest: None,
+        }
+    }
+
+    /// The overlay content identity the protocol actor bound for this request,
+    /// or `None` when the request is not document-scoped.
+    pub fn document_content_digest(&self) -> Option<&ContentDigest> {
+        self.document_content_digest.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContextExpansionRequest {
@@ -236,6 +255,9 @@ pub struct ContextExpansionEnvelope {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Boxing the large variant would ripple through in-flight construction/match
+// sites; the size gap is accepted here.
+#[allow(clippy::large_enum_variant)]
 pub enum ContextProjectionOutcome {
     Ready(ContextProjectionEnvelope),
     Unsupported,

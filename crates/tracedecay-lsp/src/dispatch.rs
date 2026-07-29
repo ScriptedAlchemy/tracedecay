@@ -2,22 +2,22 @@
 
 use serde_json::Value;
 
-use super::context::{
+use crate::context::{
     TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
 };
-use super::diagnostics::LspPosition;
-use super::gateway::{FeedbackCyclePort, SemanticProviderPort, SemanticRequest};
-use super::protocol::{DaemonLspProtocolSession, TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD};
-use super::provider::DiagnosticSnapshotPort;
-use super::rpc::{
+use crate::diagnostics::LspPosition;
+use crate::gateway::{FeedbackCyclePort, SemanticProviderPort, SemanticRequest};
+use crate::protocol::{DaemonLspProtocolSession, TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD};
+use crate::provider::DiagnosticSnapshotPort;
+use crate::rpc::{
     RpcFailure, deferred_method_reason, document_position, document_uri, error_response,
     parse_call_item, parse_type_item, request_id,
 };
-use super::session::LspRequestId;
+use crate::session::LspRequestId;
 
 /// Known client-originated LSP methods handled by the daemon gateway.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum LspClientMethod {
+pub(crate) enum LspClientMethod {
     Initialize,
     Initialized,
     Shutdown,
@@ -89,7 +89,7 @@ impl LspClientMethod {
 
 /// Parsed client ingress after JSON-RPC envelope validation.
 #[derive(Clone, Debug)]
-pub(super) enum ParsedIncoming {
+pub(crate) enum ParsedIncoming {
     Request {
         response_id: Value,
         method: LspClientMethod,
@@ -105,7 +105,7 @@ pub(super) enum ParsedIncoming {
 }
 
 /// Validates a decoded JSON-RPC value and classifies it for routing.
-pub(super) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, RpcFailure)> {
+pub(crate) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, RpcFailure)> {
     let Some(object) = value.as_object() else {
         return Err((
             Value::Null,
@@ -172,7 +172,7 @@ pub(super) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, Rpc
     }
 }
 
-pub(super) fn dispatch_incoming<P, S, D>(
+pub(crate) fn dispatch_incoming<P, S, D>(
     session: &mut DaemonLspProtocolSession<P, S, D>,
     incoming: ParsedIncoming,
     now_ms: u64,

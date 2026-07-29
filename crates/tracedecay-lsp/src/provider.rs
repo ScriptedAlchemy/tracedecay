@@ -7,14 +7,14 @@
 
 use std::sync::Arc;
 
-use super::diagnostics::{GatewayDiagnostic, LspPosition};
-use super::gateway::{
+use crate::diagnostics::{GatewayDiagnostic, LspPosition};
+use crate::gateway::{
     AdmittedRoot, CallHierarchyItem, DocumentSymbol, Hover, IncomingCall, LspLocation,
     OutgoingCall, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
     SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
-use super::overlay::OverlaySnapshot;
-use super::session::LspRequestId;
+use crate::overlay::OverlaySnapshot;
+use crate::session::LspRequestId;
 
 /// Restart exhaustion is a stable health state, not an invitation for a
 /// bridge or client to start its own analyzer.
@@ -481,7 +481,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::lsp_gateway::diagnostics::LspRange;
+    use crate::diagnostics::LspRange;
 
     struct Provider(bool);
 

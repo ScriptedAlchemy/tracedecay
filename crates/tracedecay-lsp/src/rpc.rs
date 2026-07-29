@@ -2,24 +2,24 @@
 
 use serde_json::{Map, Value, json};
 
-use super::capabilities::EffectiveCapabilities;
-use super::diagnostics::{
+use crate::capabilities::EffectiveCapabilities;
+use crate::diagnostics::{
     DiagnosticSeverity, DocumentDiagnosticReport, GatewayDiagnostic, GatewayDiagnosticCoverage,
     GatewayDiagnosticData, GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspPosition,
     LspRange, MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,
     TRACEDECAY_DIAGNOSTIC_DATA_REVISION, safe_code_description_uri, safe_related_uri,
     truncate_utf8,
 };
-use super::gateway::{
+use crate::gateway::{
     CallHierarchyItem, DocumentSymbol, GatewayResponse, Hover, IncomingCall, LspLocation,
     MethodUnavailableReason, OutgoingCall, RenameCandidateResult, RenameCandidateUnavailableReason,
     SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
-use super::overlay::{OverlayChange, OverlayError};
-use super::session::{LspRequestFailure, LspRequestId};
+use crate::overlay::{OverlayChange, OverlayError};
+use crate::session::{LspRequestFailure, LspRequestId};
 
 #[derive(Clone, Debug)]
-pub(super) struct RpcFailure {
+pub(crate) struct RpcFailure {
     pub code: i64,
     pub message: &'static str,
     pub data: Value,
@@ -65,7 +65,7 @@ impl RpcFailure {
     }
 }
 
-pub(super) fn response_value<T>(
+pub(crate) fn response_value<T>(
     response: GatewayResponse<T>,
     project: impl FnOnce(T) -> Value,
 ) -> Result<Value, RpcFailure> {
@@ -97,7 +97,7 @@ pub(super) fn response_value<T>(
 /// JSON-RPC error `data` for a partial semantic outcome: the stable coverage
 /// token, plus the bounded human-readable `detail` when the provider supplied
 /// one (omitted, never null, when absent).
-pub(super) fn partial_failure_data(coverage: String, detail: Option<String>) -> Value {
+pub(crate) fn partial_failure_data(coverage: String, detail: Option<String>) -> Value {
     let mut data = json!({ "retriggerRequest": true, "coverage": coverage });
     if let Some(detail) = detail {
         data["detail"] = Value::String(detail);
@@ -105,7 +105,7 @@ pub(super) fn partial_failure_data(coverage: String, detail: Option<String>) -> 
     data
 }
 
-pub(super) fn semantic_response_value(response: SemanticResponse) -> Value {
+pub(crate) fn semantic_response_value(response: SemanticResponse) -> Value {
     match response {
         SemanticResponse::Locations(value) => locations_value(value),
         SemanticResponse::Hover(value) => hover_value(value),
@@ -142,14 +142,14 @@ fn rename_candidate_value(value: RenameCandidateResult) -> Value {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct DiagnosticSerializationCapabilities {
+pub(crate) struct DiagnosticSerializationCapabilities {
     related_information: bool,
     code_description: bool,
     data: bool,
 }
 
 impl DiagnosticSerializationCapabilities {
-    pub(super) fn push(capabilities: &EffectiveCapabilities) -> Self {
+    pub(crate) fn push(capabilities: &EffectiveCapabilities) -> Self {
         Self {
             related_information: capabilities.publish_diagnostics_related_information,
             code_description: capabilities.publish_diagnostics_code_description,
@@ -157,7 +157,7 @@ impl DiagnosticSerializationCapabilities {
         }
     }
 
-    pub(super) fn pull(capabilities: &EffectiveCapabilities) -> Self {
+    pub(crate) fn pull(capabilities: &EffectiveCapabilities) -> Self {
         Self {
             related_information: capabilities.document_diagnostics_related_information,
             code_description: capabilities.document_diagnostics_code_description,
@@ -175,7 +175,7 @@ impl DiagnosticSerializationCapabilities {
     }
 }
 
-pub(super) fn document_diagnostic_report_value(
+pub(crate) fn document_diagnostic_report_value(
     report: DocumentDiagnosticReport,
     capabilities: DiagnosticSerializationCapabilities,
 ) -> Value {
@@ -195,7 +195,7 @@ pub(super) fn document_diagnostic_report_value(
     }
 }
 
-pub(super) fn diagnostic_value(
+pub(crate) fn diagnostic_value(
     diagnostic: GatewayDiagnostic,
     capabilities: DiagnosticSerializationCapabilities,
 ) -> Value {
@@ -309,15 +309,15 @@ fn severity_value(severity: DiagnosticSeverity) -> u8 {
     }
 }
 
-pub(super) fn locations_value(locations: Vec<LspLocation>) -> Value {
+pub(crate) fn locations_value(locations: Vec<LspLocation>) -> Value {
     Value::Array(locations.into_iter().map(location_value).collect())
 }
 
-pub(super) fn location_value(location: LspLocation) -> Value {
+pub(crate) fn location_value(location: LspLocation) -> Value {
     json!({ "uri": location.uri, "range": range_value(location.range) })
 }
 
-pub(super) fn hover_value(hover: Option<Hover>) -> Value {
+pub(crate) fn hover_value(hover: Option<Hover>) -> Value {
     hover.map_or(Value::Null, |hover| {
         json!({
             "contents": hover.contents,
@@ -326,7 +326,7 @@ pub(super) fn hover_value(hover: Option<Hover>) -> Value {
     })
 }
 
-pub(super) fn document_symbols_value(symbols: Vec<DocumentSymbol>) -> Value {
+pub(crate) fn document_symbols_value(symbols: Vec<DocumentSymbol>) -> Value {
     Value::Array(symbols.into_iter().map(document_symbol_value).collect())
 }
 
@@ -340,7 +340,7 @@ fn document_symbol_value(symbol: DocumentSymbol) -> Value {
     })
 }
 
-pub(super) fn workspace_symbols_value(symbols: Vec<WorkspaceSymbol>) -> Value {
+pub(crate) fn workspace_symbols_value(symbols: Vec<WorkspaceSymbol>) -> Value {
     Value::Array(
         symbols
             .into_iter()
@@ -355,11 +355,11 @@ pub(super) fn workspace_symbols_value(symbols: Vec<WorkspaceSymbol>) -> Value {
     )
 }
 
-pub(super) fn call_items_value(items: Vec<CallHierarchyItem>) -> Value {
+pub(crate) fn call_items_value(items: Vec<CallHierarchyItem>) -> Value {
     Value::Array(items.into_iter().map(call_item_value).collect())
 }
 
-pub(super) fn call_item_value(item: CallHierarchyItem) -> Value {
+pub(crate) fn call_item_value(item: CallHierarchyItem) -> Value {
     json!({
         "name": item.name,
         "kind": item.kind,
@@ -369,7 +369,7 @@ pub(super) fn call_item_value(item: CallHierarchyItem) -> Value {
     })
 }
 
-pub(super) fn incoming_calls_value(calls: Vec<IncomingCall>) -> Value {
+pub(crate) fn incoming_calls_value(calls: Vec<IncomingCall>) -> Value {
     Value::Array(
         calls
             .into_iter()
@@ -383,7 +383,7 @@ pub(super) fn incoming_calls_value(calls: Vec<IncomingCall>) -> Value {
     )
 }
 
-pub(super) fn outgoing_calls_value(calls: Vec<OutgoingCall>) -> Value {
+pub(crate) fn outgoing_calls_value(calls: Vec<OutgoingCall>) -> Value {
     Value::Array(
         calls
             .into_iter()
@@ -397,7 +397,7 @@ pub(super) fn outgoing_calls_value(calls: Vec<OutgoingCall>) -> Value {
     )
 }
 
-pub(super) fn signature_help_value(help: Option<SignatureHelp>) -> Value {
+pub(crate) fn signature_help_value(help: Option<SignatureHelp>) -> Value {
     help.map_or(Value::Null, |help| {
         json!({
             "signatures": help
@@ -411,7 +411,7 @@ pub(super) fn signature_help_value(help: Option<SignatureHelp>) -> Value {
     })
 }
 
-pub(super) fn type_items_value(items: Vec<TypeHierarchyItem>) -> Value {
+pub(crate) fn type_items_value(items: Vec<TypeHierarchyItem>) -> Value {
     Value::Array(
         items
             .into_iter()
@@ -428,19 +428,19 @@ pub(super) fn type_items_value(items: Vec<TypeHierarchyItem>) -> Value {
     )
 }
 
-pub(super) fn range_value(range: LspRange) -> Value {
+pub(crate) fn range_value(range: LspRange) -> Value {
     json!({ "start": position_value(range.start), "end": position_value(range.end) })
 }
 
-pub(super) fn position_value(position: LspPosition) -> Value {
+pub(crate) fn position_value(position: LspPosition) -> Value {
     json!({ "line": position.line, "character": position.character })
 }
 
-pub(super) fn success_response(id: Value, result: Value) -> Value {
+pub(crate) fn success_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-pub(super) fn error_response(id: Value, failure: RpcFailure) -> Value {
+pub(crate) fn error_response(id: Value, failure: RpcFailure) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -452,7 +452,7 @@ pub(super) fn error_response(id: Value, failure: RpcFailure) -> Value {
     })
 }
 
-pub(super) fn request_id(value: &Value) -> Option<LspRequestId> {
+pub(crate) fn request_id(value: &Value) -> Option<LspRequestId> {
     value.as_i64().map(LspRequestId::Number).or_else(|| {
         value
             .as_str()
@@ -460,14 +460,14 @@ pub(super) fn request_id(value: &Value) -> Option<LspRequestId> {
     })
 }
 
-pub(super) fn request_id_value(id: LspRequestId) -> Value {
+pub(crate) fn request_id_value(id: LspRequestId) -> Value {
     match id {
         LspRequestId::Number(value) => json!(value),
         LspRequestId::String(value) => json!(value),
     }
 }
 
-pub(super) fn unavailable_reason(reason: MethodUnavailableReason) -> &'static str {
+pub(crate) fn unavailable_reason(reason: MethodUnavailableReason) -> &'static str {
     match reason {
         MethodUnavailableReason::ExplicitlyUnavailable => "explicitlyUnavailable",
         MethodUnavailableReason::CapabilityNotNegotiated => "capabilityNotNegotiated",
@@ -476,7 +476,7 @@ pub(super) fn unavailable_reason(reason: MethodUnavailableReason) -> &'static st
     }
 }
 
-pub(super) fn deferred_method_reason(method: &str) -> MethodUnavailableReason {
+pub(crate) fn deferred_method_reason(method: &str) -> MethodUnavailableReason {
     match method {
         "textDocument/prepareRename"
         | "textDocument/rename"
@@ -488,7 +488,7 @@ pub(super) fn deferred_method_reason(method: &str) -> MethodUnavailableReason {
     }
 }
 
-pub(super) fn initialized_root_uri(params: &Value) -> Result<String, RpcFailure> {
+pub(crate) fn initialized_root_uri(params: &Value) -> Result<String, RpcFailure> {
     let folders = params.get("workspaceFolders");
     let folder_uri = match folders {
         Some(Value::Array(folders)) if folders.len() > 1 => {
@@ -532,14 +532,14 @@ pub(super) fn initialized_root_uri(params: &Value) -> Result<String, RpcFailure>
     }
 }
 
-pub(super) fn text_document(params: &Value) -> Result<&Map<String, Value>, RpcFailure> {
+pub(crate) fn text_document(params: &Value) -> Result<&Map<String, Value>, RpcFailure> {
     params
         .get("textDocument")
         .and_then(Value::as_object)
         .ok_or_else(|| RpcFailure::invalid_params("textDocument is required"))
 }
 
-pub(super) fn required_string(
+pub(crate) fn required_string(
     object: &Map<String, Value>,
     key: &str,
 ) -> Result<String, RpcFailure> {
@@ -550,7 +550,7 @@ pub(super) fn required_string(
         .ok_or_else(|| RpcFailure::invalid_params("required string is missing"))
 }
 
-pub(super) fn required_nonempty_string(
+pub(crate) fn required_nonempty_string(
     object: &Map<String, Value>,
     key: &str,
 ) -> Result<String, RpcFailure> {
@@ -561,14 +561,14 @@ pub(super) fn required_nonempty_string(
     })
 }
 
-pub(super) fn required_i64(object: &Map<String, Value>, key: &str) -> Result<i64, RpcFailure> {
+pub(crate) fn required_i64(object: &Map<String, Value>, key: &str) -> Result<i64, RpcFailure> {
     object
         .get(key)
         .and_then(Value::as_i64)
         .ok_or_else(|| RpcFailure::invalid_params("required integer is missing"))
 }
 
-pub(super) fn required_u32(object: &Map<String, Value>, key: &str) -> Result<u32, RpcFailure> {
+pub(crate) fn required_u32(object: &Map<String, Value>, key: &str) -> Result<u32, RpcFailure> {
     object
         .get(key)
         .and_then(Value::as_u64)
@@ -576,11 +576,11 @@ pub(super) fn required_u32(object: &Map<String, Value>, key: &str) -> Result<u32
         .ok_or_else(|| RpcFailure::invalid_params("required unsigned integer is missing"))
 }
 
-pub(super) fn document_uri(params: &Value) -> Result<String, RpcFailure> {
+pub(crate) fn document_uri(params: &Value) -> Result<String, RpcFailure> {
     required_nonempty_string(text_document(params)?, "uri")
 }
 
-pub(super) fn document_position(params: &Value) -> Result<(String, LspPosition), RpcFailure> {
+pub(crate) fn document_position(params: &Value) -> Result<(String, LspPosition), RpcFailure> {
     let uri = document_uri(params)?;
     let position = parse_position(
         params
@@ -590,7 +590,7 @@ pub(super) fn document_position(params: &Value) -> Result<(String, LspPosition),
     Ok((uri, position))
 }
 
-pub(super) fn parse_position(value: &Value) -> Result<LspPosition, RpcFailure> {
+pub(crate) fn parse_position(value: &Value) -> Result<LspPosition, RpcFailure> {
     let object = value
         .as_object()
         .ok_or_else(|| RpcFailure::invalid_params("position must be an object"))?;
@@ -607,7 +607,7 @@ pub(super) fn parse_position(value: &Value) -> Result<LspPosition, RpcFailure> {
     Ok(LspPosition { line, character })
 }
 
-pub(super) fn parse_range(value: &Value) -> Result<LspRange, RpcFailure> {
+pub(crate) fn parse_range(value: &Value) -> Result<LspRange, RpcFailure> {
     let object = value
         .as_object()
         .ok_or_else(|| RpcFailure::invalid_params("range must be an object"))?;
@@ -624,7 +624,7 @@ pub(super) fn parse_range(value: &Value) -> Result<LspRange, RpcFailure> {
     Ok(LspRange { start, end })
 }
 
-pub(super) fn parse_overlay_change(value: &Value) -> Result<OverlayChange, RpcFailure> {
+pub(crate) fn parse_overlay_change(value: &Value) -> Result<OverlayChange, RpcFailure> {
     let object = value
         .as_object()
         .ok_or_else(|| RpcFailure::invalid_params("content change must be an object"))?;
@@ -646,7 +646,7 @@ pub(super) fn parse_overlay_change(value: &Value) -> Result<OverlayChange, RpcFa
     })
 }
 
-pub(super) fn parse_call_item(value: &Value) -> Result<CallHierarchyItem, RpcFailure> {
+pub(crate) fn parse_call_item(value: &Value) -> Result<CallHierarchyItem, RpcFailure> {
     let object = value
         .as_object()
         .ok_or_else(|| RpcFailure::invalid_params("call hierarchy item must be an object"))?;
@@ -667,7 +667,7 @@ pub(super) fn parse_call_item(value: &Value) -> Result<CallHierarchyItem, RpcFai
     })
 }
 
-pub(super) fn parse_type_item(value: &Value) -> Result<TypeHierarchyItem, RpcFailure> {
+pub(crate) fn parse_type_item(value: &Value) -> Result<TypeHierarchyItem, RpcFailure> {
     let object = value
         .as_object()
         .ok_or_else(|| RpcFailure::invalid_params("type hierarchy item must be an object"))?;
@@ -688,7 +688,7 @@ pub(super) fn parse_type_item(value: &Value) -> Result<TypeHierarchyItem, RpcFai
     })
 }
 
-pub(super) fn overlay_failure(error: OverlayError) -> RpcFailure {
+pub(crate) fn overlay_failure(error: OverlayError) -> RpcFailure {
     RpcFailure {
         code: -32602,
         message: "Invalid params",
@@ -696,18 +696,68 @@ pub(super) fn overlay_failure(error: OverlayError) -> RpcFailure {
     }
 }
 
-pub(super) fn diagnostic_result_id(generation: u64, version: i64) -> String {
+pub(crate) fn diagnostic_result_id(generation: u64, version: i64) -> String {
     format!("generation:{generation}:version:{version}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::lsp_gateway::diagnostics::{
+    use crate::diagnostics::{
         GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
         GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
         GatewayDiagnosticRelatedInformation,
     };
+
+    /// A partial semantic outcome must stay retriggerable and must echo the
+    /// caller-supplied detail verbatim or not at all. Adapters rely on this to
+    /// keep analyzer text out of the wire: whatever they hand in is exactly
+    /// what a client sees, so their own allowlist is the only filter.
+    #[test]
+    fn partial_semantic_responses_stay_retriggerable_and_carry_only_supplied_detail() {
+        let failure = response_value(
+            GatewayResponse::Partial {
+                value: SemanticResponse::Hover(None),
+                coverage: "analyzer-start-failed".to_owned(),
+                detail: Some("Analyzer failed to start.".to_owned()),
+            },
+            semantic_response_value,
+        )
+        .expect_err("a partial semantic response is a retriggerable failure");
+        assert_eq!(failure.code, -32802);
+        assert_eq!(failure.data["retriggerRequest"], true);
+        assert_eq!(failure.data["coverage"], "analyzer-start-failed");
+        assert_eq!(failure.data["detail"], "Analyzer failed to start.");
+
+        let failure = response_value(
+            GatewayResponse::Partial {
+                value: SemanticResponse::Hover(None),
+                coverage: "analyzer-start-failed".to_owned(),
+                detail: None,
+            },
+            semantic_response_value,
+        )
+        .expect_err("a partial semantic response is a retriggerable failure");
+        assert_eq!(failure.code, -32802);
+        assert_eq!(failure.data["retriggerRequest"], true);
+        assert!(
+            failure.data.get("detail").is_none(),
+            "absent detail must be omitted, never serialized as null"
+        );
+    }
+
+    #[test]
+    fn pending_semantic_responses_are_retriggerable_under_a_stable_coverage_token() {
+        let failure = response_value(
+            GatewayResponse::<SemanticResponse>::Pending,
+            semantic_response_value,
+        )
+        .expect_err("a pending semantic response is a retriggerable failure");
+        assert_eq!(failure.code, -32802);
+        assert_eq!(failure.data["retriggerRequest"], true);
+        assert_eq!(failure.data["coverage"], "semantic-pending-not-polled");
+        assert!(failure.data.get("detail").is_none());
+    }
 
     #[test]
     fn tracedecay_diagnostic_data_projects_exact_identity_and_expansion_handle() {

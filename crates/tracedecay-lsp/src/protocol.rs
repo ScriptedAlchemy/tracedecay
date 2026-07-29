@@ -14,11 +14,14 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 
-use super::capabilities::{
+use crate::bridge::{
+    DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
+};
+use crate::capabilities::{
     CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
     GatewayCapabilities, UpstreamCapabilities, negotiate_capabilities,
 };
-use super::context::{
+use crate::context::{
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
     ContextFreshness, ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
     ContextProjectionIdentity, ContextProjectionKind, ContextProjectionOutcome,
@@ -28,38 +31,35 @@ use super::context::{
     MAX_CONTEXT_SUMMARY_BYTES, TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD,
     TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
 };
-use super::diagnostics::{
+use crate::diagnostics::{
     DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
     GatewayDiagnostic, LspPosition, LspRange, MAX_DOCUMENT_DIAGNOSTICS,
 };
-use super::dispatch::{dispatch_incoming, parse_incoming};
-use super::gateway::{
+use crate::dispatch::{dispatch_incoming, parse_incoming};
+use crate::gateway::{
     AdmittedRoot, DaemonLspGateway, FeedbackCyclePort, FeedbackCycleResponse, GatewayMethod,
     GatewayResponse, MethodUnavailableReason, SemanticProviderPort, SemanticRequest,
 };
-use super::overlay::{
+use crate::overlay::{
     DebouncedDiagnosticKind, OverlayDiagnosticDebouncer, OverlayError, OverlayStore,
 };
-use super::provider::{
+use crate::provider::{
     AnalyzerCancellationPort, DiagnosticRefreshAdmission, DiagnosticRefreshIdentity,
     DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, MAX_DIAGNOSTIC_OPERATION_ID_BYTES,
     UnavailableDiagnosticSnapshotProvider,
 };
-use super::rpc::{
+use crate::request_sequence::{ConnectionLocalRequestSequence, ProcessLocalRequestSequence};
+use crate::rpc::{
     DiagnosticSerializationCapabilities, RpcFailure, diagnostic_result_id, diagnostic_value,
     document_diagnostic_report_value, error_response, initialized_root_uri, overlay_failure,
     parse_overlay_change, partial_failure_data, request_id, request_id_value, required_i64,
     required_nonempty_string, required_string, response_value, semantic_response_value,
     success_response, text_document,
 };
-use super::session::{
+use crate::session::{
     CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
     LspSessionControl, MAX_PUBLICATION_BYTES, PublicationAdmission, SessionLifecycle,
 };
-use crate::lsp_bridge::{
-    DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
-};
-use crate::request_identity::{ConnectionLocalRequestSequence, ProcessLocalRequestSequence};
 
 /// A protocol actor allows bounded synchronous work before returning a typed
 /// cancellation response. Long-running adapters receive the same deadline via
@@ -82,7 +82,7 @@ fn valid_context_projection_identity(identity: &ContextProjectionIdentity) -> bo
             .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
 }
 const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
-pub(super) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
+pub(crate) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
 const MAX_NATIVE_DIAGNOSTIC_URI_BYTES: usize = 4 * 1024;
 const MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES: usize = 256;
 static NEXT_CONTEXT_OPERATION_ID: ProcessLocalRequestSequence =
@@ -157,7 +157,7 @@ fn bind_context_document_digest(request: &mut ContextProjectionRequest, overlays
         .document_uri
         .as_deref()
         .and_then(|uri| overlays.snapshot(uri))
-        .map(|snapshot| crate::code_index::intake::content_digest(snapshot.text.as_bytes()));
+        .map(|snapshot| ContentDigest::of_bytes(snapshot.text.as_bytes()));
 }
 
 #[derive(Deserialize)]
@@ -288,7 +288,7 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
-    pub(super) gateway: DaemonLspGateway<P, S>,
+    pub(crate) gateway: DaemonLspGateway<P, S>,
     control: LspSessionControl,
     gateway_capabilities: GatewayCapabilities,
     upstream_capabilities: UpstreamCapabilities,
@@ -799,11 +799,11 @@ where
         }
     }
 
-    pub(super) fn handle_initialized_notification(&mut self) {
+    pub(crate) fn handle_initialized_notification(&mut self) {
         let _ = self.control.initialized();
     }
 
-    pub(super) fn handle_initialized_request(&mut self, response_id: Value) {
+    pub(crate) fn handle_initialized_request(&mut self, response_id: Value) {
         let _ = self.enqueue_value(error_response(
             response_id,
             RpcFailure {
@@ -814,7 +814,7 @@ where
         ));
     }
 
-    pub(super) fn handle_shutdown_request(&mut self, response_id: Value) {
+    pub(crate) fn handle_shutdown_request(&mut self, response_id: Value) {
         if self.control.lifecycle() != SessionLifecycle::Ready {
             let _ = self.enqueue_value(error_response(
                 response_id,
@@ -844,7 +844,7 @@ where
         }
     }
 
-    pub(super) fn handle_exit_notification(&mut self) {
+    pub(crate) fn handle_exit_notification(&mut self) {
         if self.control.exit().is_err() {
             self.expire();
         } else {
@@ -852,7 +852,7 @@ where
         }
     }
 
-    pub(super) fn handle_exit_request(&mut self, response_id: Value) {
+    pub(crate) fn handle_exit_request(&mut self, response_id: Value) {
         let _ = self.enqueue_value(error_response(
             response_id,
             RpcFailure {
@@ -863,7 +863,7 @@ where
         ));
     }
 
-    pub(super) fn handle_client_response(&mut self, id: LspRequestId) {
+    pub(crate) fn handle_client_response(&mut self, id: LspRequestId) {
         if self.diagnostic_refresh_request.as_ref() == Some(&id) {
             self.diagnostic_refresh_request = None;
         }
@@ -872,11 +872,11 @@ where
         }
     }
 
-    pub(super) fn document_version(&self, uri: &str) -> i64 {
+    pub(crate) fn document_version(&self, uri: &str) -> i64 {
         self.overlays.version(uri).unwrap_or_default()
     }
 
-    pub(super) fn handle_initialize(&mut self, id: Value, params: &Value) {
+    pub(crate) fn handle_initialize(&mut self, id: Value, params: &Value) {
         if self.control.lifecycle() != SessionLifecycle::AwaitingInitialize {
             self.enqueue_value(error_response(
                 id,
@@ -1011,14 +1011,14 @@ where
             .bind_initialized_capabilities(effective.clone());
     }
 
-    pub(super) fn handle_cancel(&mut self, params: &Value) {
+    pub(crate) fn handle_cancel(&mut self, params: &Value) {
         let Some(id) = params.get("id").and_then(request_id) else {
             return;
         };
         let _ = self.cancel_request_and_upstream(&id);
     }
 
-    pub(super) fn handle_native_diagnostics_notification(&mut self, params: &Value, now_ms: u64) {
+    pub(crate) fn handle_native_diagnostics_notification(&mut self, params: &Value, now_ms: u64) {
         if !self.cursor_native_mode || self.require_ready().is_err() {
             return;
         }
@@ -1052,7 +1052,7 @@ where
         }
     }
 
-    pub(super) fn handle_did_open(
+    pub(crate) fn handle_did_open(
         &mut self,
         params: &Value,
         now_ms: u64,
@@ -1092,7 +1092,7 @@ where
         Ok(())
     }
 
-    pub(super) fn handle_did_change(
+    pub(crate) fn handle_did_change(
         &mut self,
         params: &Value,
         now_ms: u64,
@@ -1131,7 +1131,7 @@ where
         Ok(())
     }
 
-    pub(super) fn handle_did_close(
+    pub(crate) fn handle_did_close(
         &mut self,
         params: &Value,
         now_ms: u64,
@@ -1150,7 +1150,7 @@ where
         Ok(())
     }
 
-    pub(super) fn handle_did_save(
+    pub(crate) fn handle_did_save(
         &mut self,
         params: &Value,
         now_ms: u64,
@@ -1174,7 +1174,7 @@ where
         Ok(())
     }
 
-    pub(super) fn handle_context_request(&mut self, id: Value, params: &Value, now_ms: u64) {
+    pub(crate) fn handle_context_request(&mut self, id: Value, params: &Value, now_ms: u64) {
         let request = serde_json::from_value::<ContextProjectionRequest>(params.clone())
             .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/context parameters"));
         match request {
@@ -1213,7 +1213,7 @@ where
         }
     }
 
-    pub(super) fn handle_context_expand_request(&mut self, id: Value, params: &Value, now_ms: u64) {
+    pub(crate) fn handle_context_expand_request(&mut self, id: Value, params: &Value, now_ms: u64) {
         let request =
             serde_json::from_value::<ContextExpansionRequest>(params.clone()).map_err(|_| {
                 RpcFailure::invalid_params("invalid tracedecay/context/expand parameters")
@@ -1243,7 +1243,7 @@ where
         }
     }
 
-    pub(super) fn handle_context_subscribe(&mut self, id: Value, params: &Value, now_ms: u64) {
+    pub(crate) fn handle_context_subscribe(&mut self, id: Value, params: &Value, now_ms: u64) {
         let request = serde_json::from_value::<ContextSubscribeRequest>(params.clone())
             .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/subscribe parameters"));
         match request {
@@ -1258,7 +1258,7 @@ where
         }
     }
 
-    pub(super) fn with_request(
+    pub(crate) fn with_request(
         &mut self,
         id: Value,
         document: Option<(String, i64)>,
@@ -1327,7 +1327,7 @@ where
         }
     }
 
-    pub(super) fn start_semantic_request(
+    pub(crate) fn start_semantic_request(
         &mut self,
         response_id: Value,
         document: Option<(String, i64)>,
@@ -2040,7 +2040,7 @@ where
         }
     }
 
-    pub(super) fn pull_diagnostics(
+    pub(crate) fn pull_diagnostics(
         &mut self,
         uri: &str,
         params: &Value,
@@ -2591,7 +2591,7 @@ where
         outcome
     }
 
-    pub(super) fn enqueue_value(&mut self, value: Value) -> bool {
+    pub(crate) fn enqueue_value(&mut self, value: Value) -> bool {
         let server_request = value
             .get("method")
             .and_then(Value::as_str)
@@ -2963,14 +2963,14 @@ fn bounded_context_text(mut value: String, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::capabilities::SemanticCapability;
-    use super::super::diagnostics::{DiagnosticSeverity, DiagnosticSource, LspPosition, LspRange};
-    use super::super::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome};
-    use super::super::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
-    use super::super::provider::GenerationDiagnostics;
     use super::*;
-    use crate::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
-    use crate::lsp_bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
+    use crate::TRACEDECAY_CONTEXT_REVISION;
+    use crate::bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
+    use crate::capabilities::SemanticCapability;
+    use crate::diagnostics::{DiagnosticSeverity, DiagnosticSource, LspPosition, LspRange};
+    use crate::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome};
+    use crate::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
+    use crate::provider::GenerationDiagnostics;
     use std::cell::RefCell;
     use std::sync::Mutex;
 
@@ -3228,7 +3228,7 @@ mod tests {
 
         assert_eq!(
             request.document_content_digest,
-            Some(crate::code_index::intake::content_digest(b"fn dirty() {}"))
+            Some(ContentDigest::of_bytes(b"fn dirty() {}"))
         );
         assert!(
             serde_json::from_value::<ContextProjectionRequest>(json!({
@@ -3346,7 +3346,7 @@ mod tests {
 
         assert_eq!(
             *observed.lock().expect("read captured context request"),
-            Some(crate::code_index::intake::content_digest(b"fn dirty() {}"))
+            Some(ContentDigest::of_bytes(b"fn dirty() {}"))
         );
     }
 

@@ -3,7 +3,11 @@ name = "tracedecay-lsp"
 version = "0.1.0"
 edition.workspace = true
 license = "MIT"
-description = "Store-free LSP framing and stdio bridge contracts for TraceDecay"
+description = "Store-free LSP framing, protocol, and session contracts for TraceDecay"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+url = "2"
