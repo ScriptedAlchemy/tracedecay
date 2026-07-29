@@ -23,8 +23,7 @@
             "command": "__TRACEDECAY_BIN__",
             "args": [
               "hook-prompt-submit"
-            ],
-            "timeout": 5
+            ]
           }
         ]
       }
