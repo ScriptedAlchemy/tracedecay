@@ -246,15 +246,16 @@ fn registered_cache_refresh_replaces_same_version_stale_bundle() {
 fn registered_cache_refresh_refuses_registry_path_outside_cache_root() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join(".claude/plugins/cache")).unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    write_rendered_plugin_bundle(outside.path(), "/bin/tracedecay").unwrap();
-    let sentinel = outside.path().join("sentinel");
+    let outside_root = tempfile::tempdir().unwrap();
+    let outside = outside_root.path().join("tracedecay-cache");
+    write_rendered_plugin_bundle(&outside, "/bin/tracedecay").unwrap();
+    let sentinel = outside.join("sentinel");
     std::fs::write(&sentinel, "preserve").unwrap();
     let registry_path = home.path().join(".claude/plugins/installed_plugins.json");
     std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
     let mut registry = json!({ "plugins": {} });
     registry["plugins"][PLUGIN_IDENTIFIER] = json!([{
-        "installPath": outside.path(),
+        "installPath": outside,
         "version": env!("CARGO_PKG_VERSION"),
         "scope": "user"
     }]);
