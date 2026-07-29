@@ -204,67 +204,69 @@ impl McpServer {
         if !current.branch_drifted() {
             return current;
         }
-        let snapshot = {
-            let mut guard = self.cg.write().await;
-            if !guard.branch_drifted() {
-                // A concurrent call already swapped (or the user switched back).
-                return guard.clone();
-            }
-            match guard.reopen_for_current_branch().await {
-                Ok(fresh) => {
-                    tracing::info!(
-                        branch = fresh.active_branch().unwrap_or("<detached>"),
-                        "reopened index after branch change"
-                    );
-                    *guard = Arc::new(fresh);
-                    let fresh = guard.clone();
-                    if let Some(reconcile) = &self.database_owner_reconciler {
-                        reconcile(fresh.clone()).await;
-                    }
-                    fresh
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        serving_branch = guard.serving_branch().unwrap_or("<none>"),
-                        "branch drift detected but index reopen failed"
-                    );
-                    return guard.clone();
-                }
+        let Ok(_reopen_guard) = self.branch_reopen.try_lock() else {
+            return current;
+        };
+        let current = self.cg_snapshot().await;
+        if !current.branch_drifted() {
+            return current;
+        }
+        let fresh = match current.reopen_for_current_branch().await {
+            Ok(fresh) => Arc::new(fresh),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    serving_branch = current.serving_branch().unwrap_or("<none>"),
+                    "branch drift detected but index reopen failed"
+                );
+                return current;
             }
         };
+        tracing::info!(
+            branch = fresh.active_branch().unwrap_or("<detached>"),
+            "reopened index after branch change"
+        );
+        {
+            let mut guard = self.cg.write().await;
+            *guard = fresh.clone();
+        }
+        if let Some(reconcile) = &self.database_owner_reconciler {
+            reconcile(fresh.clone()).await;
+        }
         // New branch DB ⇒ new file set; refresh the token accounting map.
         self.refresh_file_token_map().await;
-        snapshot
+        fresh
     }
 
     pub(crate) async fn reopen_after_branch_tracking_added(&self) {
-        let reopened = {
-            let mut guard = self.cg.write().await;
-            match guard.reopen_for_current_branch().await {
-                Ok(fresh) => {
-                    tracing::info!(
-                        branch = fresh.active_branch().unwrap_or("<detached>"),
-                        "reopened index after branch tracking was added"
-                    );
-                    *guard = Arc::new(fresh);
-                    let fresh = guard.clone();
-                    if let Some(reconcile) = &self.database_owner_reconciler {
-                        reconcile(fresh.clone()).await;
-                    }
-                    Some(fresh)
+        let _reopen_guard = self.branch_reopen.lock().await;
+        let current = self.cg_snapshot().await;
+        let reopened = match current.reopen_for_current_branch().await {
+            Ok(fresh) => {
+                let fresh = Arc::new(fresh);
+                tracing::info!(
+                    branch = fresh.active_branch().unwrap_or("<detached>"),
+                    "reopened index after branch tracking was added"
+                );
+                {
+                    let mut guard = self.cg.write().await;
+                    *guard = fresh.clone();
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        serving_branch = guard.serving_branch().unwrap_or("<none>"),
-                        "index reopen failed after branch tracking was added"
-                    );
-                    None
+                if let Some(reconcile) = &self.database_owner_reconciler {
+                    reconcile(fresh.clone()).await;
                 }
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    serving_branch = current.serving_branch().unwrap_or("<none>"),
+                    "index reopen failed after branch tracking was added"
+                );
+                false
             }
         };
-        if reopened.is_some() {
+        if reopened {
             self.refresh_file_token_map().await;
         }
     }

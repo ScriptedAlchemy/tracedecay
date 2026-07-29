@@ -340,6 +340,9 @@ pub struct McpServer {
     /// already running when a swap lands finish against the old snapshot;
     /// each call is internally consistent.
     cg: tokio::sync::RwLock<Arc<TraceDecay>>,
+    /// Serializes branch reopen work without hiding the last complete graph
+    /// behind the `cg` write lock while the replacement is prepared.
+    branch_reopen: tokio::sync::Mutex<()>,
     stats: ServerStats,
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
@@ -1039,6 +1042,7 @@ impl McpServer {
 
         let server = Arc::new(Self {
             cg: tokio::sync::RwLock::new(cg),
+            branch_reopen: tokio::sync::Mutex::new(()),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
