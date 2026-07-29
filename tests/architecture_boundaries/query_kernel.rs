@@ -947,6 +947,7 @@ fn validate_query_attributes(
                     )
                 }
                 "must_use" => body == [Token::Ident("must_use".to_string())],
+                "default" => body == [Token::Ident("default".to_string())],
                 "cfg" => {
                     body == [
                         Token::Ident("cfg".to_string()),
@@ -1505,6 +1506,120 @@ fn query_source_guard_rejects_other_cfg_forms() {
                 .any(|violation| violation.contains("not an exact allowlisted form")),
             "query source guard accepted {name}: {violations:?}"
         );
+    }
+}
+
+#[test]
+fn query_source_guard_allows_only_exact_default_enum_marker() {
+    let violations = query_source_violations(
+        r#"
+        #[derive(Default)]
+        enum Mode {
+            #[default]
+            Current,
+            Historical,
+        }
+        "#,
+    );
+
+    assert!(
+        violations.is_empty(),
+        "the exact Rust #[default] enum marker must remain available: {violations:?}"
+    );
+
+    for (name, source) in [
+        (
+            "default with arguments",
+            "#[default(anything)] enum Mode { Current }",
+        ),
+        (
+            "default with a value",
+            r#"#[default = "current"] enum Mode { Current }"#,
+        ),
+        ("default cfg", "#[cfg(default)] enum Mode { Current }"),
+        (
+            "default through cfg_attr",
+            "#[cfg_attr(test, default)] enum Mode { Current }",
+        ),
+        ("unrelated attribute", "#[arbitrary] enum Mode { Current }"),
+    ] {
+        let violations = query_source_violations(source);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("not an exact allowlisted form")),
+            "query source guard accepted {name}: {violations:?}"
+        );
+    }
+}
+
+#[test]
+fn temporal_execution_control_source_has_no_scheduler_state() {
+    let source = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/tracedecay-query/src/temporal/ports.rs"
+    ))
+    .expect("read the temporal ports source");
+    let (production_source, _) = source
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("ports module has an inline test boundary");
+    for forbidden in [
+        "use std::thread;",
+        "std::thread::",
+        "thread::spawn",
+        "thread::sleep",
+        "Waker",
+        "wake_waiters",
+        "fn register(",
+        "tokio",
+        "rusqlite",
+        "sqlx",
+        "diesel",
+        "sqlite",
+        "SELECT ",
+        "async_std",
+        "smol::",
+    ] {
+        assert!(
+            !production_source.contains(forbidden),
+            "runtime-bound deadline implementation contains forbidden `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn temporal_ports_and_cursor_are_runtime_and_sql_free() {
+    let ports = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/tracedecay-query/src/temporal/ports.rs"
+    ))
+    .expect("ports");
+    let cursor = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/tracedecay-query/src/temporal/cursor.rs"
+    ))
+    .expect("cursor");
+    let (ports_prod, _) = ports
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("ports tests");
+    let (cursor_prod, _) = cursor
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("cursor tests");
+    for (label, source) in [("ports", ports_prod), ("cursor", cursor_prod)] {
+        for forbidden in [
+            "rusqlite",
+            "sqlx",
+            "diesel",
+            "tokio::",
+            "async_std",
+            "std::thread::",
+            "thread::spawn",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{label} production source must remain SQL/runtime-free; found `{forbidden}`"
+            );
+        }
     }
 }
 
