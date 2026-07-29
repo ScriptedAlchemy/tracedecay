@@ -51,20 +51,9 @@ pub(crate) use transcript::TranscriptPersistenceError;
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
-/// Scopes a `tracedecay_message_search` to the agent transcripts of one
-/// workflow run, mirroring `GitScopeFilter` as a search-only concern. The run's
-/// messages are the messages of its agents (rows in `workflow_agents`); see
-/// The session-message search applies this with an `EXISTS` pushdown.
-/// Serializes so the applied filter echoes cleanly into the payload.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct WorkflowScopeFilter {
-    /// The `wf_*` run whose agents' messages to keep.
-    pub run_id: String,
-    /// When set, narrows the scope to just this one agent of the run
-    /// (matched on `workflow_agents.agent_label`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_label: Option<String>,
-}
+/// Compatibility re-export: workflow search filters now live beside the
+/// workflow-index contracts in [`crate::sessions::workflow_index`].
+pub use crate::sessions::workflow_index::WorkflowScopeFilter;
 
 /// Internal query context for the session-message search fan-in.
 ///

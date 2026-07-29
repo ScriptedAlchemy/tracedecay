@@ -27,6 +27,21 @@ use crate::db::engine::{
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
 
+/// Scopes a `tracedecay_message_search` to the agent transcripts of one
+/// workflow run, mirroring [`GitScopeFilter`] as a search-only concern. The
+/// run's messages are the messages of its agents (rows in `workflow_agents`).
+/// The session-message search applies this with an `EXISTS` pushdown.
+/// Serializes so the applied filter echoes cleanly into the payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkflowScopeFilter {
+    /// The `wf_*` run whose agents' messages to keep.
+    pub run_id: String,
+    /// When set, narrows the scope to just this one agent of the run
+    /// (matched on `workflow_agents.agent_label`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+}
+
 /// Schema version recorded in `session_schema_migrations` under
 /// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
 pub const WORKFLOW_INDEX_SCHEMA_VERSION: i64 = 1;
@@ -815,7 +830,7 @@ pub(crate) async fn runs_for_git_scope(
 /// in order (`run_id`, optional `agent_label`). Callers append `params` to
 /// their query bind list and AND the predicate into the outer WHERE clause.
 pub(crate) fn workflow_scope_exists_predicate(
-    filter: &crate::global_db::WorkflowScopeFilter,
+    filter: &WorkflowScopeFilter,
     message_source_path_col: &str,
     message_session_id_col: &str,
 ) -> (String, Vec<Value>) {
