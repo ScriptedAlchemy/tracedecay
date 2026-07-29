@@ -4,8 +4,10 @@
 //! tests and exclusive-maintenance callers that are still landing.
 #![allow(dead_code)] // Doctor repair lane still landing; see module doc (Plan 23)
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,88 @@ use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
 const MAX_FINDING_COUNT: u64 = 1_000_000;
 const SQLITE_CORRUPT_VTAB: i32 = 267;
+const SESSION_TEMPORAL_HEALTH_CACHE_TTL: Duration = Duration::from_secs(2);
+const MAX_CACHED_SESSION_TEMPORAL_STORES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionTemporalStoreFileFingerprint {
+    bytes: u64,
+    modified_nanos: u128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionTemporalStoreFingerprint {
+    database: SessionTemporalStoreFileFingerprint,
+    wal: Option<SessionTemporalStoreFileFingerprint>,
+}
+
+#[derive(Clone)]
+struct CachedSessionTemporalHealth {
+    fingerprint: SessionTemporalStoreFingerprint,
+    observed_at: Instant,
+    report: SessionTemporalHealthReport,
+}
+
+type SessionTemporalHealthCacheCell = Arc<tokio::sync::Mutex<Option<CachedSessionTemporalHealth>>>;
+
+static SESSION_TEMPORAL_HEALTH_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, SessionTemporalHealthCacheCell>>,
+> = OnceLock::new();
+
+fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCacheCell {
+    let cache = SESSION_TEMPORAL_HEALTH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !cache.contains_key(path)
+        && cache.len() >= MAX_CACHED_SESSION_TEMPORAL_STORES
+        && let Some(evict) = cache
+            .iter()
+            .find(|(_, cell)| Arc::strong_count(cell) == 1)
+            .map(|(path, _)| path.clone())
+    {
+        cache.remove(&evict);
+    }
+    Arc::clone(
+        cache
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
+    )
+}
+
+fn store_file_fingerprint(
+    path: &Path,
+) -> std::io::Result<Option<SessionTemporalStoreFileFingerprint>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(SessionTemporalStoreFileFingerprint {
+            bytes: metadata.len(),
+            modified_nanos: metadata
+                .modified()?
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn session_temporal_store_fingerprint(
+    database_path: &Path,
+) -> std::io::Result<SessionTemporalStoreFingerprint> {
+    let Some(database) = store_file_fingerprint(database_path)? else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "session temporal database is absent",
+        ));
+    };
+    let mut wal_path = database_path.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    Ok(SessionTemporalStoreFingerprint {
+        database,
+        wal: store_file_fingerprint(&PathBuf::from(wal_path))?,
+    })
+}
 
 const OCCURRENCE_FTS_CHECK_SQL: &str = "SELECT
     (SELECT COUNT(*) FROM (
@@ -668,13 +752,36 @@ pub(crate) async fn session_temporal_doctor_health_at(
 
 impl RegisteredGlobalDb {
     /// Produces a redacted, non-mutating temporal health snapshot through the
-    /// retained registered reader pool.
+    /// retained registered reader pool. Identical requests coalesce behind one
+    /// per-store lane and reuse a very short-lived result only while the exact
+    /// database/WAL fingerprint remains unchanged.
     pub(crate) async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
+        let database_path = self.db_path();
+        let cache = session_temporal_health_cache_cell(database_path);
+        let mut cached = cache.lock().await;
+        let before = session_temporal_store_fingerprint(database_path).ok();
+        if let (Some(fingerprint), Some(observed)) = (before, cached.as_ref())
+            && observed.fingerprint == fingerprint
+            && observed.observed_at.elapsed() <= SESSION_TEMPORAL_HEALTH_CACHE_TTL
+        {
+            return observed.report.clone();
+        }
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return unavailable_report(classify_engine_error(&error)),
         };
-        diagnose_snapshot(&snapshot).await
+        let report = diagnose_snapshot(&snapshot).await;
+        let after = session_temporal_store_fingerprint(database_path).ok();
+        if let Some(fingerprint) = after.filter(|fingerprint| before == Some(*fingerprint)) {
+            *cached = Some(CachedSessionTemporalHealth {
+                fingerprint,
+                observed_at: Instant::now(),
+                report: report.clone(),
+            });
+        } else {
+            *cached = None;
+        }
+        report
     }
 
     /// Rebuilds only temporal FTS derived indexes after an explicit request.
@@ -1390,4 +1497,26 @@ fn non_empty_wal_sidecar(db_path: &Path) -> bool {
     let mut wal = db_path.as_os_str().to_os_string();
     wal.push("-wal");
     std::fs::metadata(PathBuf::from(wal)).is_ok_and(|metadata| metadata.len() > 0)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn session_temporal_fingerprint_tracks_database_and_wal_changes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let database = tmp.path().join("sessions.db");
+        std::fs::write(&database, b"database").expect("database");
+        let initial = session_temporal_store_fingerprint(&database).expect("initial fingerprint");
+
+        let wal = tmp.path().join("sessions.db-wal");
+        std::fs::write(&wal, b"wal").expect("wal");
+        let with_wal = session_temporal_store_fingerprint(&database).expect("wal fingerprint");
+        assert_ne!(initial, with_wal);
+
+        std::fs::write(&wal, b"wal-expanded").expect("expanded wal");
+        let expanded = session_temporal_store_fingerprint(&database).expect("expanded fingerprint");
+        assert_ne!(with_wal, expanded);
+    }
 }
