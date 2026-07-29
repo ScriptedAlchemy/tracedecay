@@ -11,7 +11,7 @@ use tracedecay_domain::{
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
 };
-use tracedecay_store::{ObservationCommitReceipt, ObservationStoreResult};
+use tracedecay_store::{ObservationCommitReceipt, ObservationStore, ObservationStoreResult};
 
 use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
 

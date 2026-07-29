@@ -828,6 +828,44 @@ pub enum ObservationStoreError {
 
 pub type ObservationStoreResult<T> = Result<T, ObservationStoreError>;
 
+/// Write-only authority for sanitized, anchor-bound observation capture.
+///
+/// The accepted request is deliberately [`AnchoredObservationWrite`], so
+/// provider scanners cannot bypass sanitization or mint a second write path.
+pub trait ObservationCaptureSink: Send + Sync {
+    fn persist_admitted_observation(
+        &self,
+        write: AnchoredObservationWrite,
+    ) -> impl Future<Output = ObservationStoreResult<ObservationPersistOutcome>> + Send;
+}
+
+/// Exact-CAS cursor authority used by provider capture coordinators.
+pub trait ObservationCursorPort: Send + Sync {
+    fn read_source_cursor(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> impl Future<Output = ObservationStoreResult<Option<ObservationSourceCursorV1>>> + Send;
+
+    fn advance_admitted_source_cursor(
+        &self,
+        advance: ObservationCursorAdvance,
+    ) -> impl Future<Output = ObservationStoreResult<CursorAdvanceOutcome>> + Send;
+}
+
+/// Read authority required by capture admission and bounded replay.
+pub trait ObservationAdmissionPort: Send + Sync {
+    fn read_admitted_observation(
+        &self,
+        observation_id: &CanonicalObservationIdV1,
+    ) -> impl Future<Output = ObservationStoreResult<Option<StoredObservation>>> + Send;
+
+    fn replay_admitted_observations(
+        &self,
+        request: ObservationReplayRequest,
+    ) -> impl Future<Output = ObservationStoreResult<Vec<StoredObservation>>> + Send;
+}
+
 /// Authoritative persistence boundary for sanitized observations and their stable anchors.
 pub trait ObservationStore: Send + Sync {
     fn persist_observation(
@@ -855,6 +893,57 @@ pub trait ObservationStore: Send + Sync {
         &self,
         request: ObservationReplayRequest,
     ) -> impl Future<Output = ObservationStoreResult<Vec<StoredObservation>>> + Send;
+}
+
+impl<T> ObservationCaptureSink for T
+where
+    T: ObservationStore + ?Sized,
+{
+    async fn persist_admitted_observation(
+        &self,
+        write: AnchoredObservationWrite,
+    ) -> ObservationStoreResult<ObservationPersistOutcome> {
+        self.persist_observation(write).await
+    }
+}
+
+impl<T> ObservationCursorPort for T
+where
+    T: ObservationStore + ?Sized,
+{
+    async fn read_source_cursor(
+        &self,
+        source: &ObservationSourceIdentityV1,
+        scope: &ObservationScopeV1,
+    ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
+        self.get_source_cursor(source, scope).await
+    }
+
+    async fn advance_admitted_source_cursor(
+        &self,
+        advance: ObservationCursorAdvance,
+    ) -> ObservationStoreResult<CursorAdvanceOutcome> {
+        self.advance_source_cursor(advance).await
+    }
+}
+
+impl<T> ObservationAdmissionPort for T
+where
+    T: ObservationStore + ?Sized,
+{
+    async fn read_admitted_observation(
+        &self,
+        observation_id: &CanonicalObservationIdV1,
+    ) -> ObservationStoreResult<Option<StoredObservation>> {
+        self.get_observation(observation_id).await
+    }
+
+    async fn replay_admitted_observations(
+        &self,
+        request: ObservationReplayRequest,
+    ) -> ObservationStoreResult<Vec<StoredObservation>> {
+        self.replay_observations(request).await
+    }
 }
 
 #[cfg(test)]

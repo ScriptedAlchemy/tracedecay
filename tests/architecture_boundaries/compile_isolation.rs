@@ -295,6 +295,27 @@ fn canonical_projector_is_pure_and_store_owned() {
 }
 
 #[test]
+fn observation_application_uses_narrow_capture_ports() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(root.join("src/application/observation.rs"))
+        .expect("read observation application");
+    for required in [
+        "ObservationCaptureSink",
+        "ObservationCursorPort",
+        "ObservationAdmissionPort",
+    ] {
+        assert!(
+            source.contains(required),
+            "observation application must use narrow authority: {required}"
+        );
+    }
+    assert!(
+        !source.contains("ObservationStore,"),
+        "observation application must not depend on the aggregate store port"
+    );
+}
+
+#[test]
 fn application_dependencies_are_exactly_the_use_case_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-application");
