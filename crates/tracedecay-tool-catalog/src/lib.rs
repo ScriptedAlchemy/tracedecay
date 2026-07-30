@@ -32,7 +32,7 @@ pub use id::{
 pub use manifest::{
     AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
     CapabilityManifestInputV1, CapabilityManifestV1, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, DeprecationWindow, EffectClass, IdempotencyContract, LifecycleClass,
+    DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
     PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
     RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaRef, ScopeDimension,
     ScopeRequirement, StreamResumeContract, StreamingContract, TerminalState,
