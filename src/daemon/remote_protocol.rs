@@ -8,7 +8,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_application::remote::auth::OpaqueRemoteCredential;
+use thiserror::Error;
+use tracedecay_application::remote::auth::{
+    OpaqueRemoteCredential, RemoteEnrollmentAuthorityErrorV1,
+};
 use tracedecay_application::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolPortV1,
     RemoteProtocolRequestV1, RemoteProtocolResponseV1,
@@ -18,9 +21,17 @@ use tracedecay_application::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_application::remote::replay::{
+    RemoteReplayApplicationErrorV1, RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1,
+    RemoteReplayRequestV1, RemoteReplayServiceV1, RemoteReplayTransactionPortV1,
+};
 use tracedecay_domain::EnrollmentCredentialRecordV1;
 use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
+use tracedecay_rusqlite_runtime::remote_authority::{
+    RegisteredRemoteEnrollmentAuthorityV1, RegisteredRemoteReplayPolicyAuthorityV1,
+    RusqliteRemoteAuthorityStoreV1,
+};
+use tracedecay_rusqlite_runtime::remote_spool::RemoteCaptureSpool;
 
 use super::remote_enrollment::{
     DaemonRemoteEnrollmentProvisionerV1, DaemonRemoteEnrollmentProvisioningErrorV1,
@@ -117,6 +128,50 @@ impl CanonicalDaemonRemoteProtocolOwnersV1 {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_registered_enrollment_and_replay(
+        enrollment_store: MigrationSqlHandle,
+        enrollment_configuration_path: &Path,
+        replay_spool: Arc<RemoteCaptureSpool>,
+        replay_authority: Arc<RusqliteRemoteAuthorityStoreV1>,
+        replay_transaction: Arc<dyn RemoteReplayTransactionPortV1>,
+        query: Arc<QueryOwnerV1>,
+        backup: Arc<BackupOwnerV1>,
+        restore: Arc<RestoreOwnerV1>,
+        promotion: Arc<PromotionOwnerV1>,
+    ) -> Result<Self, DaemonRemoteRegisteredOwnerErrorV1> {
+        let enrollment = DaemonRemoteEnrollmentProvisionerV1::from_registered_configured(
+            enrollment_store.clone(),
+            enrollment_configuration_path,
+        )?;
+        let credentials = Arc::new(RegisteredRemoteEnrollmentAuthorityV1::from_registered(
+            enrollment_store.clone(),
+        )?);
+        let policy = Arc::new(RegisteredRemoteReplayPolicyAuthorityV1::from_registered(
+            enrollment_store,
+        )?);
+        let replay = Arc::new(RemoteReplayProtocolAdapterV1::new(
+            RemoteReplayServiceV1::new(
+                credentials.clone(),
+                credentials,
+                replay_spool.clone(),
+                replay_authority,
+                policy.clone(),
+                policy,
+                replay_transaction,
+                replay_spool,
+            ),
+        ));
+        Ok(Self::new(
+            enrollment.protocol_port(),
+            replay,
+            query,
+            backup,
+            restore,
+            promotion,
+        ))
+    }
+
     pub fn new(
         enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
         replay: Arc<ReplayOwnerV1>,
@@ -138,6 +193,16 @@ impl CanonicalDaemonRemoteProtocolOwnersV1 {
     pub fn into_protocol_port(self) -> DaemonRemoteProtocolPortV1 {
         DaemonRemoteProtocolPortV1::new(Arc::new(self))
     }
+}
+
+#[derive(Debug, Error)]
+pub enum DaemonRemoteRegisteredOwnerErrorV1 {
+    #[error(transparent)]
+    Enrollment(#[from] DaemonRemoteEnrollmentProvisioningErrorV1),
+    #[error(transparent)]
+    EnrollmentAuthority(#[from] RemoteEnrollmentAuthorityErrorV1),
+    #[error(transparent)]
+    Replay(#[from] RemoteReplayApplicationErrorV1),
 }
 
 impl DaemonRemoteProtocolOwnersV1 for CanonicalDaemonRemoteProtocolOwnersV1 {

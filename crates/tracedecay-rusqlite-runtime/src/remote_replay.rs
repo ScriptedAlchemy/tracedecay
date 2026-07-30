@@ -3,6 +3,7 @@
 use std::sync::Mutex;
 
 use rusqlite::{Connection, TransactionBehavior};
+use tracedecay_application::OperationBudgetUsage;
 use tracedecay_application::remote::{
     capture::RemoteWriterAuthorityV1,
     replay::{
@@ -335,10 +336,36 @@ fn application_receipt(
     if receipt.idempotency.key.as_str() != frame.event_id {
         return Err(RemoteReplayTransactionErrorV1::IdempotencyConflict);
     }
+    let capture_bytes = serde_json::to_vec(&(
+        "tracedecay.remote-capture.v2",
+        &frame.capture.enrollment_id,
+        frame.capture.enrollment_revision,
+        &frame.capture.node_id,
+        &frame.capture.writer,
+        frame.capture.policy_revision,
+        &frame.capture.sequence,
+        &frame.capture.observation,
+        frame.capture.captured_at,
+    ))
+    .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+    let elapsed_micros = u64::try_from(
+        receipt
+            .committed_at
+            .0
+            .saturating_sub(frame.capture.captured_at.0),
+    )
+    .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
     let receipt = RemoteReplayCommitReceiptV1 {
         event_id: frame.event_id.clone(),
         writer_fence: writer.authority.fence.clone(),
         commit_sequence: receipt.commit_sequence.0,
+        committed_at: receipt.committed_at,
+        budget: OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: u64::try_from(capture_bytes.len())
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            elapsed_micros,
+        },
     };
     receipt
         .validate_for(frame, writer)
