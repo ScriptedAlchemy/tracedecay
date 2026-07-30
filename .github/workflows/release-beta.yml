@@ -178,14 +178,11 @@ jobs:
       - name: Test release distribution
         run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
 
-      # Runs before the default build so it never leaves an all-features
-      # binary (e.g. test-transport) on disk at the shared release output
-      # path for later packaging steps to pick up.
-      - name: Verify all-feature release build compiles
-        run: cargo build --release --target ${{ matrix.target }} --all-features --locked
-
-      - name: Build default-feature release binary for packaging
+      - name: Validate default release build
         run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Build production release binary
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features production --locked
 
       - name: Install modern Bash for distribution acceptance
         if: runner.os == 'macOS'
@@ -371,22 +368,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Test publishable workspace
-        run: cargo test --workspace --release --all-features --locked
+      - name: Check production feature profile
+        run: python3 scripts/check-production-feature-profile.py
 
-      - name: Verify all-feature Cargo install
+      - name: Verify production Cargo install
         shell: bash
         run: |
           set -euo pipefail
           install_root="${RUNNER_TEMP}/tracedecay-install"
-          cargo install --path . --root "$install_root" --all-features --locked
+          cargo install --path . --root "$install_root" --no-default-features --features production --locked
           "$install_root/bin/tracedecay" --version
           "$install_root/bin/tracedecay" --help >/dev/null
 
       - name: Generate publishable workspace packages
         # Keep the V2 crates in one dependency-ordered package batch until
         # release-plz publishes their first registry releases.
-        run: cargo package --workspace --all-features --locked --allow-dirty --no-verify
+        run: cargo package --workspace --locked --allow-dirty --no-verify
 
       - name: Verify generated crate archives
         shell: bash
@@ -559,7 +556,7 @@ jobs:
             conflicts_with "tracedecay", because: "both install a 'tracedecay' binary"
 
             def install
-              system "cargo", "install", *std_cargo_args, "--all-features", "--locked"
+              system "cargo", "install", *std_cargo_args, "--no-default-features", "--features", "production", "--locked"
             end
 
             test do
