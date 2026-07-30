@@ -1031,6 +1031,7 @@ mod tests {
             HostKindV1::CursorDesktop,
             HostKindV1::Codex,
             HostKindV1::Hermes,
+            HostKindV1::Kiro,
             HostKindV1::KimiCode,
             HostKindV1::OpenCode,
         ] {
@@ -1116,6 +1117,11 @@ mod tests {
         assert_eq!(
             default_components(HostKindV1::Kiro),
             vec![HostBundleComponentV1::ContextMcp]
+        );
+        assert_eq!(
+            tracedecay_domain::integration::descriptor::host_descriptor_v1(HostKindV1::Kiro)
+                .components(),
+            &[tracedecay_domain::integration::descriptor::HostComponentV1::ContextMcp]
         );
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Kiro,

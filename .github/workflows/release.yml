@@ -779,6 +779,17 @@ jobs:
               )
           ' server.json > server.json.tmp
           mv server.json.tmp server.json
+          test "$(jq '.packages | length' server.json)" -eq 4
+          jq -e '
+            all(
+              .packages[];
+              .registryType == "mcpb"
+              and (.identifier | length > 0)
+              and (.version | length > 0)
+              and (.fileSha256 | test("^[0-9a-f]{64}$"))
+              and .transport.type == "stdio"
+            )
+          ' server.json >/dev/null
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

@@ -268,7 +268,7 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             "kiro",
             "kiro",
             Native(NativeHostIdentityV1::Kiro),
-            vec![Core, ContextMcp, OperatorMcp],
+            vec![ContextMcp],
             ManagedEmbedded,
             Managed,
             KiroProjectDirectory,

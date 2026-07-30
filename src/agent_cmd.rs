@@ -2971,15 +2971,18 @@ mod tests {
         let agents_dir = home.path().join(".codex/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         let stale_path = agents_dir.join("tracedecay-legacy.toml");
+        let current_path = agents_dir.join("tracedecay-code-explorer.toml");
         let user_path = agents_dir.join("user-agent.toml");
         let manifest_path = agents_dir.join(".tracedecay-managed-agents.json");
         let stale_bytes = b"model = \"legacy\"\n";
+        let current_bytes = b"model = \"preexisting-current\"\n";
         let user_bytes = b"model = \"user\"\n";
         let manifest_bytes = format!(
             "{{\"version\":1,\"exported\":[{{\"id\":\"legacy\",\"path\":{}}}]}}\n",
             serde_json::to_string(&stale_path).unwrap()
         );
         std::fs::write(&stale_path, stale_bytes).unwrap();
+        std::fs::write(&current_path, current_bytes).unwrap();
         std::fs::write(&user_path, user_bytes).unwrap();
         std::fs::write(&manifest_path, manifest_bytes.as_bytes()).unwrap();
 
@@ -3041,6 +3044,7 @@ mod tests {
             manifest_bytes.as_bytes()
         );
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_bytes);
+        assert_eq!(std::fs::read(&current_path).unwrap(), current_bytes);
         assert_eq!(std::fs::read(&user_path).unwrap(), user_bytes);
         let mut remaining = std::fs::read_dir(&agents_dir)
             .unwrap()
@@ -3051,6 +3055,7 @@ mod tests {
             remaining,
             vec![
                 ".tracedecay-managed-agents.json",
+                "tracedecay-code-explorer.toml",
                 "tracedecay-legacy.toml",
                 "user-agent.toml",
             ]
