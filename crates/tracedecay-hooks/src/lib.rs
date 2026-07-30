@@ -225,6 +225,123 @@ pub struct HookEventEnvelopeV2 {
     pub event: HookEventV2,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizationEraHookEventEnvelopeV2 {
+    schema_version: u16,
+    event_id: [u8; 16],
+    producer: HookHostV1,
+    protected_session_id: [u8; 32],
+    project_id: [u8; 16],
+    repository_id: [u8; 16],
+    worktree_id: [u8; 16],
+    worktree_epoch: u64,
+    authorization_epoch: u64,
+    capability_revision: u32,
+    binding_token: [u8; 32],
+    ordering: HookOrderingV1,
+    observed_at: UtcMicros,
+    event: AuthorizationEraHookEventV2,
+    payload_digest: [u8; 32],
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum AuthorizationEraHookEventV2 {
+    SessionBoundary {
+        boundary: HookBoundaryV1,
+    },
+    PromptBoundary,
+    ToolLifecycle {
+        tool_id: [u8; 16],
+        phase: HookLifecyclePhaseV1,
+        effect_receipt_id: Option<[u8; 16]>,
+    },
+    SavedEdit {
+        file_id: [u8; 16],
+        content_digest: [u8; 32],
+        changed_range_count: u8,
+    },
+    TestLifecycle {
+        test_run_id: [u8; 16],
+        test_count: u8,
+        phase: HookLifecyclePhaseV1,
+        receipt_id: Option<[u8; 16]>,
+    },
+}
+
+impl AuthorizationEraHookEventV2 {
+    fn into_current(self) -> HookEventV2 {
+        match self {
+            Self::SessionBoundary { boundary } => HookEventV2::SessionBoundary { boundary },
+            Self::PromptBoundary => HookEventV2::PromptBoundary,
+            Self::ToolLifecycle {
+                tool_id,
+                phase,
+                effect_receipt_id,
+            } => HookEventV2::ToolLifecycle {
+                tool_id,
+                phase,
+                effect_receipt_id,
+            },
+            Self::SavedEdit {
+                file_id,
+                content_digest,
+                changed_range_count,
+            } => {
+                let _ = content_digest;
+                HookEventV2::SavedEdit {
+                    file_id,
+                    changed_range_count,
+                }
+            }
+            Self::TestLifecycle {
+                test_run_id,
+                test_count,
+                phase,
+                receipt_id,
+            } => HookEventV2::TestLifecycle {
+                test_run_id,
+                test_count,
+                phase,
+                receipt_id,
+            },
+        }
+    }
+}
+
+pub fn decode_hook_event_envelope_compat(
+    bytes: &[u8],
+) -> Result<HookEventEnvelopeV2, HookContractError> {
+    if let Ok(envelope) = serde_json::from_slice(bytes) {
+        return Ok(envelope);
+    }
+    let legacy: AuthorizationEraHookEventEnvelopeV2 =
+        serde_json::from_slice(bytes).map_err(|_| HookContractError::MalformedEnvelope)?;
+    if legacy.schema_version != HOOK_EVENT_SCHEMA_VERSION {
+        return Err(HookContractError::UnsupportedSchemaVersion);
+    }
+    let _retired_authority = (
+        legacy.authorization_epoch,
+        legacy.capability_revision,
+        legacy.payload_digest,
+    );
+    Ok(HookEventEnvelopeV2 {
+        schema_version: legacy.schema_version,
+        event_id: legacy.event_id,
+        producer: legacy.producer,
+        protected_session_id: legacy.protected_session_id,
+        project_id: legacy.project_id,
+        repository_id: legacy.repository_id,
+        worktree_id: legacy.worktree_id,
+        worktree_epoch: legacy.worktree_epoch,
+        binding_token: legacy.binding_token,
+        ordering: legacy.ordering,
+        observed_at: legacy.observed_at,
+        event: legacy.event.into_current(),
+    })
+}
+
 impl HookEventEnvelopeV2 {
     pub fn validate(&self, binding: &HookScopeBindingV1) -> Result<(), HookContractError> {
         if self.schema_version != HOOK_EVENT_SCHEMA_VERSION {
@@ -365,6 +482,8 @@ pub enum HookTransportDispositionV1 {
 pub enum HookContractError {
     #[error("hook schema version is unsupported")]
     UnsupportedSchemaVersion,
+    #[error("hook envelope is malformed")]
+    MalformedEnvelope,
     #[error("event family is unsupported by the native host binding")]
     UnsupportedFamily,
     #[error("hook envelope identity is invalid")]
@@ -664,6 +783,27 @@ mod tests {
             Err(HookContractError::BindingMismatch)
         );
         assert!(!called);
+    }
+
+    #[test]
+    fn retained_authorization_era_envelope_migrates_to_current_wire() {
+        let envelope = decode_hook_event_envelope_compat(include_bytes!(
+            "../fixtures/envelopes/authorization-era-saved-edit.json"
+        ))
+        .expect("retained Hook V2 envelope should migrate");
+
+        assert_eq!(envelope.schema_version, HOOK_EVENT_SCHEMA_VERSION);
+        assert_eq!(envelope.event_id, [9; 16]);
+        assert_eq!(envelope.repository_id, [2; 16]);
+        assert_eq!(envelope.worktree_id, [3; 16]);
+        assert_eq!(envelope.worktree_epoch, 4);
+        assert_eq!(
+            envelope.event,
+            HookEventV2::SavedEdit {
+                file_id: [11; 16],
+                changed_range_count: 1,
+            }
+        );
     }
 
     #[test]
