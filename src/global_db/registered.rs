@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
@@ -301,13 +302,12 @@ impl RegisteredGlobalDb {
     }
 
     pub(crate) fn work_runtime(
-        &self,
+        self: &Arc<Self>,
         authority: tracedecay_domain::WorkAuthority,
         config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
         project_root: std::path::PathBuf,
     ) -> crate::errors::Result<
         crate::daemon::work_runtime::DaemonWorkRuntimeV1<
-            '_,
             tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         >,
     > {
@@ -316,7 +316,7 @@ impl RegisteredGlobalDb {
             authority,
             storage,
             config,
-            self,
+            Arc::clone(self),
             project_root,
         ))
     }
