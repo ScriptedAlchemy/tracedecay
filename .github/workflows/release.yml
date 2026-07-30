@@ -175,11 +175,14 @@ jobs:
       - name: Test release distribution
         run: cargo test --workspace --release --target ${{ matrix.target }} --all-features --locked
 
-      - name: Validate default release build
-        run: cargo build --release --target ${{ matrix.target }} --locked
-
-      - name: Build all-feature release binary
+      # Runs before the default build so it never leaves an all-features
+      # binary (e.g. test-transport) on disk at the shared release output
+      # path for later packaging steps to pick up.
+      - name: Verify all-feature release build compiles
         run: cargo build --release --target ${{ matrix.target }} --all-features --locked
+
+      - name: Build default-feature release binary for packaging
+        run: cargo build --release --target ${{ matrix.target }} --locked
 
       - name: Install modern Bash for distribution acceptance
         if: runner.os == 'macOS'
