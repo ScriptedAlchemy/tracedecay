@@ -16,6 +16,7 @@ mod observation;
 mod project;
 mod retrieval_anchor;
 mod session;
+mod scope_set;
 mod support;
 
 use rusqlite::{Savepoint, Transaction};
@@ -40,6 +41,9 @@ pub use observation::ObservationExecutor;
 pub use project::ProjectExecutor;
 pub use retrieval_anchor::RetrievalAnchorExecutor;
 pub use session::SessionExecutor;
+pub use scope_set::{
+    AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetStoreError,
+};
 
 // The read operation/result contract now lives in `tracedecay-store`. Re-export
 // the moved types so existing `repository::` paths keep resolving across the
