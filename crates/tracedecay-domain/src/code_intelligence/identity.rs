@@ -15,6 +15,17 @@ use sha2::{Digest, Sha256};
 
 use crate::research::DomainError;
 
+/// Whether a canonical repository-relative path is exactly the requested
+/// scope or one of its descendants.
+pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
+    scope_prefix.is_none_or(|prefix| {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
+}
+
 macro_rules! code_id {
     ($($name:ident),+ $(,)?) => {$(
         #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
