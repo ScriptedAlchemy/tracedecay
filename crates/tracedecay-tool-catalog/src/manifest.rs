@@ -421,51 +421,21 @@ impl TerminalStateContract {
     }
 }
 
-/// A bounded deprecation window for a still-supported catalog entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct DeprecationWindow {
-    announced_revision: u32,
-    sunset_revision: u32,
-}
-
-impl DeprecationWindow {
-    pub fn new(
-        announced_revision: u32,
-        sunset_revision: u32,
-    ) -> Result<Self, CatalogValidationError> {
-        if announced_revision == 0 || sunset_revision < announced_revision {
-            return Err(CatalogValidationError::InvalidValue {
-                field: "deprecation window",
-                reason: "revisions must be non-zero and ordered",
-            });
-        }
-        Ok(Self {
-            announced_revision,
-            sunset_revision,
-        })
-    }
-
-    pub const fn announced_revision(&self) -> u32 {
-        self.announced_revision
-    }
-
-    pub const fn sunset_revision(&self) -> u32 {
-        self.sunset_revision
-    }
-}
-
 /// Availability metadata used for policy and profile filtering.
+///
+/// Only `Available` and `Unavailable { NotImplemented }` are constructed in
+/// production today. A future deprecation ship can reintroduce a typed window
+/// without inventing unused reason variants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum AvailabilityContract {
     Available,
-    Deprecated { window: DeprecationWindow },
     Unavailable { reason: UnavailabilityReason },
 }
 
 impl AvailabilityContract {
     pub const fn is_callable(&self) -> bool {
-        matches!(self, Self::Available | Self::Deprecated { .. })
+        matches!(self, Self::Available)
     }
 }
 
@@ -474,9 +444,6 @@ impl AvailabilityContract {
 #[serde(rename_all = "snake_case")]
 pub enum UnavailabilityReason {
     NotImplemented,
-    FeatureDisabled,
-    PolicyDisabled,
-    Retired,
 }
 
 /// Versioned agent-routing metadata. This is description data only and never

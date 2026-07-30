@@ -123,3 +123,12 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
     invalid.receipt = ReceiptContract::Operation;
     assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(invalid).is_err());
 }
+
+#[test]
+fn availability_is_callable_only_for_available_entries() {
+    assert!(AvailabilityContract::Available.is_callable());
+    assert!(!AvailabilityContract::Unavailable {
+        reason: tracedecay_tool_catalog::UnavailabilityReason::NotImplemented,
+    }
+    .is_callable());
+}

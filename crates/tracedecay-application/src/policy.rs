@@ -521,9 +521,7 @@ fn routing_cancellation(request: &RequestContext) -> CapabilityRoutingCancellati
 
 fn catalog_availability(availability: &AvailabilityContract) -> CapabilityAvailabilityV1 {
     match availability {
-        AvailabilityContract::Available | AvailabilityContract::Deprecated { .. } => {
-            CapabilityAvailabilityV1::Available
-        }
+        AvailabilityContract::Available => CapabilityAvailabilityV1::Available,
         AvailabilityContract::Unavailable { .. } => CapabilityAvailabilityV1::Unavailable,
     }
 }
