@@ -1888,6 +1888,47 @@ export const MetricValueV1Schema = z.object({
 });
 export type MetricValueV1 = z.infer<typeof MetricValueV1Schema>;
 
+/** Capability discovery never infers multi-root support from filesystem paths. */
+export const MultiRootCapabilityV1Schema = z.discriminatedUnion("status", [z.object({
+  revision: z.lazy(() => ScopeSetRevisionSchema),
+  root_count: z.number().int(),
+  scope_set_digest: z.lazy(() => ManifestDigestSchema),
+  scope_set_id: z.lazy(() => ScopeSetIdSchema),
+  status: z.literal("mounted"),
+}), z.object({
+  reason: z.string(),
+  status: z.literal("unavailable"),
+})]);
+export type MultiRootCapabilityV1 = z.infer<typeof MultiRootCapabilityV1Schema>;
+
+/** Frozen continuation identity shared by all participating roots. */
+export const MultiRootContinuationV1Schema = z.object({
+  digest: z.lazy(() => ManifestDigestSchema),
+  next_page: z.number().int(),
+  order_digest: z.lazy(() => ManifestDigestSchema),
+  query_digest: z.lazy(() => ManifestDigestSchema),
+  root_generations: z.array(z.lazy(() => RootScopeOutcomeV1_for_RootGenerationV1Schema)),
+  scope_set_digest: z.lazy(() => ManifestDigestSchema),
+});
+export type MultiRootContinuationV1 = z.infer<typeof MultiRootContinuationV1Schema>;
+
+/** Federated page preserving each root outcome and aggregate partial truth. */
+export const MultiRootQueryPageV1_for_AnyValueSchema = z.object({
+  aggregate: z.lazy(() => ScopeOutcome_for_Array_of_AnyValueSchema),
+  continuation: z.lazy(() => MultiRootContinuationV1Schema),
+  roots: z.array(z.lazy(() => RootScopeOutcomeV1_for_Array_of_AnyValueSchema)),
+  scope_set_digest: z.lazy(() => ManifestDigestSchema),
+  scope_set_id: z.lazy(() => ScopeSetIdSchema),
+  scope_set_revision: z.lazy(() => ScopeSetRevisionSchema),
+});
+export type MultiRootQueryPageV1_for_AnyValue = z.infer<typeof MultiRootQueryPageV1_for_AnyValueSchema>;
+
+/** Wire-stable projection. The application page already owns every
+continuation and per-root truthfulness invariant, so the API does not
+reconstruct or flatten it. */
+export const MultiRootQueryReadModelV1Schema = z.lazy(() => MultiRootQueryPageV1_for_AnyValueSchema);
+export type MultiRootQueryReadModelV1 = z.infer<typeof MultiRootQueryReadModelV1Schema>;
+
 export const NodeRefV1Schema = z.object({
   file_path: z.string(),
   id: z.string(),
@@ -2240,6 +2281,29 @@ export const ReviewTopologyPolicyV1Schema = z.object({
 });
 export type ReviewTopologyPolicyV1 = z.infer<typeof ReviewTopologyPolicyV1Schema>;
 
+/** Immutable collection and stack revisions for one exact resolved root. */
+export const RootGenerationV1Schema = z.object({
+  collection_revision: z.lazy(() => ManifestDigestSchema),
+  generation_digest: z.lazy(() => ManifestDigestSchema),
+  scope_digest: z.lazy(() => ManifestDigestSchema),
+  stack_revision: z.lazy(() => ManifestDigestSchema),
+});
+export type RootGenerationV1 = z.infer<typeof RootGenerationV1Schema>;
+
+/** One typed outcome pinned to the digest of an exact resolved root. */
+export const RootScopeOutcomeV1_for_Array_of_AnyValueSchema = z.object({
+  outcome: z.lazy(() => ScopeOutcome_for_Array_of_AnyValueSchema),
+  scope_digest: z.lazy(() => ManifestDigestSchema),
+});
+export type RootScopeOutcomeV1_for_Array_of_AnyValue = z.infer<typeof RootScopeOutcomeV1_for_Array_of_AnyValueSchema>;
+
+/** One typed outcome pinned to the digest of an exact resolved root. */
+export const RootScopeOutcomeV1_for_RootGenerationV1Schema = z.object({
+  outcome: z.lazy(() => ScopeOutcome_for_RootGenerationV1Schema),
+  scope_digest: z.lazy(() => ManifestDigestSchema),
+});
+export type RootScopeOutcomeV1_for_RootGenerationV1 = z.infer<typeof RootScopeOutcomeV1_for_RootGenerationV1Schema>;
+
 export const RuleEffectSchema = z.enum(["allow", "deny"]);
 export type RuleEffect = z.infer<typeof RuleEffectSchema>;
 
@@ -2397,6 +2461,64 @@ export type ScopeAccessSubjectV1 = z.infer<typeof ScopeAccessSubjectV1Schema>;
 export const ScopeControlOperationV1Schema = z.enum(["access_rule_remove", "access_rule_upsert", "read", "replace_topology_policy", "rollback", "set_default_collection", "source_bind", "source_rebind", "source_unbind"]);
 export type ScopeControlOperationV1 = z.infer<typeof ScopeControlOperationV1Schema>;
 
+/** Truthful outcome for one authorized root or an aggregate over roots.
+
+`Denied` and `Unavailable` carry no value and therefore cannot be confused
+with a successful empty result. */
+export const ScopeOutcome_for_Array_of_AnyValueSchema = z.discriminatedUnion("outcome", [z.object({
+  outcome: z.literal("denied"),
+}), z.object({
+  outcome: z.literal("exact"),
+  value: z.array(z.unknown()),
+}), z.object({
+  outcome: z.literal("partial"),
+  value: z.object({
+  reason: z.lazy(() => ScopePartialReasonV1Schema),
+  value: z.array(z.unknown()),
+}),
+}), z.object({
+  outcome: z.literal("unavailable"),
+  value: z.object({
+  reason: z.lazy(() => ScopeUnavailableReasonV1Schema),
+}),
+})]);
+export type ScopeOutcome_for_Array_of_AnyValue = z.infer<typeof ScopeOutcome_for_Array_of_AnyValueSchema>;
+
+/** Truthful outcome for one authorized root or an aggregate over roots.
+
+`Denied` and `Unavailable` carry no value and therefore cannot be confused
+with a successful empty result. */
+export const ScopeOutcome_for_RootGenerationV1Schema = z.discriminatedUnion("outcome", [z.object({
+  outcome: z.literal("denied"),
+}), z.object({
+  outcome: z.literal("exact"),
+  value: z.lazy(() => RootGenerationV1Schema),
+}), z.object({
+  outcome: z.literal("partial"),
+  value: z.object({
+  reason: z.lazy(() => ScopePartialReasonV1Schema),
+  value: z.lazy(() => RootGenerationV1Schema),
+}),
+}), z.object({
+  outcome: z.literal("unavailable"),
+  value: z.object({
+  reason: z.lazy(() => ScopeUnavailableReasonV1Schema),
+}),
+})]);
+export type ScopeOutcome_for_RootGenerationV1 = z.infer<typeof ScopeOutcome_for_RootGenerationV1Schema>;
+
+/** Typed explanation for a root that returned usable but incomplete data. */
+export const ScopePartialReasonV1Schema = z.enum(["budget_exceeded", "incomplete", "root_denied", "root_unavailable", "stale"]);
+export type ScopePartialReasonV1 = z.infer<typeof ScopePartialReasonV1Schema>;
+
+/** Stable identity of one authorized scope-set record. */
+export const ScopeSetIdSchema = z.string();
+export type ScopeSetId = z.infer<typeof ScopeSetIdSchema>;
+
+/** Monotonic optimistic-concurrency revision of one scope set. */
+export const ScopeSetRevisionSchema = z.number().int();
+export type ScopeSetRevision = z.infer<typeof ScopeSetRevisionSchema>;
+
 /** A source-to-authority binding. It stores only the source kind, a redacted
 locator digest, and the pre-resolved authority reference. */
 export const ScopeSourceBindingSchema = z.object({
@@ -2406,6 +2528,10 @@ export const ScopeSourceBindingSchema = z.object({
   source_locator_digest: z.lazy(() => LocatorDigestSchema),
 });
 export type ScopeSourceBinding = z.infer<typeof ScopeSourceBindingSchema>;
+
+/** Typed explanation for a root that could not return usable data. */
+export const ScopeUnavailableReasonV1Schema = z.enum(["authority_unavailable", "root_missing", "store_unavailable"]);
+export type ScopeUnavailableReasonV1 = z.infer<typeof ScopeUnavailableReasonV1Schema>;
 
 /** Reference-only filesystem locator. The raw path is sealed outside this
 contract; only the privacy-bound locator digest and sealed-value digest are
@@ -3431,6 +3557,12 @@ export const MetricUncertaintySchema = MetricUncertaintyV1Schema;
 export type MetricUncertainty = MetricUncertaintyV1;
 export const MetricValueSchema = MetricValueV1Schema;
 export type MetricValue = MetricValueV1;
+export const MultiRootCapabilitySchema = MultiRootCapabilityV1Schema;
+export type MultiRootCapability = MultiRootCapabilityV1;
+export const MultiRootContinuationSchema = MultiRootContinuationV1Schema;
+export type MultiRootContinuation = MultiRootContinuationV1;
+export const MultiRootQueryReadModelSchema = MultiRootQueryReadModelV1Schema;
+export type MultiRootQueryReadModel = MultiRootQueryReadModelV1;
 export const NodeRefSchema = NodeRefV1Schema;
 export type NodeRef = NodeRefV1;
 export const NodeSessionsMeasurementSchema = NodeSessionsMeasurementV1Schema;
@@ -3475,6 +3607,10 @@ export const ReviewTopologyKindSchema = ReviewTopologyKindV1Schema;
 export type ReviewTopologyKind = ReviewTopologyKindV1;
 export const ReviewTopologyPolicySchema = ReviewTopologyPolicyV1Schema;
 export type ReviewTopologyPolicy = ReviewTopologyPolicyV1;
+export const RootGenerationSchema = RootGenerationV1Schema;
+export type RootGeneration = RootGenerationV1;
+export const RootScopeOutcomeV1_for_RootGenerationSchema = RootScopeOutcomeV1_for_RootGenerationV1Schema;
+export type RootScopeOutcomeV1_for_RootGeneration = RootScopeOutcomeV1_for_RootGenerationV1;
 export const SavingsAccountingSummarySchema = SavingsAccountingSummaryV1Schema;
 export type SavingsAccountingSummary = SavingsAccountingSummaryV1;
 export const SavingsLedgerSummarySchema = SavingsLedgerSummaryV1Schema;
@@ -3501,6 +3637,12 @@ export const ScopeAccessSubjectSchema = ScopeAccessSubjectV1Schema;
 export type ScopeAccessSubject = ScopeAccessSubjectV1;
 export const ScopeControlOperationSchema = ScopeControlOperationV1Schema;
 export type ScopeControlOperation = ScopeControlOperationV1;
+export const ScopeOutcome_for_RootGenerationSchema = ScopeOutcome_for_RootGenerationV1Schema;
+export type ScopeOutcome_for_RootGeneration = ScopeOutcome_for_RootGenerationV1;
+export const ScopePartialReasonSchema = ScopePartialReasonV1Schema;
+export type ScopePartialReason = ScopePartialReasonV1;
+export const ScopeUnavailableReasonSchema = ScopeUnavailableReasonV1Schema;
+export type ScopeUnavailableReason = ScopeUnavailableReasonV1;
 export const SensitiveFilesystemLocatorSchema = SensitiveFilesystemLocatorV1Schema;
 export type SensitiveFilesystemLocator = SensitiveFilesystemLocatorV1;
 export const SettingsAvailabilitySchema = SettingsAvailabilityV1Schema;

@@ -1339,10 +1339,12 @@
           "type": "array"
         },
         "payload": {
-          "x-generic-ref": "TPayload"
+          "$ref": "#/$defs/DashboardPayloadMarkerV1"
         },
         "schema_revision": {
-          "const": 1
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
         "scope": {
           "$ref": "#/$defs/DashboardScopeV1"
@@ -1377,8 +1379,7 @@
         "legal_actions",
         "payload"
       ],
-      "type": "object",
-      "x-generic": "TPayload"
+      "type": "object"
     },
     "DashboardEnvelopeV12": {
       "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
@@ -1509,6 +1510,9 @@
         "operation"
       ],
       "type": "object"
+    },
+    "DashboardPayloadMarkerV1": {
+      "type": "null"
     },
     "DashboardScopeV1": {
       "description": "Exact scope the envelope was resolved for. A deep link/query never falls\nback to a title, path, or latest version to recover scope.",
@@ -6887,6 +6891,135 @@
       ],
       "type": "object"
     },
+    "MultiRootCapabilityV1": {
+      "description": "Capability discovery never infers multi-root support from filesystem paths.",
+      "oneOf": [
+        {
+          "properties": {
+            "revision": {
+              "$ref": "#/$defs/ScopeSetRevision"
+            },
+            "root_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "scope_set_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "scope_set_id": {
+              "$ref": "#/$defs/ScopeSetId"
+            },
+            "status": {
+              "const": "mounted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "scope_set_id",
+            "revision",
+            "scope_set_digest",
+            "root_count"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MultiRootContinuationV1": {
+      "additionalProperties": false,
+      "description": "Frozen continuation identity shared by all participating roots.",
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "next_page": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "order_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "query_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "root_generations": {
+          "items": {
+            "$ref": "#/$defs/RootScopeOutcomeV1_for_RootGenerationV1"
+          },
+          "type": "array"
+        },
+        "scope_set_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "scope_set_digest",
+        "root_generations",
+        "query_digest",
+        "order_digest",
+        "next_page",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "MultiRootQueryPageV1_for_AnyValue": {
+      "additionalProperties": false,
+      "description": "Federated page preserving each root outcome and aggregate partial truth.",
+      "properties": {
+        "aggregate": {
+          "$ref": "#/$defs/ScopeOutcome_for_Array_of_AnyValue"
+        },
+        "continuation": {
+          "$ref": "#/$defs/MultiRootContinuationV1"
+        },
+        "roots": {
+          "items": {
+            "$ref": "#/$defs/RootScopeOutcomeV1_for_Array_of_AnyValue"
+          },
+          "type": "array"
+        },
+        "scope_set_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "scope_set_id": {
+          "$ref": "#/$defs/ScopeSetId"
+        },
+        "scope_set_revision": {
+          "$ref": "#/$defs/ScopeSetRevision"
+        }
+      },
+      "required": [
+        "scope_set_id",
+        "scope_set_revision",
+        "scope_set_digest",
+        "roots",
+        "aggregate",
+        "continuation"
+      ],
+      "type": "object"
+    },
+    "MultiRootQueryReadModelV1": {
+      "$ref": "#/$defs/MultiRootQueryPageV1_for_AnyValue",
+      "description": "Wire-stable projection. The application page already owns every\ncontinuation and per-root truthfulness invariant, so the API does not\nreconstruct or flatten it."
+    },
     "NodeRefV1": {
       "properties": {
         "file_path": {
@@ -8134,6 +8267,65 @@
       ],
       "type": "object"
     },
+    "RootGenerationV1": {
+      "additionalProperties": false,
+      "description": "Immutable collection and stack revisions for one exact resolved root.",
+      "properties": {
+        "collection_revision": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "generation_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "scope_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "stack_revision": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "scope_digest",
+        "collection_revision",
+        "stack_revision",
+        "generation_digest"
+      ],
+      "type": "object"
+    },
+    "RootScopeOutcomeV1_for_Array_of_AnyValue": {
+      "additionalProperties": false,
+      "description": "One typed outcome pinned to the digest of an exact resolved root.",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/ScopeOutcome_for_Array_of_AnyValue"
+        },
+        "scope_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "scope_digest",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "RootScopeOutcomeV1_for_RootGenerationV1": {
+      "additionalProperties": false,
+      "description": "One typed outcome pinned to the digest of an exact resolved root.",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/ScopeOutcome_for_RootGenerationV1"
+        },
+        "scope_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "scope_digest",
+        "outcome"
+      ],
+      "type": "object"
+    },
     "RuleEffect": {
       "enum": [
         "allow",
@@ -8778,6 +8970,199 @@
       ],
       "type": "string"
     },
+    "ScopeOutcome_for_Array_of_AnyValue": {
+      "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "items": true,
+              "type": "array"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopePartialReasonV1"
+                },
+                "value": {
+                  "items": true,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "value",
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "unavailable",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopeUnavailableReasonV1"
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScopeOutcome_for_RootGenerationV1": {
+      "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RootGenerationV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopePartialReasonV1"
+                },
+                "value": {
+                  "$ref": "#/$defs/RootGenerationV1"
+                }
+              },
+              "required": [
+                "value",
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "unavailable",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ScopeUnavailableReasonV1"
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "outcome",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScopePartialReasonV1": {
+      "description": "Typed explanation for a root that returned usable but incomplete data.",
+      "enum": [
+        "incomplete",
+        "stale",
+        "budget_exceeded",
+        "root_denied",
+        "root_unavailable"
+      ],
+      "type": "string"
+    },
+    "ScopeSetId": {
+      "description": "Stable identity of one authorized scope-set record.",
+      "type": "string"
+    },
+    "ScopeSetRevision": {
+      "description": "Monotonic optimistic-concurrency revision of one scope set.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "ScopeSourceBinding": {
       "additionalProperties": false,
       "description": "A source-to-authority binding. It stores only the source kind, a redacted\nlocator digest, and the pre-resolved authority reference.",
@@ -8802,6 +9187,15 @@
         "authority"
       ],
       "type": "object"
+    },
+    "ScopeUnavailableReasonV1": {
+      "description": "Typed explanation for a root that could not return usable data.",
+      "enum": [
+        "authority_unavailable",
+        "root_missing",
+        "store_unavailable"
+      ],
+      "type": "string"
     },
     "SensitiveFilesystemLocatorV1": {
       "additionalProperties": false,
@@ -11492,6 +11886,12 @@
     "memory_status": {
       "$ref": "#/$defs/MemoryStatusPayloadV1"
     },
+    "multi_root_capability": {
+      "$ref": "#/$defs/MultiRootCapabilityV1"
+    },
+    "multi_root_query": {
+      "$ref": "#/$defs/MultiRootQueryReadModelV1"
+    },
     "observatory": {
       "$ref": "#/$defs/ObservatoryReadModelV1"
     },
@@ -11616,6 +12016,8 @@
     "work_attach_runtime_evidence_command",
     "work_accept_task_command",
     "work_projection",
+    "multi_root_capability",
+    "multi_root_query",
     "automation_scheduler_status"
   ],
   "schemaRevision": 1,

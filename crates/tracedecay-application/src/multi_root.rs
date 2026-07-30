@@ -411,6 +411,7 @@ pub trait MultiRootQueryPort<Q, T> {
 /// Federated page preserving each root outcome and aggregate partial truth.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "MultiRootQueryPageV1_for_{T}")]
 pub struct MultiRootQueryPageV1<T> {
     pub scope_set_id: ScopeSetId,
     pub scope_set_revision: ScopeSetRevision,
