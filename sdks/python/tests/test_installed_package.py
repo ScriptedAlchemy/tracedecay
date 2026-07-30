@@ -149,7 +149,12 @@ class InstalledPackageConformance(unittest.TestCase):
                 self.assertTrue(
                     all(
                         item["cancellation"]
-                        in {"requested", "already_requested", "already_terminal"}
+                        in {
+                            "requested",
+                            "already_requested",
+                            "already_terminal",
+                            "unavailable",
+                        }
                         for item in evidence
                     )
                 )
@@ -161,8 +166,10 @@ class InstalledPackageConformance(unittest.TestCase):
                     except subprocess.TimeoutExpired:
                         daemon.kill()
                         daemon.wait(timeout=5)
+                stderr = daemon.stderr.read() if daemon.stderr else ""
+                if daemon.stderr is not None:
+                    daemon.stderr.close()
                 if daemon.returncode not in {0, -signal.SIGINT}:
-                    stderr = daemon.stderr.read() if daemon.stderr else ""
                     self.fail(
                         f"production daemon exited {daemon.returncode}: {stderr}"
                     )
@@ -194,7 +201,13 @@ import json
 import os
 from urllib.parse import urlsplit
 
-from tracedecay_sdk import PageOptions, StreamOptions, StreamResume, TraceDecayClient
+from tracedecay_sdk import (
+    PageOptions,
+    StreamOptions,
+    StreamResume,
+    TraceDecayClient,
+    TraceDecayProblemError,
+)
 
 base_url = os.environ["TRACEDECAY_SDK_BASE_URL"]
 project_id = os.environ["TRACEDECAY_SDK_PROJECT_ID"]
@@ -210,30 +223,61 @@ for mode in ("local", "remote"):
             base_url, project_id=project_id, token=token, origin=origin
         )
     )
-    response = client.call("git_status", {}, page=PageOptions(size=1))
-    request_id = response["request_id"]
-    initial = client.stream_operation(request_id)
-    opened = next(initial)
-    frontier = opened.data["data"]["frontier"]
-    initial.close()
-    resumed = list(
-        client.stream_operation(
-            request_id,
-            StreamOptions(
-                resume=StreamResume(
-                    token=frontier["resume_token"],
-                    next_sequence=frontier["next_sequence"],
+    try:
+        response = client.call("test_results", {}, page=PageOptions(size=1))
+        request_id = response["request_id"]
+    except TraceDecayProblemError as error:
+        if error.code != "application.pr12-primitive.unavailable":
+            raise
+        request_id = error.envelope["request_id"]
+    try:
+        initial = client.stream_operation(request_id)
+        opened = next(initial)
+        frontier = opened.data["data"]["frontier"]
+        initial.close()
+        resumed = list(
+            client.stream_operation(
+                request_id,
+                StreamOptions(
+                    resume=StreamResume(
+                        token=frontier["resume_token"],
+                        next_sequence=frontier["next_sequence"],
+                    )
                 )
-            ),
+            )
         )
-    )
-    cancellation = client.cancel_operation(request_id)
+        terminal = resumed[-1].terminal
+    except TraceDecayProblemError as error:
+        if error.code != "operation_event.unavailable":
+            raise
+        try:
+            next(
+                client.stream_operation(
+                    request_id,
+                    StreamOptions(
+                        resume=StreamResume(
+                            token="resume.unavailable", next_sequence=1
+                        )
+                    ),
+                )
+            )
+            raise AssertionError("unavailable resume unexpectedly opened")
+        except TraceDecayProblemError as resume_error:
+            if resume_error.code != "operation_event.resume_expired":
+                raise
+        terminal = "unavailable"
+    try:
+        cancellation = client.cancel_operation(request_id)["status"]
+    except TraceDecayProblemError as error:
+        if error.code != "operation_event.unavailable":
+            raise
+        cancellation = "unavailable"
     print(
         json.dumps(
             {
                 "mode": mode,
-                "terminal": resumed[-1].terminal,
-                "cancellation": cancellation["status"],
+                "terminal": terminal,
+                "cancellation": cancellation,
             }
         )
     )
