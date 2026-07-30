@@ -98,6 +98,25 @@ export function wireReading(state: WorkWireState): WireReading {
   }
 }
 
+/**
+ * Whether a row's reading is an absence, as the row itself presents it.
+ *
+ * Contract presence and absence are independent axes, and prose that branches on
+ * the first while claiming the second is how this page came to call its one live
+ * stream unregistered. `runtime_not_mounted` has no landed contract, so its wire
+ * state is `withheld`; what it describes is a mounted subscription with nothing
+ * to apply, which reads as `partial`. A helper keyed on `state.kind` therefore
+ * counts it among the missing, and the aside and the group footer both went on to
+ * report a stream this build subscribes to as "Not registered" and "Withheld".
+ *
+ * So the question every reading is derived from is asked once, here, in the same
+ * terms the row's own chip answers it: `partial` means the piece is present and
+ * unread, anything else means it is absent.
+ */
+export function isAbsentReading(state: WorkWireState): boolean {
+  return wireReading(state).state !== 'partial';
+}
+
 export type WorkWire =
   /** No Work contract exists in this build. Every row is withheld and the
    * channel's closed reading is the whole truth about it. */

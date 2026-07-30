@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { WITHHELD_WORK, withheldPresentation, type WithheldReason } from './authority.ts';
-import { resolveWorkStates, resolveWorkWire, wireStateFor } from './workContracts.ts';
+import {
+  isAbsentReading,
+  resolveWorkStates,
+  resolveWorkWire,
+  wireStateFor,
+} from './workContracts.ts';
 
 const SURFACES = WITHHELD_WORK.flatMap((group) => group.surfaces);
 
@@ -298,6 +303,54 @@ describe('the Work authority ledger', () => {
     // reach the surface without a state.
     for (const candidate of SURFACES) {
       expect([...absences, ...mounted]).toContain(candidate.reason);
+    }
+  });
+});
+
+/**
+ * The predicate the page's prose is derived from.
+ *
+ * Contract presence and absence are independent axes, and every piece of copy
+ * that conflated them got the streams group wrong in the same direction: it has
+ * no landed contract and it is not an absence, so counting withheld wire states
+ * reported a stream this build subscribes to as unregistered and withheld. This
+ * is the one place that distinction is decided, so it is asserted here rather
+ * than only through the rendered sentences that consume it.
+ */
+describe('whether a Work row reads as an absence', () => {
+  it('calls a mounted subscription present even with no contract landed', () => {
+    const activity = surface('task-activity');
+    const state = wireStateFor(activity, new Set<string>());
+
+    // The row this is about: withheld on the wire, and not an absence.
+    expect(state.kind).toBe('withheld');
+    expect(isAbsentReading(state)).toBe(false);
+  });
+
+  it('calls a row with neither a contract nor a subscription absent', () => {
+    for (const id of ['kanban', 'admission', 'acceptance']) {
+      expect(
+        isAbsentReading(wireStateFor(surface(id), new Set<string>())),
+        `${id} is an absence and must read as one`,
+      ).toBe(true);
+    }
+  });
+
+  it('calls a landed but unread contract present', () => {
+    const state = wireStateFor(surface('kanban'), new Set(['WorkProjectionSnapshotV1Schema']));
+
+    expect(state.kind).toBe('landed');
+    expect(isAbsentReading(state)).toBe(false);
+  });
+
+  /** The axes are independent, so the predicate must agree with the chip the row
+   * actually renders rather than with the wire state behind it. */
+  it('agrees with the presentation state every row renders', () => {
+    for (const state of resolveWorkStates(new Set<string>())) {
+      expect(
+        isAbsentReading(state),
+        `${state.surface.id} disagrees with the chip it renders`,
+      ).toBe(withheldPresentation(state.surface.reason).state !== 'partial');
     }
   });
 });
