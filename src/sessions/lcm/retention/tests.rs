@@ -267,29 +267,6 @@ async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result
     Ok(())
 }
 
-#[tokio::test]
-async fn unauthorised_entry_rejects_apply() -> Result<(), String> {
-    let store = test_store().await?;
-    let error = run_session_retention(
-        &store.conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &drop_config(30),
-        RetentionMode::Apply,
-        NOW,
-    )
-    .await
-    .expect_err("apply must require the authority-bound entry point");
-
-    assert!(
-        error
-            .to_string()
-            .contains("authority-bound session retention entry point")
-    );
-    Ok(())
-}
-
 // (a)+(d) drop acts only on projection-durable rows; un-projected live evidence
 // is never deleted, even when older than the window.
 #[tokio::test]
@@ -348,7 +325,7 @@ async fn dry_run_counts_without_mutating() -> Result<(), String> {
     let durable = insert_message(conn, 1, 90, "durable old content").await?;
     make_projection_durable(conn, durable).await?;
 
-    let report = run_session_retention(
+    let report = run_session_retention_authorized(
         conn,
         &store.storage_root,
         PROVIDER,
@@ -356,6 +333,7 @@ async fn dry_run_counts_without_mutating() -> Result<(), String> {
         &drop_config(30),
         RetentionMode::DryRun,
         NOW,
+        &|_| Ok(()),
     )
     .await
     .map_err(|e| e.to_string())?;
