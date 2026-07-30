@@ -89,8 +89,8 @@ const OFFLOAD_KIND: &str = "retention_offload";
 /// copy after 30 days. Rows without durable summary lineage remain untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcmRetentionConfig {
-    /// Master switch. When `false`, [`run_session_retention`] is a no-op even
-    /// in [`RetentionMode::Apply`].
+    /// Master switch. When `false`, [`run_session_retention_authorized`] is a
+    /// no-op even in [`RetentionMode::Apply`].
     #[serde(default = "default_retention_enabled")]
     pub enabled: bool,
     /// Window after which a projection-durable, still-inline raw row has its
@@ -379,33 +379,7 @@ async fn scoped_row_count(
 /// `provider` may be `"all"` to span every provider; `session_id` narrows to a
 /// single session. In [`RetentionMode::DryRun`] nothing is mutated and each
 /// phase reports the candidate count and bytes that *would* be reclaimed.
-pub(crate) async fn run_session_retention(
-    conn: &Connection,
-    storage_root: &Path,
-    provider: &str,
-    session_id: Option<&str>,
-    config: &LcmRetentionConfig,
-    mode: RetentionMode,
-    now: i64,
-) -> Result<LcmRetentionReport, LcmError> {
-    if mode.is_apply() {
-        return Err(LcmError::Db(
-            "apply requires the authority-bound session retention entry point".to_string(),
-        ));
-    }
-    run_session_retention_authorized(
-        conn,
-        storage_root,
-        provider,
-        session_id,
-        config,
-        mode,
-        now,
-        &|_| Ok(()),
-    )
-    .await
-}
-
+/// Apply mode requires `authorize` to admit each mutating intent.
 pub(crate) async fn run_session_retention_authorized(
     conn: &Connection,
     storage_root: &Path,
