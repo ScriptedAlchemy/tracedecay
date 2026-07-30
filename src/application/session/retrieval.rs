@@ -20,16 +20,16 @@ use crate::application::session::types::{
     SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
-use crate::query::temporal::context::{ContextBudget, ContextError, VersionedTokenEstimator};
-use crate::query::temporal::cursor::CursorError;
-use crate::query::temporal::hydration::HydrationError;
-use crate::query::temporal::ports::{
+use tracedecay_temporal_query::context::{ContextBudget, ContextError, VersionedTokenEstimator};
+use tracedecay_temporal_query::cursor::CursorError;
+use tracedecay_temporal_query::hydration::HydrationError;
+use tracedecay_temporal_query::ports::{
     ExecutionControl, ExecutionLimits, TemporalAuthorizedRoot, TemporalCandidateFilterV1,
     TemporalPortError, TemporalRetrievalScope,
 };
-use crate::query::temporal::ranking::DiversityLimits;
-use crate::query::temporal::resolution::SummaryLineageRejection;
-use crate::query::temporal::{TemporalKernelError, TemporalKernelResult};
+use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::resolution::SummaryLineageRejection;
+use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionRetrievalConfiguration {
@@ -386,7 +386,7 @@ where
         if binding.cancellation().is_cancelled() || context.cancellation().is_cancelled() {
             control.cancel();
         }
-        let snapshot_request = match crate::query::temporal::ports::TemporalSnapshotRequest::new(
+        let snapshot_request = match tracedecay_temporal_query::ports::TemporalSnapshotRequest::new(
             query.session_id.clone(),
             root_digest,
             request_digest,

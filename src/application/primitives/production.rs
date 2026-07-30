@@ -69,16 +69,16 @@ use crate::mcp::tools::handlers::git::{
     affected_test_proximity, collect_affected_test_files, rank_affected_tests,
 };
 use crate::mcp::tools::handlers::grep::{ScanResult, build_matcher, scan_tree};
-use crate::query::temporal::cursor::{
+use crate::tracedecay::TraceDecay;
+use crate::types::{Node, Visibility};
+use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };
-use crate::query::temporal::ports::{
+use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
     TemporalSnapshotRequest, TemporalWatermarks,
 };
-use crate::query::temporal::resolution::ValidatedAuthorization;
-use crate::tracedecay::TraceDecay;
-use crate::types::{Node, Visibility};
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 const PRIMITIVE_SORT: &str = "sort.application.primitive.v1";
 
@@ -2469,7 +2469,7 @@ mod affected_tests_tests {
         TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
         TestAttributionWatermarkV1,
     };
-    use crate::query::temporal::ports::InMemoryCursorAuthenticator;
+    use tracedecay_temporal_query::ports::InMemoryCursorAuthenticator;
 
     struct AttributionFixture {
         calls: AtomicUsize,

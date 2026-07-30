@@ -14,9 +14,9 @@ use tracedecay_domain::UtcMicros;
 use super::symbol_graph::SymbolGraphCursorPort;
 use crate::context::read_modes::{LineRange, ReadMode};
 use crate::context::source_read::{SourceReadRequest, read_source};
-use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use crate::query::temporal::ports::{SessionCursorAuthenticator, TemporalExecutionSnapshot};
 use crate::tracedecay::TraceDecay;
+use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
+use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecutionSnapshot};
 
 /// Production source-read adapter for one typed project root.
 ///
@@ -332,12 +332,12 @@ mod tests {
         SymbolGraphCursorSnapshotAuthority,
     };
     use crate::application::primitives::SymbolGraphCursorPort;
-    use crate::query::temporal::ports::{
+    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_temporal_query::ports::{
         BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
         TemporalSnapshotRequest, TemporalWatermarks,
     };
-    use crate::query::temporal::resolution::ValidatedAuthorization;
-    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+    use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
     const NOW: UtcMicros = UtcMicros(1_000);
 

@@ -33,13 +33,13 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
-use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use crate::query::temporal::ports::{
+use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
+use tracedecay_temporal_query::ports::{
     BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
     TemporalSnapshotRequest, TemporalWatermarks,
 };
 
-use crate::query::temporal::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 const RESUME_KEY_RANDOM_BYTES: usize = 16;
 const RESUME_KEY_MATERIAL_BYTES: usize = 32;

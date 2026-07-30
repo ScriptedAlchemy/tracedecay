@@ -12,13 +12,13 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::git::{GitBlameV1, GitDiffScopeV1, GitDiffV1, GitHistoryV1, HunkRefV1};
 
-use crate::code_index::historical_query::{
-    HistoricalGitQueryAdapter, HistoricalQueryError, HistoricalQueryRequestV1,
-    HistoricalQueryResultV1, HistoricalSourceAuthorizationV1,
-};
 use crate::git_intelligence::{GitBlameRequest, GitHistoryRequest, NativeGitIntelligence};
 use crate::git_query::{
     GitQueryBounds, GitQueryEngine, GitQueryEnvelopeV1, GitQueryError, GitStatusSummaryV1,
+};
+use tracedecay_application::historical_query::{
+    HistoricalGitQueryAdapter, HistoricalQueryError, HistoricalQueryRequestV1,
+    HistoricalQueryResultV1, HistoricalSourceAuthorizationV1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

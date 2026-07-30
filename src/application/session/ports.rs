@@ -6,10 +6,10 @@ use std::sync::Arc;
 use tracedecay_domain::{RetrievalAnchorId, SessionSourceCoverageReceiptV1};
 
 use crate::application::session::SessionDataFreshness;
-use crate::query::temporal::context::{ContextBudget, VersionedTokenEstimator};
-use crate::query::temporal::ports::{ExecutionLimits, TemporalSnapshotRequest};
-use crate::query::temporal::ranking::DiversityLimits;
-use crate::query::temporal::{TemporalKernelError, TemporalKernelResult};
+use tracedecay_temporal_query::context::{ContextBudget, VersionedTokenEstimator};
+use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalSnapshotRequest};
+use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedTemporalExecutionRequest {
@@ -100,9 +100,9 @@ impl AuthorizedTemporalExecutionRequest {
 
     pub(crate) fn into_kernel_request(
         self,
-        snapshot: crate::query::temporal::ports::TemporalExecutionSnapshot,
-    ) -> crate::query::temporal::TemporalKernelRequest {
-        crate::query::temporal::TemporalKernelRequest {
+        snapshot: tracedecay_temporal_query::ports::TemporalExecutionSnapshot,
+    ) -> tracedecay_temporal_query::TemporalKernelRequest {
+        tracedecay_temporal_query::TemporalKernelRequest {
             snapshot,
             query: self.query,
             direct_anchor: self.direct_anchor,
