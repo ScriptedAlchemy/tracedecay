@@ -35,40 +35,20 @@ use crate::application::git_reads::{
     execute_historical_git_read,
 };
 use crate::code_index::chunks::content_digest;
-use crate::code_index::historical_query::{
-    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
-};
 use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use crate::code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexProductionConfigV1, CodeIndexPublicationStoreErrorV1,
-    CodeIndexPublishedGenerationV1,
+    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
+    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
 };
 use crate::code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
 };
 use crate::git_intelligence::is_canonical_repository_relative_path;
-use crate::query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
-};
-use crate::query::retrieval::fusion::{
-    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
-};
-use crate::query::retrieval::graph::{
-    CodeGraphEvidenceAdapterV1, GraphLane, GraphLaneRequest, GraphLaneRetriever,
-    production_code_index_freshness,
-};
-use crate::query::retrieval::hydrate::{
-    CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
-    HydrationReadOutcomeV1, HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
-};
-use crate::query::retrieval::lexical::{
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
-};
-use crate::query::retrieval::ports::CodeCandidateBindingV1;
 use tracedecay_application::ResolvedScope;
+use tracedecay_application::historical_query::{
+    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
+};
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
@@ -84,6 +64,26 @@ use tracedecay_domain::{
     ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SnapshotFileDispositionV1,
     TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
+use tracedecay_query::retrieval::exact::{
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
+    ExactLaneRetriever,
+};
+use tracedecay_query::retrieval::fusion::{
+    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
+};
+use tracedecay_query::retrieval::graph::{
+    CodeGraphEvidenceAdapterV1, GraphLane, GraphLaneRequest, GraphLaneRetriever,
+    production_code_index_freshness,
+};
+use tracedecay_query::retrieval::hydrate::{
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    HydrationReadOutcomeV1, HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
+};
+use tracedecay_query::retrieval::lexical::{
+    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1, LexicalLane,
+    LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
+};
+use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 
 const WORKLOAD_RELATIVE: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
 pub(super) const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
@@ -457,23 +457,25 @@ pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
 
 #[derive(Clone, Default)]
 struct SharedPublicationStore {
-    active: Arc<Mutex<Option<CodeIndexPublishedGenerationV1>>>,
+    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, CodeIndexPublishedGenerationV1>>>,
 }
 
 impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
+        scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
         let active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(
                 "candidate-output publication lock is poisoned".to_owned(),
             )
         })?;
-        Ok(active.clone())
+        Ok(active.get(scope).cloned())
     }
 
     fn publish_atomically(
         &mut self,
+        scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -483,14 +485,14 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
             )
         })?;
         if active
-            .as_ref()
+            .get(scope)
             .map(|current| current.manifest().generation_id.clone())
             .as_ref()
             != expected_active_generation
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        *active = Some(generation);
+        active.insert(scope.clone(), generation);
         Ok(())
     }
 }
@@ -637,9 +639,11 @@ fn build_query_projections(
             .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
             .collect(),
         freshness: freshness.clone(),
-        exact_retriever_revision: id(crate::query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1)?,
-        lexical_retriever_revision: id(crate::query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1)?,
-        exact_score_domain: id(crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1)?,
+        exact_retriever_revision: id(tracedecay_query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1)?,
+        lexical_retriever_revision: id(
+            tracedecay_query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1,
+        )?,
+        exact_score_domain: id(tracedecay_query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1)?,
     };
     let admitted = generation
         .admitted_chunks()
@@ -1955,9 +1959,9 @@ fn prepare_production_query(
     let request = retrieval_request(&profile.profile_id, published)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
         &query.query,
-        id::<SanitizerRevision>(crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)?,
+        id::<SanitizerRevision>(tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)?,
         id::<QueryNormalizationRevision>(
-            crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+            tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
         )?,
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
@@ -1974,7 +1978,7 @@ fn prepare_production_query(
             ))
         })?;
     let authority = CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>(
-        crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+        tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
     )?);
     let exact_lane = ExactLane::new(
         authority.clone(),
@@ -2023,8 +2027,8 @@ fn prepare_production_query(
         phrases: lexical_parts.phrases,
         field_filters: Vec::new(),
         fuzzy_budget: 8,
-        lexical_profile_revision: id(crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1)?,
-        score_domain: id(crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1)?,
+        lexical_profile_revision: id(tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1)?,
+        score_domain: id(tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1)?,
         budget,
     };
     let lexical_input_candidates = lexical_request
@@ -2075,7 +2079,7 @@ fn prepare_production_query(
     };
 
     let kernel = CompositionKernel::new(id::<ComponentRevision>(
-        crate::query::retrieval::PR9_RANKING_REVISION_V1,
+        tracedecay_query::retrieval::PR9_RANKING_REVISION_V1,
     )?);
     let fallback_profile = pr9_fallback_profile(profile);
     let fusion_profile = fusion_profile(&fallback_profile, &budget, false)?;
@@ -3083,6 +3087,7 @@ fn prove_cancellation(
             profile_digest: lexical_projection_profile_digest()?,
         },
     };
+    let generation_scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
     let config = CodeIndexProductionConfigV1 {
         repository: id::<RepositoryId>("repository.candidate.cancel")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
@@ -3110,7 +3115,7 @@ fn prove_cancellation(
         )));
     }
     if store
-        .load_active()
+        .load_active(&generation_scope)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
         .is_some()
     {
@@ -3123,10 +3128,12 @@ fn prove_cancellation(
 
 fn graph_seeds_from_outcomes(
     exact: &RetrieverOutcome<
-        tracedecay_domain::RetrieverBatch<crate::query::retrieval::exact::ExactLaneEvidence>,
+        tracedecay_domain::RetrieverBatch<tracedecay_query::retrieval::exact::ExactLaneEvidence>,
     >,
     lexical: &RetrieverOutcome<
-        tracedecay_domain::RetrieverBatch<crate::query::retrieval::lexical::LexicalLaneEvidence>,
+        tracedecay_domain::RetrieverBatch<
+            tracedecay_query::retrieval::lexical::LexicalLaneEvidence,
+        >,
     >,
 ) -> Vec<CodeCandidateBindingV1> {
     let mut seeds = Vec::new();
@@ -3198,15 +3205,15 @@ fn fusion_profile(
     let score_domain_calibrations = [
         (
             RetrieverKind::ExactLiteral,
-            crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
+            tracedecay_query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
         ),
         (
             RetrieverKind::Lexical,
-            crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+            tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
         ),
         (
             RetrieverKind::Graph,
-            crate::query::retrieval::PR9_GRAPH_SCORE_DOMAIN_V1,
+            tracedecay_query::retrieval::PR9_GRAPH_SCORE_DOMAIN_V1,
         ),
         (RetrieverKind::Semantic, "score.semantic.candidate.v1"),
     ]
