@@ -16,7 +16,6 @@ fn current_handshake() -> DaemonHandshake {
     DaemonHandshake {
         project_path: Some(PathBuf::from("/work/repo")),
         scope_prefix: Some("src".to_string()),
-        attested_scope: None,
         timings: true,
         allow_init: false,
         allow_initialize_root_routing: true,
