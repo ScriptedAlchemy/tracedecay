@@ -31,6 +31,7 @@ pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
 pub mod work;
+pub mod work_execution;
 
 mod error;
 
@@ -204,3 +205,4 @@ pub use storage::{
     stale_branch_dbs_finding,
 };
 pub use work::*;
+pub use work_execution::*;
