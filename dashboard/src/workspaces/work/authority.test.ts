@@ -79,6 +79,64 @@ describe('the Work authority ledger', () => {
     expect(resolveWorkWire(resolveWorkStates(implemented)).kind).toBe('opening');
   });
 
+  /**
+   * The canonical contracts, by their exact committed names.
+   *
+   * `crates/tracedecay-domain/src/work_read.rs` serves `WorkProjectionSnapshotV1`
+   * and `WorkProjectionDeltaV1`; `work_runtime.rs` serves `WorkAttemptV1` and its
+   * leaves. None of these is spelled the way this ledger labels its rows, and the
+   * delta in particular is neither `WorkDeltaV1` nor `WorkEventDeltaV1` — the two
+   * names previously watched for it. Every row is asserted to fire, because a row
+   * that sleeps through its own contract arriving is this page's worst failure.
+   */
+  it('detects the canonical read and runtime contract names', () => {
+    const canonical = new Set([
+      'WorkProjectionSnapshotV1Schema',
+      'WorkProjectionDeltaV1Schema',
+      'WorkProjectionCoverageV1Schema',
+      'WorkProjectionResumeCursorV1Schema',
+      'WorkAttemptV1Schema',
+      'WorkAttemptProgressV1Schema',
+      'WorkProviderRouteV1Schema',
+      'WorkArtifactRefV1Schema',
+      'WorkCancellationRequestV1Schema',
+      'WorkTerminalEvidenceV1Schema',
+      'WorkLeaseFenceV1Schema',
+      'DashboardEventKindSchema',
+    ]);
+
+    const asleep = resolveWorkStates(canonical)
+      .filter((state) => state.kind === 'withheld')
+      .map((state) => state.surface.id);
+
+    // The five command rows are application-crate writes and are not part of
+    // these two commits, so they are expected to stay withheld.
+    expect(asleep.sort()).toEqual(
+      ['admission', 'graph-change', 'proposal-review'].sort(),
+    );
+    expect(resolveWorkWire(resolveWorkStates(canonical)).kind).toBe('opening');
+  });
+
+  /** Each projection row must resolve to the contract that would actually serve
+   * it, not to whichever Work name landed first. */
+  it('resolves each row to its own canonical contract', () => {
+    const canonical = new Set([
+      'WorkProjectionSnapshotV1Schema',
+      'WorkProjectionDeltaV1Schema',
+      'WorkAttemptV1Schema',
+    ]);
+
+    expect(wireStateFor(surface('kanban'), canonical)).toMatchObject({
+      contract: 'WorkProjectionSnapshotV1Schema',
+    });
+    expect(wireStateFor(surface('timeline'), canonical)).toMatchObject({
+      contract: 'WorkProjectionDeltaV1Schema',
+    });
+    expect(wireStateFor(surface('executor'), canonical)).toMatchObject({
+      contract: 'WorkAttemptV1Schema',
+    });
+  });
+
   it('does not mistake worktree topology policy for canonical Work', () => {
     // `WorkTopologyPolicyV1` and the `Worktree*` family are already generated,
     // and they are branch and worktree placement policy — nothing to do with the
@@ -108,7 +166,10 @@ describe('the Work authority ledger', () => {
    * stream row gets a real check.
    */
   it('watches the event union for the activity stream', () => {
-    expect(surface('task-activity').watches).toEqual(['DashboardEventKind']);
+    expect(surface('task-activity').watches).toContain('DashboardEventKind');
+    // The payload such a stream would carry, so the row also fires if progress
+    // reaches the dashboard before the union naming its channel does.
+    expect(surface('task-activity').watches).toContain('WorkAttemptProgress');
     expect(
       wireStateFor(surface('task-activity'), new Set(['DashboardEventKindSchema'])).kind,
       'the event union reaching the dashboard must flip the stream row',
