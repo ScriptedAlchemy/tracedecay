@@ -4,14 +4,14 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::time::SystemTime;
 
 use super::*;
-use crate::diagnostics::lsp::adapters::{DiagnosticMode, LspAdapterDefinition, LspInstallOption};
-use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, profile_sharded_layout, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
+use tracedecay_lsp::analyzer::adapters::{DiagnosticMode, LspAdapterDefinition, LspInstallOption};
+use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(windows)]

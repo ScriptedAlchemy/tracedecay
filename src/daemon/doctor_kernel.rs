@@ -559,9 +559,9 @@ impl CodeIndexMountDoctorPort for CodeIndexMountDoctorAdapterV1 {
 /// Map the daemon diagnostic broker's project-active engine statuses.
 #[must_use]
 pub fn language_server_read_from_engine_states(
-    states: impl IntoIterator<Item = crate::diagnostics::lsp::broker::EngineState>,
+    states: impl IntoIterator<Item = tracedecay_lsp::analyzer::broker::EngineState>,
 ) -> LanguageServerReadV1 {
-    use crate::diagnostics::lsp::broker::EngineState;
+    use tracedecay_lsp::analyzer::broker::EngineState;
 
     let states = states.into_iter().collect::<Vec<_>>();
     if states.is_empty() {
@@ -588,7 +588,7 @@ pub fn language_server_read_from_engine_states(
 
 /// Read live project-active analyzer state from the daemon diagnostic owner.
 pub async fn language_server_read_from_broker(
-    broker: &tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>,
+    broker: &tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>,
 ) -> LanguageServerReadV1 {
     let statuses = broker.lock().await.project_engine_statuses();
     language_server_read_from_engine_states(statuses.into_iter().map(|status| status.state))
@@ -1309,7 +1309,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     profile_root: PathBuf,
     retention: crate::config::RetentionConfig,
     schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    diagnostic_broker: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: crate::daemon::service::invocation::DaemonFeedbackRuntimeRegistrar,
 ) -> crate::dashboard::DoctorReportReader {
     let store_telemetry_ports = Arc::new(Mutex::new(StoreTelemetryPortCache::default()));

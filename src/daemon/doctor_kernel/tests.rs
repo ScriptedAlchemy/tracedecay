@@ -408,7 +408,7 @@ async fn code_index_adapter_returns_seeded_read() {
 
 #[test]
 fn language_server_engine_states_preserve_live_degradation() {
-    use crate::diagnostics::lsp::broker::EngineState;
+    use tracedecay_lsp::analyzer::broker::EngineState;
 
     assert_eq!(
         language_server_read_from_engine_states([]),
