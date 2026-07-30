@@ -414,13 +414,16 @@ fn log_compaction(store_name: &'static str, freelist_before: u64, freelist_after
 /// Runs bounded incremental-vacuum compaction over every tracked branch
 /// database other than the one `cg` currently has mounted (that store already
 /// goes through [`run_project_compaction`]). Best-effort and independent per
-/// file: a busy or failing branch database never blocks the rest, and this
-/// pass never fails the overall maintenance tick — see
+/// file: a busy or failing branch database never blocks the rest, but keeps
+/// the maintenance cadence retry-eligible — see
 /// `src/retention/branch_compaction.rs` for the compaction policy itself.
-pub(super) async fn run_branch_compaction(cg: &TraceDecay, config: &CompactionThresholdConfig) {
+pub(super) async fn run_branch_compaction(
+    cg: &TraceDecay,
+    config: &CompactionThresholdConfig,
+) -> bool {
     let layout = cg.store_layout();
     let Some(meta) = crate::branch_meta::load_branch_meta(&layout.data_root) else {
-        return;
+        return true;
     };
     let active_db_path = cg.db_path();
     let candidates = crate::retention::branch_compaction::select_branch_db_candidates(
@@ -429,7 +432,7 @@ pub(super) async fn run_branch_compaction(cg: &TraceDecay, config: &CompactionTh
         &active_db_path,
     );
     if candidates.is_empty() {
-        return;
+        return true;
     }
     let report = crate::retention::branch_compaction::compact_branch_databases(&candidates, config);
     if report.policy_invalid {
@@ -446,10 +449,10 @@ pub(super) async fn run_branch_compaction(cg: &TraceDecay, config: &CompactionTh
                 ),
             ],
         );
-        return;
+        return false;
     }
     if report.compacted.is_empty() && report.skipped.is_empty() {
-        return;
+        return true;
     }
     let freed_pages: u64 = report
         .compacted
@@ -476,6 +479,13 @@ pub(super) async fn run_branch_compaction(cg: &TraceDecay, config: &CompactionTh
             ("unreclaimable", unreclaimable.to_string()),
         ],
     );
+    branch_compaction_succeeded(&report)
+}
+
+pub(super) fn branch_compaction_succeeded(
+    report: &crate::retention::branch_compaction::BranchCompactionReport,
+) -> bool {
+    !report.policy_invalid && report.skipped.is_empty()
 }
 
 pub(super) async fn run_orphan_store_sweep(
