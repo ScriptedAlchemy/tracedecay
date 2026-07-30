@@ -614,6 +614,10 @@ pub struct LspSemanticRequest {
 }
 
 impl LspSemanticRequest {
+    pub(crate) fn from_standard(method: &'static str, params: Value) -> Self {
+        Self { method, params }
+    }
+
     pub fn method(&self) -> &'static str {
         self.method
     }

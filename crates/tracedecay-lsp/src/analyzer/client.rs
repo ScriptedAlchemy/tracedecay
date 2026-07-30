@@ -142,6 +142,34 @@ pub fn decode_semantic_request(
     }
 }
 
+pub fn encode_semantic_request(
+    request: LspSemanticRequest,
+) -> std::result::Result<crate::LspSemanticRequest, LspSemanticRequestError> {
+    let method = request.method();
+    let params = match request {
+        LspSemanticRequest::Declaration(params) => serde_json::to_value(params),
+        LspSemanticRequest::Definition(params) => serde_json::to_value(params),
+        LspSemanticRequest::TypeDefinition(params) => serde_json::to_value(params),
+        LspSemanticRequest::Implementation(params) => serde_json::to_value(params),
+        LspSemanticRequest::References(params) => serde_json::to_value(params),
+        LspSemanticRequest::Hover(params) => serde_json::to_value(params),
+        LspSemanticRequest::DocumentSymbols(params) => serde_json::to_value(params),
+        LspSemanticRequest::WorkspaceSymbols(params) => serde_json::to_value(params),
+        LspSemanticRequest::PrepareCallHierarchy(params) => serde_json::to_value(params),
+        LspSemanticRequest::IncomingCalls(params) => serde_json::to_value(params),
+        LspSemanticRequest::OutgoingCalls(params) => serde_json::to_value(params),
+        LspSemanticRequest::SignatureHelp(params) => serde_json::to_value(params),
+        LspSemanticRequest::PrepareTypeHierarchy(params) => serde_json::to_value(params),
+        LspSemanticRequest::TypeHierarchySupertypes(params) => serde_json::to_value(params),
+        LspSemanticRequest::TypeHierarchySubtypes(params) => serde_json::to_value(params),
+        LspSemanticRequest::PrepareRename(params) => serde_json::to_value(params),
+    }
+    .map_err(|error| LspSemanticRequestError::InvalidResponse {
+        class: error.to_string(),
+    })?;
+    Ok(crate::LspSemanticRequest::from_standard(method, params))
+}
+
 fn decode<T: DeserializeOwned>(value: Value) -> std::result::Result<T, LspSemanticRequestError> {
     serde_json::from_value(value).map_err(|error| LspSemanticRequestError::InvalidResponse {
         class: error.to_string(),
@@ -1118,9 +1146,26 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LspSemanticRequestError, cancel_request_message, file_uri_from_path_text,
-        is_current_diagnostic_publication, lsp_initialization_options,
+        LspSemanticRequestError, cancel_request_message, decode_semantic_request,
+        encode_semantic_request, file_uri_from_path_text, is_current_diagnostic_publication,
     };
+
+    #[test]
+    fn semantic_request_codec_round_trips_standard_wire_shape() {
+        let request = crate::lsp_semantic_request(&crate::SemanticRequest::WorkspaceSymbols {
+            query: "needle".to_owned(),
+        })
+        .expect("generic semantic request");
+        let method = request.method();
+        let params = request.params().clone();
+
+        let encoded =
+            encode_semantic_request(decode_semantic_request(request).expect("decode request"))
+                .expect("encode request");
+
+        assert_eq!(encoded.method(), method);
+        assert_eq!(encoded.params(), &params);
+    }
 
     #[test]
     fn semantic_error_coverage_ignores_free_form_error_text() {
