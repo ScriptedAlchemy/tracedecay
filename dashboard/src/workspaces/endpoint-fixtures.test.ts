@@ -24,6 +24,7 @@ import { z } from 'zod';
 import type { ZodType } from 'zod';
 
 import { resolveFixture } from '../../stories/fixtures/data.ts';
+import { MultiRootCapabilityV1Schema } from '../contracts/generated.ts';
 import { AnyObject } from '../data/query/legacy.ts';
 import {
   AnalyticsOverviewPayloadSchema,
@@ -115,6 +116,11 @@ const CapabilitiesSchema = z
         managed_skills: z.boolean(),
         savings: z.boolean(),
         settings: z.boolean(),
+        // Mirrors `multi_root_available` in `mod.rs::capabilities`, the
+        // boolean beside the typed capability below. Both were missing from
+        // this schema and from the fixture, so a `.strict()` mirror of the
+        // handler was passing without the member the handler always sends.
+        multi_root: z.boolean(),
       })
       .strict(),
     automation: z
@@ -134,6 +140,9 @@ const CapabilitiesSchema = z
       })
       .strict(),
     dashboards: z.array(z.string()),
+    // The generated `MultiRootCapabilityV1`, held to the generated schema
+    // rather than restated here.
+    multi_root: MultiRootCapabilityV1Schema,
   })
   .strict();
 

@@ -20,6 +20,7 @@ import {
   settingsWriteGate,
   type WritableScopes,
 } from './SettingsEditorController.tsx';
+import { MultiRootPanel } from './MultiRootPanel.tsx';
 import { OriginBand, SectionIndex } from './SettingsProvenance.tsx';
 import { ConfigSectionBlock } from './SettingsValues.tsx';
 import {
@@ -294,6 +295,12 @@ function SettingsSurface({
                 />
               ) : null}
               {query === '' ? <OriginBand model={model} onJump={jumpTo} /> : null}
+              {/* Not a configuration section: it comes from `/api/capabilities`
+               * rather than the settings payload, so it is outside the
+               * key-search this page runs over `model.sections`. Shown only in
+               * the unfiltered view for that reason — a search that skipped it
+               * silently would be the same lie as not reading it at all. */}
+              {query === '' ? <MultiRootPanel /> : null}
               {filtered.map(({ section, rows }) => (
                 <ConfigSectionBlock
                   key={section.id}

@@ -11,6 +11,19 @@ import { applySettingsMutation } from './settingsMutation.ts';
  * case below is about something other than. */
 const ACTIVE_SCOPE: ScopeWritability = { state: 'writable', target: 'tracedecay' };
 
+/**
+ * These suites assert the exact request sequence the settings write protocol
+ * performs: read, re-read for the confirmation, patch, refresh. The page also
+ * reads `/api/capabilities` now, for the multi-root panel, which is neither
+ * part of that protocol nor able to affect it — so the recorders below keep
+ * only settings traffic. The assertion still fails on an extra settings read,
+ * a duplicate patch, or a write the page should not have sent; it just stops
+ * doubling as a ledger of every route the page touches.
+ */
+function isSettingsRoute(url: string): boolean {
+  return new URL(url, 'http://localhost').pathname.startsWith('/api/settings');
+}
+
 describe('SettingsPage authorized changes', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -25,7 +38,7 @@ describe('SettingsPage authorized changes', () => {
         const url = String(input);
         const method = init?.method ?? 'GET';
         const body = init?.body ? JSON.parse(String(init.body)) : null;
-        calls.push({ url, method, body });
+        if (isSettingsRoute(url)) calls.push({ url, method, body });
         if (url === '/api/settings' && method === 'GET') {
           return jsonResponse(applied ? updatedSettings('rev-43') : settings());
         }
@@ -82,7 +95,7 @@ describe('SettingsPage authorized changes', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method ?? 'GET';
-        methods.push(`${method} ${url}`);
+        if (isSettingsRoute(url)) methods.push(`${method} ${url}`);
         if (url === '/api/settings' && method === 'GET') {
           getCount += 1;
           if (getCount === 1) return jsonResponse(settings());
@@ -124,7 +137,8 @@ describe('SettingsPage authorized changes', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
+        if (isSettingsRoute(String(input)))
+          calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
         return jsonResponse(settingsWithout('configuration_batch'));
       }),
     );
@@ -201,7 +215,8 @@ describe('SettingsPage authorized changes', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
+        if (isSettingsRoute(String(input)))
+          calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
         return jsonResponse(settings());
       }),
     );
@@ -233,7 +248,7 @@ describe('SettingsPage authorized changes', () => {
         const url = String(input);
         const method = init?.method ?? 'GET';
         const body = init?.body ? JSON.parse(String(init.body)) : null;
-        calls.push({ url, method, body });
+        if (isSettingsRoute(url)) calls.push({ url, method, body });
         if (url === '/api/settings' && method === 'GET') {
           return jsonResponse(settings());
         }
@@ -323,7 +338,8 @@ describe('Settings scope authority', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
+        if (isSettingsRoute(String(input)))
+          calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
         return jsonResponse(settings());
       }),
     );

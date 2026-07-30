@@ -2285,6 +2285,18 @@ const capabilities: Record<string, unknown> = {
   graph_db: '/fast/projects/tracedecay/.tracedecay/graph.db',
   lcm_db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
   lcm_scope: 'project',
+  // `MultiRootCapabilityV1`, which `mod.rs::capabilities` has always sent and
+  // this fixture omitted. Mounted, because the state worth screenshotting is
+  // the one with figures in it; the `unavailable` arm is a state chip whose
+  // only content is the daemon's sentence, and `MultiRootPanel.dom.test.tsx`
+  // covers it directly.
+  multi_root: {
+    status: 'mounted',
+    scope_set_id: 'scope-set.tracedecay.primary',
+    revision: 7,
+    scope_set_digest: 'sha256:0b91f7c4a2e85d31c6470fb2e9d18a5c',
+    root_count: 3,
+  },
   features: {
     memory: true,
     lcm: true,
@@ -2299,6 +2311,7 @@ const capabilities: Record<string, unknown> = {
     managed_skills: true,
     savings: true,
     settings: true,
+    multi_root: true,
   },
   automation: {
     enabled: true,
