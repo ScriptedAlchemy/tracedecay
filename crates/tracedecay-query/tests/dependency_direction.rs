@@ -93,10 +93,7 @@ fn query_leaf_has_no_policy_dependency() {
     let mut queue = VecDeque::from([query.id.as_str()]);
     let mut seen = BTreeSet::from([query.id.as_str()]);
     while let Some(package_id) = queue.pop_front() {
-        let name = package_names
-            .get(package_id)
-            .copied()
-            .unwrap_or(package_id);
+        let name = package_names.get(package_id).copied().unwrap_or(package_id);
         assert_ne!(
             name, "tracedecay-policy",
             "tracedecay-query resolved dependency graph must not include tracedecay-policy"

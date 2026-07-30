@@ -173,6 +173,38 @@ fn retained_query_key_verifies_without_fallback_key_guessing() {
 }
 
 #[test]
+fn prepared_cursor_authentication_binds_the_selected_key_id() {
+    let request = request();
+    let active_key = id::<RetrievalCursorKeyId>("retrieval-key.prepared.active");
+    let alternate_key = id::<RetrievalCursorKeyId>("retrieval-key.prepared.alternate");
+    let mut keys = RetrievalCursorKeyringV1::new(
+        request.scope.privacy_domain.clone(),
+        active_key.clone(),
+        7,
+        vec![7_u8; 32],
+        1_000_000,
+    )
+    .expect("active key");
+    keys.retain(alternate_key.clone(), 7, vec![7_u8; 32])
+        .expect("same-epoch alternate key");
+    let authority = authority_with_keyring(keys);
+    let payload = br#"{"cursor":"prepared"}"#;
+    let digest = authority
+        .authenticate_prepared_cursor_payload(&request, payload)
+        .expect("prepared cursor digest");
+
+    authority
+        .verify_prepared_cursor_payload(&active_key, &request, payload, &digest)
+        .expect("selected key verifies");
+    assert_eq!(
+        authority.verify_prepared_cursor_payload(&alternate_key, &request, payload, &digest,),
+        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+            QueryDigestAuthenticationError::AuthenticationFailed,
+        ))
+    );
+}
+
+#[test]
 fn revoked_retained_query_key_is_rejected() {
     let request = request();
     let query = query_view();

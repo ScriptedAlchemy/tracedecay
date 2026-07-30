@@ -231,7 +231,8 @@ impl RetrievalCursorKeyringV1 {
             return Err(QueryDigestAuthenticationError::PrivacyDomainMismatch);
         }
         let material = self.key_material(key_id, digest.key_epoch)?;
-        let bytes = self.prepared_cursor_mac_input_bytes(digest.key_epoch, request, payload_bytes)?;
+        let bytes =
+            self.prepared_cursor_mac_input_bytes(key_id, digest.key_epoch, request, payload_bytes)?;
         let signature = query_mac_bytes(&digest.mac)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
@@ -277,7 +278,8 @@ impl RetrievalCursorKeyringV1 {
             return Err(QueryDigestAuthenticationError::PrivacyDomainMismatch);
         }
         let material = self.key_material(key_id, key_epoch)?;
-        let bytes = self.prepared_cursor_mac_input_bytes(key_epoch, request, payload_bytes)?;
+        let bytes =
+            self.prepared_cursor_mac_input_bytes(key_id, key_epoch, request, payload_bytes)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
         mac.update(&bytes);
@@ -311,6 +313,7 @@ impl RetrievalCursorKeyringV1 {
 
     fn prepared_cursor_mac_input_bytes(
         &self,
+        key_id: &RetrievalCursorKeyId,
         key_epoch: u64,
         request: &RetrievalRequest,
         payload_bytes: &[u8],
@@ -319,6 +322,7 @@ impl RetrievalCursorKeyringV1 {
         struct PreparedCursorMacInput<'a> {
             domain: &'static str,
             privacy_domain: &'a PrivacyDomainId,
+            authentication_key_id: &'a RetrievalCursorKeyId,
             key_epoch: u64,
             profile_id: &'a tracedecay_domain::FusionProfileId,
             snapshot_freshness_digest: &'a tracedecay_domain::FreshnessVectorDigest,
@@ -328,6 +332,7 @@ impl RetrievalCursorKeyringV1 {
         let input = PreparedCursorMacInput {
             domain: PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1,
             privacy_domain: &self.privacy_domain,
+            authentication_key_id: key_id,
             key_epoch,
             profile_id: &request.profile_id,
             snapshot_freshness_digest: &request.snapshot.freshness_digest,
