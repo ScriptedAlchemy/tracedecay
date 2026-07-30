@@ -240,28 +240,14 @@ where
         if payload.len() > MAX_PUBLICATION_BYTES {
             return false;
         }
-        let Ok(replacement) = self.publication_replacement(&payload, &tag) else {
+        if self.publication_replacement(&payload, &tag).is_err() {
             return false;
-        };
-        if replacement.is_some_and(|index| {
-            self.outbound.queue[index]
-                .publication
-                .as_ref()
-                .is_some_and(|existing| {
-                    (existing.version, existing.generation) == (tag.version, tag.generation)
-                })
-        }) {
-            // The queued initial clear for a reopened document may be replaced
-            // by diagnostics for the same version/generation before either is
-            // delivered. Queue identity, not just tuple equality, determines
-            // whether that is a duplicate.
-            self.lifecycle.control.remove_publication(&tag.uri);
         }
-        match self.lifecycle.control.admit_sized_publication(
+        match self.lifecycle.control.admit_payload_publication(
             tag.uri.clone(),
             tag.version,
             tag.generation,
-            payload.len(),
+            &payload,
         ) {
             PublicationAdmission::Accepted => {}
             PublicationAdmission::Duplicate | PublicationAdmission::Stale => return false,
