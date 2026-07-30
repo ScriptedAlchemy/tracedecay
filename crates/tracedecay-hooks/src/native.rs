@@ -895,6 +895,54 @@ mod tests {
     }
 
     #[test]
+    fn authentic_cursor_saved_edit_preserves_scope_and_content_identity() {
+        let binding = HookScopeBindingV1 {
+            host: NativeHostIdentityV1::CursorDesktop,
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: 4,
+            binding_token: [5; 32],
+            capabilities: vec![crate::HookCapabilityV1 {
+                family: HookEventFamily::SavedEdit,
+                support: HookEventSupportV1::Native,
+            }],
+        };
+        let envelope = decode_bound_native_hook_event(
+            NativeHostIdentityV1::CursorDesktop,
+            include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
+            &binding,
+            NativeEnvelopeMaterialV1 {
+                event_id: [6; 16],
+                protected_session_id: [7; 32],
+                observed_at: UtcMicros(8),
+                tool_id: None,
+                effect_receipt_id: None,
+                file_id: Some([9; 16]),
+                changed_range_count: 1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(envelope.repository_id, binding.repository_id);
+        assert_eq!(envelope.worktree_id, binding.worktree_id);
+        assert_eq!(envelope.worktree_epoch, binding.worktree_epoch);
+        assert_eq!(
+            envelope.event,
+            HookEventV2::SavedEdit {
+                file_id: [9; 16],
+                changed_range_count: 1,
+            }
+        );
+        let mut conflicting_scope = binding;
+        conflicting_scope.worktree_epoch += 1;
+        assert_eq!(
+            envelope.validate(&conflicting_scope),
+            Err(HookContractError::BindingMismatch)
+        );
+    }
+
+    #[test]
     fn bound_decoder_requires_exact_daemon_scope() {
         let binding = HookScopeBindingV1 {
             host: NativeHostIdentityV1::ClaudeCode,
