@@ -1198,6 +1198,7 @@ pub(crate) mod remote_brain;
 mod remote_https;
 #[cfg(test)]
 mod remote_https_tests;
+pub(crate) mod remote_protocol;
 mod semantic_evaluation;
 pub(crate) use core_admission::*;
 pub use core_client::*;
