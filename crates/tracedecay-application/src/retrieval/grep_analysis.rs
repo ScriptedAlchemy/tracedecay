@@ -10,7 +10,6 @@ use crate::handlers::ApplicationOperation;
 use crate::result::{CoverageCompleteness, OpaqueCursor};
 
 pub const MAX_GREP_RESULTS_V1: u32 = 200;
-pub const DEFAULT_GREP_RESULTS_V1: u32 = 50;
 pub const MAX_GREP_CONTEXT_LINES_V1: u32 = 3;
 pub const MAX_ANALYSIS_RESULTS_V1: u32 = 100;
 pub const MAX_REDUNDANCY_PAIRS_V1: u32 = 500;
@@ -20,20 +19,6 @@ pub const MAX_REDUNDANCY_PAIRS_V1: u32 = 500;
 pub struct PrimitiveWindowV1 {
     pub limit: u32,
     pub cursor: Option<OpaqueCursor>,
-}
-
-impl PrimitiveWindowV1 {
-    pub fn compatibility(limit: u32, maximum: u32) -> Result<Self, ApplicationContractError> {
-        if limit == 0 || limit > maximum {
-            return Err(ApplicationContractError::InvalidRange {
-                field: "grep/analysis result limit",
-            });
-        }
-        Ok(Self {
-            limit,
-            cursor: None,
-        })
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,32 +33,6 @@ pub struct GrepRequestV1 {
 }
 
 impl GrepRequestV1 {
-    pub fn compatibility(
-        pattern: impl Into<String>,
-        fixed_strings: bool,
-        case_sensitive: bool,
-        path_glob: Option<String>,
-        max_results: Option<u64>,
-        context_lines: Option<u64>,
-    ) -> Self {
-        Self {
-            pattern: pattern.into(),
-            fixed_strings,
-            case_sensitive,
-            path_glob,
-            context_lines: context_lines
-                .unwrap_or(0)
-                .min(u64::from(MAX_GREP_CONTEXT_LINES_V1)) as u32,
-            window: PrimitiveWindowV1 {
-                limit: max_results
-                    .unwrap_or(u64::from(DEFAULT_GREP_RESULTS_V1))
-                    .min(u64::from(MAX_GREP_RESULTS_V1))
-                    .max(1) as u32,
-                cursor: None,
-            },
-        }
-    }
-
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         validate_nonempty_pattern(&self.pattern, "grep pattern", false)?;
         if self.context_lines > MAX_GREP_CONTEXT_LINES_V1
@@ -119,30 +78,6 @@ pub struct AstGrepRequestV1 {
 }
 
 impl AstGrepRequestV1 {
-    pub fn compatibility(
-        pattern: impl Into<String>,
-        lang: Option<String>,
-        path_glob: Option<String>,
-        max_results: Option<u64>,
-    ) -> Self {
-        Self {
-            pattern: pattern.into(),
-            lang: lang
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            path_glob: path_glob
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            window: PrimitiveWindowV1 {
-                limit: max_results
-                    .unwrap_or(u64::from(DEFAULT_GREP_RESULTS_V1))
-                    .min(u64::from(MAX_GREP_RESULTS_V1))
-                    .max(1) as u32,
-                cursor: None,
-            },
-        }
-    }
-
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         validate_nonempty_pattern(&self.pattern, "AST grep pattern", true)?;
         if self.window.limit == 0 || self.window.limit > MAX_GREP_RESULTS_V1 {
@@ -186,21 +121,6 @@ pub struct ComplexityRequestV1 {
 }
 
 impl ComplexityRequestV1 {
-    pub fn compatibility(
-        node_kind: Option<String>,
-        path: Option<String>,
-        limit: Option<u64>,
-    ) -> Self {
-        Self {
-            node_kind,
-            path,
-            window: PrimitiveWindowV1 {
-                limit: limit.unwrap_or(10).min(u64::from(MAX_ANALYSIS_RESULTS_V1)) as u32,
-                cursor: None,
-            },
-        }
-    }
-
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.window.limit > MAX_ANALYSIS_RESULTS_V1 {
             return Err(ApplicationContractError::InvalidRange {
@@ -255,30 +175,6 @@ pub struct RedundancyRequestV1 {
 }
 
 impl RedundancyRequestV1 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn compatibility(
-        path: Option<String>,
-        min_lines: Option<u64>,
-        max_pairs: Option<u64>,
-        similarity_threshold: Option<f64>,
-        include_naming_only: bool,
-        include_generated_paths: bool,
-    ) -> Self {
-        Self {
-            path,
-            min_lines: min_lines
-                .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or(8),
-            max_pairs: max_pairs
-                .unwrap_or(20)
-                .min(u64::from(MAX_REDUNDANCY_PAIRS_V1)) as u32,
-            similarity_threshold: similarity_threshold.unwrap_or(0.6).clamp(0.0, 1.0),
-            include_naming_only,
-            include_generated_paths,
-            cursor: None,
-        }
-    }
-
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.max_pairs > MAX_REDUNDANCY_PAIRS_V1
             || !self.similarity_threshold.is_finite()
@@ -386,16 +282,6 @@ pub struct DependencyDepthRequestV1 {
 }
 
 impl DependencyDepthRequestV1 {
-    pub fn compatibility(path: Option<String>, limit: Option<u64>) -> Self {
-        Self {
-            path,
-            window: PrimitiveWindowV1 {
-                limit: limit.unwrap_or(10).min(u64::from(MAX_ANALYSIS_RESULTS_V1)) as u32,
-                cursor: None,
-            },
-        }
-    }
-
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.window.limit > MAX_ANALYSIS_RESULTS_V1 {
             return Err(ApplicationContractError::InvalidRange {
@@ -629,4 +515,127 @@ fn validate_nonempty_pattern(
         return Err(ApplicationContractError::InvalidIdentifier { field });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grep_request_json_round_trips_and_rejects_invalid_bounds() {
+        let ok: GrepRequestV1 = serde_json::from_value(serde_json::json!({
+            "pattern": "HostCapabilityStateV1",
+            "fixed_strings": true,
+            "case_sensitive": true,
+            "path_glob": "crates/**/*.rs",
+            "context_lines": 1,
+            "window": { "limit": 25, "cursor": null }
+        }))
+        .unwrap();
+        assert_eq!(ok.pattern, "HostCapabilityStateV1");
+        assert_eq!(ok.window.limit, 25);
+        ok.validate().unwrap();
+
+        let zero_limit: GrepRequestV1 = serde_json::from_value(serde_json::json!({
+            "pattern": "x",
+            "fixed_strings": false,
+            "case_sensitive": false,
+            "path_glob": null,
+            "context_lines": 0,
+            "window": { "limit": 0, "cursor": null }
+        }))
+        .unwrap();
+        assert!(matches!(
+            zero_limit.validate(),
+            Err(ApplicationContractError::InvalidRange { .. })
+        ));
+
+        let over_context: GrepRequestV1 = serde_json::from_value(serde_json::json!({
+            "pattern": "x",
+            "fixed_strings": false,
+            "case_sensitive": false,
+            "path_glob": null,
+            "context_lines": MAX_GREP_CONTEXT_LINES_V1 + 1,
+            "window": { "limit": 10, "cursor": null }
+        }))
+        .unwrap();
+        assert!(matches!(
+            over_context.validate(),
+            Err(ApplicationContractError::InvalidRange { .. })
+        ));
+    }
+
+    #[test]
+    fn analysis_request_json_validation_covers_complexity_redundancy_and_depth() {
+        let complexity: ComplexityRequestV1 = serde_json::from_value(serde_json::json!({
+            "node_kind": "function",
+            "path": "src/lib.rs",
+            "window": { "limit": 10, "cursor": null }
+        }))
+        .unwrap();
+        complexity.validate().unwrap();
+        let over_complexity = ComplexityRequestV1 {
+            window: PrimitiveWindowV1 {
+                limit: MAX_ANALYSIS_RESULTS_V1 + 1,
+                cursor: None,
+            },
+            ..complexity
+        };
+        assert!(matches!(
+            over_complexity.validate(),
+            Err(ApplicationContractError::InvalidRange { .. })
+        ));
+
+        let redundancy: RedundancyRequestV1 = serde_json::from_value(serde_json::json!({
+            "path": null,
+            "min_lines": 8,
+            "max_pairs": 20,
+            "similarity_threshold": 0.6,
+            "include_naming_only": false,
+            "include_generated_paths": false,
+            "cursor": null
+        }))
+        .unwrap();
+        redundancy.validate().unwrap();
+        let bad_threshold = RedundancyRequestV1 {
+            similarity_threshold: 1.5,
+            ..redundancy
+        };
+        assert!(matches!(
+            bad_threshold.validate(),
+            Err(ApplicationContractError::InvalidRange { .. })
+        ));
+
+        let depth: DependencyDepthRequestV1 = serde_json::from_value(serde_json::json!({
+            "path": "crates/tracedecay-application",
+            "window": { "limit": 5, "cursor": null }
+        }))
+        .unwrap();
+        depth.validate().unwrap();
+        assert_eq!(depth.path.as_deref(), Some("crates/tracedecay-application"));
+    }
+
+    #[test]
+    fn ast_grep_request_json_requires_nonempty_pattern() {
+        let ok: AstGrepRequestV1 = serde_json::from_value(serde_json::json!({
+            "pattern": "fn $NAME($$$ARGS) { $$$BODY }",
+            "lang": "rust",
+            "path_glob": null,
+            "window": { "limit": 50, "cursor": null }
+        }))
+        .unwrap();
+        ok.validate().unwrap();
+
+        let blank: AstGrepRequestV1 = serde_json::from_value(serde_json::json!({
+            "pattern": "   ",
+            "lang": null,
+            "path_glob": null,
+            "window": { "limit": 1, "cursor": null }
+        }))
+        .unwrap();
+        assert!(matches!(
+            blank.validate(),
+            Err(ApplicationContractError::InvalidIdentifier { .. })
+        ));
+    }
 }
