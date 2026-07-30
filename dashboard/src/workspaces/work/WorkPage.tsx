@@ -121,6 +121,15 @@ function SurfaceRow({ surface }: { surface: WithheldSurface }) {
     <tr className="border-t border-edge-subtle align-top" data-work-surface={surface.id}>
       <th scope="row" className="px-2 py-1.5 text-left font-medium text-text-primary">
         {surface.name}
+        {/* The same sentence as the column beside it, reflowed under the name
+          * below `md`. `display:none` takes the column out of the accessibility
+          * tree as well as the viewport, and what it holds is the whole point of
+          * the ledger — the shape of the absence rather than only that there is
+          * one — with no other copy of it anywhere. Exactly one of the two is
+          * ever rendered, so nothing is read twice. */}
+        <span className="mt-0.5 block font-normal text-text-secondary md:hidden">
+          {surface.draws}
+        </span>
       </th>
       <td className="px-2 py-1.5 text-text-secondary max-md:hidden">{surface.draws}</td>
       <td className="px-2 py-1.5">

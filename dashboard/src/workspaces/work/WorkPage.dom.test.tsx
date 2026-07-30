@@ -30,11 +30,13 @@ describe('WorkPage contract gate', () => {
     // claiming half-read data it cannot have.
     const partials = container.querySelectorAll('[data-state="partial"]');
     expect(partials).toHaveLength(1);
-    expect(
-      container
-        .querySelector('[data-work-surface="task-activity"]')
-        ?.querySelector('[data-state="partial"]'),
-    ).not.toBeNull();
+
+    // Resolved in two steps on purpose. Optional-chaining the row and asserting
+    // the chip `not.toBeNull()` passes on `undefined`, so deleting the row
+    // entirely would have satisfied it.
+    const activityRow = container.querySelector('[data-work-surface="task-activity"]');
+    expect(activityRow, 'the subscribed stream row is missing').not.toBeNull();
+    expect(activityRow?.querySelector('[data-state="partial"]')).not.toBeNull();
   });
 
   it('scrolls inside a named region and leaves the shell its own main landmark', () => {
