@@ -9,14 +9,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::OperationBudgetUsage;
 use tracedecay_application::remote::auth::{
+    RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
     RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
     RemoteEnrollmentAuthorityPortV1, RemoteEnrollmentCommitReceiptV1,
+    RemoteEnrollmentCredentialLookupPortV1,
 };
 use tracedecay_application::remote::capture::{
     RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
+use tracedecay_application::remote::replay::{
+    RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1, RemoteReplayFrameV1,
+};
 use tracedecay_domain::{
-    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, EnrollmentGrantV1, EntityId,
+    BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1,
+    EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EnrollmentGrantV1, EntityId,
     RemoteAuthorityUnavailableReasonV1, UtcMicros,
 };
 use tracedecay_store::{AuthorityCasV1, ShardWatermarkV1, StoreRuntimeBindingV1};
@@ -376,6 +382,111 @@ impl RemoteEnrollmentAuthorityPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
         }
         transaction.commit().map_err(enrollment_unavailable)?;
         Ok(receipt)
+    }
+}
+
+impl RemoteEnrollmentCredentialLookupPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
+    fn enrollment_by_id(
+        &self,
+        enrollment_id: &EntityId,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
+        self.query_enrollment(
+            "SELECT enrollment_json FROM remote_enrollment_credentials_v1
+             WHERE enrollment_id = ?1",
+            vec![MigrationSqlValue::Text(enrollment_id.as_str().to_owned())],
+        )
+    }
+
+    fn authority_enrollment(
+        &self,
+        brain_id: &BrainId,
+        node_id: &BrainNodeId,
+        revision: u64,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
+        let candidates = self.query_enrollments(
+            "SELECT enrollment_json FROM remote_enrollment_credentials_v1
+             WHERE credential_revision = ?1",
+            vec![MigrationSqlValue::Integer(
+                i64::try_from(revision)
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?,
+            )],
+        )?;
+        let mut matches = candidates.into_iter().filter(|enrollment| {
+            enrollment.brain_id == *brain_id && enrollment.node_id == *node_id
+        });
+        let enrollment = matches
+            .next()
+            .ok_or(RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
+        if matches.next().is_some() {
+            return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
+        }
+        Ok(enrollment)
+    }
+
+    fn enrollment_commit_receipt(
+        &self,
+        enrollment_id: &EntityId,
+    ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1> {
+        self.load_commit_receipt(enrollment_id)
+    }
+}
+
+impl RemoteAuthorityAuthenticationPort for RegisteredRemoteEnrollmentAuthorityV1 {
+    fn authenticate_connected_authority(
+        &self,
+        expected_authority: &CurrentRemoteAuthorityV1,
+        expected_credential: &EnrollmentCredentialRecordV1,
+        observed_at: UtcMicros,
+    ) -> Result<(), RemoteAuthenticationError> {
+        let persisted = self
+            .enrollment_by_id(&expected_credential.enrollment_id)
+            .map_err(|_| RemoteAuthenticationError::AuthorityAuthenticationFailed)?;
+        if persisted != *expected_credential
+            || persisted.brain_id != expected_authority.fence.brain_id
+            || persisted.node_id != expected_authority.fence.authority_node_id
+            || persisted.revision != expected_authority.credential_revision
+            || persisted.state_at(observed_at) != EnrollmentCredentialStateV1::Active
+        {
+            return Err(RemoteAuthenticationError::InvalidAuthorityCredential);
+        }
+        Ok(())
+    }
+}
+
+impl RegisteredRemoteEnrollmentAuthorityV1 {
+    fn query_enrollment(
+        &self,
+        sql: &str,
+        params: Vec<MigrationSqlValue>,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
+        self.query_enrollments(sql, params)?
+            .into_iter()
+            .next()
+            .ok_or(RemoteEnrollmentAuthorityErrorV1::GrantNotFound)
+    }
+
+    fn query_enrollments(
+        &self,
+        sql: &str,
+        params: Vec<MigrationSqlValue>,
+    ) -> Result<Vec<EnrollmentCredentialRecordV1>, RemoteEnrollmentAuthorityErrorV1> {
+        let rows = self
+            .handle
+            .query(enrollment_statement(sql, params)?, Duration::from_secs(5))
+            .map_err(enrollment_unavailable)?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let encoded = enrollment_text(&row.values, 0)
+                    .ok_or(RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                let enrollment: EnrollmentCredentialRecordV1 = serde_json::from_str(encoded)
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                enrollment
+                    .validate()
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+                Ok(enrollment)
+            })
+            .collect()
     }
 }
 
@@ -799,6 +910,28 @@ impl RemoteAuthorityReachabilityPortV1 for RusqliteRemoteAuthorityStoreV1 {
             reason: RemoteAuthorityUnavailableReasonV1::RegistryUnavailable,
             observed_at: requested.authority.observed_at,
         })
+    }
+}
+
+impl RemoteReplayCurrentWriterPortV1 for RusqliteRemoteAuthorityStoreV1 {
+    fn current_writer(
+        &self,
+        frame: &RemoteReplayFrameV1,
+    ) -> Result<RemoteReplayCurrentWriterV1, RemoteCapturePersistenceErrorV1> {
+        frame
+            .validate()
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        let state = self.current_writer_authority(&frame.capture.writer)?;
+        let writer = match &state {
+            CurrentRemoteAuthorityStateV1::Available(authority) => Some(RemoteWriterAuthorityV1 {
+                authority: authority.clone(),
+                project_id: frame.capture.writer.project_id.clone(),
+                scope: frame.capture.writer.scope.clone(),
+            }),
+            CurrentRemoteAuthorityStateV1::Partial { .. }
+            | CurrentRemoteAuthorityStateV1::Unavailable { .. } => None,
+        };
+        Ok(RemoteReplayCurrentWriterV1 { writer, state })
     }
 }
 
