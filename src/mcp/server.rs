@@ -35,7 +35,7 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, SessionRetrievalServicePort,
-    ToolCallRegistryOptions, ToolRegistryMode, WorkflowIndexReadPort,
+    ToolCallRegistryOptions, ToolRegistryMode,
     default_catalog_discovery_authority, explore_call_budget,
     get_catalog_filtered_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
@@ -355,7 +355,7 @@ pub struct McpServer {
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     identical_read_coalescer: IdenticalReadCoalescer,
     diagnostics_cache: crate::diagnostics::DiagnosticsCache,
-    diagnostics_lsp: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    diagnostics_lsp: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     /// Approximate token count per indexed file (`file_path` -> tokens).
     /// `Arc` so the detached D4 background-refresh task can hold a cheap
     /// clone and swap in the freshly synced map on completion.
@@ -1274,7 +1274,7 @@ impl McpServer {
 
     pub fn diagnostics_lsp(
         &self,
-    ) -> Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>> {
+    ) -> Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>> {
         Arc::clone(&self.diagnostics_lsp)
     }
 

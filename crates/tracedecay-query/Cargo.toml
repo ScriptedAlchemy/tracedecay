@@ -14,13 +14,13 @@ serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 zeroize = "1.9.0"
 
 [features]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
-test-helpers = []
+test-helpers = ["tracedecay-temporal-query/test-helpers"]
 
 [dev-dependencies]
 static_assertions = "1.1.0"

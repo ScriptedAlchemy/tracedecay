@@ -27,6 +27,8 @@ pub enum SourceStoreErrorV1 {
     DefinitionConflict,
     #[error("external source binding changed across immutable dimensions")]
     BindingConflict,
+    #[error("external source authority revision compare-and-set failed")]
+    AuthorityRevisionConflict,
     #[error("external source frontier compare-and-set failed")]
     FrontierConflict,
     #[error("external source idempotency key was reused with a different request")]
@@ -808,6 +810,97 @@ impl SourceCommitReceiptV1 {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceAuthorityPublicationV1 {
+    definition: SourceDefinitionV1,
+    binding: SourceBindingV1,
+    expected_definition_digest: ManifestDigest,
+    expected_binding_digest: ManifestDigest,
+    idempotency_key: ManifestDigest,
+    request_digest: ManifestDigest,
+}
+
+impl SourceAuthorityPublicationV1 {
+    pub fn new(
+        definition: &SourceDefinitionV1,
+        binding: &SourceBindingV1,
+        expected_definition_digest: ManifestDigest,
+        expected_binding_digest: ManifestDigest,
+        idempotency_key: ManifestDigest,
+        request_digest: ManifestDigest,
+    ) -> SourceStoreResult<Self> {
+        let publication = Self {
+            definition: definition.clone(),
+            binding: binding.clone(),
+            expected_definition_digest,
+            expected_binding_digest,
+            idempotency_key,
+            request_digest,
+        };
+        publication.validate()?;
+        Ok(publication)
+    }
+
+    pub fn validate(&self) -> SourceStoreResult<()> {
+        self.definition.validate()?;
+        self.binding.validate_against(&self.definition)?;
+        self.expected_definition_digest.validate()?;
+        self.expected_binding_digest.validate()?;
+        self.idempotency_key.validate()?;
+        self.request_digest.validate()?;
+        Ok(())
+    }
+
+    pub fn binding(&self) -> &SourceBindingV1 {
+        &self.binding
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceAuthorityPublicationReceiptV1 {
+    idempotency_key: ManifestDigest,
+    request_digest: ManifestDigest,
+    prior_definition_digest: ManifestDigest,
+    prior_binding_digest: ManifestDigest,
+    definition_digest: ManifestDigest,
+    binding_digest: ManifestDigest,
+}
+
+impl SourceAuthorityPublicationReceiptV1 {
+    pub fn idempotency_key(&self) -> &ManifestDigest {
+        &self.idempotency_key
+    }
+
+    pub fn request_digest(&self) -> &ManifestDigest {
+        &self.request_digest
+    }
+
+    pub fn definition_digest(&self) -> &ManifestDigest {
+        &self.definition_digest
+    }
+
+    pub fn binding_digest(&self) -> &ManifestDigest {
+        &self.binding_digest
+    }
+
+    fn validate(&self) -> SourceStoreResult<()> {
+        self.idempotency_key.validate()?;
+        self.request_digest.validate()?;
+        self.prior_definition_digest.validate()?;
+        self.prior_binding_digest.validate()?;
+        self.definition_digest.validate()?;
+        self.binding_digest.validate()?;
+        if self.prior_definition_digest == self.definition_digest
+            || self.prior_binding_digest == self.binding_digest
+        {
+            return Err(SourceStoreErrorV1::AuthorityRevisionConflict);
+        }
+        Ok(())
+    }
+}
+
 /// The exact durable state a project Database stores under its existing writer
 /// authority. It is a source-local state record, not a second database or
 /// cross-provider registry.
@@ -816,6 +909,9 @@ impl SourceCommitReceiptV1 {
 pub struct SourceStoreStateV1 {
     definition: SourceDefinitionV1,
     binding: SourceBindingV1,
+    definition_history: BTreeMap<u64, SourceDefinitionV1>,
+    binding_history: BTreeMap<u64, SourceBindingV1>,
+    authority_receipt_history: BTreeMap<ManifestDigest, SourceAuthorityPublicationReceiptV1>,
     source_frontier: SourceAggregateFrontierV1,
     projection: SourceProjectionCommitV1,
     projected_objects: BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1>,
@@ -842,6 +938,24 @@ impl SourceStoreStateV1 {
 
     pub fn binding(&self) -> &SourceBindingV1 {
         &self.binding
+    }
+
+    pub fn definition_history(&self) -> &BTreeMap<u64, SourceDefinitionV1> {
+        &self.definition_history
+    }
+
+    pub fn binding_history(&self) -> &BTreeMap<u64, SourceBindingV1> {
+        &self.binding_history
+    }
+
+    pub fn authority_receipts(
+        &self,
+    ) -> &BTreeMap<ManifestDigest, SourceAuthorityPublicationReceiptV1> {
+        &self.authority_receipt_history
+    }
+
+    pub fn commit_receipts(&self) -> &BTreeMap<ManifestDigest, SourceCommitReceiptV1> {
+        &self.receipt_history
     }
 
     pub fn projected_objects(
@@ -882,10 +996,51 @@ impl SourceStoreStateV1 {
     pub fn validate(&self) -> SourceStoreResult<()> {
         self.definition.validate()?;
         self.binding.validate_against(&self.definition)?;
+        if self.definition_history.get(&self.definition.revision) != Some(&self.definition)
+            || self.binding_history.get(&self.binding.binding_revision) != Some(&self.binding)
+            || self.definition_history.keys().next_back() != Some(&self.definition.revision)
+            || self.binding_history.keys().next_back() != Some(&self.binding.binding_revision)
+        {
+            return Err(SourceStoreErrorV1::AuthorityRevisionConflict);
+        }
+        let mut prior_definition_revision = None;
+        for (revision, definition) in &self.definition_history {
+            definition.validate()?;
+            if definition.source_id != self.definition.source_id
+                || definition.revision != *revision
+                || prior_definition_revision.is_some_and(|prior| *revision != prior + 1)
+            {
+                return Err(SourceStoreErrorV1::DefinitionConflict);
+            }
+            prior_definition_revision = Some(*revision);
+        }
+        let binding_identity = self.binding.immutable_identity()?;
+        let mut prior_binding_revision = None;
+        for (revision, binding) in &self.binding_history {
+            binding.validate()?;
+            if binding.immutable_identity()? != binding_identity
+                || binding.binding_revision != *revision
+                || self
+                    .definition_history
+                    .get(&binding.definition_revision)
+                    .is_none_or(|definition| {
+                        definition.definition_digest != binding.definition_digest
+                    })
+                || prior_binding_revision.is_some_and(|prior| *revision != prior + 1)
+            {
+                return Err(SourceStoreErrorV1::BindingConflict);
+            }
+            prior_binding_revision = Some(*revision);
+        }
+        for (key, receipt) in &self.authority_receipt_history {
+            receipt.validate()?;
+            if key != receipt.idempotency_key() {
+                return Err(SourceStoreErrorV1::IdempotencyConflict);
+            }
+        }
         self.source_frontier.validate()?;
         self.projection.validate()?;
         self.receipt.validate()?;
-        let binding_identity = self.binding.immutable_identity()?;
         for (idempotency_key, receipt) in &self.receipt_history {
             idempotency_key.validate()?;
             receipt.validate()?;
@@ -1006,6 +1161,53 @@ impl SourceStoreStateV1 {
 pub enum SourceCommitApplyOutcomeV1 {
     Committed(Box<SourceStoreStateV1>),
     ExactDuplicate(Box<SourceCommitReceiptV1>),
+}
+
+pub fn apply_source_authority_publication(
+    current: &SourceStoreStateV1,
+    publication: SourceAuthorityPublicationV1,
+) -> SourceStoreResult<SourceStoreStateV1> {
+    current.validate()?;
+    publication.validate()?;
+    if let Some(receipt) = current
+        .authority_receipt_history
+        .get(&publication.idempotency_key)
+    {
+        return if receipt.request_digest() == &publication.request_digest {
+            Ok(current.clone())
+        } else {
+            Err(SourceStoreErrorV1::IdempotencyConflict)
+        };
+    }
+    if publication.binding.immutable_identity()? != current.binding.immutable_identity()? {
+        return Err(SourceStoreErrorV1::BindingConflict);
+    }
+    if publication.expected_definition_digest != current.definition.definition_digest
+        || publication.expected_binding_digest != current.binding.binding_digest
+        || publication.definition.revision != current.definition.revision.saturating_add(1)
+        || publication.binding.binding_revision
+            != current.binding.binding_revision.saturating_add(1)
+    {
+        return Err(SourceStoreErrorV1::AuthorityRevisionConflict);
+    }
+    let receipt = SourceAuthorityPublicationReceiptV1 {
+        idempotency_key: publication.idempotency_key.clone(),
+        request_digest: publication.request_digest,
+        prior_definition_digest: current.definition.definition_digest.clone(),
+        prior_binding_digest: current.binding.binding_digest.clone(),
+        definition_digest: publication.definition.definition_digest.clone(),
+        binding_digest: publication.binding.binding_digest.clone(),
+    };
+    let mut next = current.clone();
+    next.definition = publication.definition;
+    next.binding = publication.binding;
+    next.definition_history
+        .insert(next.definition.revision, next.definition.clone());
+    next.binding_history
+        .insert(next.binding.binding_revision, next.binding.clone());
+    next.authority_receipt_history
+        .insert(receipt.idempotency_key.clone(), receipt);
+    next.validated()
 }
 
 /// Applies one source commit against the caller's previously read state. The
@@ -1132,10 +1334,21 @@ pub fn apply_source_commit(
     let mut receipt_history =
         current.map_or_else(BTreeMap::new, |state| state.receipt_history.clone());
     receipt_history.insert(receipt.idempotency_key().clone(), receipt.clone());
+    let mut definition_history =
+        current.map_or_else(BTreeMap::new, |state| state.definition_history.clone());
+    definition_history.insert(commit.definition().revision, commit.definition().clone());
+    let mut binding_history =
+        current.map_or_else(BTreeMap::new, |state| state.binding_history.clone());
+    binding_history.insert(commit.binding().binding_revision, commit.binding().clone());
     Ok(SourceCommitApplyOutcomeV1::Committed(Box::new(
         SourceStoreStateV1 {
             definition: commit.definition().clone(),
             binding: commit.binding().clone(),
+            definition_history,
+            binding_history,
+            authority_receipt_history: current.map_or_else(BTreeMap::new, |state| {
+                state.authority_receipt_history.clone()
+            }),
             source_frontier: commit.next_frontier().clone(),
             projection,
             projected_objects,

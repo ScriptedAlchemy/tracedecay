@@ -353,10 +353,17 @@ impl SessionAuthorizationGrant {
         if &self.context != context || !self.binding.matches(binding) {
             return Err(SessionAuthorizationError::WrongContext);
         }
-        if self.scope.access() != request.access() {
+        if !self
+            .scope
+            .access()
+            .matches_requested_access(request.access())
+        {
             return Err(SessionAuthorizationError::WrongAccess);
         }
-        if self.scope.retrieval_scope() != request.retrieval_scope()
+        if !self
+            .scope
+            .retrieval_scope()
+            .matches_requested_scope(request.retrieval_scope())
             || self.scope.provider_scope() != request.provider_scope()
             || self.scope.temporal_mode() != request.temporal_mode()
             || self.scope.grain() != request.grain()
@@ -475,15 +482,15 @@ impl SessionRetrievalRequest {
         if limit > grant.budgets().max_results() {
             return Err(SessionRetrievalError::LimitExceedsGrant);
         }
-        let target_is_authorized = match (grant.scope().retrieval_scope(), &target) {
-            (
-                SessionRetrievalScope::Session(authorized),
-                SessionRetrievalTarget::Session(requested),
-            ) => authorized == requested,
-            (SessionRetrievalScope::AllSessionsInAuthorizedRoot, SessionRetrievalTarget::Scope) => {
-                true
-            }
-            _ => false,
+        let target_is_authorized = match &target {
+            SessionRetrievalTarget::Scope => grant
+                .scope()
+                .retrieval_scope()
+                .matches_authorized_root_target(),
+            SessionRetrievalTarget::Session(session_id) => grant
+                .scope()
+                .retrieval_scope()
+                .matches_session_target(session_id),
         };
         if !target_is_authorized {
             return Err(SessionRetrievalError::TargetOutsideGrant);

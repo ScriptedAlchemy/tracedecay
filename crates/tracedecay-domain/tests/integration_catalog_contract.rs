@@ -140,10 +140,10 @@ fn typed_status_reasons_have_stable_encoding() {
     );
     assert_eq!(
         serde_json::to_value(HostCapabilityAvailabilityV1::Unavailable(
-            HostCapabilityReasonV1::AuthorityUnavailable,
+            HostCapabilityReasonV1::ProjectAuthorityUnbound,
         ))
         .unwrap(),
-        json!({"status": "unavailable", "reason_code": "authority_unavailable"})
+        json!({"status": "unavailable", "reason_code": "project_authority_unbound"})
     );
 }
 
@@ -155,7 +155,7 @@ fn schema_rejects_unknown_fields_and_supported_reasons() {
 
     let mut supported_reason: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
     supported_reason["capabilities"][0]["hosts"][0]["availability_states"][0]["reason_code"] =
-        json!("authority_unavailable");
+        json!("project_authority_unbound");
     assert!(serde_json::from_value::<HostIntegrationCatalogV1>(supported_reason).is_err());
 }
 
@@ -196,7 +196,7 @@ fn catalog_validation_requires_the_exact_fixture_backed_state_set() {
 
     let mut unproven: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
     unproven["capabilities"][0]["hosts"][0]["availability_states"][1]["reason_code"] =
-        json!("authority_unavailable");
+        json!("project_authority_unbound");
     let catalog: HostIntegrationCatalogV1 = serde_json::from_value(unproven).unwrap();
     assert!(matches!(
         catalog.validate(),

@@ -922,10 +922,11 @@ export const WORKSPACE_SCENARIOS: readonly Scenario[] = [
         }
         // The defect this guards: a provenance figure that could not be read
         // must not print as zero.
-        expectEqual(plate.value, '—', `the ${label} figure behind an unreadable read`);
-        if (plate.value === '0') {
-          throw new Error(`FALSIFIED: an unreadable ${label} read rendered as a measured zero`);
-        }
+        expectEqual(
+          plate.value,
+          '—',
+          `the ${label} figure behind an unreadable read, which a measured zero would falsify`,
+        );
       }
       expectContains(
         plates['hook calls']!.text,

@@ -9,12 +9,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{NativeHostIdentityV1, UtcMicros};
 
 use crate::{
     HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1, HookContractError, HookEventEnvelopeV2,
-    HookEventFamily, HookEventSupportV1, HookEventV2, HookHostV1, HookLifecyclePhaseV1,
-    HookOrderingV1, HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES, stock_event_support,
+    HookEventFamily, HookEventSupportV1, HookEventV2, HookLifecyclePhaseV1, HookOrderingV1,
+    HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES, stock_event_support,
 };
 
 /// The bounded, content-free signal yielded from one native host event.
@@ -72,7 +72,7 @@ impl NativeHookSignalV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecodedNativeHookEventV1 {
-    pub host: HookHostV1,
+    pub host: NativeHostIdentityV1,
     pub signal: NativeHookSignalV1,
     pub ordering: HookOrderingV1,
 }
@@ -168,19 +168,23 @@ pub enum NativeHookDecodeError {
 /// Decode one provider-native checked-in event shape. Unsupported names are
 /// rejected rather than inferred from command text or another provider.
 pub fn decode_native_hook_event(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     payload: &[u8],
 ) -> Result<DecodedNativeHookEventV1, NativeHookDecodeError> {
     let raw = parse_native_payload(payload)?;
     let signal = match host {
-        HookHostV1::ClaudeCode => decode_claude(&raw)?,
-        HookHostV1::Codex => decode_codex(&raw)?,
-        HookHostV1::CursorDesktop | HookHostV1::CursorCloud => decode_cursor(&raw)?,
-        HookHostV1::Hermes => decode_hermes(&raw)?,
-        HookHostV1::Kiro => decode_kiro(&raw)?,
-        HookHostV1::KimiCode => decode_kimi(&raw)?,
-        HookHostV1::OpenCode => decode_opencode_event(&raw)?,
-        HookHostV1::Cline | HookHostV1::RooCode | HookHostV1::Kilo => {
+        NativeHostIdentityV1::ClaudeCode => decode_claude(&raw)?,
+        NativeHostIdentityV1::Codex => decode_codex(&raw)?,
+        NativeHostIdentityV1::CursorDesktop | NativeHostIdentityV1::CursorCloud => {
+            decode_cursor(&raw)?
+        }
+        NativeHostIdentityV1::Hermes => decode_hermes(&raw)?,
+        NativeHostIdentityV1::Kiro => decode_kiro(&raw)?,
+        NativeHostIdentityV1::KimiCode => decode_kimi(&raw)?,
+        NativeHostIdentityV1::OpenCode => decode_opencode_event(&raw)?,
+        NativeHostIdentityV1::Cline
+        | NativeHostIdentityV1::RooCode
+        | NativeHostIdentityV1::Kilo => {
             return Err(NativeHookDecodeError::UnsupportedNativeEvent);
         }
     };
@@ -196,7 +200,7 @@ pub fn decode_opencode_plugin_event(
         OpenCodePluginSurfaceV1::Event => decode_opencode_event(&raw)?,
         OpenCodePluginSurfaceV1::ToolExecuteAfter => decode_opencode_tool_after(&raw)?,
     };
-    finish_decoded_native_event(HookHostV1::OpenCode, signal, &raw)
+    finish_decoded_native_event(NativeHostIdentityV1::OpenCode, signal, &raw)
 }
 
 pub fn decode_opencode_lsp_event(
@@ -228,7 +232,7 @@ fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> 
 }
 
 fn finish_decoded_native_event(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     signal: NativeHookSignalV1,
     raw: &Value,
 ) -> Result<DecodedNativeHookEventV1, NativeHookDecodeError> {
@@ -247,7 +251,7 @@ fn finish_decoded_native_event(
 /// native bytes into a transport envelope; it still discards every raw host
 /// field before binding and cannot infer a host/project/worktree identity.
 pub fn decode_bound_native_hook_event(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     payload: &[u8],
     binding: &HookScopeBindingV1,
     material: NativeEnvelopeMaterialV1,
@@ -539,32 +543,33 @@ fn decode_cursor(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
 }
 
 fn decode_hermes(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
-    let native_event = raw
-        .get("event")
-        .and_then(Value::as_str)
-        .or_else(|| raw.get("hook_event_name").and_then(Value::as_str))
-        .filter(|value| !value.is_empty())
-        .ok_or(NativeHookDecodeError::MalformedPayload)?;
-    match native_event {
-        "turnIngested" => Ok(NativeHookSignalV1::SessionBoundary(
-            HookBoundaryV1::TurnComplete,
-        )),
+    if let Some(event_bus_name) = raw.get("event") {
+        return match event_bus_name.as_str().filter(|value| !value.is_empty()) {
+            Some("turnIngested") => Ok(NativeHookSignalV1::SessionBoundary(
+                HookBoundaryV1::TurnComplete,
+            )),
+            Some("terminalReceipt") => {
+                let event = decode_shape::<HermesTerminalReceiptEvent>(raw)?;
+                if event.agent != "hermes"
+                    || event.route.session_id.is_empty()
+                    || event.receipt.tool_call_id.is_empty()
+                {
+                    return Err(NativeHookDecodeError::MissingTypedIdentity);
+                }
+                hermes_terminal_tool_signal(&event.receipt.status)
+            }
+            Some(_) => Err(NativeHookDecodeError::UnsupportedNativeEvent),
+            None => Err(NativeHookDecodeError::MalformedPayload),
+        };
+    }
+
+    match event_name(raw, "hook_event_name")? {
         "post_tool_call" => {
             let event = decode_shape::<HermesWriteEvent>(raw)?;
             if event.tool_name.is_empty() || event.extra.tool_call_id.is_empty() {
                 return Err(NativeHookDecodeError::MalformedPayload);
             }
             hermes_terminal_tool_signal(&event.extra.status)
-        }
-        "terminalReceipt" => {
-            let event = decode_shape::<HermesTerminalReceiptEvent>(raw)?;
-            if event.agent != "hermes"
-                || event.route.session_id.is_empty()
-                || event.receipt.tool_call_id.is_empty()
-            {
-                return Err(NativeHookDecodeError::MissingTypedIdentity);
-            }
-            hermes_terminal_tool_signal(&event.receipt.status)
         }
         "on_session_end" => {
             let event = decode_shape::<HermesSessionEndEvent>(raw)?;
@@ -704,7 +709,7 @@ mod tests {
     #[test]
     fn decoded_event_serialization_is_structurally_content_free() {
         let value = serde_json::to_value(DecodedNativeHookEventV1 {
-            host: HookHostV1::CursorDesktop,
+            host: NativeHostIdentityV1::CursorDesktop,
             signal: NativeHookSignalV1::SavedEdit,
             ordering: HookOrderingV1::Unknown,
         })
@@ -718,49 +723,49 @@ mod tests {
 
     #[test]
     fn checked_in_native_captures_decode_supported_host_families() {
-        let captures: Vec<(HookHostV1, &[u8], NativeHookSignalV1)> = vec![
+        let captures: Vec<(NativeHostIdentityV1, &[u8], NativeHookSignalV1)> = vec![
             (
-                HookHostV1::ClaudeCode,
+                NativeHostIdentityV1::ClaudeCode,
                 include_bytes!("../fixtures/host_events/claude/post_tool_use_write.json"),
                 NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
             ),
             (
-                HookHostV1::ClaudeCode,
+                NativeHostIdentityV1::ClaudeCode,
                 include_bytes!("../fixtures/host_events/claude/stop.json"),
                 NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
             ),
             (
-                HookHostV1::Codex,
+                NativeHostIdentityV1::Codex,
                 include_bytes!("../fixtures/host_events/codex/stop.json"),
                 NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
             ),
             (
-                HookHostV1::CursorDesktop,
+                NativeHostIdentityV1::CursorDesktop,
                 include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
                 NativeHookSignalV1::SavedEdit,
             ),
             (
-                HookHostV1::Hermes,
+                NativeHostIdentityV1::Hermes,
                 include_bytes!("../fixtures/host_events/hermes/saved-edit.json"),
                 NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
             ),
             (
-                HookHostV1::Hermes,
+                NativeHostIdentityV1::Hermes,
                 include_bytes!("../fixtures/host_events/hermes/terminal-receipt.json"),
                 NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed),
             ),
             (
-                HookHostV1::Hermes,
+                NativeHostIdentityV1::Hermes,
                 include_bytes!("../fixtures/host_events/hermes/stop.json"),
                 NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
             ),
             (
-                HookHostV1::KimiCode,
+                NativeHostIdentityV1::KimiCode,
                 include_bytes!("../fixtures/host_events/kimi/post-tool-use-edit.json"),
                 NativeHookSignalV1::SavedEdit,
             ),
             (
-                HookHostV1::KimiCode,
+                NativeHostIdentityV1::KimiCode,
                 include_bytes!("../fixtures/host_events/kimi/stop.json"),
                 NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
             ),
@@ -787,7 +792,7 @@ mod tests {
         ] {
             assert_eq!(
                 decode_native_hook_event(
-                    HookHostV1::OpenCode,
+                    NativeHostIdentityV1::OpenCode,
                     fixture_request(opencode, identity).as_slice()
                 )
                 .unwrap()
@@ -813,11 +818,35 @@ mod tests {
     }
 
     #[test]
+    fn hermes_hook_discriminators_do_not_alias_event_bus_variants() {
+        for fixture in [
+            include_bytes!("../fixtures/host_events/hermes/saved-edit.json").as_slice(),
+            include_bytes!("../fixtures/host_events/hermes/stop.json").as_slice(),
+        ] {
+            let mut payload = serde_json::from_slice::<Value>(fixture).unwrap();
+            let hook_event_name = payload
+                .as_object_mut()
+                .unwrap()
+                .remove("hook_event_name")
+                .unwrap();
+            payload["event"] = hook_event_name;
+
+            assert_eq!(
+                decode_native_hook_event(
+                    NativeHostIdentityV1::Hermes,
+                    &serde_json::to_vec(&payload).unwrap()
+                ),
+                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            );
+        }
+    }
+
+    #[test]
     fn kiro_documented_unverified_events_are_rejected_instead_of_emulated() {
         let kiro = include_str!("../fixtures/host_events/kiro.json");
         assert_eq!(
             decode_native_hook_event(
-                HookHostV1::Kiro,
+                NativeHostIdentityV1::Kiro,
                 fixture_request(kiro, "prompt_boundary").as_slice()
             )
             .unwrap()
@@ -827,7 +856,7 @@ mod tests {
         for identity in ["saved_edit", "stop"] {
             assert_eq!(
                 decode_native_hook_event(
-                    HookHostV1::Kiro,
+                    NativeHostIdentityV1::Kiro,
                     fixture_request(kiro, identity).as_slice()
                 ),
                 Err(NativeHookDecodeError::UnsupportedNativeEvent)
@@ -840,13 +869,13 @@ mod tests {
         let codex = include_str!("../fixtures/host_events/codex.json");
         assert_eq!(
             decode_native_hook_event(
-                HookHostV1::Codex,
+                NativeHostIdentityV1::Codex,
                 fixture_request(codex, "saved_edit").as_slice()
             ),
             Err(NativeHookDecodeError::UnsupportedNativeEvent)
         );
         assert_eq!(
-            stock_event_support(HookHostV1::Codex, HookEventFamily::ToolLifecycle),
+            stock_event_support(NativeHostIdentityV1::Codex, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Unavailable
         );
     }
@@ -855,7 +884,7 @@ mod tests {
     fn authentic_cursor_saved_edit_capture_is_typed() {
         assert!(matches!(
             decode_native_hook_event(
-                HookHostV1::CursorDesktop,
+                NativeHostIdentityV1::CursorDesktop,
                 include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
             ),
             Ok(DecodedNativeHookEventV1 {
@@ -868,7 +897,7 @@ mod tests {
     #[test]
     fn bound_decoder_requires_exact_daemon_scope() {
         let binding = HookScopeBindingV1 {
-            host: HookHostV1::ClaudeCode,
+            host: NativeHostIdentityV1::ClaudeCode,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
@@ -880,7 +909,7 @@ mod tests {
             }],
         };
         let envelope = decode_bound_native_hook_event(
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!("../fixtures/host_events/claude/stop.json"),
             &binding,
             NativeEnvelopeMaterialV1 {
@@ -894,7 +923,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(envelope.producer, HookHostV1::ClaudeCode);
+        assert_eq!(envelope.producer, NativeHostIdentityV1::ClaudeCode);
         assert_eq!(envelope.project_id, binding.project_id);
         assert_eq!(envelope.worktree_id, binding.worktree_id);
         assert_eq!(envelope.binding_token, binding.binding_token);

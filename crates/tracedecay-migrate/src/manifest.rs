@@ -747,6 +747,8 @@ mod tests {
                 FinalSchemaFamily::RemoteReplayDeduplication,
                 FinalSchemaFamily::RemoteBackupStaging,
                 FinalSchemaFamily::RemoteAuthorityCas,
+                FinalSchemaFamily::ExternalSourceAuthorityRevisions,
+                FinalSchemaFamily::ExternalSourceProjectionPublications,
             ]
         );
         target.validate().expect("canonical final target");
@@ -786,6 +788,18 @@ mod tests {
                 .family(FinalSchemaFamily::RemoteBackupStaging)
                 .invariants
                 .contains(&FinalSchemaInvariant::VerifiedBackupBeforeDestruction)
+        );
+        assert!(
+            target
+                .family(FinalSchemaFamily::ExternalSourceAuthorityRevisions)
+                .invariants
+                .contains(&FinalSchemaInvariant::CompareAndSwap)
+        );
+        assert!(
+            target
+                .family(FinalSchemaFamily::ExternalSourceProjectionPublications)
+                .invariants
+                .contains(&FinalSchemaInvariant::DurableReplayDeduplication)
         );
     }
 
