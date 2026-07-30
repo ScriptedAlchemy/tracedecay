@@ -3,9 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use serde::{Deserialize, Serialize};
 use tracedecay_application::{
-    WorkAttemptPersistencePort, WorkExecutionError, WorkExecutionService,
-    WorkProviderExecutionError, WorkProviderExecutionPort, WorkStorageError, WorkStoragePort,
+    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptPersistencePort,
+    WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
+    WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
+    WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkExecutionError,
+    WorkExecutionService, WorkProviderExecutionError, WorkProviderExecutionPort, WorkStorageError,
+    WorkStoragePort,
 };
 use tracedecay_domain::{
     AttemptId, ProviderId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
@@ -26,6 +31,23 @@ use crate::sessions::codex_app_server::{
 const CODEX_PROVIDER_ID: &str = "provider.work.codex-app-server";
 const CODEX_ROUTE_ID: &str = "route.work.codex-app-server.v1";
 const CODEX_THREAD_SOURCE: &str = "tracedecay_work";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "attempt_operation",
+    content = "request",
+    rename_all = "snake_case"
+)]
+pub(crate) enum WorkAttemptInvocationV1 {
+    AcquireLease(WorkAttemptAcquireLeaseRequestV1),
+    RenewLease(WorkAttemptRenewLeaseRequestV1),
+    Start(WorkAttemptStartRequestV1),
+    PublishProgress(WorkAttemptPublishProgressRequestV1),
+    PublishArtifact(WorkAttemptPublishArtifactRequestV1),
+    Cancel(WorkAttemptCancelRequestV1),
+    Recover(WorkAttemptRecoverRequestV1),
+    Terminalize(WorkAttemptTerminalizeRequestV1),
+}
 
 #[derive(Clone)]
 pub(crate) struct CodexAppServerWorkProviderV1<S> {
@@ -213,7 +235,7 @@ where
     }
 }
 
-pub(crate) struct DaemonWorkRuntimeV1<'a, S>
+pub(crate) struct DaemonWorkRuntimeV1<S>
 where
     S: WorkAttemptPersistencePort + WorkStoragePort + Clone,
 {
@@ -221,11 +243,11 @@ where
     storage: S,
     provider: CodexAppServerWorkProviderV1<S>,
     execution: WorkExecutionService<S, CodexAppServerWorkProviderV1<S>>,
-    observation_db: &'a RegisteredGlobalDb,
+    observation_db: Arc<RegisteredGlobalDb>,
     project_root: PathBuf,
 }
 
-impl<'a, S> DaemonWorkRuntimeV1<'a, S>
+impl<S> DaemonWorkRuntimeV1<S>
 where
     S: WorkAttemptPersistencePort + WorkStoragePort + Clone + Send + Sync + 'static,
 {
@@ -233,7 +255,7 @@ where
         authority: WorkAuthority,
         storage: S,
         config: CodexAppServerSummaryConfig,
-        observation_db: &'a RegisteredGlobalDb,
+        observation_db: Arc<RegisteredGlobalDb>,
         project_root: PathBuf,
     ) -> Self {
         let provider =
@@ -254,7 +276,71 @@ where
     }
 
     pub(crate) fn is_ready(&self) -> bool {
-        self.provider.is_ready() && event_lane::enabled(Some(self.observation_db))
+        self.provider.is_ready() && event_lane::enabled(Some(self.observation_db.as_ref()))
+    }
+
+    pub(crate) async fn dispatch(
+        &self,
+        request: WorkAttemptInvocationV1,
+    ) -> Result<WorkAttemptResponseV1, WorkExecutionError> {
+        let attempt = match request {
+            WorkAttemptInvocationV1::AcquireLease(request) => {
+                let route = self.provider_route()?;
+                if request.requested_route != route {
+                    return Err(WorkProviderExecutionError::Rejected(
+                        "requested Work provider route is not mounted".to_owned(),
+                    )
+                    .into());
+                }
+                let projection = request
+                    .snapshot
+                    .projections()
+                    .iter()
+                    .find(|projection| projection.task_id() == request.identity.task_id())
+                    .ok_or(WorkExecutionError::NotFound)?;
+                let binding = WorkAttemptProjectionBindingV1::new(
+                    request.snapshot.generation_id().clone(),
+                    request.snapshot.sequence(),
+                    projection.version(),
+                )?;
+                if request.projection_binding != binding {
+                    return Err(WorkProviderExecutionError::Rejected(
+                        "requested Work projection binding is not current".to_owned(),
+                    )
+                    .into());
+                }
+                self.acquire_lease(&request.snapshot, request.identity, request.lease)
+                    .await?
+            }
+            WorkAttemptInvocationV1::RenewLease(request) => {
+                self.renew_lease(&request.identity, &request.expected, request.replacement)?
+            }
+            WorkAttemptInvocationV1::Start(request) => {
+                self.start(&request.identity, &request.lease, request.recovery)
+                    .await?
+            }
+            WorkAttemptInvocationV1::PublishProgress(request) => {
+                self.publish_progress(&request.identity, &request.lease, request.progress)
+                    .await?
+            }
+            WorkAttemptInvocationV1::PublishArtifact(request) => {
+                self.publish_artifact(&request.identity, &request.lease, request.artifact)
+                    .await?
+            }
+            WorkAttemptInvocationV1::Cancel(request) => {
+                self.cancel(&request.identity, &request.lease, request.request)
+                    .await?
+            }
+            WorkAttemptInvocationV1::Recover(request) => {
+                self.recover(&request.identity, &request.lease, request.reason)
+                    .await?
+            }
+            WorkAttemptInvocationV1::Terminalize(request) => {
+                self.terminalize(&request.identity, &request.lease, request.terminal)
+                    .await?
+            }
+        };
+        Ok(attempt.into())
     }
 
     pub(crate) async fn acquire_lease(
@@ -503,7 +589,7 @@ where
 
     async fn publish_activity(&self, detail: &str) {
         event_lane::publish(
-            self.observation_db,
+            self.observation_db.as_ref(),
             ActivityFamilyV1::Task,
             &self.project_root,
             Some(self.authority.project_id().as_str()),
@@ -795,7 +881,7 @@ for line in sys.stdin:
         )
         .await
         .unwrap();
-        let observation_db = host.project_observation_database_for_test().unwrap();
+        let observation_db = host.project_observation_database_arc_for_test().unwrap();
         let storage = observation_db.work_storage().unwrap();
         let context = context(project_id);
         let owner = authority(&context);
@@ -997,7 +1083,7 @@ for line in sys.stdin:
         )
         .await
         .unwrap();
-        let observation_db = host.project_observation_database_for_test().unwrap();
+        let observation_db = host.project_observation_database_arc_for_test().unwrap();
         let storage = observation_db.work_storage().unwrap();
         let context = context(project_id);
         let owner = authority(&context);
