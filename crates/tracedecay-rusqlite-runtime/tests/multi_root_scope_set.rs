@@ -1,21 +1,130 @@
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::PathBuf;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Savepoint};
+use tempfile::TempDir;
 use tracedecay_application::{
     AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    UtcMicros, WorktreeId,
+    ActorId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
+    ScopeSetRevision, UtcMicros, WorktreeId,
 };
-use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetExecutor;
+use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
+use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
+use tracedecay_rusqlite_runtime::repository::{
+    AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
+};
+use tracedecay_rusqlite_runtime::{
+    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
+};
 use tracedecay_store::runtime::ScopeSetCasOutcomeV1;
+use tracedecay_store::{
+    AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
+    StorageRuntimeErrorV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 const CAPABILITY: &str = "capability.multi-root.query";
 const USE_CASE: &str = "use-case.multi-root.query";
+
+struct NoTypedWrites;
+
+impl StorageOperationExecutor for NoTypedWrites {
+    fn execute(
+        &mut self,
+        _savepoint: &Savepoint<'_>,
+        _payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
+        unreachable!("scope sets use only the registered migration SQL channel")
+    }
+}
+
+#[derive(Clone)]
+struct NoTypedReads;
+
+impl ReaderQueryExecutor for NoTypedReads {
+    fn execute_read(
+        &mut self,
+        _snapshot: &rusqlite::Transaction<'_>,
+        _request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        unreachable!("scope sets use only the registered migration SQL channel")
+    }
+}
+
+struct RegisteredScopeSetStore {
+    storage: AuthorizedScopeSetSqliteStorage,
+    path: PathBuf,
+    _writer: PersistentWriter,
+    _readers: ReaderPool<NoTypedReads>,
+    _directory: TempDir,
+}
+
+impl RegisteredScopeSetStore {
+    fn start(name: &str, setup: impl FnOnce(&Connection)) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!("{name}.sqlite3"));
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
+                .unwrap();
+            setup(&connection);
+        }
+        let path = path.canonicalize().unwrap();
+        let binding = registered_binding(name);
+        let locator = registered_locator(&binding);
+        let writer = PersistentWriter::start(
+            ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
+            AdmissionConfigV1::default(),
+            NoTypedWrites,
+        )
+        .unwrap();
+        let readers = ReaderPool::start(
+            ExistingReaderLocator::new(binding, locator, path.clone()).unwrap(),
+            AdmissionConfigV1::default().readers,
+            NoTypedReads,
+        )
+        .unwrap();
+        let handle = MigrationSqlHandle::attach(&writer, &readers).unwrap();
+        Self {
+            storage: AuthorizedScopeSetSqliteStorage::from_registered(handle),
+            path,
+            _writer: writer,
+            _readers: readers,
+            _directory: directory,
+        }
+    }
+
+    fn inspect(&self, read: impl FnOnce(&Connection)) {
+        let connection = Connection::open(&self.path).unwrap();
+        read(&connection);
+    }
+}
+
+fn registered_binding(name: &str) -> StoreRuntimeBindingV1 {
+    serde_json::from_value(serde_json::json!({
+        "shard_id": {
+            "brain_id": "brain.scope-set",
+            "profile_id": "profile.scope-set",
+            "scope": { "kind": "project", "project_id": format!("project.scope-set.{name}") }
+        },
+        "incarnation": 1,
+        "authority_epoch": 1
+    }))
+    .unwrap()
+}
+
+fn registered_locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1 {
+    VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        StoreIncarnationV1::new(1).unwrap(),
+        LocatorDigest::new(format!("sha256:{}", "5".repeat(64))).unwrap(),
+    )
+}
 
 fn id<T>(value: &str) -> T
 where
@@ -66,8 +175,12 @@ fn scope_set(revision: u64) -> AuthorizedScopeSet {
 }
 
 fn scope_set_for_actor(revision: u64, actor: &str) -> AuthorizedScopeSet {
+    scope_set_for_id_actor(revision, "scope-set.fixture", actor)
+}
+
+fn scope_set_for_id_actor(revision: u64, scope_set_id: &str, actor: &str) -> AuthorizedScopeSet {
     AuthorizedScopeSetAuthority::authorize(
-        ScopeSetId::new("scope-set.fixture").unwrap(),
+        ScopeSetId::new(scope_set_id).unwrap(),
         ScopeSetRevision::new(revision).unwrap(),
         vec![
             context_for_actor("worktree.main", &format!("main.{revision}"), actor),
@@ -225,4 +338,89 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
     assert!(
         AuthorizedScopeSetExecutor::read(&corrupt_connection, canonical.scope_set_id()).is_err()
     );
+}
+
+#[test]
+fn registered_scope_set_store_preserves_actor_and_checked_revisions() {
+    let store = RegisteredScopeSetStore::start("actor-cas", |_| {});
+    let first = scope_set_for_actor(1, "actor.owner");
+    let second = scope_set_for_actor(2, "actor.owner");
+    let takeover = scope_set_for_actor(3, "actor.other");
+
+    assert!(matches!(
+        store.storage.compare_and_swap(None, &first).unwrap(),
+        ScopeSetCasOutcomeV1::Applied(_)
+    ));
+    assert!(matches!(
+        store
+            .storage
+            .compare_and_swap(Some(ScopeSetRevision::new(1).unwrap()), &second)
+            .unwrap(),
+        ScopeSetCasOutcomeV1::Applied(_)
+    ));
+    assert!(
+        store
+            .storage
+            .compare_and_swap(Some(ScopeSetRevision::new(2).unwrap()), &takeover)
+            .is_err()
+    );
+    assert_eq!(
+        store.storage.read(first.scope_set_id()).unwrap(),
+        Some(second)
+    );
+
+    let oversized = scope_set_for_id_actor(
+        u64::try_from(i64::MAX).unwrap() + 1,
+        "scope-set.overflow",
+        "actor.owner",
+    );
+    assert!(store.storage.compare_and_swap(None, &oversized).is_err());
+    store.inspect(|connection| {
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM authorized_scope_sets_v1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    });
+}
+
+#[test]
+fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
+    let canonical = scope_set(1);
+    let payload = serde_json::to_vec(&canonical).unwrap();
+    let id = canonical.scope_set_id().as_str().to_owned();
+    let digest = canonical.digest().as_str().to_owned();
+
+    for (name, revision) in [("zero-revision", 0_i64), ("negative-revision", -1_i64)] {
+        let payload = payload.clone();
+        let id = id.clone();
+        let digest = digest.clone();
+        let store = RegisteredScopeSetStore::start(name, move |connection| {
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = ON")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO authorized_scope_sets_v1
+                         (scope_set_id, revision, digest, canonical_payload)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![id, revision, digest, payload],
+                )
+                .unwrap();
+        });
+        assert!(store.storage.read(canonical.scope_set_id()).is_err());
+    }
+
+    let corrupt = RegisteredScopeSetStore::start("corrupt-payload", move |connection| {
+        connection
+            .execute(
+                "INSERT INTO authorized_scope_sets_v1
+                     (scope_set_id, revision, digest, canonical_payload)
+                 VALUES (?1, 1, ?2, ?3)",
+                rusqlite::params![id, digest, b"{".as_slice()],
+            )
+            .unwrap();
+    });
+    assert!(corrupt.storage.read(canonical.scope_set_id()).is_err());
 }
