@@ -84,6 +84,29 @@ where
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_workspace_ports(
+        workspace: AuthorizedLspWorkspace,
+        initial_capabilities: EffectiveCapabilities,
+        gateway_capabilities: GatewayCapabilities,
+        upstream_capabilities: UpstreamCapabilities,
+        feedback_cycle: P,
+        semantic_provider: S,
+        diagnostics: D,
+    ) -> Self {
+        Self::new(
+            DaemonLspGateway::for_workspace(
+                workspace,
+                initial_capabilities,
+                feedback_cycle,
+                semantic_provider,
+            ),
+            gateway_capabilities,
+            upstream_capabilities,
+            diagnostics,
+        )
+    }
+
     pub fn new(
         gateway: DaemonLspGateway<P, S>,
         gateway_capabilities: GatewayCapabilities,
@@ -182,18 +205,29 @@ where
 
     pub(super) fn clear_volatile_state(&mut self) {
         if let Some(cancellation) = &self.semantic.cancellation {
-            for request_id in self.semantic.pending.keys() {
-                let _ = cancellation.cancel_upstream(self.lifecycle.gateway.root(), request_id);
+            for (request_id, pending) in &self.semantic.pending {
+                if let Some(root) = pending
+                    .request
+                    .document_uri()
+                    .and_then(|uri| self.document_root(uri).ok())
+                {
+                    let _ = cancellation.cancel_upstream(&root, request_id);
+                }
             }
         }
         if let Some(context) = &self.context.port {
             for pending in self.context.pending_requests.values() {
-                let _ =
-                    context.cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                if let Ok(root) = self.optional_document_root(
+                    pending.request.document_uri.as_deref(),
+                    TRACEDECAY_CONTEXT_METHOD,
+                ) {
+                    let _ = context.cancel_request(&root, &pending.operation_id);
+                }
             }
             for pending in self.context.pending_expansions.values() {
-                let _ =
-                    context.cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                if let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD) {
+                    let _ = context.cancel_request(&root, &pending.operation_id);
+                }
             }
         }
         self.lifecycle.overlays.clear();
@@ -219,7 +253,13 @@ where
         for (request_id, pending) in semantic {
             let _ = self.lifecycle.control.cancel_request(&request_id);
             if let Some(cancellation) = &self.semantic.cancellation {
-                let _ = cancellation.cancel_upstream(self.lifecycle.gateway.root(), &request_id);
+                if let Some(root) = pending
+                    .request
+                    .document_uri()
+                    .and_then(|uri| self.document_root(uri).ok())
+                {
+                    let _ = cancellation.cancel_upstream(&root, &request_id);
+                }
             }
             self.complete_context_request(
                 request_id,
@@ -234,8 +274,12 @@ where
         for (request_id, pending) in snapshots {
             let _ = self.lifecycle.control.cancel_request(&request_id);
             if let Some(context) = &self.context.port {
-                let _ =
-                    context.cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                if let Ok(root) = self.optional_document_root(
+                    pending.request.document_uri.as_deref(),
+                    TRACEDECAY_CONTEXT_METHOD,
+                ) {
+                    let _ = context.cancel_request(&root, &pending.operation_id);
+                }
             }
             self.complete_context_request(
                 request_id,
@@ -250,8 +294,9 @@ where
         for (request_id, pending) in expansions {
             let _ = self.lifecycle.control.cancel_request(&request_id);
             if let Some(context) = &self.context.port {
-                let _ =
-                    context.cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                if let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD) {
+                    let _ = context.cancel_request(&root, &pending.operation_id);
+                }
             }
             self.complete_context_request(
                 request_id,
@@ -351,20 +396,25 @@ where
             ));
             return;
         }
-        let root_uri = match initialized_root_uri(params) {
-            Ok(root_uri) => root_uri,
+        let root_uris = match initialized_workspace_uris(params) {
+            Ok(root_uris) => root_uris,
             Err(error) => {
                 self.enqueue_value(error_response(id, error));
                 return;
             }
         };
-        if !self.lifecycle.gateway.root().matches_root_uri(&root_uri) {
+        if !self
+            .lifecycle
+            .gateway
+            .workspace()
+            .admits_exact_root_hints(&root_uris)
+        {
             self.enqueue_value(error_response(
                 id,
                 RpcFailure {
                     code: -32602,
                     message: "Invalid params",
-                    data: json!({ "detail": "root is not the daemon-admitted root" }),
+                    data: json!({ "detail": "workspace roots differ from the daemon-admitted set" }),
                 },
             ));
             return;
@@ -488,22 +538,29 @@ where
     }
     pub(super) fn expire_requests(&mut self, now_ms: u64) {
         for id in self.lifecycle.control.expire_deadlines(now_ms) {
-            if self.semantic.pending.remove(&id).is_some()
+            if let Some(pending) = self.semantic.pending.remove(&id)
                 && let Some(cancellation) = &self.semantic.cancellation
+                && let Some(root) = pending
+                    .request
+                    .document_uri()
+                    .and_then(|uri| self.document_root(uri).ok())
             {
-                let _ = cancellation.cancel_upstream(self.lifecycle.gateway.root(), &id);
+                let _ = cancellation.cancel_upstream(&root, &id);
             }
             if let Some(pending) = self.context.pending_requests.remove(&id)
                 && let Some(context) = &self.context.port
+                && let Ok(root) = self.optional_document_root(
+                    pending.request.document_uri.as_deref(),
+                    TRACEDECAY_CONTEXT_METHOD,
+                )
             {
-                let _ =
-                    context.cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                let _ = context.cancel_request(&root, &pending.operation_id);
             }
             if let Some(pending) = self.context.pending_expansions.remove(&id)
                 && let Some(context) = &self.context.port
+                && let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD)
             {
-                let _ =
-                    context.cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                let _ = context.cancel_request(&root, &pending.operation_id);
             }
             let disposition = self.lifecycle.control.complete_request(&id);
             if let Some(failure) = disposition.failure() {
@@ -521,20 +578,32 @@ where
             let semantic = self.semantic.pending.remove(id);
             let context_pending = self.context.pending_requests.remove(id);
             let expansion_pending = self.context.pending_expansions.remove(id);
-            if let Some(cancellation) = &self.semantic.cancellation {
-                let _ = cancellation.cancel_upstream(self.lifecycle.gateway.root(), id);
+            if let Some(cancellation) = &self.semantic.cancellation
+                && let Some(root) = semantic
+                    .as_ref()
+                    .and_then(|pending| pending.request.document_uri())
+                    .and_then(|uri| self.document_root(uri).ok())
+            {
+                let _ = cancellation.cancel_upstream(&root, id);
             }
             if let Some(context) = &self.context.port {
                 if let Some(pending) = context_pending.as_ref() {
-                    let _ = context
-                        .cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                    if let Ok(root) = self.optional_document_root(
+                        pending.request.document_uri.as_deref(),
+                        TRACEDECAY_CONTEXT_METHOD,
+                    ) {
+                        let _ = context.cancel_request(&root, &pending.operation_id);
+                    }
                 }
                 if let Some(pending) = expansion_pending.as_ref() {
-                    let _ = context
-                        .cancel_request(self.lifecycle.gateway.root(), &pending.operation_id);
+                    if let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD) {
+                        let _ = context.cancel_request(&root, &pending.operation_id);
+                    }
                 }
                 if context_pending.is_none() && expansion_pending.is_none() {
-                    let _ = context.cancel_request(self.lifecycle.gateway.root(), id);
+                    for root in self.lifecycle.gateway.workspace().roots() {
+                        let _ = context.cancel_request(root, id);
+                    }
                 }
             }
             let response_id = semantic
@@ -565,17 +634,43 @@ where
     }
 
     pub(super) fn require_document_root(&self, uri: &str) -> Result<(), RpcFailure> {
+        self.document_root(uri).map(drop)
+    }
+
+    pub(super) fn document_root(&self, uri: &str) -> Result<AdmittedRoot, RpcFailure> {
         self.lifecycle
             .gateway
-            .root()
-            .contains_document(uri)
-            .then_some(())
-            .ok_or_else(|| {
+            .root_for_document(uri)
+            .cloned()
+            .map_err(|reason| {
                 RpcFailure::unavailable(
                     GatewayMethod::TextDocumentDiagnostic.as_lsp_method(),
-                    MethodUnavailableReason::OutsideAdmittedRoot,
+                    reason,
                 )
             })
+    }
+
+    pub(super) fn optional_document_root(
+        &self,
+        uri: Option<&str>,
+        method: &str,
+    ) -> Result<AdmittedRoot, RpcFailure> {
+        match uri {
+            Some(uri) => self.document_root(uri),
+            None => self.workspace_root(method),
+        }
+    }
+
+    pub(super) fn workspace_root(&self, method: &str) -> Result<AdmittedRoot, RpcFailure> {
+        let roots = self.lifecycle.gateway.workspace().roots();
+        if roots.len() == 1 {
+            Ok(roots[0].clone())
+        } else {
+            Err(RpcFailure::unavailable(
+                method,
+                MethodUnavailableReason::AmbiguousAdmittedRoot,
+            ))
+        }
     }
 
     pub(super) fn close_for_overlay_error(&mut self, error: OverlayError) -> RpcFailure {

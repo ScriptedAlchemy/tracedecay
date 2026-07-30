@@ -112,6 +112,12 @@ pub struct AuthorizedLspWorkspace {
     roots: Vec<AdmittedRoot>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LspWorkspaceRouteError {
+    OutsideAdmittedRoots,
+    AmbiguousAdmittedRoots,
+}
+
 impl AuthorizedLspWorkspace {
     pub fn single(root: AdmittedRoot) -> Self {
         Self {
@@ -164,14 +170,61 @@ impl AuthorizedLspWorkspace {
         self.scope_set_digest.as_ref()
     }
 
-    fn primary(&self) -> &AdmittedRoot {
+    pub fn resolve_document(
+        &self,
+        document_uri: &str,
+    ) -> Result<&AdmittedRoot, LspWorkspaceRouteError> {
+        let mut matches = self
+            .roots
+            .iter()
+            .filter(|root| root.contains_document(document_uri));
+        let Some(root) = matches.next() else {
+            return Err(LspWorkspaceRouteError::OutsideAdmittedRoots);
+        };
+        if matches.next().is_some() {
+            return Err(LspWorkspaceRouteError::AmbiguousAdmittedRoots);
+        }
+        Ok(root)
+    }
+
+    pub fn resolve_root_uri(
+        &self,
+        root_uri: &str,
+    ) -> Result<&AdmittedRoot, LspWorkspaceRouteError> {
+        let mut matches = self
+            .roots
+            .iter()
+            .filter(|root| root.matches_root_uri(root_uri));
+        let Some(root) = matches.next() else {
+            return Err(LspWorkspaceRouteError::OutsideAdmittedRoots);
+        };
+        if matches.next().is_some() {
+            return Err(LspWorkspaceRouteError::AmbiguousAdmittedRoots);
+        }
+        Ok(root)
+    }
+
+    pub fn admits_exact_root_hints(&self, requested: &[String]) -> bool {
+        self.matches_multi_root_hints(requested)
+    }
+
+    pub fn is_single_root(&self) -> bool {
+        self.roots.len() == 1
+    }
+
+    pub(crate) fn primary(&self) -> &AdmittedRoot {
         &self.roots[0]
     }
 
     fn matches_multi_root_hints(&self, requested: &[String]) -> bool {
         requested.len() == self.roots.len()
-            && requested.iter().all(|uri| {
-                self.roots
+            && requested.iter().enumerate().all(|(index, uri)| {
+                !requested[..index].iter().any(|prior| {
+                    self.roots
+                        .iter()
+                        .any(|root| root.matches_root_uri(prior) && root.matches_root_uri(uri))
+                }) && self
+                    .roots
                     .iter()
                     .filter(|root| root.matches_root_uri(uri))
                     .count()
@@ -973,6 +1026,37 @@ mod tests {
         assert_eq!(
             session.complete_request(&LspRequestId::Number(1)),
             CompletionDisposition::UnknownRequest
+        );
+    }
+
+    #[test]
+    fn authorized_workspace_rejects_ambiguous_nested_document_routes() {
+        let workspace = AuthorizedLspWorkspace::new(
+            Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
+            vec![
+                AdmittedRoot::authorized(
+                    "file:///repo",
+                    ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+                ),
+                AdmittedRoot::authorized(
+                    "file:///repo/nested",
+                    ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            workspace.resolve_document("file:///repo/nested/src/lib.rs"),
+            Err(LspWorkspaceRouteError::AmbiguousAdmittedRoots)
+        );
+        assert_eq!(
+            workspace.resolve_document("file:///outside/lib.rs"),
+            Err(LspWorkspaceRouteError::OutsideAdmittedRoots)
+        );
+        assert!(
+            !workspace
+                .admits_exact_root_hints(&["file:///repo".to_owned(), "file:///repo".to_owned(),])
         );
     }
 

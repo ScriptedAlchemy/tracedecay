@@ -1,6 +1,7 @@
 //! JSON-RPC 2.0 framing helpers, parameter parsing, and gateway response encoding.
 
 use serde_json::{Map, Value, json};
+use tracedecay_domain::ManifestDigest;
 
 use crate::capabilities::EffectiveCapabilities;
 use crate::diagnostics::{
@@ -472,6 +473,7 @@ pub(crate) fn unavailable_reason(reason: MethodUnavailableReason) -> &'static st
         MethodUnavailableReason::ExplicitlyUnavailable => "explicitlyUnavailable",
         MethodUnavailableReason::CapabilityNotNegotiated => "capabilityNotNegotiated",
         MethodUnavailableReason::OutsideAdmittedRoot => "outsideAdmittedRoot",
+        MethodUnavailableReason::AmbiguousAdmittedRoot => "ambiguousAdmittedRoot",
         MethodUnavailableReason::ProviderUnavailable => "providerUnavailable",
     }
 }
@@ -488,21 +490,21 @@ pub(crate) fn deferred_method_reason(method: &str) -> MethodUnavailableReason {
     }
 }
 
-pub(crate) fn initialized_root_uri(params: &Value) -> Result<String, RpcFailure> {
+pub(crate) fn initialized_workspace_uris(params: &Value) -> Result<Vec<String>, RpcFailure> {
     let folders = params.get("workspaceFolders");
-    let folder_uri = match folders {
-        Some(Value::Array(folders)) if folders.len() > 1 => {
-            return Err(RpcFailure::invalid_params(
-                "multiple workspace folders are unsupported",
-            ));
-        }
-        Some(Value::Array(folders)) if folders.len() == 1 => folders[0]
-            .get("uri")
-            .and_then(Value::as_str)
-            .filter(|uri| !uri.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| RpcFailure::invalid_params("workspace folder uri is required"))?,
-        Some(Value::Array(_) | Value::Null) | None => String::new(),
+    let folder_uris = match folders {
+        Some(Value::Array(folders)) => folders
+            .iter()
+            .map(|folder| {
+                folder
+                    .get("uri")
+                    .and_then(Value::as_str)
+                    .filter(|uri| !uri.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| RpcFailure::invalid_params("workspace folder uri is required"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(Value::Null) | None => Vec::new(),
         Some(_) => {
             return Err(RpcFailure::invalid_params(
                 "workspaceFolders must be an array",
@@ -518,17 +520,19 @@ pub(crate) fn initialized_root_uri(params: &Value) -> Result<String, RpcFailure>
             ));
         }
     };
-    if folder_uri.is_empty() {
-        root_uri.ok_or_else(|| RpcFailure::invalid_params("one explicit rootUri is required"))
+    if folder_uris.is_empty() {
+        root_uri
+            .map(|root| vec![root])
+            .ok_or_else(|| RpcFailure::invalid_params("one explicit rootUri is required"))
     } else {
         if let Some(root_uri) = root_uri
-            && root_uri != folder_uri
+            && !folder_uris.iter().any(|folder| folder == &root_uri)
         {
             return Err(RpcFailure::invalid_params(
-                "rootUri and workspace folder differ",
+                "rootUri is not one of the workspace folders",
             ));
         }
-        Ok(folder_uri)
+        Ok(folder_uris)
     }
 }
 
@@ -696,8 +700,20 @@ pub(crate) fn overlay_failure(error: OverlayError) -> RpcFailure {
     }
 }
 
-pub(crate) fn diagnostic_result_id(generation: u64, version: i64) -> String {
-    format!("generation:{generation}:version:{version}")
+pub(crate) fn diagnostic_result_id(
+    scope_set_digest: Option<&ManifestDigest>,
+    scope_digest: Option<&ManifestDigest>,
+    generation: u64,
+    version: i64,
+) -> String {
+    match (scope_set_digest, scope_digest) {
+        (Some(scope_set), Some(scope)) => format!(
+            "scope-set={};scope={};generation={generation};version={version}",
+            scope_set.as_str(),
+            scope.as_str()
+        ),
+        _ => format!("generation:{generation}:version:{version}"),
+    }
 }
 
 #[cfg(test)]

@@ -119,7 +119,7 @@ pub use session::{
     DaemonLspSessionEndpoint, LSP_SESSION_TTL_MS, LifecycleError, LspEndpointError,
     LspRequestFailure, LspRequestId, LspSessionAccess, LspSessionAdmissionPort, LspSessionControl,
     LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
-    MAX_LSP_SESSIONS, MAX_LSP_WORKSPACE_ROOTS, MAX_PENDING_REQUESTS, MAX_PUBLICATION_BYTES,
-    PublicationAdmission, PublicationDelivery, PublicationState, RequestAdmission,
-    SessionLifecycle,
+    LspWorkspaceRouteError, MAX_LSP_SESSIONS, MAX_LSP_WORKSPACE_ROOTS, MAX_PENDING_REQUESTS,
+    MAX_PUBLICATION_BYTES, PublicationAdmission, PublicationDelivery, PublicationState,
+    RequestAdmission, SessionLifecycle,
 };

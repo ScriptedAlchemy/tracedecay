@@ -8,12 +8,16 @@ const MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES: usize = 256;
 pub(super) struct PublishedDiagnostic {
     pub(super) version: i64,
     pub(super) generation: u64,
+    pub(super) scope_digest: Option<ManifestDigest>,
+    pub(super) scope_set_digest: Option<ManifestDigest>,
 }
 
 #[derive(Clone)]
 pub(super) struct PendingDiagnosticRefresh {
     pub(super) identity: DiagnosticRefreshIdentity,
     pub(super) overlay_version: i64,
+    pub(super) scope_digest: Option<ManifestDigest>,
+    pub(super) scope_set_digest: Option<ManifestDigest>,
 }
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct NativeDiagnosticSnapshot {
@@ -240,11 +244,11 @@ where
         )?;
         self.poll_diagnostic_refresh(uri);
         let overlay = self.lifecycle.overlays.snapshot(uri);
-        let outcome = self.diagnostics.provider.document_diagnostics(
-            self.lifecycle.gateway.root(),
-            uri,
-            overlay.as_ref(),
-        );
+        let root = self.document_root(uri)?;
+        let outcome = self
+            .diagnostics
+            .provider
+            .document_diagnostics(&root, uri, overlay.as_ref());
         let version = overlay.as_ref().map_or(0, |overlay| overlay.version);
         let source_generation = diagnostic_source_generation(&outcome);
         let _refresh_failure =
@@ -283,7 +287,16 @@ where
             .published
             .get(uri)
             .is_some_and(|published| {
-                published.version == version && published.generation > generation
+                published.version == version
+                    && published.generation > generation
+                    && published.scope_digest == root.scope_digest().cloned()
+                    && published.scope_set_digest
+                        == self
+                            .lifecycle
+                            .gateway
+                            .workspace()
+                            .scope_set_digest()
+                            .cloned()
             })
         {
             return Err(refresh_pending_failure(
@@ -293,7 +306,12 @@ where
                 Some("superseded-generation".to_owned()),
             ));
         }
-        let result_id = diagnostic_result_id(generation, version);
+        let result_id = diagnostic_result_id(
+            self.lifecycle.gateway.workspace().scope_set_digest(),
+            root.scope_digest(),
+            generation,
+            version,
+        );
         let merged =
             self.merge_document_diagnostics(uri, diagnostics.upstream, diagnostics.tracedecay);
         let value = document_diagnostic_report_value(
@@ -322,6 +340,13 @@ where
                 PublishedDiagnostic {
                     version,
                     generation,
+                    scope_digest: root.scope_digest().cloned(),
+                    scope_set_digest: self
+                        .lifecycle
+                        .gateway
+                        .workspace()
+                        .scope_set_digest()
+                        .cloned(),
                 },
             );
         }
@@ -357,8 +382,11 @@ where
                 }
                 DebouncedDiagnosticKind::Refresh => {
                     let overlay = self.lifecycle.overlays.snapshot(&scheduled.uri);
+                    let Ok(root) = self.document_root(&scheduled.uri) else {
+                        continue;
+                    };
                     let outcome = self.diagnostics.provider.document_diagnostics(
-                        self.lifecycle.gateway.root(),
+                        &root,
                         &scheduled.uri,
                         overlay.as_ref(),
                     );
@@ -396,8 +424,11 @@ where
         {
             return None;
         }
+        let Ok(root) = self.document_root(uri) else {
+            return Some("document-root-unavailable".to_owned());
+        };
         match self.diagnostics.provider.request_document_refresh(
-            self.lifecycle.gateway.root(),
+            &root,
             uri,
             overlay,
             source_generation,
@@ -412,6 +443,13 @@ where
                     PendingDiagnosticRefresh {
                         identity,
                         overlay_version: version,
+                        scope_digest: root.scope_digest().cloned(),
+                        scope_set_digest: self
+                            .lifecycle
+                            .gateway
+                            .workspace()
+                            .scope_set_digest()
+                            .cloned(),
                     },
                 );
                 None
@@ -440,11 +478,27 @@ where
             return;
         }
         let overlay = self.lifecycle.overlays.snapshot(uri);
-        match self.diagnostics.provider.document_diagnostics(
-            self.lifecycle.gateway.root(),
-            uri,
-            overlay.as_ref(),
-        ) {
+        let Ok(root) = self.document_root(uri) else {
+            self.diagnostics.active_refreshes.remove(uri);
+            return;
+        };
+        if pending.scope_digest != root.scope_digest().cloned()
+            || pending.scope_set_digest
+                != self
+                    .lifecycle
+                    .gateway
+                    .workspace()
+                    .scope_set_digest()
+                    .cloned()
+        {
+            self.diagnostics.active_refreshes.remove(uri);
+            return;
+        }
+        match self
+            .diagnostics
+            .provider
+            .document_diagnostics(&root, uri, overlay.as_ref())
+        {
             DiagnosticSnapshotOutcome::Ready {
                 diagnostics,
                 completed_operation_id,
@@ -524,6 +578,16 @@ where
             PublishedDiagnostic {
                 version,
                 generation,
+                scope_digest: self
+                    .document_root(uri)
+                    .ok()
+                    .and_then(|root| root.scope_digest().cloned()),
+                scope_set_digest: self
+                    .lifecycle
+                    .gateway
+                    .workspace()
+                    .scope_set_digest()
+                    .cloned(),
             },
         );
         self.queue_diagnostic_refresh();
@@ -551,8 +615,8 @@ where
             diagnostic.related_information.retain(|related| {
                 self.lifecycle
                     .gateway
-                    .root()
-                    .contains_document(&related.uri)
+                    .root_for_document(&related.uri)
+                    .is_ok()
             });
         }
         diagnostics

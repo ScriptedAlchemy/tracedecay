@@ -4,11 +4,12 @@ use crate::TRACEDECAY_CONTEXT_REVISION;
 use crate::bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
 use crate::capabilities::SemanticCapability;
 use crate::diagnostics::{DiagnosticSeverity, DiagnosticSource, LspPosition, LspRange};
-use crate::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome};
+use crate::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome, WorkspaceSymbol};
 use crate::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
 use crate::provider::GenerationDiagnostics;
 use std::cell::RefCell;
 use std::sync::Mutex;
+use tracedecay_domain::ManifestDigest;
 
 #[derive(Default)]
 pub(super) struct Feedback(RefCell<Vec<FeedbackCycleRequest>>);
@@ -214,6 +215,186 @@ fn initialization_is_single_root_and_deferred_methods_are_typed_unavailable() {
     let response: Value = serde_json::from_slice(&output[0]).unwrap();
     assert_eq!(response["error"]["code"], -32601);
     assert_eq!(response["error"]["data"]["reason"], "explicitlyUnavailable");
+}
+
+#[derive(Clone, Default)]
+struct RoutingSemantics {
+    routed_scope_digests: Arc<Mutex<Vec<ManifestDigest>>>,
+}
+
+impl SemanticProviderPort for RoutingSemantics {
+    fn definition(
+        &self,
+        root: &AdmittedRoot,
+        uri: &str,
+        _position: LspPosition,
+    ) -> SemanticProviderOutcome<Vec<LspLocation>> {
+        self.routed_scope_digests
+            .lock()
+            .expect("capture routed root")
+            .push(root.scope_digest().expect("authorized root").clone());
+        SemanticProviderOutcome::Complete(vec![LspLocation {
+            uri: uri.to_owned(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+            },
+        }])
+    }
+
+    fn workspace_symbols(
+        &self,
+        root: &AdmittedRoot,
+        _query: &str,
+    ) -> SemanticProviderOutcome<Vec<WorkspaceSymbol>> {
+        self.routed_scope_digests
+            .lock()
+            .expect("capture routed root")
+            .push(root.scope_digest().expect("authorized root").clone());
+        SemanticProviderOutcome::Complete(vec![WorkspaceSymbol {
+            name: root.uri().to_owned(),
+            kind: 1,
+            location: LspLocation {
+                uri: root.uri().to_owned(),
+                range: LspRange {
+                    start: LspPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: LspPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+            },
+        }])
+    }
+}
+
+#[test]
+fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
+    let left_digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+    let right_digest = ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap();
+    let workspace = AuthorizedLspWorkspace::new(
+        Some(ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap()),
+        vec![
+            AdmittedRoot::authorized("file:///left", left_digest.clone()),
+            AdmittedRoot::authorized("file:///right", right_digest.clone()),
+        ],
+    )
+    .unwrap();
+    let semantics = RoutingSemantics::default();
+    let routed = semantics.routed_scope_digests.clone();
+    let gateway_capabilities = GatewayCapabilities {
+        supports_workspace_folders: true,
+        ..GatewayCapabilities::default()
+    };
+    let upstream = UpstreamCapabilities {
+        supports_diagnostics: true,
+        semantic: SemanticCapability::ALL.into_iter().collect(),
+    };
+    let initial = negotiate_capabilities(
+        &ClientCapabilities::default(),
+        &gateway_capabilities,
+        &upstream,
+    );
+    let mut session = DaemonLspProtocolSession::from_workspace_ports(
+        workspace,
+        initial,
+        gateway_capabilities,
+        upstream,
+        Feedback::default(),
+        semantics,
+        Diagnostics,
+    );
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "workspaceFolders": [
+                { "uri": "file:///left", "name": "left" },
+                { "uri": "file:///right", "name": "right" }
+            ],
+            "capabilities": {
+                "general": { "positionEncodings": ["utf-16"] },
+                "textDocument": {
+                    "definition": {},
+                    "diagnostic": {}
+                },
+                "workspace": {
+                    "workspaceFolders": true,
+                    "symbol": {}
+                }
+            }
+        }
+    });
+    session.handle_payload(&serde_json::to_vec(&initialize).unwrap(), 0);
+    session.drain_outbound();
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        1,
+    );
+
+    for (id, uri) in [
+        (2, "file:///left/src/lib.rs"),
+        (3, "file:///right/src/lib.rs"),
+    ] {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 0 }
+            }
+        });
+        session.handle_payload(&serde_json::to_vec(&request).unwrap(), id);
+    }
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":4,"method":"workspace/symbol","params":{"query":"needle"}}"#,
+        4,
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":5,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":"file:///left/src/lib.rs"}}}"#,
+        5,
+    );
+    let responses = session.drain_outbound();
+    assert_eq!(responses.len(), 4);
+    let workspace_response: Value = serde_json::from_slice(&responses[2]).unwrap();
+    assert_eq!(
+        workspace_response["result"]
+            .as_array()
+            .unwrap_or_else(|| panic!("workspace response was {workspace_response}"))
+            .len(),
+        2
+    );
+    let diagnostic_response: Value = serde_json::from_slice(&responses[3]).unwrap();
+    let result_id = diagnostic_response["result"]["resultId"].as_str().unwrap();
+    assert!(result_id.contains(&"c".repeat(64)));
+    assert!(result_id.contains(&"a".repeat(64)));
+    assert_eq!(
+        *routed.lock().expect("read routed roots"),
+        vec![
+            left_digest.clone(),
+            right_digest.clone(),
+            left_digest,
+            right_digest,
+        ]
+    );
+
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":6,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///escape.rs"},"position":{"line":0,"character":0}}}"#,
+        6,
+    );
+    let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(response["error"]["data"]["reason"], "outsideAdmittedRoot");
 }
 
 #[test]
