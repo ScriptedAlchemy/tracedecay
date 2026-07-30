@@ -1,10 +1,10 @@
 use crate::db::engine::Value as SqlValue;
 use tracedecay_domain::TemporalModeV1;
 
-use crate::query::temporal::ports::{
+use tracedecay_temporal_query::ports::{
     PageRequest, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
 };
-use crate::query::temporal::ranking::RankingCandidate;
+use tracedecay_temporal_query::ranking::RankingCandidate;
 
 use super::cursors::*;
 use super::rows::*;
@@ -56,10 +56,10 @@ pub(super) fn build_record_query(
         params.push(SqlValue::Text(session_id.to_string()));
         params.push(SqlValue::Text(candidate.anchor_id.to_string()));
         params.push(match candidate.channel {
-            crate::query::temporal::candidates::CandidateChannel::Span => {
+            tracedecay_temporal_query::candidates::CandidateChannel::Span => {
                 SqlValue::Text("span".to_string())
             }
-            crate::query::temporal::candidates::CandidateChannel::Burst => {
+            tracedecay_temporal_query::candidates::CandidateChannel::Burst => {
                 SqlValue::Text("burst".to_string())
             }
             _ => SqlValue::Null,

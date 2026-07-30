@@ -6,8 +6,8 @@ use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCurs
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
 use crate::db::engine::{Executor, ReadSnapshot, params};
-use crate::query::temporal::cursor::{CURSOR_CLOCK_SKEW_MICROS, CURSOR_LIFETIME_MICROS};
-use crate::query::temporal::ports::{
+use tracedecay_temporal_query::cursor::{CURSOR_CLOCK_SKEW_MICROS, CURSOR_LIFETIME_MICROS};
+use tracedecay_temporal_query::ports::{
     CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,
     TemporalExecutionSnapshot,
 };

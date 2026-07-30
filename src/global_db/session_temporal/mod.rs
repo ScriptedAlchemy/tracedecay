@@ -37,17 +37,17 @@ use crate::application::session::{
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
 use crate::global_db::RegisteredGlobalDb;
-use crate::query::temporal::context::VersionedTokenEstimator;
-use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use crate::query::temporal::execute_temporal_kernel;
-use crate::query::temporal::hydration::hydrate_selected;
-use crate::query::temporal::ports::{
+use tracedecay_store::SessionMessageRecord;
+use tracedecay_temporal_query::context::VersionedTokenEstimator;
+use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
+use tracedecay_temporal_query::execute_temporal_kernel;
+use tracedecay_temporal_query::hydration::hydrate_selected;
+use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalAuthorizedRoot,
     TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
     TemporalParticipantManifest, TemporalRetrievalScope, TemporalSourceAccess, TemporalWatermarks,
 };
-use crate::query::temporal::resolution::ValidatedAuthorization;
-use tracedecay_store::SessionMessageRecord;
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub(crate) use self::direct::ResolvedDirectAnchor;
@@ -261,7 +261,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .await
             .map_err(|error| {
                 SessionTemporalExecutionError::Kernel(
-                    crate::query::temporal::TemporalKernelError::Hydration(error),
+                    tracedecay_temporal_query::TemporalKernelError::Hydration(error),
                 )
             })?;
         let available = batch
@@ -715,26 +715,26 @@ struct FrozenWatermarksWire {
 }
 
 fn map_control_error(
-    error: crate::query::temporal::ports::TemporalPortError,
+    error: tracedecay_temporal_query::ports::TemporalPortError,
 ) -> SessionTemporalExecutionError {
     match error {
-        crate::query::temporal::ports::TemporalPortError::Cancelled
-        | crate::query::temporal::ports::TemporalPortError::DeadlineExceeded => {
+        tracedecay_temporal_query::ports::TemporalPortError::Cancelled
+        | tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
             SessionTemporalExecutionError::Cancelled
         }
-        crate::query::temporal::ports::TemporalPortError::BudgetExceeded { .. } => {
+        tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
             SessionTemporalExecutionError::BudgetExhausted
         }
-        error @ (crate::query::temporal::ports::TemporalPortError::ParticipantLimitExceeded {
+        error @ (tracedecay_temporal_query::ports::TemporalPortError::ParticipantLimitExceeded {
             ..
-        } | crate::query::temporal::ports::TemporalPortError::ParticipantManifestBytesExceeded {
+        } | tracedecay_temporal_query::ports::TemporalPortError::ParticipantManifestBytesExceeded {
             ..
         }) => SessionTemporalExecutionError::Kernel(
-            crate::query::temporal::TemporalKernelError::Port(error),
+            tracedecay_temporal_query::TemporalKernelError::Port(error),
         ),
         // The caller distinguishes a genuinely source-free root from sources
         // that exist but have not published a searchable generation.
-        crate::query::temporal::ports::TemporalPortError::EmptyParticipantManifest => {
+        tracedecay_temporal_query::ports::TemporalPortError::EmptyParticipantManifest => {
             SessionTemporalExecutionError::Unavailable
         }
         _ => SessionTemporalExecutionError::Unavailable,
