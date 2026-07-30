@@ -481,7 +481,11 @@ fn nullable_unsigned(value: Option<&Value>, status: u16, field: &str) -> Result<
     }
 }
 
-fn validate_receipt(value: Option<&Value>, status: u16, field: &str) -> Result<&str, ClientError> {
+fn validate_receipt<'a>(
+    value: Option<&'a Value>,
+    status: u16,
+    field: &str,
+) -> Result<&'a str, ClientError> {
     let receipt = object(value, status, field)?;
     unsigned(receipt.get("started_at"), status, "execution.started_at")?;
     unsigned(receipt.get("ended_at"), status, "execution.ended_at")?;
