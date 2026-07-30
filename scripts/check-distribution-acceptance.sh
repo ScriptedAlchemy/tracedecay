@@ -756,8 +756,9 @@ CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 "$fastembed_binary" \
   "$fastembed_dimensions" \
   "$fastembed_max_length"
 
-binary="$install_root/bin/tracedecay"
-[[ -x $binary ]] || die "cargo install did not produce $binary"
+binary=$(python3 "$repo/scripts/resolve-installed-binary.py" \
+  "$install_root" \
+  "${RUNNER_OS:-}")
 "$binary" --version
 
 echo "distribution acceptance: exercising installed MCP behavior"

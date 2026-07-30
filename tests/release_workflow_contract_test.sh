@@ -69,24 +69,45 @@ for name, text in [("stable", stable), ("beta", beta)]:
         if target not in text:
             raise SystemExit(f"{name} release must preserve package coverage for {target}")
     for forbidden in [
-        r"cargo build[^\n]*--all-features",
         r"cargo install[^\n]*--all-features",
         r'std_cargo_args, "--all-features"',
+        r"python3 scripts/check-production-feature-profile.py",
     ]:
         if re.search(forbidden, text):
             raise SystemExit(
                 f"{name} release artifact must not enable test features: {forbidden!r}"
             )
     for required in [
-        "Build production release binary",
-        "--no-default-features --features production",
-        "Check production feature profile",
-        "Verify production Cargo install",
+        "Verify all-feature release build compiles",
+        "Build release binary for packaging",
+        ".release-automation/scripts/resolve-release-source-profile.py",
+        "${{ steps.release-profile.outputs.cargo_args }}",
+        "Run historical release binary smoke",
+        "steps.release-profile.outputs.profile == 'legacy-default'",
+        "Verify release Cargo install",
+        "path: release-source",
+        "--source release-source",
     ]:
         if required not in text:
             raise SystemExit(
                 f"{name} release must preserve production packaging guard {required!r}"
             )
+    compile_index = text.index("Verify all-feature release build compiles")
+    package_build_index = text.index("Build release binary for packaging")
+    mcpb_index = text.index("Package MCPB")
+    if not compile_index < package_build_index < mcpb_index:
+        raise SystemExit(
+            f"{name} release must leave the source-compatible production binary "
+            "at the packaging path"
+        )
+    if "Validate immutable FastEmbed fixture pins\n        if: steps.release-profile.outputs.profile == 'production'" not in text:
+        raise SystemExit(
+            f"{name} historical rebuild must not require modern FastEmbed fixtures"
+        )
+    if 'feature_args = "${{ steps.release-profile.outputs.cargo_args }}".split' not in text:
+        raise SystemExit(
+            f"{name} Homebrew source install must use the resolved source profile"
+        )
 
 if "  validate-stable-release:" not in stable:
     raise SystemExit("stable manual rebuild must have a validation job")
@@ -170,3 +191,5 @@ for item in required:
 if "contents: write" in text or "pull-requests: write" in text:
     raise SystemExit("release PR integrity workflow must remain read-only")
 PY
+
+python3 scripts/test-resolve-release-source-profile.py

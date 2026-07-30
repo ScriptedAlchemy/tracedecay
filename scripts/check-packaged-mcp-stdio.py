@@ -149,6 +149,57 @@ def main() -> int:
     if missing:
         raise SystemExit("MCP tools/list omitted required tools: " + ", ".join(missing))
 
+    diagnostics = inspect(
+        npx,
+        binary,
+        fixture,
+        environment,
+        "--method",
+        "tools/call",
+        "--tool-name",
+        "tracedecay_diagnostics",
+        check=False,
+    )
+    try:
+        diagnostic_payload = json.loads(diagnostics.stdout)
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            "advertised tracedecay_diagnostics dispatch returned no typed payload: "
+            + diagnostics.stderr.strip()
+        ) from error
+    content = diagnostic_payload.get("content")
+    if not isinstance(content, list):
+        raise SystemExit("tracedecay_diagnostics omitted typed MCP content")
+    diagnostic_text = "\n".join(
+        item.get("text", "")
+        for item in content
+        if isinstance(item, dict)
+        and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
+    )
+    if not diagnostic_text:
+        raise SystemExit("tracedecay_diagnostics returned no typed text result")
+    lowered = diagnostic_text.lower()
+    if diagnostic_payload.get("isError") is True:
+        if "unavailable" not in lowered or not any(
+            marker in lowered for marker in ("daemon", "authority", "service")
+        ):
+            raise SystemExit(
+                "tracedecay_diagnostics error was not typed as unavailable"
+            )
+    else:
+        if diagnostics.returncode != 0:
+            raise SystemExit(
+                "tracedecay_diagnostics successful payload exited nonzero"
+            )
+        if not any(
+            marker in lowered
+            for marker in ("diagnostic", "generation", "status", "unavailable")
+        ):
+            raise SystemExit(
+                "tracedecay_diagnostics success omitted concrete diagnostic state"
+            )
+
     resources = inspect(
         npx,
         binary,
