@@ -135,6 +135,13 @@ pub(crate) enum DashboardEventKindV1 {
         calls: u64,
         detail: Option<String>,
     },
+    /// Work task mutations were committed for this project. Clients refetch
+    /// canonical generation-bound Work projections.
+    TaskActivity {
+        count: u64,
+        tasks: u64,
+        detail: Option<String>,
+    },
     /// Requested durable cursor predates the retained frontier. The client
     /// invalidates canonical reads once, then continues from `first_available`.
     ResumeGap {
@@ -159,6 +166,7 @@ impl DashboardEventKindV1 {
             Self::SessionIngestActivity { .. } => ActivityFamilyV1::SessionIngest.stream_name(),
             Self::CodeIndexActivity { .. } => ActivityFamilyV1::CodeIndex.stream_name(),
             Self::ToolCallActivity { .. } => ActivityFamilyV1::ToolCall.stream_name(),
+            Self::TaskActivity { .. } => ActivityFamilyV1::Task.stream_name(),
             Self::ResumeGap { .. } => "control",
         }
     }
@@ -184,6 +192,11 @@ impl DashboardEventKindV1 {
             ActivityFamilyV1::ToolCall => Self::ToolCallActivity {
                 count,
                 calls: units,
+                detail,
+            },
+            ActivityFamilyV1::Task => Self::TaskActivity {
+                count,
+                tasks: units,
                 detail,
             },
         }

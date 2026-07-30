@@ -34,6 +34,7 @@ pub(crate) enum ActivityFamilyV1 {
     SessionIngest,
     CodeIndex,
     ToolCall,
+    Task,
 }
 
 impl ActivityFamilyV1 {
@@ -43,6 +44,7 @@ impl ActivityFamilyV1 {
             Self::SessionIngest => "session_ingest",
             Self::CodeIndex => "code_index_activity",
             Self::ToolCall => "tool_call",
+            Self::Task => "task_activity",
         }
     }
 
@@ -52,6 +54,7 @@ impl ActivityFamilyV1 {
             Self::SessionIngest => "session_ingest",
             Self::CodeIndex => "code_index",
             Self::ToolCall => "tool_call",
+            Self::Task => "task",
         }
     }
 
@@ -61,16 +64,18 @@ impl ActivityFamilyV1 {
             "session_ingest" => Some(Self::SessionIngest),
             "code_index" => Some(Self::CodeIndex),
             "tool_call" => Some(Self::ToolCall),
+            "task" => Some(Self::Task),
             _ => None,
         }
     }
 
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Hook,
         Self::SessionIngest,
         Self::CodeIndex,
         Self::ToolCall,
+        Self::Task,
     ];
 }
 
