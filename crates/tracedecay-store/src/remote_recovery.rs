@@ -527,6 +527,7 @@ mod tests {
                 "revoked_at": null,
                 "capabilities": ["read_backup"],
                 "scope": {
+                    "project_id": "project.remote",
                     "repository_id": "repository.remote",
                     "worktree_id": "worktree.remote",
                     "reference": "refs/heads/main",
