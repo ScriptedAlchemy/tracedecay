@@ -6,6 +6,8 @@
 name: Plugin Validation
 
 on:
+  push:
+    branches: [master]
   pull_request:
     paths:
       - "plugin/**"
