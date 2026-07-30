@@ -5,12 +5,10 @@
 //! or bypass the canonical enrollment, replay, query, recovery, and promotion
 //! operations.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_application::ResultContractRef;
-use tracedecay_application::remote::auth::{
-    OpaqueRemoteCredential, RemoteEnrollmentServiceErrorV1,
-};
+use tracedecay_application::remote::auth::OpaqueRemoteCredential;
 use tracedecay_application::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolPortV1,
     RemoteProtocolRequestV1, RemoteProtocolResponseV1,
@@ -22,8 +20,11 @@ use tracedecay_application::remote::recovery::{
 };
 use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
 use tracedecay_domain::EnrollmentCredentialRecordV1;
+use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
 
-use super::remote_enrollment::DaemonRemoteEnrollmentProvisionerV1;
+use super::remote_enrollment::{
+    DaemonRemoteEnrollmentProvisionerV1, DaemonRemoteEnrollmentProvisioningErrorV1,
+};
 
 /// The daemon's concrete owner composition. Implementations must delegate each
 /// method to the corresponding canonical authority; this boundary intentionally
@@ -94,16 +95,20 @@ pub struct CanonicalDaemonRemoteProtocolOwnersV1 {
 impl CanonicalDaemonRemoteProtocolOwnersV1 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_registered_enrollment(
-        enrollment: &DaemonRemoteEnrollmentProvisionerV1,
-        enrollment_result_contract: ResultContractRef,
+        enrollment_store: MigrationSqlHandle,
+        enrollment_configuration_path: &Path,
         replay: Arc<ReplayOwnerV1>,
         query: Arc<QueryOwnerV1>,
         backup: Arc<BackupOwnerV1>,
         restore: Arc<RestoreOwnerV1>,
         promotion: Arc<PromotionOwnerV1>,
-    ) -> Result<Self, RemoteEnrollmentServiceErrorV1> {
+    ) -> Result<Self, DaemonRemoteEnrollmentProvisioningErrorV1> {
+        let enrollment = DaemonRemoteEnrollmentProvisionerV1::from_registered_configured(
+            enrollment_store,
+            enrollment_configuration_path,
+        )?;
         Ok(Self::new(
-            enrollment.protocol_port(enrollment_result_contract)?,
+            enrollment.protocol_port(),
             replay,
             query,
             backup,
