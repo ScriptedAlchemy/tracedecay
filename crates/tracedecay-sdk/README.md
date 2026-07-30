@@ -20,6 +20,6 @@ let snapshot = client.execute::<WorkSnapshot>(&request, RequestOptions::default(
 # Ok::<(), tracedecay_sdk::client::ClientError>(())
 ```
 
-The 17 mounted Work routes use generated request/result wire models. The 64
+The 18 mounted Work routes use generated request/result wire models. The 64
 older production routes remain discovery-only `SchemaUnavailable` capabilities
 until their canonical catalog exports schema bodies.
