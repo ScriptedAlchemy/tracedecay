@@ -254,20 +254,35 @@ function json(
 }
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("publishes the complete canonical server inventory", () => {
+  it("publishes typed Work methods and fail-closed base discovery", () => {
     type Equal<Left, Right> =
       (<Value>() => Value extends Left ? 1 : 2) extends
       (<Value>() => Value extends Right ? 1 : 2) ? true : false;
     const requestMatches: Equal<
-      Parameters<ReturnType<typeof createClient>["operations"]["health_read"]>[0],
-      Readonly<Record<string, unknown>>
+      Parameters<ReturnType<typeof createClient>["operations"]["work_snapshot"]>[0],
+      { readonly page_size: number }
     > = true;
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+    });
 
     expect(requestMatches).toBe(true);
     expect(SERVER_OPERATIONS).toHaveLength(64);
+    expect(
+      SERVER_OPERATIONS.every(
+        (operation) =>
+          operation.sdkAvailability === "unavailable" &&
+          operation.disposition === "schema_unavailable",
+      ),
+    ).toBe(true);
     expect(SERVER_OPERATIONS.map((operation) => operation.operation)).toContain(
-      "health_read",
+      "git_status",
     );
+    expect("health_read" in client.operations).toBe(false);
+    // @ts-expect-error Base routes have no canonical schema bodies yet.
+    void client.operations.health_read;
   });
 
   it("preserves remote base paths and origin policy", async () => {
@@ -288,15 +303,17 @@ describe("TraceDecayClient generated operation bindings", () => {
       },
     });
 
-    await client.operations.health_read({});
+    await expect(
+      client.operations.work_snapshot({ page_size: 25 }),
+    ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
 
     expect(requestedUrl).toBe(
-      "https://remote.example/api/v1/projects/project.sdk/application/primitives/health_read",
+      "https://remote.example/api/v1/projects/project.sdk/application/work/snapshot",
     );
     expect(requestedOrigin).toBe("https://consumer.example");
   });
 
-  it("fails closed on malformed server requests before transport", async () => {
+  it("fails closed on malformed typed Work requests before transport", async () => {
     let fetchCalls = 0;
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
@@ -310,8 +327,8 @@ describe("TraceDecayClient generated operation bindings", () => {
 
     await expect(
       // @ts-expect-error Deliberately malformed at the package boundary.
-      client.operations.health_read(null),
-    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+      client.operations.work_snapshot({ page_size: "25" }),
+    ).rejects.toBeInstanceOf(TypeError);
     expect(fetchCalls).toBe(0);
     expect("invoke" in client).toBe(false);
   });

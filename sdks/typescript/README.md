@@ -3,10 +3,10 @@
 `@tracedecay/sdk` provides generated TypeScript contracts and a strict client
 for TraceDecay's public application API.
 
-The generated operation surface includes all 64 canonical production HTTP
-operations and the cancellation/resumable-stream lifecycle. Operations without
-a mounted production route are exported as typed unavailable capabilities
-rather than partially functional methods.
+The generated callable surface includes the 17 mounted Work operations and the
+cancellation/resumable-stream lifecycle. The 64 older production routes remain
+in `SERVER_OPERATIONS` for discovery with `schema_unavailable`; they are not
+exposed as partially typed methods.
 
 ## Requirements
 
@@ -25,8 +25,8 @@ const client = createClient({
   token: process.env.TRACEDECAY_APPLICATION_TOKEN!,
 });
 
-const status = await client.operations.storage_status(
-  {},
+const snapshot = await client.operations.work_snapshot(
+  { page_size: 25 },
   { page: { size: 25 } },
 );
 ```

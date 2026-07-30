@@ -3,10 +3,12 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 
 use serde_json::json;
-use tracedecay_sdk::api::HttpApplicationOperation;
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ConnectionMode, PageOptions, RequestOptions, StreamOptions,
-    StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, PageOptions, RequestOptions,
+    StreamOptions, StreamResume,
+};
+use tracedecay_sdk::operations::{
+    TypedOperation, WorkCreate, WorkSnapshot, base_operation_capabilities,
 };
 
 fn request(stream: &mut TcpStream) -> String {
@@ -65,8 +67,8 @@ fn local_and_remote_clients_preserve_auth_origin_and_paging() {
         json!({
             "kind": "success",
             "value": {
-                "binding_id": "binding.http.health_read.v1",
-                "contract": {"schema_id": "schema.health.result", "schema_revision": 1},
+                "binding_id": "binding.http.work.create",
+                "contract": {"schema_id": "schema.work.create.result", "schema_revision": 1},
                 "request_id": "request.sdk",
                 "scope": {},
                 "outcome": {"outcome": "evidence", "value": {
@@ -78,7 +80,24 @@ fn local_and_remote_clients_preserve_auth_origin_and_paging() {
                         "effective_deadline": {"expires_at": 3}, "cancellation": null,
                         "budget": {"units_consumed": 1, "bytes_consumed": 1,
                             "elapsed_micros": 1}, "termination": "completed"},
-                    "payload": {"status": "ok"}
+                    "payload": {
+                        "accepted_proposal": null,
+                        "authority": {
+                            "actor_id": "actor.sdk",
+                            "policy_digest": "sha256:policy",
+                            "project_id": "project.sdk",
+                            "repository_id": "repository.sdk",
+                            "worktree_id": "worktree.sdk"
+                        },
+                        "dependencies": [],
+                        "execution_admitted": false,
+                        "history_len": 1,
+                        "runtime_evidence": [],
+                        "task_accepted": false,
+                        "task_id": "task.sdk",
+                        "title": "SDK task",
+                        "version": 1
+                    }
                 }}
             }
         }),
@@ -103,22 +122,30 @@ fn local_and_remote_clients_preserve_auth_origin_and_paging() {
         ..RequestOptions::default()
     };
 
+    let request = serde_json::from_value(json!({
+        "command_id": "command.sdk",
+        "occurred_at": 1,
+        "task_id": "task.sdk",
+        "title": "SDK task"
+    }))
+    .unwrap();
     let local_result = local
-        .call(
-            HttpApplicationOperation::HealthRead,
-            &json!({}),
-            options.clone(),
-        )
+        .execute::<WorkCreate>(&request, options.clone())
         .unwrap();
-    let remote_result = remote
-        .call(HttpApplicationOperation::HealthRead, &json!({}), options)
-        .unwrap();
+    let remote_result = remote.execute::<WorkCreate>(&request, options).unwrap();
 
-    assert_eq!(local_result.payload(), Some(&json!({"status": "ok"})));
-    assert_eq!(remote_result.payload(), Some(&json!({"status": "ok"})));
+    assert_eq!(
+        serde_json::to_value(local_result.result).unwrap()["task_id"],
+        "task.sdk"
+    );
+    assert_eq!(
+        serde_json::to_value(remote_result.result).unwrap()["task_id"],
+        "task.sdk"
+    );
     let requests = server.join().unwrap();
     assert!(requests[0].contains("authorization: Bearer sdk-token"));
     assert!(requests[0].contains(&format!("origin: {base_url}")));
+    assert!(requests[0].contains("/application/work/create"));
     assert!(requests[0].contains("page_size=25&cursor=cursor.next"));
     assert!(requests[1].contains("origin: https://client.example"));
 }
@@ -178,4 +205,65 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
     assert!(requests[1].contains(
         "/application/operations/request.operation/events?next_sequence=7&resume_token=resume.old"
     ));
+}
+
+#[test]
+fn typed_work_descriptors_close_the_public_operation_surface() {
+    fn assert_typed_contract<Operation: TypedOperation>() {}
+
+    assert_typed_contract::<WorkCreate>();
+    assert_eq!(WorkCreate::OPERATION_ID, "operation.work.create");
+    let capabilities = base_operation_capabilities().collect::<Vec<_>>();
+    assert_eq!(capabilities.len(), 64);
+    assert!(
+        capabilities
+            .iter()
+            .all(|capability| capability.disposition
+                == tracedecay_sdk::operation::ExecutableUnavailableDispositionV1::SchemaUnavailable)
+    );
+}
+
+#[test]
+fn typed_work_result_rejects_malformed_payloads() {
+    let response = json_response(
+        "200 OK",
+        json!({
+            "kind": "success",
+            "value": {
+                "binding_id": "binding.http.work.snapshot",
+                "contract": {
+                    "schema_id": "schema.work.snapshot.result",
+                    "schema_revision": 1
+                },
+                "request_id": "request.sdk",
+                "scope": {},
+                "outcome": {"outcome": "evidence", "value": {
+                    "temporal": {}, "authority": {}, "evidence_authorities": [],
+                    "coverage": {}, "omissions": [], "scores": [], "contributions": [],
+                    "page": {"sort_contract_id": "sort.work", "sort_revision": 1,
+                        "total": 1, "returned": 1, "cursor": null, "expires_at": null},
+                    "execution": {"started_at": 1, "ended_at": 2,
+                        "effective_deadline": {"expires_at": 3}, "cancellation": null,
+                        "budget": {"units_consumed": 1, "bytes_consumed": 1,
+                            "elapsed_micros": 1}, "termination": "completed"},
+                    "payload": {"not": "a work snapshot"}
+                }}
+            }
+        }),
+    );
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+
+    let request = serde_json::from_value::<<WorkSnapshot as TypedOperation>::Request>(
+        json!({"page_size": 1}),
+    )
+    .unwrap();
+    let error = client
+        .execute::<WorkSnapshot>(&request, RequestOptions::default())
+        .unwrap_err();
+
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    server.join().unwrap();
 }

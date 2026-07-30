@@ -11,8 +11,11 @@ client = TraceDecayClient.local(
     project_id="project.example",
     token="daemon-token",
 )
-result = client.operations.health_read({})
+response = client.operations.work_snapshot({"page_size": 25})
+snapshot = response.result
 ```
 
-Work operations remain listed in `UNAVAILABLE_OPERATIONS` until their
-production routes are mounted.
+The 17 mounted Work operations expose generated `TypedDict` request/result
+models and runtime schema decoders. The 64 older production routes remain in
+`SERVER_OPERATIONS` for discovery and are explicitly `schema_unavailable` in
+`UNAVAILABLE_OPERATIONS`.

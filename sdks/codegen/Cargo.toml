@@ -11,7 +11,12 @@ name = "generate"
 path = "../../crates/tracedecay-sdk/src/bin/generate.rs"
 
 [dependencies]
+prettyplease = "0.3.0"
+quote = "1.0.47"
+schemars = "0.8.22"
 serde_json = "1"
+syn = { version = "3.0.3", features = ["full"] }
 tracedecay-api = { path = "../../crates/tracedecay-api" }
 tracedecay-application = { path = "../../crates/tracedecay-application" }
 tracedecay-tool-catalog = { path = "../../crates/tracedecay-tool-catalog" }
+typify = "0.7.0"

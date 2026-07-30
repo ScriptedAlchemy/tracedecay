@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod operations;
 
 /// Canonical HTTP/SSE presentation contracts.
 pub use tracedecay_api as api;

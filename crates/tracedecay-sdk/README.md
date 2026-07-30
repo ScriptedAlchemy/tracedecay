@@ -1,12 +1,12 @@
 # TraceDecay Rust SDK
 
-Blocking local and remote clients for the canonical 64-operation HTTP
-inventory, cancellation, paging, and resumable SSE streams.
+Blocking local and remote clients for typed Work operations, cancellation,
+paging, and resumable SSE streams.
 
 ```rust
 use serde_json::json;
-use tracedecay_sdk::api::HttpApplicationOperation;
 use tracedecay_sdk::client::{Client, ConnectionMode, RequestOptions};
+use tracedecay_sdk::operations::{TypedOperation, WorkSnapshot};
 
 let client = Client::builder(ConnectionMode::local(
     "http://127.0.0.1:4317",
@@ -14,13 +14,12 @@ let client = Client::builder(ConnectionMode::local(
     "daemon-token",
 ))
 .build()?;
-let status = client.call(
-    HttpApplicationOperation::StorageStatus,
-    &json!({}),
-    RequestOptions::default(),
-)?;
+let request: <WorkSnapshot as TypedOperation>::Request =
+    serde_json::from_value(json!({"page_size": 25}))?;
+let snapshot = client.execute::<WorkSnapshot>(&request, RequestOptions::default())?;
 # Ok::<(), tracedecay_sdk::client::ClientError>(())
 ```
 
-Work operations are not advertised as available until their production routes
-are mounted.
+The 17 mounted Work routes use generated request/result wire models. The 64
+older production routes remain discovery-only `SchemaUnavailable` capabilities
+until their canonical catalog exports schema bodies.

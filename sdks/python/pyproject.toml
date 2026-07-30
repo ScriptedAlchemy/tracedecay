@@ -14,6 +14,7 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Typing :: Typed",
 ]
+dependencies = ["typing-extensions>=4.6"]
 
 [project.urls]
 Repository = "https://github.com/ScriptedAlchemy/tracedecay"

@@ -5,6 +5,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use quote::ToTokens;
+use schemars::schema::RootSchema;
 use serde_json::Value;
 use tracedecay_api::HttpApplicationOperation;
 use tracedecay_application::work_executable_binding_registry;
@@ -62,7 +64,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     write(&destination.join("index.ts"), &render_index())?;
     write(
         &root.join("sdks/python/src/tracedecay_sdk/operations.py"),
-        &render_python_operations(&operations, &unavailable),
+        &render_python_operations(&operations, &unavailable)?,
+    )?;
+    write(
+        &root.join("crates/tracedecay-sdk/src/operations.rs"),
+        &render_rust_operations(&operations)?,
     )?;
     Ok(())
 }
@@ -479,13 +485,15 @@ fn render_server_operations() -> String {
         "export interface ServerOperationDescriptor<Name extends string = string> {\n\
          \x20 readonly operation: Name;\n\
          \x20 readonly route: string;\n\
+         \x20 readonly sdkAvailability: \"unavailable\";\n\
+         \x20 readonly disposition: \"schema_unavailable\";\n\
          }\n\n\
          export const SERVER_OPERATIONS = [\n",
     );
     for operation in HttpApplicationOperation::ALL {
         writeln!(
             out,
-            "  {{ operation: {}, route: {} }},",
+            "  {{ operation: {}, route: {}, sdkAvailability: \"unavailable\", disposition: \"schema_unavailable\" }},",
             quote(operation.as_str()),
             quote(&format!("/application{}", operation.route_path()))
         )
@@ -499,14 +507,134 @@ fn render_server_operations() -> String {
     out
 }
 
+fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Error>> {
+    let mut out = String::from(
+        "//! Generated typed public operation descriptors. DO NOT EDIT.\n\n\
+         use serde::Serialize;\n\
+         use serde::de::DeserializeOwned;\n\
+         use tracedecay_api::HttpApplicationOperation;\n\
+         use tracedecay_tool_catalog::ExecutableUnavailableDispositionV1;\n\n\
+         pub trait TypedOperation {\n\
+         \x20   type Request: Serialize;\n\
+         \x20   type Result: DeserializeOwned;\n\n\
+         \x20   const OPERATION_ID: &'static str;\n\
+         \x20   const ROUTE: &'static str;\n\
+         \x20   const BINDING_ID: &'static str;\n\
+         \x20   const RESULT_SCHEMA_ID: &'static str;\n\
+         \x20   const RESULT_SCHEMA_REVISION: u32;\n\
+         }\n\n\
+         macro_rules! typed_operation {\n\
+         \x20   ($name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal, $schema:literal, $revision:literal) => {\n\
+         \x20       #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n\
+         \x20       pub struct $name;\n\
+         \x20       impl TypedOperation for $name {\n\
+         \x20           type Request = $module::Request;\n\
+         \x20           type Result = $module::Result;\n\
+         \x20           const OPERATION_ID: &'static str = $operation;\n\
+         \x20           const ROUTE: &'static str = $route;\n\
+         \x20           const BINDING_ID: &'static str = $binding;\n\
+         \x20           const RESULT_SCHEMA_ID: &'static str = $schema;\n\
+         \x20           const RESULT_SCHEMA_REVISION: u32 = $revision;\n\
+         \x20       }\n\
+         \x20   };\n\
+         }\n\n",
+    );
+    for operation in operations {
+        let module = operation.name.clone();
+        let (request_source, request_type) = typify_schema(&operation.request_schema.body)?;
+        let (result_source, result_type) = typify_schema(&operation.result_schema.body)?;
+        writeln!(
+            out,
+            "#[allow(clippy::all)]\n\
+             pub mod {module} {{\n\
+             \x20   pub mod request {{ {request_source} }}\n\
+             \x20   pub mod result {{ {result_source} }}\n\
+             \x20   pub type Request = request::{request_type};\n\
+             \x20   pub type Result = result::{result_type};\n\
+             }}\n\
+             typed_operation!(\n\
+             \x20   {marker}, {module}, {operation_id:?}, {route:?}, {binding:?}, {schema:?}, {revision}\n\
+             );\n",
+            marker = type_name(&operation.name),
+            operation_id = operation.operation_id,
+            route = operation.route,
+            binding = operation.binding,
+            schema = operation.result_schema.id,
+            revision = operation.result_schema.revision,
+        )
+        .expect("String writes cannot fail");
+    }
+    out.push_str(
+        "#[derive(Clone, Debug, PartialEq, Eq)]\n\
+         pub struct BaseOperationCapability {\n\
+         \x20   pub operation: HttpApplicationOperation,\n\
+         \x20   pub route: String,\n\
+         \x20   pub disposition: ExecutableUnavailableDispositionV1,\n\
+         }\n\n\
+         pub fn base_operation_capabilities() -> impl ExactSizeIterator<Item = BaseOperationCapability> {\n\
+         \x20   HttpApplicationOperation::ALL.iter().copied().map(|operation| BaseOperationCapability {\n\
+         \x20       route: format!(\"/application{}\", operation.route_path()),\n\
+         \x20       operation,\n\
+         \x20       disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,\n\
+         \x20   })\n\
+         }\n",
+    );
+    let syntax = syn::parse_file(&out)?;
+    Ok(prettyplease::unparse(&syntax))
+}
+
+fn typify_schema(schema: &Value) -> Result<(String, String), Box<dyn Error>> {
+    let title = schema
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or("canonical schema body has no root title")?;
+    let schema: RootSchema = serde_json::from_value(schema_for_typify(schema.clone()))?;
+    let settings = typify::TypeSpaceSettings::default();
+    let mut type_space = typify::TypeSpace::new(&settings);
+    type_space.add_root_schema(schema)?;
+    Ok((type_space.to_token_stream().to_string(), type_name(title)))
+}
+
+fn schema_for_typify(value: Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(schema_for_typify).collect())
+        }
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = if key == "$defs" {
+                        "definitions".to_owned()
+                    } else {
+                        key
+                    };
+                    let value = match value {
+                        Value::String(reference) if reference.starts_with("#/$defs/") => {
+                            Value::String(reference.replacen("#/$defs/", "#/definitions/", 1))
+                        }
+                        value => schema_for_typify(value),
+                    };
+                    (key, value)
+                })
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
 fn render_python_operations(
     operations: &[Operation],
     unavailable: &[UnavailableOperation],
-) -> String {
+) -> Result<String, Box<dyn Error>> {
     let mut out = String::from(
         "# Generated by `sdks/codegen/generate.sh`. DO NOT EDIT.\n\
-         # Authority: tracedecay-api HTTP inventory and route-gated executable bindings.\n\n\
-         from typing import Final, Literal, TypeAlias\n\n\
+         # Authority: canonical executable schema bodies and route inventory.\n\n\
+         from __future__ import annotations\n\n\
+         from dataclasses import dataclass\n\
+         from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar, TypedDict, cast\n\
+         from typing_extensions import NotRequired\n\n\
+         from .schema import JsonValue, decode_canonical_schema\n\n\
          ServerOperationName: TypeAlias = Literal[\n",
     );
     for operation in HttpApplicationOperation::ALL {
@@ -530,6 +658,14 @@ fn render_python_operations(
             .expect("String writes cannot fail");
     }
     out.push_str("}\n\nUNAVAILABLE_OPERATIONS: Final[dict[str, str]] = {\n");
+    for operation in HttpApplicationOperation::ALL {
+        writeln!(
+            out,
+            "    {:?}: \"schema_unavailable\",",
+            operation.as_str()
+        )
+        .expect("String writes cannot fail");
+    }
     for operation in unavailable {
         writeln!(
             out,
@@ -538,8 +674,247 @@ fn render_python_operations(
         )
         .expect("String writes cannot fail");
     }
-    out.push_str("}\n");
-    out
+    out.push_str("}\n\n");
+
+    for operation in operations {
+        let request_name = format!("{}Request", operation.type_name);
+        let result_name = format!("{}Result", operation.type_name);
+        let (request_definitions, _) =
+            render_python_schema_type(&operation.request_schema.body, &request_name)?;
+        let (result_definitions, _) =
+            render_python_schema_type(&operation.result_schema.body, &result_name)?;
+        out.push_str(&request_definitions);
+        out.push_str(&result_definitions);
+    }
+
+    out.push_str(
+        "RequestT = TypeVar(\"RequestT\")\n\
+         ResultT = TypeVar(\"ResultT\")\n\n\
+         @dataclass(frozen=True, slots=True)\n\
+         class OperationResponse(Generic[ResultT]):\n\
+         \x20   request_id: str\n\
+         \x20   result: ResultT\n\n\
+         class PageOptionsLike(Protocol):\n\
+         \x20   @property\n\
+         \x20   def size(self) -> int | None: ...\n\
+         \x20   @property\n\
+         \x20   def cursor(self) -> str | None: ...\n\n\
+         @dataclass(frozen=True, slots=True)\n\
+         class OperationDescriptor(Generic[RequestT, ResultT]):\n\
+         \x20   operation: str\n\
+         \x20   operation_id: str\n\
+         \x20   route: str\n\
+         \x20   binding_id: str\n\
+         \x20   result_schema_id: str\n\
+         \x20   result_schema_revision: int\n\
+         \x20   request_schema: dict[str, JsonValue]\n\
+         \x20   result_schema: dict[str, JsonValue]\n\n\
+         \x20   def decode_request(self, value: object) -> RequestT:\n\
+         \x20       return cast(RequestT, decode_canonical_schema(value, self.request_schema))\n\n\
+         \x20   def decode_result(self, value: object) -> ResultT:\n\
+         \x20       return cast(ResultT, decode_canonical_schema(value, self.result_schema))\n\n\
+         WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {\n",
+    );
+    for operation in operations {
+        writeln!(
+            out,
+            "    {name:?}: cast(\n\
+             \x20       OperationDescriptor[object, object],\n\
+             \x20       OperationDescriptor[{type_name}Request, {type_name}Result](\n\
+             \x20       operation={name:?}, operation_id={operation_id:?}, route={route:?},\n\
+             \x20       binding_id={binding:?}, result_schema_id={result_schema_id:?},\n\
+             \x20       result_schema_revision={result_revision},\n\
+             \x20       request_schema={request_schema},\n\
+             \x20       result_schema={result_schema},\n\
+             \x20       ),\n\
+             \x20   ),",
+            name = operation.name,
+            type_name = operation.type_name,
+            operation_id = operation.operation_id,
+            route = operation.route,
+            binding = operation.binding,
+            result_schema_id = operation.result_schema.id,
+            result_revision = operation.result_schema.revision,
+            request_schema = python_literal(&operation.request_schema.body)?,
+            result_schema = python_literal(&operation.result_schema.body)?,
+        )
+        .expect("String writes cannot fail");
+    }
+    out.push_str(
+        "}\n\n\
+         class OperationInvoker(Protocol):\n\
+         \x20   def __call__(\n\
+         \x20       self,\n\
+         \x20       descriptor: OperationDescriptor[RequestT, ResultT],\n\
+         \x20       request: RequestT,\n\
+         \x20       *,\n\
+         \x20       page: PageOptionsLike | None = None,\n\
+         \x20   ) -> OperationResponse[ResultT]: ...\n\n\
+         class WorkOperations:\n\
+         \x20   \"\"\"The 17 operations admitted by canonical schema-body authority.\"\"\"\n\n\
+         \x20   def __init__(self, invoke: OperationInvoker) -> None:\n\
+         \x20       self._invoke = invoke\n\n",
+    );
+    for operation in operations {
+        writeln!(
+            out,
+            "    def {name}(\n\
+             \x20       self,\n\
+             \x20       request: {type_name}Request,\n\
+             \x20       *,\n\
+             \x20       page: PageOptionsLike | None = None,\n\
+             \x20   ) -> OperationResponse[{type_name}Result]:\n\
+             \x20       descriptor = cast(\n\
+             \x20           OperationDescriptor[{type_name}Request, {type_name}Result],\n\
+             \x20           WORK_OPERATIONS[{name:?}],\n\
+             \x20       )\n\
+             \x20       return self._invoke(descriptor, request, page=page)\n",
+            name = operation.name,
+            type_name = operation.type_name,
+        )
+        .expect("String writes cannot fail");
+    }
+    if out.ends_with("\n\n") {
+        out.pop();
+    }
+    Ok(out)
+}
+
+fn render_python_schema_type(
+    schema: &Value,
+    root_name: &str,
+) -> Result<(String, String), Box<dyn Error>> {
+    let mut renderer = PythonSchemaRenderer {
+        root: schema,
+        emitted: BTreeSet::new(),
+        definitions: String::new(),
+        root_name,
+    };
+    let type_name = renderer.render(schema, root_name)?;
+    Ok((renderer.definitions, type_name))
+}
+
+struct PythonSchemaRenderer<'a> {
+    root: &'a Value,
+    emitted: BTreeSet<String>,
+    definitions: String,
+    root_name: &'a str,
+}
+
+impl PythonSchemaRenderer<'_> {
+    fn render(&mut self, schema: &Value, name: &str) -> Result<String, Box<dyn Error>> {
+        let object = schema
+            .as_object()
+            .ok_or("canonical JSON Schema node must be an object")?;
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+            let definition_name = reference
+                .strip_prefix("#/$defs/")
+                .ok_or("only local canonical schema references are supported")?;
+            let definition = self
+                .root
+                .get("$defs")
+                .and_then(|value| value.get(definition_name))
+                .ok_or("canonical schema reference is missing its definition")?;
+            let type_name = format!("{}{}", self.root_name, type_name(definition_name));
+            return self.render(definition, &type_name);
+        }
+        if let Some(value) = object.get("const") {
+            return Ok(format!("Literal[{}]", python_literal(value)?));
+        }
+        if let Some(values) = object.get("enum").and_then(Value::as_array) {
+            let values = values
+                .iter()
+                .map(python_literal)
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(format!("Literal[{}]", values.join(", ")));
+        }
+        for key in ["anyOf", "oneOf"] {
+            if let Some(values) = object.get(key).and_then(Value::as_array) {
+                let variants = values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| self.render(value, &format!("{name}Variant{index}")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(variants.join(" | "));
+            }
+        }
+        match object.get("type").and_then(Value::as_str) {
+            Some("null") => Ok("None".into()),
+            Some("boolean") => Ok("bool".into()),
+            Some("integer") => Ok("int".into()),
+            Some("number") => Ok("float".into()),
+            Some("string") => Ok("str".into()),
+            Some("array") => {
+                let item = object
+                    .get("items")
+                    .ok_or("array schema requires canonical items")?;
+                Ok(format!("list[{}]", self.render(item, &format!("{name}Item"))?))
+            }
+            Some("object") => {
+                if !self.emitted.insert(name.to_owned()) {
+                    return Ok(name.to_owned());
+                }
+                let properties = object
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .ok_or("object schema requires canonical properties")?;
+                let required = object
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut fields = String::new();
+                for (field, field_schema) in properties {
+                    let field_type =
+                        self.render(field_schema, &format!("{name}{}", type_name(field)))?;
+                    if required.contains(field.as_str()) {
+                        writeln!(fields, "    {field}: {field_type}")
+                            .expect("String writes cannot fail");
+                    } else {
+                        writeln!(fields, "    {field}: NotRequired[{field_type}]")
+                            .expect("String writes cannot fail");
+                    }
+                }
+                if fields.is_empty() {
+                    fields.push_str("    pass\n");
+                }
+                writeln!(self.definitions, "class {name}(TypedDict):\n{fields}")
+                    .expect("String writes cannot fail");
+                Ok(name.to_owned())
+            }
+            _ => Err("unsupported canonical schema node for Python generation".into()),
+        }
+    }
+}
+
+fn python_literal(value: &Value) -> Result<String, Box<dyn Error>> {
+    match value {
+        Value::Null => Ok("None".into()),
+        Value::Bool(value) => Ok(if *value { "True" } else { "False" }.into()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::String(value) => Ok(format!("{value:?}")),
+        Value::Array(values) => Ok(format!(
+            "[{}]",
+            values
+                .iter()
+                .map(python_literal)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        Value::Object(values) => Ok(format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| Ok(format!("{key:?}: {}", python_literal(value)?)))
+                .collect::<Result<Vec<_>, Box<dyn Error>>>()?
+                .join(", ")
+        )),
+    }
 }
 
 fn render_types() -> String {
@@ -701,6 +1076,18 @@ mod tests {
         assert_eq!(tracedecay_api::HttpApplicationOperation::ALL.len(), 64);
         assert!(generated.contains("operation: \"health_read\""));
         assert!(generated.contains("route: \"/application/primitives/health_read\""));
+        assert_eq!(
+            generated
+                .matches("sdkAvailability: \"unavailable\"")
+                .count(),
+            65
+        );
+        assert_eq!(
+            generated
+                .matches("disposition: \"schema_unavailable\"")
+                .count(),
+            65
+        );
     }
 
     #[test]
@@ -708,10 +1095,30 @@ mod tests {
         let registry = super::canonical_application_registry().unwrap();
         let operations = canonical_operations(&registry).unwrap();
         let unavailable = canonical_unavailable_operations(&registry);
-        let generated = super::render_python_operations(&operations, &unavailable);
+        let generated = super::render_python_operations(&operations, &unavailable).unwrap();
 
         assert_eq!(generated.matches("\": \"/application/").count(), 81);
+        assert_eq!(generated.matches("\": \"schema_unavailable\"").count(), 64);
         assert!(generated.contains("\"work_attempt_start\": \"/application/work/attempt/start\""));
         assert!(generated.contains("\"work_snapshot\": \"/application/work/snapshot\""));
+        assert!(generated.contains("class OperationWorkSnapshotRequest(TypedDict):"));
+        assert!(generated.contains("class OperationWorkSnapshotResult(TypedDict):"));
+        assert!(generated.contains("class WorkOperations:"));
+        assert!(generated.contains("def work_snapshot("));
+        assert!(generated.contains("request: OperationWorkSnapshotRequest"));
+    }
+
+    #[test]
+    fn rust_wire_models_are_generated_from_the_same_schema_bodies() {
+        let registry = super::canonical_application_registry().unwrap();
+        let operations = canonical_operations(&registry).unwrap();
+        let generated = super::render_rust_operations(&operations).unwrap();
+
+        assert_eq!(generated.matches("typed_operation!(").count(), 17);
+        assert!(generated.contains("pub mod work_snapshot"));
+        assert!(generated.contains("WorkSnapshot"));
+        assert!(generated.contains("pub type Request = request::"));
+        assert!(generated.contains("pub type Result = result::"));
+        assert!(generated.contains("ExecutableUnavailableDispositionV1::SchemaUnavailable"));
     }
 }
