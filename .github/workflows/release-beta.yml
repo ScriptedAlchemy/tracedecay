@@ -126,6 +126,11 @@ jobs:
       - name: Validate downloaded dashboard bundle
         run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
 
+      - name: Validate portable distribution harnesses
+        run: |
+          python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
+          python3 .release-automation/scripts/test-build-mcpb.py
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -227,6 +232,31 @@ jobs:
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # --- MCP Registry bundle (all platforms) ---
+
+      - name: Package MCPB
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/tracedecay"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          bundle="tracedecay-beta-${RELEASE_TAG}-${{ matrix.name }}.mcpb"
+          python3 .release-automation/scripts/build-mcpb.py build \
+            --binary "$binary" \
+            --output "$bundle" \
+            --version "${{ steps.version.outputs.version }}" \
+            --platform "${{ matrix.name }}"
+          test -s "$bundle"
+
+      - name: Upload MCPB artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: mcpb-beta-${{ matrix.name }}
+          path: tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.mcpb
+          if-no-files-found: error
 
       # --- Binary archive (all platforms) ---
 
@@ -393,6 +423,12 @@ jobs:
     needs: [build, package-workspace]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-automation
+
       - name: Download binary artifacts
         uses: actions/download-artifact@v7
         with:
@@ -400,13 +436,40 @@ jobs:
           path: binaries
           merge-multiple: true
 
-      - name: Upload binaries to release
+      - name: Download MCPB artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: mcpb-beta-*
+          path: mcpbs
+          merge-multiple: true
+
+      - name: Verify complete beta MCPB platform set
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          for platform in aarch64-macos x86_64-linux aarch64-linux x86_64-windows; do
+            bundle="mcpbs/tracedecay-beta-${RELEASE_TAG}-${platform}.mcpb"
+            test -s "$bundle"
+            python3 .release-automation/scripts/build-mcpb.py verify \
+              --bundle "$bundle" \
+              --version "$VERSION" \
+              --platform "$platform"
+          done
+          shopt -s nullglob
+          bundles=(mcpbs/*.mcpb)
+          test "${#bundles[@]}" -eq 4
+
+      - name: Upload binaries and MCPBs to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          find binaries -type f -name 'tracedecay-beta-*' -print -exec \
-            gh release upload "$RELEASE_TAG" {} --repo "${{ github.repository }}" --clobber \;
+          shopt -s nullglob
+          assets=(binaries/tracedecay-beta-* mcpbs/*.mcpb)
+          test "${#assets[@]}" -eq 8
+          gh release upload "$RELEASE_TAG" "${assets[@]}" \
+            --repo "${{ github.repository }}" --clobber
 
   update-homebrew:
     name: Update Homebrew tap (beta)

@@ -2,12 +2,12 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.ScriptedAlchemy/tracedecay",
   "title": "TraceDecay",
-  "description": "Code intelligence for 15+ languages: semantic graph queries instead of file reads. 37 MCP tools.",
+  "description": "Semantic code intelligence for 50+ languages through 164 MCP tools.",
   "repository": {
     "url": "https://github.com/ScriptedAlchemy/tracedecay",
     "source": "github"
   },
   "websiteUrl": "https://github.com/ScriptedAlchemy/tracedecay",
-  "version": "0.0.2",
+  "version": "0.0.67",
   "packages": []
 }

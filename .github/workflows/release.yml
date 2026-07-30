@@ -129,6 +129,11 @@ jobs:
       - name: Validate downloaded dashboard bundle
         run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
 
+      - name: Validate portable distribution harnesses
+        run: |
+          python3 .release-automation/scripts/test-check-packaged-lsp-bridge.py
+          python3 .release-automation/scripts/test-build-mcpb.py
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -231,6 +236,31 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # --- MCP Registry bundle (all platforms) ---
+
+      - name: Package MCPB
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/tracedecay"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
+          python3 .release-automation/scripts/build-mcpb.py build \
+            --binary "$binary" \
+            --output "$bundle" \
+            --version "${{ steps.version.outputs.version }}" \
+            --platform "${{ matrix.name }}"
+          test -s "$bundle"
+
+      - name: Upload MCPB artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: mcpb-${{ matrix.name }}
+          path: tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb
+          if-no-files-found: error
 
       # --- Binary archive (all platforms) ---
 
@@ -426,6 +456,12 @@ jobs:
     needs: [build, package-workspace]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-automation
+
       - name: Get release tag
         id: release
         run: |
@@ -444,13 +480,41 @@ jobs:
           path: binaries
           merge-multiple: true
 
-      - name: Upload binaries to release
+      - name: Download MCPB artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: mcpb-*
+          path: mcpbs
+          merge-multiple: true
+
+      - name: Verify complete MCPB platform set
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.release.outputs.tag }}"
+          VERSION="${TAG#v}"
+          for platform in aarch64-macos x86_64-linux aarch64-linux x86_64-windows; do
+            bundle="mcpbs/tracedecay-${TAG}-${platform}.mcpb"
+            test -s "$bundle"
+            python3 .release-automation/scripts/build-mcpb.py verify \
+              --bundle "$bundle" \
+              --version "$VERSION" \
+              --platform "$platform"
+          done
+          shopt -s nullglob
+          bundles=(mcpbs/*.mcpb)
+          test "${#bundles[@]}" -eq 4
+
+      - name: Upload binaries and MCPBs to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          find binaries -type f -name 'tracedecay-*' -print -exec \
-            gh release upload "${{ steps.release.outputs.tag }}" {} --repo "${{ github.repository }}" --clobber \;
+          shopt -s nullglob
+          assets=(binaries/tracedecay-* mcpbs/*.mcpb)
+          test "${#assets[@]}" -eq 8
+          gh release upload "${{ steps.release.outputs.tag }}" "${assets[@]}" \
+            --repo "${{ github.repository }}" --clobber
 
   update-homebrew:
     name: Update Homebrew tap
@@ -646,10 +710,9 @@ jobs:
           git diff --cached --quiet || git commit -m "tracedecay ${VERSION}"
           git push
 
-  # Rewrites the MCP registry manifest (server.json) from the actual release
-  # artifacts so the version, download URLs, and fileSha256 digests always
-  # describe real uploaded assets. Skips (with a warning) when the release has
-  # no MCPB packages, since those are not yet produced by the build matrix.
+  # Rewrites the MCP registry manifest (server.json) from the actual nonempty
+  # platform MCPBs so version, URLs, and fileSha256 values describe uploaded
+  # assets. A missing package is a release failure, never a successful skip.
   update-server-json:
     name: Update server.json manifest
     if: |
@@ -677,32 +740,25 @@ jobs:
           fi
           VERSION="${TAG#v}"
           REPO="${{ github.repository }}"
-          PLATFORMS="aarch64-macos:mcp.tar.gz x86_64-linux:mcp.tar.gz aarch64-linux:mcp.tar.gz x86_64-windows:mcp.zip"
+          PLATFORMS="aarch64-macos x86_64-linux aarch64-linux x86_64-windows"
 
           mkdir -p assets
-          missing=0
-          for entry in $PLATFORMS; do
-            platform="${entry%%:*}"
-            ext="${entry#*:}"
-            asset="tracedecay-${TAG}-${platform}.${ext}"
-            if ! gh release download "$TAG" --repo "$REPO" --pattern "$asset" --dir assets; then
-              echo "::warning::release asset ${asset} not found"
-              missing=1
-            fi
+          for platform in $PLATFORMS; do
+            asset="tracedecay-${TAG}-${platform}.mcpb"
+            gh release download "$TAG" --repo "$REPO" --pattern "$asset" --dir assets
+            test -s "assets/${asset}"
+            python3 scripts/build-mcpb.py verify \
+              --bundle "assets/${asset}" \
+              --version "$VERSION" \
+              --platform "$platform"
           done
-          if [ "$missing" -ne 0 ]; then
-            echo "::warning::server.json not updated — this release has no complete MCPB package set"
-            exit 0
-          fi
 
           printf '[' > sha-map.json
           sep=""
-          for entry in $PLATFORMS; do
-            platform="${entry%%:*}"
-            ext="${entry#*:}"
-            asset="tracedecay-${TAG}-${platform}.${ext}"
+          for platform in $PLATFORMS; do
+            asset="tracedecay-${TAG}-${platform}.mcpb"
             sha=$(sha256sum "assets/${asset}" | cut -d' ' -f1)
-            printf '%s{"platform":"%s","ext":"%s","sha":"%s"}' "$sep" "$platform" "$ext" "$sha" >> sha-map.json
+            printf '%s{"platform":"%s","sha":"%s"}' "$sep" "$platform" "$sha" >> sha-map.json
             sep=","
           done
           printf ']' >> sha-map.json
@@ -712,15 +768,9 @@ jobs:
             | .packages = ($map[0] | map(
                 {
                   "registryType": "mcpb",
-                  "identifier": "https://github.com/\($repo)/releases/download/\($tag)/tracedecay-\($tag)-\(.platform).\(.ext)",
+                  "identifier": "https://github.com/\($repo)/releases/download/\($tag)/tracedecay-\($tag)-\(.platform).mcpb",
                   "version": $v,
                   "fileSha256": .sha,
-                  "packageArguments": [
-                    {
-                      "type": "positional",
-                      "valueHint": "serve"
-                    }
-                  ],
                   "transport": {
                     "type": "stdio"
                   }
