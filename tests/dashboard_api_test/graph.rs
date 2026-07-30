@@ -529,7 +529,8 @@ fn graph_api_caller_and_callee_traversal_are_behaviorally_symmetric() {
             "both directions must use qualified-name ordering before limiting"
         );
 
-        for (row, expected_line, expected_start_line) in callers.iter().zip([(101, 40), (102, 50)])
+        for (row, (expected_line, expected_start_line)) in
+            callers.iter().zip([(101, 40), (102, 50)])
         {
             assert_eq!(row["kind"], "function");
             assert_eq!(row["file_path"], "src/dashboard/symmetry.rs");

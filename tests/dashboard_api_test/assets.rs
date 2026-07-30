@@ -100,7 +100,8 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
             agent
                 .get(&capabilities_url)
                 .header("Host", "attacker.example")
-                .call(),
+                .call()
+                .expect("rebound request should return a concealed HTTP response"),
         );
         assert_eq!(status, 403, "a non-loopback Host must be rejected");
         assert_eq!(rebound["error"], "dashboard_request_forbidden");
@@ -109,7 +110,8 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
             agent
                 .get(&capabilities_url)
                 .header("Host", "127.0.0.1:1")
-                .call(),
+                .call()
+                .expect("wrong-port request should return a concealed HTTP response"),
         );
         assert_eq!(status, 403, "Host must name the bound dashboard port");
         assert_eq!(wrong_port["error"], "dashboard_request_forbidden");
@@ -118,7 +120,8 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
             agent
                 .get(&capabilities_url)
                 .header("Origin", "http://attacker.example")
-                .call(),
+                .call()
+                .expect("cross-origin request should return a concealed HTTP response"),
         );
         assert_eq!(
             status, 403,
@@ -130,7 +133,8 @@ fn dashboard_http_admission_rejects_rebinding_and_cross_origin_shapes() {
             agent
                 .get(&capabilities_url)
                 .header("Origin", &fixture.base_url)
-                .call(),
+                .call()
+                .expect("same-origin request should remain admitted"),
         );
         assert_eq!(
             status, 200,

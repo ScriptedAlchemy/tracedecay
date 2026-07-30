@@ -1,4 +1,5 @@
 use crate::dashboard_api_support::*;
+use tracedecay::automation::backend::AgentTaskRetryAttempt;
 
 #[test]
 fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
@@ -771,6 +772,13 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 error: None,
                 error_classification: None,
                 error_retryable: None,
+                backend_attempt_count: 1,
+                backend_attempts: vec![AgentTaskRetryAttempt {
+                    attempt: 1,
+                    succeeded: true,
+                    failure_classification: None,
+                    backoff_millis: 0,
+                }],
                 fallback_status: None,
                 report_ref: None,
                 artifacts: vec![artifact],
