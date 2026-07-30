@@ -293,6 +293,37 @@ fn host_conformance_summary_counts_real_verifier_outcomes() {
     assert!(summary.executable_present);
 }
 
+#[test]
+fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
+    let checked_in = crate::agents::host_bundle_v2::HostBundleDoctorReportV1::default();
+    assert_eq!(
+        host_integration_read_from_report(&checked_in),
+        HostIntegrationReadV1::Absent
+    );
+
+    let mut drifted = checked_in;
+    drifted.components.push(
+        crate::agents::host_bundle_v2::HostBundleComponentDoctorResultV1 {
+            receipt_path: std::path::PathBuf::from("receipt.fixture.json"),
+            host: Some(crate::agents::host_bundle_v2::HostKindV1::Codex),
+            component: Some(crate::agents::host_bundle_v2::HostBundleComponentV1::Core),
+            state: crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1::Repairable,
+            registration: Some(
+                crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
+            ),
+            artifacts: Vec::new(),
+            repair_action: "repair fixture".to_owned(),
+        },
+    );
+    assert_eq!(
+        host_integration_read_from_report(&drifted),
+        HostIntegrationReadV1::Observed {
+            conformance: HostConformanceV1::Drifted,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        }
+    );
+}
+
 #[tokio::test]
 async fn host_adapter_returns_seeded_read() {
     let ctx = context();
@@ -540,6 +571,10 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             startup_converged: false,
             ..DaemonRuntimeHealthSignalV1::default()
         }),
+        operational_audit: OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::Unavailable,
+        },
         host: HostIntegrationReadV1::Denied,
         advisory_feedback: AdvisoryFeedbackReadV1::Absent,
         language_server: LanguageServerReadV1::Observed {

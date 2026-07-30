@@ -42,8 +42,9 @@ use tracedecay_application::doctor::{
     DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingV1, HostConformanceV1,
     HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
     LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
-    ObservabilityStateV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
-    StorageDoctorPort,
+    ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
+    ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
+    RuntimeLivenessV1, StorageDoctorPort,
 };
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
@@ -270,6 +271,27 @@ impl RuntimeHealthDoctorPort for RuntimeHealthDoctorAdapterV1 {
     }
 }
 
+pub struct OperationalAuditDoctorAdapterV1 {
+    read: OperationalAuditReadV1,
+}
+
+impl OperationalAuditDoctorAdapterV1 {
+    #[must_use]
+    pub fn from_read(read: OperationalAuditReadV1) -> Self {
+        Self { read }
+    }
+}
+
+impl OperationalAuditDoctorPort for OperationalAuditDoctorAdapterV1 {
+    fn operational_audit<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, OperationalAuditReadV1> {
+        let read = self.read.clone();
+        Box::pin(async move { read })
+    }
+}
+
 // === Host/agent integration conformance (Advisory family) ====================
 
 /// A conformance summary over a host's installed components versus the expected
@@ -345,6 +367,42 @@ pub fn host_conformance_read(summary: &HostConformanceSummaryV1) -> HostIntegrat
         HostConformanceV1::ProtocolDrift
     } else {
         HostConformanceV1::Drifted
+    };
+    HostIntegrationReadV1::Observed {
+        conformance,
+        coverage: DoctorCoverageCompletenessV1::Complete,
+    }
+}
+
+fn host_integration_read_from_report(
+    report: &crate::agents::host_bundle_v2::HostBundleDoctorReportV1,
+) -> HostIntegrationReadV1 {
+    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1;
+
+    if report.native_edit_stop_conformance.is_empty() {
+        return HostIntegrationReadV1::Unsupported;
+    }
+    if report.components.is_empty() {
+        return HostIntegrationReadV1::Absent;
+    }
+    let conformance = if report.components.iter().any(|component| {
+        matches!(
+            component.state,
+            HostBundleComponentDoctorStateV1::Corrupt
+                | HostBundleComponentDoctorStateV1::OwnershipConflict
+        )
+    }) {
+        HostConformanceV1::ProtocolDrift
+    } else if report.components.iter().any(|component| {
+        matches!(
+            component.state,
+            HostBundleComponentDoctorStateV1::Repairable
+                | HostBundleComponentDoctorStateV1::Missing
+        )
+    }) {
+        HostConformanceV1::Drifted
+    } else {
+        HostConformanceV1::Conformant
     };
     HostIntegrationReadV1::Observed {
         conformance,
@@ -1179,6 +1237,8 @@ pub struct DoctorKernelInputsV1 {
     pub configuration: ConfigurationAuthorityReadV1,
     /// Daemon/runtime health read (`StorageRuntime` family).
     pub runtime: RuntimeHealthReadV1,
+    /// Remote HTTPS and exact registered-profile operational authority.
+    pub operational_audit: OperationalAuditReadV1,
     /// Host/agent integration conformance read (Advisory family).
     pub host: HostIntegrationReadV1,
     /// Mounted canonical feedback-owner read (Advisory family).
@@ -1204,6 +1264,10 @@ impl DoctorKernelInputsV1 {
         Self {
             configuration: ConfigurationAuthorityReadV1::Unknown,
             runtime: RuntimeHealthReadV1::Unknown,
+            operational_audit: OperationalAuditReadV1 {
+                remote: RemoteOperationalReadV1::Unavailable,
+                profile_authority: ProfileAuthorityReadV1::Unavailable,
+            },
             host: HostIntegrationReadV1::Unknown,
             advisory_feedback: AdvisoryFeedbackReadV1::Unknown,
             language_server: LanguageServerReadV1::Unknown,
@@ -1228,6 +1292,8 @@ pub async fn compose_doctor_report(
     let configuration =
         ConfigurationAuthorityDoctorAdapterV1::from_read(inputs.configuration.clone());
     let runtime = RuntimeHealthDoctorAdapterV1::from_read(inputs.runtime.clone());
+    let operational_audit =
+        OperationalAuditDoctorAdapterV1::from_read(inputs.operational_audit.clone());
     let host = HostIntegrationDoctorAdapterV1::from_read(inputs.host.clone());
     let advisory_feedback =
         AdvisoryFeedbackDoctorAdapterV1::from_read(inputs.advisory_feedback.clone());
@@ -1239,6 +1305,7 @@ pub async fn compose_doctor_report(
     let composer = DoctorReportComposerV1::new()
         .with_configuration(&configuration)
         .with_runtime(&runtime)
+        .with_operational_audit(&operational_audit)
         .with_host(&host)
         .with_advisory_feedback(&advisory_feedback)
         .with_language_server(&language_server)
@@ -1307,6 +1374,8 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     profile_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
     project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
     profile_root: PathBuf,
+    host_home: Option<PathBuf>,
+    remote_operational: RemoteOperationalReadV1,
     retention: crate::config::RetentionConfig,
     schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1322,6 +1391,8 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let profile_sessions = Arc::clone(&profile_sessions);
         let project_sessions = Arc::clone(&project_sessions);
         let profile_root = profile_root.clone();
+        let host_home = host_home.clone();
+        let remote_operational = remote_operational.clone();
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1463,6 +1534,23 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 },
                 None => AdvisoryFeedbackReadV1::Absent,
             };
+            let host = host_home
+                .as_ref()
+                .map_or(HostIntegrationReadV1::Unsupported, |home| {
+                    let context = crate::agents::HealthcheckContext {
+                        home: home.clone(),
+                        project_path: project_root.clone(),
+                    };
+                    crate::agents::inspect_receipt_backed_host_components(
+                        &context,
+                        &profile_root.join("host-components"),
+                    )
+                    .as_ref()
+                    .map_or(
+                        HostIntegrationReadV1::Unknown,
+                        host_integration_read_from_report,
+                    )
+                });
             let inputs = DoctorKernelInputsV1 {
                 configuration: configuration_read_from_pin::<crate::errors::TraceDecayError>(
                     &pinned,
@@ -1476,10 +1564,15 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     ),
                     temporal_ok,
                 }),
-                // Host conformance has no single project-scoped runtime owner;
-                // retain honest unknown until the profile host registry is
-                // injected rather than probing mutable paths here.
-                host: HostIntegrationReadV1::Unknown,
+                operational_audit: OperationalAuditReadV1 {
+                    remote: remote_operational,
+                    profile_authority: ProfileAuthorityReadV1::Observed {
+                        registry_attached: registry.writer_connection().is_ok(),
+                        profile_sessions_attached: profile_sessions.writer_connection().is_ok(),
+                        coverage: DoctorCoverageCompletenessV1::Complete,
+                    },
+                },
+                host,
                 advisory_feedback,
                 language_server,
                 code_index: code_index_read_from_registry(&schedulers, &project_root).await,

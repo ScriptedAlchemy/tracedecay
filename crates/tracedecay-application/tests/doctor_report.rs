@@ -21,9 +21,10 @@ use tracedecay_application::{
     DoctorRemediationRefV1, DoctorRemediationRegistryV1, DoctorRemediationResolutionErrorV1,
     DoctorReportComposerV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
     DoctorStorageFindingKindV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, OrphanStoreRecordV1, RequestContext, RuntimeHealthDoctorPort,
-    RuntimeHealthReadV1, RuntimeLivenessV1, StorageByteSizeV1, StorageDoctorPort, StoreKeyV1,
-    orphan_store_finding,
+    HostIntegrationReadV1, OperationalAuditDoctorPort, OperationalAuditReadV1, OrphanStoreRecordV1,
+    ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
+    RequestContext, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageByteSizeV1, StorageDoctorPort, StoreKeyV1, orphan_store_finding,
 };
 use tracedecay_domain::UtcMicros;
 
@@ -89,6 +90,17 @@ impl StorageDoctorPort for StaticStorage {
         &'a self,
         _context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, DoctorStorageFamilyReadV1> {
+        let read = self.0.clone();
+        Box::pin(async move { read })
+    }
+}
+
+struct StaticOperationalAudit(OperationalAuditReadV1);
+impl OperationalAuditDoctorPort for StaticOperationalAudit {
+    fn operational_audit<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, OperationalAuditReadV1> {
         let read = self.0.clone();
         Box::pin(async move { read })
     }
@@ -244,6 +256,93 @@ fn doctor_report_coverage_statement_is_truthful_about_unavailable_families() {
         .expect("advisory finding");
     assert_eq!(advisory.state(), DoctorEvidenceStateV1::Unsupported);
     assert!(!advisory.state().is_healthy_complete());
+}
+
+#[test]
+fn doctor_report_exposes_remote_and_profile_authority_truth_without_replacing_runtime_health() {
+    let ctx = context();
+    let runtime = StaticRuntime(RuntimeHealthReadV1::Observed {
+        liveness: RuntimeLivenessV1::Healthy,
+        coverage: DoctorCoverageCompletenessV1::Complete,
+    });
+    let audit = StaticOperationalAudit(OperationalAuditReadV1 {
+        remote: RemoteOperationalReadV1::Observed {
+            listener: RemoteListenerReadV1::Serving,
+            authority: RemoteAuthorityReadV1::Available,
+            pending_spool_items: 2,
+            quarantined_spool_items: 1,
+            replay_coverage_complete: false,
+            backup_verified: true,
+            failover_in_progress: false,
+            recovery_required: true,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        profile_authority: ProfileAuthorityReadV1::Observed {
+            registry_attached: true,
+            profile_sessions_attached: true,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+    });
+
+    let report = block_on(
+        DoctorReportComposerV1::new()
+            .with_runtime(&runtime)
+            .with_operational_audit(&audit)
+            .compose(&ctx),
+    )
+    .expect("compose");
+    let runtime_codes = report
+        .findings()
+        .filter(|finding| finding.family() == DoctorFindingFamilyV1::StorageRuntime)
+        .map(|finding| finding.evidence()[0].reference().as_str())
+        .collect::<Vec<_>>();
+
+    assert!(runtime_codes.contains(&"runtime.health.healthy"));
+    assert!(runtime_codes.contains(&"remote.operational.recovery-required"));
+    assert!(runtime_codes.contains(&"profile.authority.registered"));
+    assert!(
+        report
+            .findings()
+            .find(|finding| {
+                finding.evidence()[0].reference().as_str() == "remote.operational.recovery-required"
+            })
+            .is_some_and(|finding| finding.state() == DoctorEvidenceStateV1::Degraded)
+    );
+}
+
+#[test]
+fn optional_remote_capability_preserves_unconfigured_and_unsupported_truth() {
+    let ctx = context();
+    for (read, expected_code) in [
+        (
+            RemoteOperationalReadV1::Unconfigured,
+            "remote.operational.unconfigured",
+        ),
+        (
+            RemoteOperationalReadV1::Unsupported,
+            "remote.operational.unsupported",
+        ),
+    ] {
+        let audit = StaticOperationalAudit(OperationalAuditReadV1 {
+            remote: read,
+            profile_authority: ProfileAuthorityReadV1::Unavailable,
+        });
+        let report = block_on(
+            DoctorReportComposerV1::new()
+                .with_operational_audit(&audit)
+                .compose(&ctx),
+        )
+        .expect("compose");
+        assert!(
+            report
+                .findings()
+                .any(|finding| finding.evidence()[0].reference().as_str() == expected_code),
+            "{expected_code} must remain explicit"
+        );
+        assert!(report.findings().any(|finding| {
+            finding.evidence()[0].reference().as_str() == "profile.authority.unavailable"
+        }));
+    }
 }
 
 #[test]
