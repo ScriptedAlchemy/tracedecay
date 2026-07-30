@@ -1,0 +1,55 @@
+{
+  "attempted_events_per_sample": 10000,
+  "authority": {
+    "binary_sha256": "39ec2fb26a6549647d3282b500534c43e574f2a52b21ebcea2ebaa98331fb584",
+    "kind": "prebuilt-integration-test",
+    "test": "publication_rate_and_queue_memory_stay_bounded_under_backpressure"
+  },
+  "availability": {
+    "detail": null,
+    "state": "available"
+  },
+  "event_counts": {
+    "attempted_total": 30000,
+    "emitted_total": 3,
+    "queue_depth_max": 1
+  },
+  "latency_ns": {
+    "p50": {
+      "available": true,
+      "minimum_samples": 2,
+      "value": 1538442545
+    },
+    "p95": {
+      "available": false,
+      "minimum_samples": 40,
+      "value": null
+    },
+    "p99": {
+      "available": false,
+      "minimum_samples": 100,
+      "value": null
+    }
+  },
+  "outcome": {
+    "available_count": 3,
+    "process_leak_count": 0,
+    "unavailable_count": 0
+  },
+  "policy": {
+    "journey_margins": {
+      "p50_regression_margin_pct": 20,
+      "p95_regression_margin_pct": 25,
+      "resource_regression_margin_pct": 20
+    },
+    "journey_policy_id": "runtime-journey-margins-v1",
+    "journey_policy_sha256": "6db22e48d7e45a6cc751baaf1ae40e67905aafb5b315157f646a94cf57695d45",
+    "policy_id": "runtime-acceptance-v1",
+    "policy_sha256": "7c74637ac91439e8d04870d322c7e9c9d1d4dc926958c01c475c3c7f37651878"
+  },
+  "report_id": "incident-93a5114288d64b0e8323a99e9b32e154",
+  "sample_count": 3,
+  "samples_sha256": "fda203f5cc946cd0c1ce9650443558825bc5bf2ecb148258476a4ddf77c78ef7",
+  "schema_version": 1,
+  "workload_id": "diagnostic-dedup-batch-rate"
+}
