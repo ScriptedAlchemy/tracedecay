@@ -1,12 +1,13 @@
 //! Durable SQLite authority, fencing, and publication for Remote Brain recovery.
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_application::OperationBudgetUsage;
 use tracedecay_application::remote::auth::{
     RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
     RemoteEnrollmentAuthorityPortV1, RemoteEnrollmentCommitReceiptV1,
@@ -67,7 +68,7 @@ CREATE TABLE IF NOT EXISTS remote_enrollment_credentials_v1 (
     enrollment_id TEXT PRIMARY KEY,
     credential_revision INTEGER NOT NULL CHECK (credential_revision > 0),
     enrollment_json TEXT NOT NULL,
-    commit_receipt_json TEXT NOT NULL
+    commit_receipt_json TEXT
 ) STRICT;
 "#;
 
@@ -257,6 +258,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
         let revision = i64::try_from(enrollment.revision)
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let transaction_started = Instant::now();
         let transaction = self
             .handle
             .begin_immediate()
@@ -286,6 +288,9 @@ impl RemoteEnrollmentAuthorityPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
         admission
             .validate_for(grant)
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        if admission.effective_deadline().is_elapsed_at(consumed_at) {
+            return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
+        }
         let updated = transaction
             .execute(enrollment_statement(
                 "UPDATE remote_enrollment_grants_v1
@@ -300,12 +305,34 @@ impl RemoteEnrollmentAuthorityPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
                         i64::try_from(grant.revision)
                             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?,
                     ),
-                    MigrationSqlValue::Text(grant_json),
+                    MigrationSqlValue::Text(grant_json.clone()),
                 ],
             )?)
             .map_err(enrollment_unavailable)?;
         if updated.changed_rows != 1 {
             return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+        }
+        let bytes_consumed = u64::try_from(
+            grant_json.len()
+                + admission_json.len()
+                + enrollment_json.len()
+                + input_digest.as_str().len(),
+        )
+        .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let inserted = transaction
+            .execute(enrollment_statement(
+                "INSERT INTO remote_enrollment_credentials_v1 (
+                    enrollment_id, credential_revision, enrollment_json, commit_receipt_json
+                 ) VALUES (?1, ?2, ?3, NULL)",
+                vec![
+                    MigrationSqlValue::Text(enrollment.enrollment_id.as_str().to_owned()),
+                    MigrationSqlValue::Integer(revision),
+                    MigrationSqlValue::Text(enrollment_json),
+                ],
+            )?)
+            .map_err(enrollment_unavailable)?;
+        if inserted.changed_rows != 1 {
+            return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
         }
         let receipt = RemoteEnrollmentCommitReceiptV1 {
             admission,
@@ -315,6 +342,17 @@ impl RemoteEnrollmentAuthorityPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
             committed_state_digest: tracedecay_domain::canonical_sha256(enrollment)
                 .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?,
             consumed_at,
+            budget: OperationBudgetUsage {
+                units_consumed: u64::try_from(updated.changed_rows)
+                    .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?
+                    .saturating_add(
+                        u64::try_from(inserted.changed_rows)
+                            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?,
+                    ),
+                bytes_consumed,
+                elapsed_micros: u64::try_from(transaction_started.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
+            },
             enrollment: enrollment.clone(),
         };
         receipt
@@ -322,18 +360,20 @@ impl RemoteEnrollmentAuthorityPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
         let receipt_json = serde_json::to_string(&receipt)
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
-        enrollment_execute_tx(
-            &transaction,
-            "INSERT INTO remote_enrollment_credentials_v1 (
-                enrollment_id, credential_revision, enrollment_json, commit_receipt_json
-             ) VALUES (?1, ?2, ?3, ?4)",
-            vec![
-                MigrationSqlValue::Text(enrollment.enrollment_id.as_str().to_owned()),
-                MigrationSqlValue::Integer(revision),
-                MigrationSqlValue::Text(enrollment_json),
-                MigrationSqlValue::Text(receipt_json),
-            ],
-        )?;
+        let receipt_written = transaction
+            .execute(enrollment_statement(
+                "UPDATE remote_enrollment_credentials_v1
+                 SET commit_receipt_json = ?2
+                 WHERE enrollment_id = ?1 AND commit_receipt_json IS NULL",
+                vec![
+                    MigrationSqlValue::Text(enrollment.enrollment_id.as_str().to_owned()),
+                    MigrationSqlValue::Text(receipt_json),
+                ],
+            )?)
+            .map_err(enrollment_unavailable)?;
+        if receipt_written.changed_rows != 1 {
+            return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
+        }
         transaction.commit().map_err(enrollment_unavailable)?;
         Ok(receipt)
     }

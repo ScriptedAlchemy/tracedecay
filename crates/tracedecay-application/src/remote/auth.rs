@@ -22,8 +22,9 @@ use crate::{
 };
 
 use super::protocol::{
-    EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolFailureV1,
-    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_protocol_problem,
+    EnrollmentRequestV1, REMOTE_ENROLLMENT_USE_CASE_ID_V1, RemoteEnrollmentProtocolPortV1,
+    RemoteProtocolFailureV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    remote_enrollment_result_contract_v1, remote_protocol_problem,
 };
 
 /// Opaque credential accepted only at an application boundary.
@@ -103,25 +104,56 @@ pub enum RemoteEnrollmentAuthorityErrorV1 {
     IdentityConflict,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteEnrollmentAdmissionEvidenceV1 {
-    pub result_contract: ResultContractRef,
-    pub scope: ResolvedScope,
-    pub authority: AuthorityReceipt,
-    pub actor: ActorId,
-    pub operation: UseCaseId,
-    pub effect_id: EffectId,
-    pub effect_class: EffectClass,
-    pub idempotency_key: IdempotencyKey,
-    pub configuration_digest: ManifestDigest,
-    pub catalog_digest: ManifestDigest,
-    pub privacy_digest: ManifestDigest,
-    pub effective_deadline: Deadline,
-    pub budget: OperationBudgetUsage,
+    result_contract: ResultContractRef,
+    scope: ResolvedScope,
+    authority: AuthorityReceipt,
+    actor: ActorId,
+    operation: UseCaseId,
+    effect_id: EffectId,
+    effect_class: EffectClass,
+    idempotency_key: IdempotencyKey,
+    configuration_digest: ManifestDigest,
+    catalog_digest: ManifestDigest,
+    privacy_digest: ManifestDigest,
+    effective_deadline: Deadline,
 }
 
 impl RemoteEnrollmentAdmissionEvidenceV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        grant: &EnrollmentGrantV1,
+        scope: ResolvedScope,
+        authority: AuthorityReceipt,
+        actor: ActorId,
+        configuration_digest: ManifestDigest,
+        catalog_digest: ManifestDigest,
+        privacy_digest: ManifestDigest,
+        effective_deadline: Deadline,
+    ) -> Result<Self, ()> {
+        let identity = format!("{}.{}", grant.grant_id.as_str(), grant.revision);
+        let evidence = Self {
+            result_contract: remote_enrollment_result_contract_v1(),
+            scope,
+            authority,
+            actor,
+            operation: UseCaseId::new(REMOTE_ENROLLMENT_USE_CASE_ID_V1).map_err(|_| ())?,
+            effect_id: EffectId::new(format!("effect.remote.enrollment.{identity}"))
+                .map_err(|_| ())?,
+            effect_class: EffectClass::Administrative,
+            idempotency_key: IdempotencyKey::new(format!("remote.enrollment.{identity}"))
+                .map_err(|_| ())?,
+            configuration_digest,
+            catalog_digest,
+            privacy_digest,
+            effective_deadline,
+        };
+        evidence.validate_for(grant)?;
+        Ok(evidence)
+    }
+
     pub fn validate_for(&self, grant: &EnrollmentGrantV1) -> Result<(), ()> {
         self.scope.validate().map_err(|_| ())?;
         self.authority.validate_for(&self.scope).map_err(|_| ())?;
@@ -136,7 +168,21 @@ impl RemoteEnrollmentAdmissionEvidenceV1 {
             || self.scope.repository_id != grant.scope.repository_id
             || self.scope.worktree_id != grant.scope.worktree_id
             || self.scope.reference != grant.scope.reference
-            || !self.effect_class.is_effect()
+            || self.result_contract != remote_enrollment_result_contract_v1()
+            || self.operation.as_str() != REMOTE_ENROLLMENT_USE_CASE_ID_V1
+            || self.effect_class != EffectClass::Administrative
+            || self.effect_id.as_str()
+                != format!(
+                    "effect.remote.enrollment.{}.{}",
+                    grant.grant_id.as_str(),
+                    grant.revision
+                )
+            || self.idempotency_key.as_str()
+                != format!(
+                    "remote.enrollment.{}.{}",
+                    grant.grant_id.as_str(),
+                    grant.revision
+                )
             || self
                 .effective_deadline
                 .is_elapsed_at(self.authority.revalidated_at)
@@ -144,6 +190,109 @@ impl RemoteEnrollmentAdmissionEvidenceV1 {
             return Err(());
         }
         Ok(())
+    }
+
+    pub fn result_contract(&self) -> &ResultContractRef {
+        &self.result_contract
+    }
+
+    pub fn scope(&self) -> &ResolvedScope {
+        &self.scope
+    }
+
+    pub fn authority(&self) -> &AuthorityReceipt {
+        &self.authority
+    }
+
+    pub fn actor(&self) -> &ActorId {
+        &self.actor
+    }
+
+    pub fn operation(&self) -> &UseCaseId {
+        &self.operation
+    }
+
+    pub fn effect_id(&self) -> &EffectId {
+        &self.effect_id
+    }
+
+    pub fn effect_class(&self) -> &EffectClass {
+        &self.effect_class
+    }
+
+    pub fn idempotency_key(&self) -> &IdempotencyKey {
+        &self.idempotency_key
+    }
+
+    pub fn configuration_digest(&self) -> &ManifestDigest {
+        &self.configuration_digest
+    }
+
+    pub fn catalog_digest(&self) -> &ManifestDigest {
+        &self.catalog_digest
+    }
+
+    pub fn privacy_digest(&self) -> &ManifestDigest {
+        &self.privacy_digest
+    }
+
+    pub fn effective_deadline(&self) -> &Deadline {
+        &self.effective_deadline
+    }
+}
+
+impl<'de> Deserialize<'de> for RemoteEnrollmentAdmissionEvidenceV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            result_contract: ResultContractRef,
+            scope: ResolvedScope,
+            authority: AuthorityReceipt,
+            actor: ActorId,
+            operation: UseCaseId,
+            effect_id: EffectId,
+            effect_class: EffectClass,
+            idempotency_key: IdempotencyKey,
+            configuration_digest: ManifestDigest,
+            catalog_digest: ManifestDigest,
+            privacy_digest: ManifestDigest,
+            effective_deadline: Deadline,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let identity = format!(
+            "{}.{}",
+            wire.authority.grant_id.as_str(),
+            wire.authority.grant_revision
+        );
+        if wire.result_contract != remote_enrollment_result_contract_v1()
+            || wire.operation.as_str() != REMOTE_ENROLLMENT_USE_CASE_ID_V1
+            || wire.effect_class != EffectClass::Administrative
+            || wire.effect_id.as_str() != format!("effect.remote.enrollment.{identity}")
+            || wire.idempotency_key.as_str() != format!("remote.enrollment.{identity}")
+        {
+            return Err(serde::de::Error::custom(
+                "non-canonical remote enrollment admission identity",
+            ));
+        }
+        Ok(Self {
+            result_contract: wire.result_contract,
+            scope: wire.scope,
+            authority: wire.authority,
+            actor: wire.actor,
+            operation: wire.operation,
+            effect_id: wire.effect_id,
+            effect_class: wire.effect_class,
+            idempotency_key: wire.idempotency_key,
+            configuration_digest: wire.configuration_digest,
+            catalog_digest: wire.catalog_digest,
+            privacy_digest: wire.privacy_digest,
+            effective_deadline: wire.effective_deadline,
+        })
     }
 }
 
@@ -155,6 +304,7 @@ pub struct RemoteEnrollmentCommitReceiptV1 {
     pub input_digest: ManifestDigest,
     pub committed_state_digest: ManifestDigest,
     pub consumed_at: UtcMicros,
+    pub budget: OperationBudgetUsage,
     pub enrollment: EnrollmentCredentialRecordV1,
 }
 
@@ -168,6 +318,8 @@ impl RemoteEnrollmentCommitReceiptV1 {
             || self.committed_state_digest != canonical_sha256(&self.enrollment).map_err(|_| ())?
             || self.consumed_at != self.enrollment.issued_at
             || self.admission.authority.revalidated_at > self.consumed_at
+            || self.budget.units_consumed == 0
+            || self.budget.bytes_consumed == 0
         {
             return Err(());
         }
@@ -254,6 +406,12 @@ where
         admission
             .validate_for(&grant)
             .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
+        if admission
+            .effective_deadline()
+            .is_elapsed_at(request.sent_at)
+        {
+            return Err(RemoteEnrollmentServiceErrorV1::InvalidRequest);
+        }
         let issue = EnrollmentIssueRequestV1 {
             grant_id: request.body.grant_id,
             grant_revision: request.body.grant_revision,
@@ -280,6 +438,10 @@ where
         if receipt.admission != admission
             || receipt.input_digest != input_digest
             || receipt.enrollment != enrollment
+            || receipt
+                .admission
+                .effective_deadline()
+                .is_elapsed_at(receipt.consumed_at)
         {
             return Err(RemoteEnrollmentServiceErrorV1::Authority(
                 RemoteEnrollmentAuthorityErrorV1::IdentityConflict,
@@ -288,32 +450,32 @@ where
         let execution = OperationReceipt::completed(
             request.sent_at,
             receipt.consumed_at,
-            admission.effective_deadline.clone(),
-            admission.budget,
+            admission.effective_deadline().clone(),
+            receipt.budget,
         )
         .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
         let effect_receipt = EffectReceipt {
-            operation: admission.operation.clone(),
+            operation: admission.operation().clone(),
             request_id: request.request_id,
-            actor: admission.actor.clone(),
-            scope: admission.scope.clone(),
-            effect_class: admission.effect_class.clone(),
-            idempotency_key: admission.idempotency_key.clone(),
+            actor: admission.actor().clone(),
+            scope: admission.scope().clone(),
+            effect_class: admission.effect_class().clone(),
+            idempotency_key: admission.idempotency_key().clone(),
             input_digest,
             expected_state: receipt.prior_grant_digest.clone(),
-            policy_digest: admission.authority.policy.digest.clone(),
-            configuration_digest: admission.configuration_digest.clone(),
-            catalog_digest: admission.catalog_digest.clone(),
-            privacy_digest: admission.privacy_digest.clone(),
+            policy_digest: admission.authority().policy.digest.clone(),
+            configuration_digest: admission.configuration_digest().clone(),
+            catalog_digest: admission.catalog_digest().clone(),
+            privacy_digest: admission.privacy_digest().clone(),
             outcome: EffectTermination::Completed,
             committed_state: Some(receipt.committed_state_digest.clone()),
             external_proof: None,
         };
         let effect = EffectResult::new(
-            admission.effect_id.clone(),
-            admission.effect_class.clone(),
-            admission.idempotency_key.clone(),
-            admission.authority.clone(),
+            admission.effect_id().clone(),
+            admission.effect_class().clone(),
+            admission.idempotency_key().clone(),
+            admission.authority().clone(),
             receipt.prior_grant_digest,
             execution,
             ReconciliationState::Reconciled,
@@ -322,8 +484,8 @@ where
         )
         .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
         Ok(RemoteEnrollmentEffectOutcomeV1 {
-            result_contract: admission.result_contract,
-            scope: admission.scope,
+            result_contract: admission.result_contract().clone(),
+            scope: admission.scope().clone(),
             effect,
         })
     }
@@ -331,21 +493,16 @@ where
 
 pub struct RemoteEnrollmentProtocolAdapterV1<A> {
     service: RemoteEnrollmentServiceV1<A>,
-    result_contract: ResultContractRef,
 }
 
 impl<A> RemoteEnrollmentProtocolAdapterV1<A>
 where
     A: RemoteEnrollmentAuthorityPortV1,
 {
-    pub fn new(
-        authority: A,
-        result_contract: ResultContractRef,
-    ) -> Result<Self, RemoteEnrollmentServiceErrorV1> {
-        Ok(Self {
+    pub fn new(authority: A) -> Self {
+        Self {
             service: RemoteEnrollmentServiceV1::new(authority),
-            result_contract,
-        })
+        }
     }
 }
 
@@ -365,7 +522,7 @@ where
             .service
             .enroll(request, &grant_credential, &enrollment_credential)
         {
-            Ok(outcome) if outcome.result_contract == self.result_contract => {
+            Ok(outcome) if outcome.result_contract == remote_enrollment_result_contract_v1() => {
                 Ok(ApplicationEnvelope::effect(
                     outcome.result_contract,
                     request_id.clone(),
@@ -374,12 +531,12 @@ where
                 ))
             }
             Ok(_) => Err(remote_protocol_problem(
-                self.result_contract.clone(),
+                remote_enrollment_result_contract_v1(),
                 request_id.clone(),
                 RemoteProtocolFailureV1::AuthorityUnavailable,
             )),
             Err(error) => Err(remote_protocol_problem(
-                self.result_contract.clone(),
+                remote_enrollment_result_contract_v1(),
                 request_id.clone(),
                 enrollment_protocol_failure(error),
             )),
@@ -387,7 +544,7 @@ where
         RemoteProtocolResponseV1::new(
             request_id,
             CurrentRemoteAuthorityStateV1::Unavailable {
-                reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
                 observed_at,
             },
             result,
@@ -738,7 +895,6 @@ mod tests {
         RemotePlacementRevisionV1, RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId,
         ShardId, WorktreeId,
     };
-    use tracedecay_tool_catalog::SchemaId;
 
     fn credential(value: u8) -> OpaqueRemoteCredential {
         OpaqueRemoteCredential::new(vec![value; 32].into_boxed_slice()).unwrap()
@@ -848,6 +1004,11 @@ mod tests {
                 input_digest: input_digest.clone(),
                 committed_state_digest: canonical_sha256(enrollment).unwrap(),
                 consumed_at,
+                budget: OperationBudgetUsage {
+                    units_consumed: 2,
+                    bytes_consumed: 256,
+                    elapsed_micros: 1,
+                },
                 enrollment: enrollment.clone(),
             })
         }
@@ -883,32 +1044,27 @@ mod tests {
             ComponentVersion::new("policy.remote.enrollment.v1").unwrap(),
         )
         .unwrap();
-        RemoteEnrollmentServiceV1::new(TestEnrollmentAuthority {
-            admission: RemoteEnrollmentAdmissionEvidenceV1 {
-                result_contract: ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1)
-                    .unwrap(),
-                scope: resolved_scope.clone(),
-                authority: AuthorityReceipt {
-                    grant_id: CapabilityGrantId::new(grant.grant_id.as_str()).unwrap(),
-                    grant_revision: grant.revision,
-                    grant_digest,
-                    authorized_scope_digest: resolved_scope.scope_digest,
-                    disclosure: DisclosureClass::Evidence,
-                    policy,
-                    revalidated_at: UtcMicros(10),
-                },
-                actor: ActorId::new("actor.remote.node").unwrap(),
-                operation: UseCaseId::new("use-case.remote.enrollment").unwrap(),
-                effect_id: EffectId::new("effect.remote.enrollment").unwrap(),
-                effect_class: EffectClass::Administrative,
-                idempotency_key: IdempotencyKey::new("grant.remote").unwrap(),
-                configuration_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
-                    .unwrap(),
-                catalog_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
-                privacy_digest: ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
-                effective_deadline: Deadline::new(UtcMicros(100)).unwrap(),
-                budget: OperationBudgetUsage::default(),
+        let admission = RemoteEnrollmentAdmissionEvidenceV1::new(
+            &grant,
+            resolved_scope.clone(),
+            AuthorityReceipt {
+                grant_id: CapabilityGrantId::new(grant.grant_id.as_str()).unwrap(),
+                grant_revision: grant.revision,
+                grant_digest,
+                authorized_scope_digest: resolved_scope.scope_digest,
+                disclosure: DisclosureClass::Evidence,
+                policy,
+                revalidated_at: UtcMicros(10),
             },
+            ActorId::new("actor.remote.node").unwrap(),
+            ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+            Deadline::new(UtcMicros(100)).unwrap(),
+        )
+        .unwrap();
+        RemoteEnrollmentServiceV1::new(TestEnrollmentAuthority {
+            admission,
             grant,
             committed: Mutex::new(None),
         })
@@ -1042,11 +1198,47 @@ mod tests {
     }
 
     #[test]
+    fn enrollment_rejects_deadline_at_exact_request_boundary() {
+        let grant_credential = credential(b'g');
+        let enrollment_credential = credential(b'e');
+        let mut service = enrollment_service(&grant_credential);
+        service.authority.admission.effective_deadline = Deadline::new(UtcMicros(10)).unwrap();
+        assert_eq!(
+            service.enroll(
+                protocol_enrollment_request("node.remote"),
+                &grant_credential,
+                &enrollment_credential,
+            ),
+            Err(RemoteEnrollmentServiceErrorV1::InvalidRequest)
+        );
+        assert!(service.authority.committed.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn enrollment_admission_deserialization_rejects_noncanonical_identities() {
+        let grant_credential = credential(b'g');
+        let service = enrollment_service(&grant_credential);
+        let encoded = serde_json::to_value(&service.authority.admission).unwrap();
+        for (field, invalid) in [
+            ("operation", serde_json::json!("use-case.remote.query")),
+            ("effect_id", serde_json::json!("effect.remote.other")),
+            ("idempotency_key", serde_json::json!("remote.other")),
+            ("effect_class", serde_json::json!("configuration_write")),
+        ] {
+            let mut candidate = encoded.clone();
+            candidate[field] = invalid;
+            assert!(
+                serde_json::from_value::<RemoteEnrollmentAdmissionEvidenceV1>(candidate).is_err(),
+                "{field} must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn enrollment_protocol_success_binds_effect_receipt_request_and_scope() {
         let grant_credential = credential(b'g');
         let service = enrollment_service(&grant_credential);
-        let contract = service.authority.admission.result_contract.clone();
-        let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority, contract).unwrap();
+        let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority);
         let response = adapter.execute_enrollment(
             protocol_enrollment_request("node.remote"),
             grant_credential,
@@ -1056,7 +1248,7 @@ mod tests {
         assert!(matches!(
             response.authority,
             CurrentRemoteAuthorityStateV1::Unavailable {
-                reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
                 ..
             }
         ));
@@ -1084,8 +1276,7 @@ mod tests {
     fn enrollment_protocol_maps_replayed_grant_to_stale_problem() {
         let grant_credential = credential(b'g');
         let service = enrollment_service(&grant_credential);
-        let contract = service.authority.admission.result_contract.clone();
-        let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority, contract).unwrap();
+        let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority);
         adapter.execute_enrollment(
             protocol_enrollment_request("node.remote"),
             grant_credential,

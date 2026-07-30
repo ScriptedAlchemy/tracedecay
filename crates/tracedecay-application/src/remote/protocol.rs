@@ -11,6 +11,7 @@ use tracedecay_domain::{
     ProjectionGenerationId, RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
     RemoteWriterFenceV1, ShardId, UtcMicros,
 };
+use tracedecay_tool_catalog::SchemaId;
 
 use crate::remote::auth::OpaqueRemoteCredential;
 use crate::{
@@ -19,6 +20,15 @@ use crate::{
 };
 
 pub const REMOTE_PROTOCOL_VERSION_V1: u16 = 1;
+pub const REMOTE_ENROLLMENT_USE_CASE_ID_V1: &str = "use-case.remote.enrollment";
+
+pub fn remote_enrollment_result_contract_v1() -> ResultContractRef {
+    ResultContractRef::new(
+        SchemaId::new("remote.result").expect("static remote result schema id is canonical"),
+        1,
+    )
+    .expect("static remote result contract is canonical")
+}
 
 /// Canonical semantic validation required before any authenticated remote
 /// request reaches a production port.
