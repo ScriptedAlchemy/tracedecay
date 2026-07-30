@@ -6463,10 +6463,10 @@ pub mod work_attempt_acquire_lease {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -6474,7 +6474,15 @@ pub mod work_attempt_acquire_lease {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -6499,10 +6507,14 @@ pub mod work_attempt_acquire_lease {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -8601,10 +8613,10 @@ pub mod work_attempt_cancel {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -8612,7 +8624,15 @@ pub mod work_attempt_cancel {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -8637,10 +8657,14 @@ pub mod work_attempt_cancel {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -10742,10 +10766,10 @@ pub mod work_attempt_publish_artifact {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -10753,7 +10777,15 @@ pub mod work_attempt_publish_artifact {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -10778,10 +10810,14 @@ pub mod work_attempt_publish_artifact {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -12780,10 +12816,10 @@ pub mod work_attempt_publish_progress {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -12791,7 +12827,15 @@ pub mod work_attempt_publish_progress {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -12816,10 +12860,14 @@ pub mod work_attempt_publish_progress {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -14871,10 +14919,10 @@ pub mod work_attempt_recover {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -14882,7 +14930,15 @@ pub mod work_attempt_recover {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -14907,10 +14963,14 @@ pub mod work_attempt_recover {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -16874,10 +16934,10 @@ pub mod work_attempt_renew_lease {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -16885,7 +16945,15 @@ pub mod work_attempt_renew_lease {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -16910,10 +16978,14 @@ pub mod work_attempt_renew_lease {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -17688,10 +17760,10 @@ pub mod work_attempt_start {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -17699,7 +17771,15 @@ pub mod work_attempt_start {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -17724,10 +17804,14 @@ pub mod work_attempt_start {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -19209,10 +19293,10 @@ pub mod work_attempt_start {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -19220,7 +19304,15 @@ pub mod work_attempt_start {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -19245,10 +19337,14 @@ pub mod work_attempt_start {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`
@@ -21398,10 +21494,10 @@ pub mod work_attempt_terminalize {
         ///      }
         ///    },
         ///    {
+        ///      "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
         ///      "type": "object",
         ///      "required": [
         ///        "reason",
-        ///        "source_attempt_id",
         ///        "state"
         ///      ],
         ///      "properties": {
@@ -21409,7 +21505,15 @@ pub mod work_attempt_terminalize {
         ///          "$ref": "#/definitions/WorkRestartReasonV1"
         ///        },
         ///        "source_attempt_id": {
-        ///          "$ref": "#/definitions/AttemptId"
+        ///          "default": null,
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/AttemptId"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
         ///        },
         ///        "state": {
         ///          "type": "string",
@@ -21434,10 +21538,14 @@ pub mod work_attempt_terminalize {
             },
             #[serde(rename = "restarted")]
             Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
+            /**The attempt cannot continue and must be recovered. A first attempt
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                source_attempt_id: ::std::option::Option<AttemptId>,
             },
         }
         ///`WorkRestartReasonV1`

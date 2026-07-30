@@ -456,7 +456,7 @@ fn recovery_candidate_resumes_and_clears_restart_work() {
             Vec::new(),
             WorkCancellationStateV1::None,
             WorkRecoveryStateV1::RecoveryRequired {
-                source_attempt_id: id("attempt.work.runtime-store.0"),
+                source_attempt_id: Some(id("attempt.work.runtime-store.0")),
                 reason: WorkRestartReasonV1::ProcessLost,
             },
             None,
