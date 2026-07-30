@@ -343,7 +343,7 @@ impl IntegrationDaemonRequirementV1 {
 #[non_exhaustive]
 pub enum HostCapabilityReasonV1 {
     SpoolRecordTooLarge,
-    AuthorityUnavailable,
+    ProjectAuthorityUnbound,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -365,7 +365,7 @@ impl HostCapabilityAvailabilityV1 {
     pub const FIXTURE_BACKED_STATES: [Self; 3] = [
         Self::Supported,
         Self::Degraded(HostCapabilityReasonV1::SpoolRecordTooLarge),
-        Self::Unavailable(HostCapabilityReasonV1::AuthorityUnavailable),
+        Self::Unavailable(HostCapabilityReasonV1::ProjectAuthorityUnbound),
     ];
 }
 
