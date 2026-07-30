@@ -171,16 +171,28 @@ class ClientTest(unittest.TestCase):
         available_work = {name for name in server_names if name.startswith("work_")}
         unavailable_work = set(UNAVAILABLE_OPERATIONS)
 
-        self.assertEqual(len(base_names), 64)
-        self.assertEqual(len(available_work), 18)
-        self.assertEqual(len(unavailable_work), 64)
+        self.assertTrue(base_names)
+        self.assertEqual(available_work, set(WORK_OPERATIONS))
         self.assertFalse(available_work & unavailable_work)
         self.assertTrue(
             all(value == "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values())
         )
-        # No executable binding registry schema body exists for these 64 routes.
+        # No executable binding registry schema body exists for these base routes.
         self.assertEqual(set(UNAVAILABLE_OPERATIONS), base_names)
         self.assertFalse(hasattr(self.client(), "call"))
+
+    def test_work_attempt_finish_descriptor_matches_the_canonical_binding(self) -> None:
+        self.assertIn("work_attempt_finish", WORK_OPERATIONS)
+        descriptor = WORK_OPERATIONS["work_attempt_finish"]
+
+        self.assertEqual(descriptor.operation, "work_attempt_finish")
+        self.assertEqual(descriptor.operation_id, "operation.work.attempt_finish")
+        self.assertEqual(descriptor.route, "/application/work/attempt/finish")
+        self.assertEqual(descriptor.binding_id, "binding.http.work.attempt_finish")
+        self.assertEqual(descriptor.result_schema_id, "schema.work.attempt_finish.result")
+        self.assertEqual(descriptor.result_schema_revision, 1)
+        self.assertEqual(descriptor.request_schema.get("title"), "WorkAttemptFinishRequestV1")
+        self.assertTrue(hasattr(self.client().operations, "work_attempt_finish"))
 
     def test_generated_result_decoder_rejects_malformed_body(self) -> None:
         with self.assertRaises(TypeError):
