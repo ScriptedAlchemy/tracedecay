@@ -21,10 +21,16 @@ use crate::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation, ResultContractRef,
 };
 
+/// Historical redesign-branch digest domain. Never shipped on `origin/master`.
+/// Kept only so tests can prove final-v2 digests are intentionally distinct.
+#[cfg(test)]
 const API_MIGRATION_PLAN_DIGEST_DOMAIN_V1: &str = "tracedecay.application.api-migration-plan.v1";
+/// Final V2 plan digest domain for plans that wire `deletion_condition`.
+const API_MIGRATION_PLAN_DIGEST_DOMAIN_V2: &str = "tracedecay.application.api-migration-plan.v2";
 const API_MIGRATION_DEFINITION_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.api-migration-definition.v1";
 const API_MIGRATION_FILE_DIGEST_DOMAIN_V1: &str = "tracedecay.api-migration.file.v1";
+const API_MIGRATION_SCHEMA_REVISION_V2: u32 = 2;
 
 pub fn api_migration_definition_digest(
     source: &str,
@@ -78,13 +84,10 @@ pub struct ApiCompatibilityDispositionV1 {
     pub deprecation_policy: String,
     /// Product sunset predicate for temporary compatibility inserts.
     ///
-    /// Wire migration: serialize as `deletion_condition`; deserialize also
-    /// accepts the historical `pr19_deletion_condition` field name.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "pr19_deletion_condition"
-    )]
+    /// Final V2 wire field. The redesign-branch name `pr19_deletion_condition`
+    /// is rejected (`deny_unknown_fields`); there is no shipped persisted
+    /// authority on `origin/master` that requires a lossless v1 migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deletion_condition: Option<String>,
 }
 
@@ -413,7 +416,7 @@ pub struct ApiMigrationPlanV1 {
 impl ApiMigrationPlanV1 {
     pub fn compute_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
         Ok(canonical_sha256(&(
-            API_MIGRATION_PLAN_DIGEST_DOMAIN_V1,
+            API_MIGRATION_PLAN_DIGEST_DOMAIN_V2,
             &self.family_id,
             &self.repository_revision,
             &self.graph_revision,
@@ -788,7 +791,7 @@ pub fn api_migration_catalog_contribution()
     let mut bindings = Vec::new();
     let mut binding_ids = Vec::new();
     for (surface, name) in [(BindingSurface::Cli, "cli"), (BindingSurface::Mcp, "mcp")] {
-        let binding_id = BindingId::new(format!("binding.{name}.api-migration-plan.v1"))?;
+        let binding_id = BindingId::new(format!("binding.{name}.api-migration-plan.v2"))?;
         bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
             binding_id: binding_id.clone(),
             capability_id: operation.capability_id().clone(),
@@ -864,7 +867,7 @@ pub fn api_migration_catalog_contribution()
 fn api_migration_schema(suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!("schema.application.api-migration.{suffix}"))?,
-        1,
+        API_MIGRATION_SCHEMA_REVISION_V2,
     )?)
 }
 
@@ -938,23 +941,133 @@ mod tests {
             ..disposition.clone()
         };
         with_condition.validate().unwrap();
+        let serialized = serde_json::to_value(&with_condition).unwrap();
+        assert_eq!(
+            serialized["deletion_condition"],
+            "remove after consumers migrate"
+        );
+        assert!(serialized.get("pr19_deletion_condition").is_none());
+    }
 
-        let legacy_wire: ApiCompatibilityDispositionV1 = serde_json::from_value(serde_json::json!({
+    #[test]
+    fn legacy_pr19_deletion_condition_is_rejected() {
+        let legacy = serde_json::json!({
             "lifetime": "temporary",
             "external_consumer": "published users",
             "owner": "api",
             "deprecation_policy": "warn for one release",
             "pr19_deletion_condition": "legacy wire sunset predicate"
-        }))
-        .unwrap();
-        assert_eq!(
-            legacy_wire.deletion_condition.as_deref(),
-            Some("legacy wire sunset predicate")
+        });
+        assert!(
+            serde_json::from_value::<ApiCompatibilityDispositionV1>(legacy).is_err(),
+            "final V2 disposition must reject redesign-branch pr19_deletion_condition"
         );
-        legacy_wire.validate().unwrap();
-        let serialized = serde_json::to_value(&legacy_wire).unwrap();
-        assert!(serialized.get("deletion_condition").is_some());
-        assert!(serialized.get("pr19_deletion_condition").is_none());
+
+        let both = serde_json::json!({
+            "lifetime": "temporary",
+            "external_consumer": "published users",
+            "owner": "api",
+            "deprecation_policy": "warn for one release",
+            "deletion_condition": "product sunset",
+            "pr19_deletion_condition": "legacy wire sunset predicate"
+        });
+        assert!(
+            serde_json::from_value::<ApiCompatibilityDispositionV1>(both).is_err(),
+            "legacy and final field names must not coexist"
+        );
+    }
+
+    #[test]
+    fn final_v2_plan_digest_domain_binds_deletion_condition() {
+        let expected = "pub fn current() {}\n";
+        let replacement = "pub fn legacy() { current(); }\n";
+        let intended = format!("{expected}{replacement}");
+        let insert_at = u64::try_from(expected.len()).expect("fixture length fits u64");
+        let operation = ApiMigrationOperationRequestV1::InsertCompatibility {
+            operation_id: "compatibility".to_owned(),
+            depends_on: vec![],
+            anchor: symbol("current"),
+            position: ApiDefinitionInsertionV1::After,
+            definition: "pub fn legacy() { current(); }".to_owned(),
+            disposition: ApiCompatibilityDispositionV1 {
+                lifetime: ApiCompatibilityLifetimeV1::Temporary,
+                external_consumer: "published users".to_owned(),
+                owner: "api".to_owned(),
+                deprecation_policy: "remove after consumers migrate".to_owned(),
+                deletion_condition: Some("consumers no longer call legacy()".to_owned()),
+            },
+        };
+        let plan = plan_with(
+            operation,
+            ApiMigrationSiteV1 {
+                site_id: "site.compatibility".to_owned(),
+                operation_id: "compatibility".to_owned(),
+                path: "src/lib.rs".to_owned(),
+                start_byte: insert_at,
+                end_byte: insert_at,
+                expected_bytes: String::new(),
+                replacement_bytes: replacement.to_owned(),
+                disposition: ApiMigrationSiteDispositionV1::Changed,
+                reason: "deliberate compatibility definition".to_owned(),
+                caller_node_id: None,
+            },
+            expected,
+            &intended,
+        );
+        plan.validate().unwrap();
+
+        let historical_v1 = canonical_sha256(&(
+            API_MIGRATION_PLAN_DIGEST_DOMAIN_V1,
+            &plan.family_id,
+            &plan.repository_revision,
+            &plan.graph_revision,
+            &plan.operations,
+            &plan.sites,
+            &plan.files,
+            plan.blocked,
+        ))
+        .unwrap();
+        assert_ne!(
+            plan.plan_digest, historical_v1,
+            "final V2 digest domain must not collide with redesign-branch v1 digests"
+        );
+        assert_eq!(plan.compute_digest().unwrap(), plan.plan_digest);
+
+        let mut mutated = plan.clone();
+        if let ApiMigrationOperationRequestV1::InsertCompatibility {
+            disposition, ..
+        } = &mut mutated.operations[0]
+        {
+            disposition.deletion_condition =
+                Some("different sunset predicate changes the digest".to_owned());
+        } else {
+            panic!("expected InsertCompatibility");
+        }
+        assert_ne!(mutated.compute_digest().unwrap(), plan.plan_digest);
+    }
+
+    #[test]
+    fn api_migration_catalog_advertises_final_v2_bindings_and_schema_revision() {
+        let contribution = api_migration_catalog_contribution().unwrap();
+        for binding in contribution.bindings() {
+            assert!(
+                binding.binding_id().as_str().ends_with("api-migration-plan.v2"),
+                "unexpected binding {}",
+                binding.binding_id().as_str()
+            );
+        }
+        let capability = contribution
+            .capabilities()
+            .first()
+            .expect("api migration capability");
+        assert_eq!(
+            capability.request_schema().revision(),
+            API_MIGRATION_SCHEMA_REVISION_V2
+        );
+        assert_eq!(
+            capability.result_schema().revision(),
+            API_MIGRATION_SCHEMA_REVISION_V2
+        );
     }
 
     #[test]
