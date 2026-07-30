@@ -1195,6 +1195,9 @@ pub(crate) mod hook_v2_replay;
 pub(crate) mod pr9_authority_provider;
 pub(crate) mod project_open_owners;
 pub(crate) mod remote_brain;
+mod remote_https;
+#[cfg(test)]
+mod remote_https_tests;
 mod semantic_evaluation;
 pub(crate) use core_admission::*;
 pub use core_client::*;

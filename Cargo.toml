@@ -339,6 +339,10 @@ lsp-types = "0.97.0"
 yaml-edit = { version = "0.2.3", default-features = false }
 schemars = "1.2.1"
 futures-util = "0.3.33"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2.2.0"
+hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "service"] }
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"

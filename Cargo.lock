@@ -4500,6 +4500,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5405,6 +5414,8 @@ dependencies = [
  "hex",
  "hf-hub",
  "hmac 0.13.0",
+ "hyper",
+ "hyper-util",
  "ignore",
  "jsonschema",
  "keyring",
@@ -5419,6 +5430,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "rustls",
+ "rustls-pemfile",
  "same-file",
  "schemars",
  "self-replace",
@@ -5434,6 +5446,7 @@ dependencies = [
  "thiserror",
  "tiktoken-rs",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "toml",
  "tower",
