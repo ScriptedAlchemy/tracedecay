@@ -12,10 +12,11 @@ import {
  * shape the two hand-written copies of this route both declared non-nullable,
  * so the exact responses `status` exists to distinguish were the ones that
  * failed to parse. */
-function registryBody(status: string) {
+function registryBody(status: string, error: string | null = null) {
   const ok = status === 'ok';
   return {
     status,
+    error,
     limit: 100,
     truncated: ok ? false : null,
     active_project_id: null,
@@ -26,10 +27,32 @@ function registryBody(status: string) {
   };
 }
 
-function renderBrain(status: string) {
+/**
+ * The transport status each body really arrives with.
+ *
+ * `projects.rs::list` answers both registry failures with 503, never with a
+ * 200 carrying a failing status — so serving these at 200, as this suite used
+ * to, exercised a response the daemon cannot produce. It passed only because
+ * `fetchLegacy` discarded non-2xx bodies, which is the defect that made these
+ * very branches unreachable in production.
+ *
+ * An unrecognised status is different, and stays at 200: `status` is a bare
+ * string in Rust, so a future successful state is a word this build has not
+ * been taught, arriving on a perfectly ordinary success.
+ */
+function transportStatusFor(status: string): number {
+  return status === 'missing_registry' || status === 'registry_unavailable' ? 503 : 200;
+}
+
+function renderBrain(status: string, error: string | null = null) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => new Response(JSON.stringify(registryBody(status)), { status: 200 })),
+    vi.fn(
+      async () =>
+        new Response(JSON.stringify(registryBody(status, error)), {
+          status: transportStatusFor(status),
+        }),
+    ),
   );
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -52,6 +75,28 @@ describe('BrainPage registry states', () => {
 
     expect(await screen.findByText(/registry read failed/i)).toBeTruthy();
     expect(screen.queryByText(/0 repositories · 0 projects/i)).toBeNull();
+  });
+
+  /**
+   * `error` is the only field that says WHICH read failed. It is set on the
+   * `registry_unavailable` responses and dropped on the floor by a surface that
+   * rendered the status word alone, leaving every distinct failure of the
+   * registry looking identical to the operator who has to fix one of them.
+   */
+  it("repeats the daemon's own account of a failed registry read", async () => {
+    renderBrain('registry_unavailable', 'unable to open /home/x/.tracedecay/global.db');
+
+    expect(await screen.findByText(/registry read failed/i)).toBeTruthy();
+    expect(screen.getByText(/unable to open \/home\/x\/\.tracedecay\/global\.db/)).toBeTruthy();
+  });
+
+  it('says nothing extra when the daemon sent no reason', async () => {
+    // `missing_registry` carries `error: None`, so there is nothing to repeat
+    // and nothing is invented to fill the space.
+    renderBrain('missing_registry');
+
+    expect(await screen.findByText(/registry is not configured/i)).toBeTruthy();
+    expect(screen.queryByText(/unable to open/i)).toBeNull();
   });
 
   // `projects.rs` writes `status` as a bare JSON string literal, so a fourth

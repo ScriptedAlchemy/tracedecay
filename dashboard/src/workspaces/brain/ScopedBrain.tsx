@@ -5,6 +5,7 @@ import { ActivationField } from '../../viz/graph/activation.ts';
 import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
+import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useProjectEntry } from '../../data/query/projectRegistry.ts';
 import { useScope } from '../../data/scope/store.ts';
@@ -14,6 +15,7 @@ import {
   GraphOverviewPayloadSchema,
   GraphSubgraphPayloadSchema,
   MemoryStatusPayloadSchema,
+  type GraphSubgraphPayload,
   type ProjectContextPayload,
   type ProjectStoreContext,
 } from '../../contracts/wire.ts';
@@ -39,6 +41,12 @@ import {
  */
 export function ScopedBrain({ projectId, label }: { projectId: string; label: string }) {
   const selectAllProjects = useScope((s) => s.selectAllProjects);
+
+  // The holdings rail is a scroll container at `lg` and an ordinary block
+  // below it, so whether it needs a tab stop is a question about the rendered
+  // box rather than a constant.
+  const holdingsRef = useRef<HTMLElement>(null);
+  const holdingsTabStop = useScrollTabStop(holdingsRef);
 
   // The registry backbone. Read by absolute id rather than through the scoped
   // gateway — `/api/projects` is deliberately never rewritten by scope (see
@@ -181,7 +189,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
             pending={subgraph.isPending}
             result={subgraph.data}
           >
-            {() =>
+            {(slice) =>
               nodes.length > 0 ? (
                 <GraphCanvas
                   nodes={nodes}
@@ -213,26 +221,27 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                   }
                 />
               ) : (
-                // The slice route fails with 500 `read_failed` too, so this is
-                // an answered read that returned no symbols — a project whose
-                // graph holds nothing, stated as the measurement it is.
-                <CenteredState
-                  title={`No symbols are indexed for ${label}`}
-                  kind="complete_zero_findings"
-                />
+                <EmptySlice slice={slice} label={label} />
               )
             }
           </LegacyBoundary>
         </div>
         <aside
+          ref={holdingsRef}
           aria-label={`What TraceDecay holds for ${label}`}
-          tabIndex={0}
+          // Only where it is really a scroller. Its overflow is applied at `lg`,
+          // so below that this is an ordinary block in the page flow — measured
+          // at 320 and 768 CSS px as `overflow-y: visible` — and a literal
+          // `tabIndex={0}` put a stop that does nothing in front of the holdings
+          // on exactly the screens where tabbing is most of the navigation.
+          tabIndex={holdingsTabStop}
           className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
         >
           <LegacyBoundary
             title="Project"
             pending={context.isPending}
             result={context.data}
+            statusInBody
           >
             {(data) => <ProjectHoldings data={data} />}
           </LegacyBoundary>
@@ -242,6 +251,38 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         </aside>
       </div>
     </div>
+  );
+}
+
+/**
+ * A slice that came back with nothing in it, read through the payload's own
+ * account of what it went looking for.
+ *
+ * The route (`graph_service.rs::subgraph_payload`) fails with 500
+ * `read_failed`, so an empty 200 is always an answered read — but *what* it
+ * answers depends on the mode it ran in, and the two are not the same claim.
+ * An unseeded slice draws from the whole graph, so empty means the graph holds
+ * nothing. A seeded slice that found no seed means the search matched nothing,
+ * which says nothing at all about whether the project is indexed. This surface
+ * only ever requests the default slice, but reading `mode` rather than
+ * assuming it keeps the sentence true if that ever changes — and the previous
+ * text ("cannot distinguish empty data from query failure") was false either
+ * way, since the status code distinguishes them.
+ */
+function EmptySlice({ slice, label }: { slice: GraphSubgraphPayload; label: string }) {
+  if (slice.mode === 'default') {
+    return (
+      <CenteredState title={`No symbols are indexed for ${label}`} kind="complete_zero_findings" />
+    );
+  }
+  if (slice.seed_id === null) {
+    return <CenteredState title="No symbol matched this slice request" kind="complete_zero_findings" />;
+  }
+  return (
+    <CenteredState
+      title={`Nothing is connected to ${slice.seed_id} in this graph`}
+      kind="complete_zero_findings"
+    />
   );
 }
 
