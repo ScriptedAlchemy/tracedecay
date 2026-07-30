@@ -102,6 +102,35 @@ function writableScopes(
   };
 }
 
+/**
+ * The rendered block for one configuration section, matched by comparing the
+ * attribute's value rather than by interpolating it into a selector.
+ *
+ * `[data-section="${id}"]` is safe only for as long as every id is a bare
+ * identifier. Today it is: `SettingsPayloadV1Schema` is a plain `z.object`, so
+ * zod strips every key the contract does not name and the eight that survive are
+ * all identifiers. But `buildSettingsModel` takes ids straight from the payload's
+ * top-level keys and is written to accept `unknown` precisely so a group the
+ * daemon starts reporting appears rather than vanishes — so the safety rests on
+ * a parse step outside this function, and the failure if it ever moves is bad
+ * out of proportion to its cause: one `"` closes the attribute early,
+ * `querySelector` throws `SyntaxError` from inside a click handler, and the
+ * section index stops navigating with nothing on screen to say why.
+ *
+ * `CSS.escape` is the usual answer and would also close it. Comparison is
+ * preferred because there is no escaping to get right — no input can break it —
+ * it costs one pass over a list of at most eight headings, and it stays
+ * exercisable under jsdom, which ships no `CSS` global to escape with.
+ */
+export function findConfigSection(
+  container: ParentNode,
+  id: string,
+): HTMLElement | undefined {
+  return Array.from(container.querySelectorAll<HTMLElement>('[data-section]')).find(
+    (section) => section.dataset['section'] === id,
+  );
+}
+
 function SettingsSurface({
   payload,
   writable,
@@ -150,15 +179,9 @@ function SettingsSurface({
 
   const jumpTo = useCallback((id: string) => {
     const container = scrollRef.current;
-    // Interpolated unescaped, which is safe for a reason worth writing down:
-    // section ids are the keys of `SettingsPayloadV1Schema`, a closed
-    // `z.object` over Rust field names, so Zod has already stripped anything
-    // that is not one of them. Were that not so, a daemon-chosen key holding a
-    // quote would build a selector that does not parse, and `querySelector`
-    // answers an unparseable selector by throwing — inside this handler.
-    // `SettingsPage.dom.test.tsx` pins the premise rather than this line.
-    const target = container?.querySelector<HTMLElement>(`[data-section="${id}"]`);
-    if (!container || !target) return;
+    if (!container) return;
+    const target = findConfigSection(container, id);
+    if (!target) return;
     container.scrollTo({ top: target.offsetTop - 4, behavior: 'auto' });
   }, []);
 
