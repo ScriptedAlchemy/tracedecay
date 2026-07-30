@@ -12,12 +12,51 @@ use tracedecay_domain::{
     RemoteWriterFenceV1, ShardId, UtcMicros,
 };
 
+use crate::remote::auth::OpaqueRemoteCredential;
 use crate::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
     LegalAction, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 
 pub const REMOTE_PROTOCOL_VERSION_V1: u16 = 1;
+
+/// Authenticated transport boundary for one versioned remote operation.
+///
+/// Concrete HTTP/SSE and persistence adapters remain outside the application
+/// crate; this port receives the opaque credential without serializing it.
+pub trait RemoteProtocolPortV1<Request> {
+    type Output;
+
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<Request>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<Self::Output>;
+}
+
+/// Validates canonical protocol metadata before delegating exactly once to the
+/// authenticated transport-neutral remote port.
+pub struct RemoteProtocolServiceV1<Port> {
+    port: Port,
+}
+
+impl<Port> RemoteProtocolServiceV1<Port> {
+    pub const fn new(port: Port) -> Self {
+        Self { port }
+    }
+
+    pub fn execute<Request>(
+        &self,
+        request: RemoteProtocolRequestV1<Request>,
+        credential: OpaqueRemoteCredential,
+    ) -> Result<RemoteProtocolResponseV1<Port::Output>, ApplicationContractError>
+    where
+        Port: RemoteProtocolPortV1<Request>,
+    {
+        request.validate_metadata()?;
+        Ok(self.port.execute(request, credential))
+    }
+}
 
 /// Versioned request metadata common to enrollment, authority discovery,
 /// rotation, revocation, and subsequent remote operations.
@@ -328,8 +367,16 @@ pub type CurrentAuthorityProtocolResultV1 = ApplicationResult<CurrentRemoteAutho
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
-    use tracedecay_domain::{AuthorityEpoch, RepositoryId, RepositoryStateSnapshotId, WorktreeId};
+    use tracedecay_domain::{
+        AuthorityEpoch, ObservabilityTerminalResultV1, OperationActivationOutcomeV1,
+        OperationAvailabilityV1, OperationPhaseTimingV1, OperationPhaseV1, OperationReadinessV1,
+        OperationResourceObservedV1, OperationStageTimingV1, OperationStageV1, RepositoryId,
+        RepositoryStateSnapshotId, WorktreeId,
+    };
     use tracedecay_tool_catalog::SchemaId;
 
     fn fence() -> RemoteWriterFenceV1 {
@@ -341,6 +388,169 @@ mod tests {
             authority_epoch: AuthorityEpoch(4),
             authority_node_id: BrainNodeId::new("node.authority").unwrap(),
         }
+    }
+
+    struct FakeProtocolPort {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RemoteProtocolPortV1<()> for FakeProtocolPort {
+        type Output = ();
+
+        fn execute(
+            &self,
+            request: RemoteProtocolRequestV1<()>,
+            _credential: OpaqueRemoteCredential,
+        ) -> RemoteProtocolResponseV1<Self::Output> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let request_id = request.request_id;
+            RemoteProtocolResponseV1::new(
+                request_id.clone(),
+                CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason:
+                        tracedecay_domain::RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                    observed_at: UtcMicros(20),
+                },
+                Err(remote_protocol_problem(
+                    ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1).unwrap(),
+                    request_id,
+                    RemoteProtocolFailureV1::AuthorityUnavailable,
+                )),
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn generic_protocol_service_delegates_once_to_application_port() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = RemoteProtocolServiceV1::new(FakeProtocolPort {
+            calls: Arc::clone(&calls),
+        });
+        let request = RemoteProtocolRequestV1::new(
+            RequestId::new("request.remote").unwrap(),
+            BrainId::new("brain.remote").unwrap(),
+            BrainNodeId::new("node.caller").unwrap(),
+            1,
+            None,
+            UtcMicros(10),
+            (),
+        )
+        .unwrap();
+
+        let response = service
+            .execute(
+                request,
+                OpaqueRemoteCredential::new(
+                    b"0123456789abcdef0123456789abcdef"
+                        .to_vec()
+                        .into_boxed_slice(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response.request_id.as_str(), "request.remote");
+    }
+
+    #[test]
+    fn protocol_round_trip_preserves_observability_contracts() {
+        let resource = OperationResourceObservedV1 {
+            scheduled_latency_micros: 5,
+            service_latency_micros: 34,
+            process_rss_bytes: None,
+            process_pss_bytes: None,
+            cpu_user_micros: None,
+            cpu_system_micros: None,
+            read_bytes: None,
+            write_bytes: None,
+            input_tokens: None,
+            output_tokens: None,
+            cost_amount: None,
+            cost_currency: None,
+            pricing_revision: None,
+            stage_timings: vec![
+                OperationStageTimingV1 {
+                    stage: OperationStageV1::Scheduled,
+                    elapsed_micros: 0,
+                },
+                OperationStageTimingV1 {
+                    stage: OperationStageV1::Admitted,
+                    elapsed_micros: 5,
+                },
+                OperationStageTimingV1 {
+                    stage: OperationStageV1::Started,
+                    elapsed_micros: 8,
+                },
+                OperationStageTimingV1 {
+                    stage: OperationStageV1::FirstUsefulResult,
+                    elapsed_micros: 21,
+                },
+                OperationStageTimingV1 {
+                    stage: OperationStageV1::Terminal,
+                    elapsed_micros: 34,
+                },
+            ],
+            phase_timings: vec![
+                OperationPhaseTimingV1 {
+                    phase: OperationPhaseV1::ProcessSpawn,
+                    duration_micros: 3,
+                },
+                OperationPhaseTimingV1 {
+                    phase: OperationPhaseV1::ProcessReady,
+                    duration_micros: 4,
+                },
+                OperationPhaseTimingV1 {
+                    phase: OperationPhaseV1::Dispatch,
+                    duration_micros: 8,
+                },
+                OperationPhaseTimingV1 {
+                    phase: OperationPhaseV1::OutputWrite,
+                    duration_micros: 1,
+                },
+            ],
+            absolute_deadline_micros: Some(50),
+            availability: OperationAvailabilityV1::Available,
+            activation_outcome: Some(OperationActivationOutcomeV1::Committed),
+            process_count: Some(2),
+            input_bytes: Some(128),
+            output_bytes: Some(64),
+        };
+        let request = RemoteProtocolRequestV1::new(
+            RequestId::new("request.remote.observability").unwrap(),
+            BrainId::new("brain.remote").unwrap(),
+            BrainNodeId::new("node.caller").unwrap(),
+            1,
+            None,
+            UtcMicros(10),
+            resource,
+        )
+        .unwrap();
+
+        let encoded = serde_json::to_vec(&request).unwrap();
+        let decoded: RemoteProtocolRequestV1<OperationResourceObservedV1> =
+            serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(
+            decoded.body.readiness(),
+            OperationReadinessV1 {
+                foreground_ready_micros: Some(21),
+                background_complete_micros: Some(34),
+            }
+        );
+        assert_eq!(decoded.body.phase_timings, request.body.phase_timings);
+        assert_eq!(
+            decoded.body.absolute_deadline_micros,
+            request.body.absolute_deadline_micros
+        );
+        assert_eq!(decoded.body.availability, request.body.availability);
+        assert_eq!(
+            decoded
+                .body
+                .validate(Some(ObservabilityTerminalResultV1::Succeeded)),
+            Ok(())
+        );
     }
 
     #[test]
