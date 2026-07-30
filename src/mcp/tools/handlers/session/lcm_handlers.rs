@@ -2311,6 +2311,7 @@ mod compatibility_tests {
             grain: RetrievalGrainV1::Summary,
             state: HydrationStateV1::Available,
             lineage: Vec::new(),
+            retrieval: LcmRetrievalOutcome::complete(LcmDataFreshness::Fresh),
         });
         let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
 
@@ -2376,6 +2377,7 @@ mod compatibility_tests {
             temporal: temporal(Some("opaque-next")),
             grain: RetrievalGrainV1::Occurrence,
             state: HydrationStateV1::Available,
+            retrieval: LcmRetrievalOutcome::complete(LcmDataFreshness::Fresh),
         });
         let context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&service));
 
@@ -2531,6 +2533,7 @@ mod compatibility_tests {
             temporal: temporal(None),
             grain: RetrievalGrainV1::Summary,
             state: HydrationStateV1::Available,
+            retrieval: LcmRetrievalOutcome::complete(LcmDataFreshness::Fresh),
         });
         let response = payload(
             handle_lcm_expand_query(
@@ -2583,8 +2586,8 @@ mod compatibility_tests {
                 raw_message: None,
                 summary_node: None,
             };
-        service.set_expand_outcome(LcmExpandServiceOutcome::Complete {
-            expansion: LcmExpandResponse {
+        service.set_expand_outcome(LcmExpandServiceOutcome::Partial {
+            expansion: Some(LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content: "canonical summary".to_string(),
                 content_range: LcmContentRange {
@@ -2606,10 +2609,11 @@ mod compatibility_tests {
                 from_current_session: None,
                 externalized_note: None,
                 source_pagination: None,
-            },
+            }),
             temporal: temporal(None),
             grain: RetrievalGrainV1::Summary,
-            state: HydrationStateV1::Available,
+            state: Some(HydrationStateV1::Available),
+            retrieval: LcmRetrievalOutcome::partial(LcmDataFreshness::Fresh, 3),
         });
 
         let direct = payload(
@@ -2711,6 +2715,7 @@ mod compatibility_tests {
             temporal: temporal(None),
             grain: RetrievalGrainV1::Summary,
             state: HydrationStateV1::Available,
+            retrieval: LcmRetrievalOutcome::complete(LcmDataFreshness::Fresh),
         });
 
         handle_lcm_expand_query(
