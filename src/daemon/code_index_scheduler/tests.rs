@@ -4061,8 +4061,38 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
         receipt.is_noop(),
         "unchanged retained content must emit a no-op event-to-ready receipt"
     );
-    assert!(receipt.queue_delay_micros >= 0);
+    // The mount wake is an observed arrival, so queue wait and total latency are
+    // both measurable, and the dequeue stamp keeps them distinct measurements.
+    let queue_delay = receipt
+        .queue_delay_micros()
+        .expect("mount wake arrival is observed");
+    let event_to_ready = receipt
+        .event_to_ready_micros()
+        .expect("mount wake arrival is observed");
+    assert!(
+        queue_delay <= event_to_ready,
+        "queue wait ({queue_delay}) cannot exceed event-to-ready ({event_to_ready})"
+    );
+    assert_eq!(
+        event_to_ready,
+        queue_delay + receipt.service_micros(),
+        "event-to-ready must decompose into queue wait plus service time"
+    );
     assert_eq!(receipt.trigger, CodeIndexCadenceTriggerV1::Mount);
+
+    // The read model is reachable from the production registry surface.
+    let read_model = registry.cadence_read_model();
+    assert!(read_model.retained_count >= 1);
+    assert!(
+        read_model.capacity >= super::cadence::P99_MINIMUM_SAMPLES,
+        "ring must be able to hold a p99-eligible population"
+    );
+    assert_eq!(read_model.latency_sample_count, read_model.retained_count);
+    assert_eq!(read_model.arrival_unavailable_count, 0);
+    assert!(
+        !read_model.event_to_ready_micros.p99.is_available(),
+        "p99 must stay unavailable until 100 samples are retained"
+    );
     registry.shutdown().await;
 }
 

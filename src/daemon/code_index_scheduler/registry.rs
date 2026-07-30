@@ -16,10 +16,11 @@ use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, Worktree
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
 use super::{
-    CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
-    CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1,
-    CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1,
-    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1, now_micros,
+    CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
+    CodeIndexCadenceReadModelV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
+    CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1, CodeIndexPublishEvidenceV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
+    LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
 
 const MAX_CONCURRENT_BACKGROUND_RECONCILES: usize = 1;
@@ -147,26 +148,75 @@ impl CodeIndexSchedulerRegistryV1 {
         wake.notify_one();
     }
 
-    fn record_reconcile_receipt(
-        telemetry: &Mutex<CodeIndexCadenceTelemetryV1>,
-        project_root: PathBuf,
+    /// Claim the pending wake as one reconcile's arrival, at the instant the
+    /// scheduler dequeues it.
+    ///
+    /// A reconcile with no pending wake — a follow-up pass draining work an
+    /// earlier wake already claimed — has no attributable arrival. Reporting the
+    /// dequeue or terminal instant instead would publish a fabricated zero queue
+    /// delay, so the absence stays typed.
+    fn take_pending_arrival(
         pending_wake_micros: &AtomicU64,
         pending_wake_trigger: &AtomicU64,
         default_trigger: CodeIndexCadenceTriggerV1,
+    ) -> (CodeIndexArrivalV1, CodeIndexCadenceTriggerV1) {
+        let wake_micros = pending_wake_micros.swap(0, Ordering::AcqRel);
+        if wake_micros == 0 {
+            return (CodeIndexArrivalV1::Unavailable, default_trigger);
+        }
+        let trigger = Self::unpack_trigger(pending_wake_trigger.load(Ordering::Acquire));
+        match i64::try_from(wake_micros) {
+            Ok(wake_micros) => (CodeIndexArrivalV1::Observed { wake_micros }, trigger),
+            // An out-of-range clock reading is an unobserved arrival, not an
+            // arrival equal to the terminal instant.
+            Err(_) => (CodeIndexArrivalV1::Unavailable, trigger),
+        }
+    }
+
+    /// Return a claimed arrival to the pending slot when the reconcile produced
+    /// no receipt, keeping the earliest pending arrival so the wait a wake
+    /// really took is never shortened by a failed attempt.
+    fn restore_pending_arrival(
+        pending_wake_micros: &AtomicU64,
+        pending_wake_trigger: &AtomicU64,
+        arrival: CodeIndexArrivalV1,
+        trigger: CodeIndexCadenceTriggerV1,
+    ) {
+        let Some(wake_micros) = arrival.wake_micros() else {
+            return;
+        };
+        let Ok(wake_micros) = u64::try_from(wake_micros) else {
+            return;
+        };
+        let mut observed = pending_wake_micros.load(Ordering::Acquire);
+        loop {
+            // A wake that arrived while this pass ran is newer, so the restored
+            // arrival remains the earliest and stays authoritative.
+            if observed != 0 && observed <= wake_micros {
+                return;
+            }
+            match pending_wake_micros.compare_exchange_weak(
+                observed,
+                wake_micros,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => observed = current,
+            }
+        }
+        pending_wake_trigger.store(Self::pack_trigger(trigger), Ordering::Release);
+    }
+
+    fn record_reconcile_receipt(
+        telemetry: &Mutex<CodeIndexCadenceTelemetryV1>,
+        project_root: PathBuf,
+        arrival: CodeIndexArrivalV1,
+        trigger: CodeIndexCadenceTriggerV1,
+        started_micros: i64,
         outcome: &CodeIndexReconcileOutcomeV1,
     ) {
         let ready_micros = now_micros().0;
-        let wake_micros = pending_wake_micros.swap(0, Ordering::AcqRel);
-        let trigger = if wake_micros == 0 {
-            default_trigger
-        } else {
-            Self::unpack_trigger(pending_wake_trigger.load(Ordering::Acquire))
-        };
-        let wake_micros = if wake_micros == 0 {
-            ready_micros
-        } else {
-            i64::try_from(wake_micros).unwrap_or(ready_micros)
-        };
         let (cadence_outcome, overflow_reconciled) = match outcome {
             CodeIndexReconcileOutcomeV1::Published(evidence) => (
                 CodeIndexCadenceOutcomeV1::Published {
@@ -190,19 +240,57 @@ impl CodeIndexSchedulerRegistryV1 {
         let receipt = CodeIndexEventToReadyReceiptV1::new(
             project_root,
             trigger,
-            wake_micros,
+            arrival,
+            started_micros,
             ready_micros,
             cadence_outcome,
             overflow_reconciled,
         );
-        telemetry
+        // Bounded, redacted cadence observability: labels and durations only.
+        // The project root stays out of telemetry.
+        tracing::debug!(
+            event = "code_index_event_to_ready",
+            trigger = receipt.trigger.label(),
+            outcome = receipt.outcome_label(),
+            arrival = receipt.arrival.label(),
+            queue_delay_micros = ?receipt.queue_delay_micros(),
+            service_micros = receipt.service_micros(),
+            event_to_ready_micros = ?receipt.event_to_ready_micros(),
+            overflow_reconciled = receipt.overflow_reconciled,
+            "code-index reconcile reached a terminal outcome"
+        );
+        let mut telemetry = telemetry
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record(receipt);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        telemetry.record(receipt);
+        // Emit the aggregate exactly when a percentile first becomes eligible,
+        // so aggregate lines stay bounded to a few per ring cycle.
+        if let Some(percentile) = newly_eligible_percentile(telemetry.latency_sample_count()) {
+            let read_model = telemetry.read_model();
+            tracing::debug!(
+                event = "code_index_cadence_read_model",
+                newly_eligible = percentile,
+                retained_count = read_model.retained_count,
+                capacity = read_model.capacity,
+                latency_sample_count = read_model.latency_sample_count,
+                arrival_unavailable_count = read_model.arrival_unavailable_count,
+                published_count = read_model.published_count,
+                noop_count = read_model.noop_count,
+                event_to_ready_p50_micros = ?read_model.event_to_ready_micros.p50.value,
+                event_to_ready_p95_micros = ?read_model.event_to_ready_micros.p95.value,
+                event_to_ready_p99_micros = ?read_model.event_to_ready_micros.p99.value,
+                queue_delay_p50_micros = ?read_model.queue_delay_micros.p50.value,
+                queue_delay_p95_micros = ?read_model.queue_delay_micros.p95.value,
+                queue_delay_p99_micros = ?read_model.queue_delay_micros.p99.value,
+                "code-index cadence percentile became eligible"
+            );
+        }
     }
 
-    #[cfg(test)]
-    pub(super) fn latest_event_to_ready_receipt(&self) -> Option<CodeIndexEventToReadyReceiptV1> {
+    /// Latest completed event-to-ready receipt for this registry, if any.
+    pub(in crate::daemon) fn latest_event_to_ready_receipt(
+        &self,
+    ) -> Option<CodeIndexEventToReadyReceiptV1> {
         self.cadence_telemetry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -210,13 +298,26 @@ impl CodeIndexSchedulerRegistryV1 {
             .cloned()
     }
 
-    #[cfg(test)]
-    pub(super) fn event_to_ready_receipts(&self) -> Vec<CodeIndexEventToReadyReceiptV1> {
+    /// Every retained event-to-ready receipt, oldest first.
+    pub(in crate::daemon) fn event_to_ready_receipts(&self) -> Vec<CodeIndexEventToReadyReceiptV1> {
         self.cadence_telemetry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .receipts()
-            .to_vec()
+            .cloned()
+            .collect()
+    }
+
+    /// Bounded truthful cadence read model over the retained receipts.
+    ///
+    /// Percentiles are withheld until the retained population reaches the floor
+    /// each one declares, and receipts with an unobservable arrival are reported
+    /// as unavailable rather than counted as zero-latency samples.
+    pub(in crate::daemon) fn cadence_read_model(&self) -> CodeIndexCadenceReadModelV1 {
+        self.cadence_telemetry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .read_model()
     }
 
     pub(crate) fn subscribe_generation_publications(
@@ -373,6 +474,14 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
+                // Dequeue instant: admission is held and the reconcile is about
+                // to start, so queue wait ends here and service time begins.
+                let started_micros = now_micros().0;
+                let (arrival, trigger) = Self::take_pending_arrival(
+                    &worker_pending_wake_micros,
+                    &worker_pending_wake_trigger,
+                    CodeIndexCadenceTriggerV1::Mount,
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     let mut scheduler = scheduler
                         .lock()
@@ -398,10 +507,20 @@ impl CodeIndexSchedulerRegistryV1 {
                     Self::record_reconcile_receipt(
                         &worker_cadence_telemetry,
                         worker_project_root.clone(),
+                        arrival,
+                        trigger,
+                        started_micros,
+                        outcome,
+                    );
+                } else {
+                    // No terminal outcome, so no receipt is owed. Give the
+                    // arrival back or the next pass would measure from its own
+                    // dequeue and under-report the wait this wake really took.
+                    Self::restore_pending_arrival(
                         &worker_pending_wake_micros,
                         &worker_pending_wake_trigger,
-                        CodeIndexCadenceTriggerV1::Mount,
-                        outcome,
+                        arrival,
+                        trigger,
                     );
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
@@ -870,7 +989,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         .map(|latest| (latest, None));
                 }
             };
-            let wake_micros = now_micros().0;
+            // Dequeue instant for the query-admission path: the scheduler lock
+            // is held and reconcile work starts on the next line.
+            let started_micros = now_micros().0;
             let outcome = scheduler.ensure_fresh_for_query().ok()?;
             let latest = scheduler.latest_complete()?;
             *serving_generation
@@ -881,7 +1002,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // query-admission reconcile is its own event-to-ready sample.
                 let _ = pending_wake_micros.compare_exchange(
                     0,
-                    u64::try_from(wake_micros).unwrap_or(u64::MAX),
+                    u64::try_from(started_micros).unwrap_or(u64::MAX),
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 );
@@ -891,12 +1012,17 @@ impl CodeIndexSchedulerRegistryV1 {
                         Ordering::Release,
                     );
                 }
-                Self::record_reconcile_receipt(
-                    &cadence_telemetry,
-                    project_root.clone(),
+                let (arrival, trigger) = Self::take_pending_arrival(
                     &pending_wake_micros,
                     &pending_wake_trigger,
                     CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+                Self::record_reconcile_receipt(
+                    &cadence_telemetry,
+                    project_root.clone(),
+                    arrival,
+                    trigger,
+                    started_micros,
                     outcome,
                 );
             }
