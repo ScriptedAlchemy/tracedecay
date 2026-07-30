@@ -38,7 +38,7 @@ use tracedecay_application::{
     PageState, PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestContext,
     RequestId, ResolvedScope, RetrieverContribution, RetryDirective, SafeDiagnostic, TemporalState,
-    callable_code_operations,
+    WorkAttemptResponseV1, WorkExecutionError, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -50,20 +50,21 @@ use tracedecay_domain::feedback::{FeedbackCycleTerminationV1, ProviderEvaluation
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    ManifestDigest, ProjectId, RetrievalAnchorId, UserProfileId, UtcMicros, canonical_sha256,
+    ManifestDigest, ProjectId, RetrievalAnchorId, UserProfileId, UtcMicros, WorkAuthority,
+    canonical_sha256,
 };
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::{
-    AdmittedRoot, AuthorizedLspSession, CanonicalContextProjectionAuthority,
-    CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
-    ContextProjectionOutcome, ContextProjectionRegistration, ContextProjectionRequest,
-    DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest,
-    FeedbackCycleRuntimePort, GatewayCapabilities, GenerationDiagnostics, LSP_SESSION_TTL_MS,
-    LspAnalyzerCancellationAuthority, LspEndpointError, LspRequestId, LspRuntimeFailure,
-    LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential,
-    LspSessionId, LspSessionOpenRequest, LspSessionRegistry, MAX_LSP_FRAME_BYTES, SessionLifecycle,
-    UnavailableSemanticProvider, UpstreamCapabilities,
+    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace,
+    CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
+    CanonicalDiagnosticSnapshotAuthority, ContextProjectionOutcome, ContextProjectionRegistration,
+    ContextProjectionRequest, DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger,
+    FeedbackCycleRequest, FeedbackCycleRuntimePort, GatewayCapabilities, GenerationDiagnostics,
+    LSP_SESSION_TTL_MS, LspAnalyzerCancellationAuthority, LspEndpointError, LspRequestId,
+    LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
+    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
+    MAX_LSP_FRAME_BYTES, SessionLifecycle, UnavailableSemanticProvider, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -140,6 +141,7 @@ use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationS
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
 };
+use crate::daemon::work_runtime::{DaemonWorkRuntimeV1, WorkAttemptInvocationV1};
 use crate::db::Database;
 use crate::errors::TraceDecayError;
 use crate::request_identity::{
@@ -204,6 +206,7 @@ pub(crate) enum DaemonInvocationOperation {
     CodeReferences,
     Configuration,
     ContextScout,
+    WorkAttempt,
     SemanticEvaluateAndPublish,
     LspOpen,
     LspFrame,
@@ -246,6 +249,7 @@ impl DaemonInvocationOperation {
             Self::CodeReferences => "code_references",
             Self::Configuration => "configuration",
             Self::ContextScout => "context_scout",
+            Self::WorkAttempt => "work_attempt",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
             Self::LspOpen => "lsp_open",
             Self::LspFrame => "lsp_frame",
@@ -431,6 +435,12 @@ pub(crate) enum DaemonInvocationPayload {
     ContextScout {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: ContextScoutSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    WorkAttempt {
+        request: WorkAttemptInvocationV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -859,6 +869,27 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn work_attempt(
+        request_id: impl Into<String>,
+        request: WorkAttemptInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::WorkAttempt {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn semantic_evaluate_and_publish(
         request_id: impl Into<String>,
         candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
@@ -1153,6 +1184,7 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::Configuration
             }
             DaemonInvocationPayload::ContextScout { .. } => DaemonInvocationOperation::ContextScout,
+            DaemonInvocationPayload::WorkAttempt { .. } => DaemonInvocationOperation::WorkAttempt,
             DaemonInvocationPayload::SemanticEvaluateAndPublish { .. } => {
                 DaemonInvocationOperation::SemanticEvaluateAndPublish
             }
@@ -1194,6 +1226,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::CodeCallees
                 | DaemonInvocationOperation::Configuration
                 | DaemonInvocationOperation::ContextScout
+                | DaemonInvocationOperation::WorkAttempt
                 | DaemonInvocationOperation::SemanticEvaluateAndPublish
                 | DaemonInvocationOperation::LspOpen
         )
@@ -1253,6 +1286,12 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::Configuration {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::WorkAttempt {
                 observed_at,
                 deadline,
                 cancellation,
@@ -3879,6 +3918,10 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
     },
+    WorkAttempt {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<WorkAttemptResponseV1>,
+    },
     SemanticEvaluatedProfilePublished {
         scope: ResolvedScope,
         profile_digest: ManifestDigest,
@@ -4259,6 +4302,16 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 
 /// Retained daemon state for the typed LSP invocation operations.
 #[derive(Clone)]
+struct RegisteredWorkRuntime {
+    runtime: Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>>,
+    actor: ActorId,
+    grant: CapabilityGrantSnapshot,
+    authority_digest: ManifestDigest,
+    policy_digest: ManifestDigest,
+    configuration_digest: ManifestDigest,
+}
+
+#[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     callable_code_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredCallableCodeRuntime>>>,
@@ -4270,6 +4323,7 @@ pub(crate) struct DaemonInvocationService {
     feedback_cycle_inputs: Arc<Mutex<BTreeMap<PathBuf, Arc<SwitchableFeedbackCycleRuntimeV1>>>>,
     primitive_runtimes: Arc<Mutex<BTreeMap<PathBuf, Pr12PrimitiveProjectRuntime>>>,
     configuration_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredConfigurationRuntime>>>,
+    work_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredWorkRuntime>>>,
     lsp_owners: Arc<Mutex<BTreeMap<PathBuf, DaemonLspInvocationOwner>>>,
     advisory_runtimes: Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Any + Send + Sync>>>>,
     advisory_cycle_invokers:
@@ -4303,6 +4357,7 @@ impl DaemonInvocationService {
             feedback_cycle_inputs: Arc::new(Mutex::new(BTreeMap::new())),
             primitive_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             configuration_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
+            work_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_owners: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_cycle_invokers: Arc::new(Mutex::new(BTreeMap::new())),
@@ -5090,6 +5145,104 @@ impl DaemonConfigurationRuntimeRegistrar {
 }
 
 #[derive(Clone)]
+pub(crate) struct DaemonWorkRuntimeRegistrar {
+    service: DaemonInvocationService,
+}
+
+impl DaemonWorkRuntimeRegistrar {
+    pub(crate) fn new(service: &DaemonInvocationService) -> Self {
+        Self {
+            service: service.clone(),
+        }
+    }
+
+    pub(crate) async fn register(
+        &self,
+        project_root: PathBuf,
+        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        authority: WorkAuthority,
+        actor: ActorId,
+        grant: CapabilityGrantSnapshot,
+        policy_digest: ManifestDigest,
+        configuration_digest: ManifestDigest,
+        config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
+    ) -> Result<(), TraceDecayError> {
+        if authority.project_id() != &grant.scope.project_id
+            || authority.repository_id() != &grant.scope.repository_id
+            || authority.worktree_id() != &grant.scope.worktree_id
+            || authority.actor_id() != &actor
+            || authority.policy_digest() != &grant.digest
+        {
+            return Err(TraceDecayError::Config {
+                message: "Work runtime authority does not match its registered grant".to_owned(),
+            });
+        }
+        let authority_digest = canonical_sha256(&authority).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("Work runtime authority digest failed: {error}"),
+            }
+        })?;
+        let mut runtimes = self.service.work_runtimes.lock().await;
+        if let Some(registered) = runtimes.get_mut(&project_root) {
+            if registered.actor == actor
+                && registered.grant.digest == grant.digest
+                && registered.grant.scope == grant.scope
+                && registered.authority_digest == authority_digest
+                && registered.policy_digest == policy_digest
+                && registered.configuration_digest == configuration_digest
+            {
+                registered.grant = grant;
+                return Ok(());
+            }
+            return Err(TraceDecayError::Config {
+                message: "a different Work authority is already registered for this project"
+                    .to_owned(),
+            });
+        }
+        let runtime = database.work_runtime(authority, config, project_root.clone())?;
+        runtimes.insert(
+            project_root,
+            RegisteredWorkRuntime {
+                runtime: Arc::new(runtime),
+                actor,
+                grant,
+                authority_digest,
+                policy_digest,
+                configuration_digest,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn authority_matches(
+        &self,
+        project_root: &Path,
+        authority: &WorkAuthority,
+        actor: &ActorId,
+        grant: &CapabilityGrantSnapshot,
+        policy_digest: &ManifestDigest,
+        configuration_digest: &ManifestDigest,
+    ) -> bool {
+        let Ok(authority_digest) = canonical_sha256(authority) else {
+            return false;
+        };
+        self.service
+            .work_runtimes
+            .lock()
+            .await
+            .get(project_root)
+            .is_some_and(|registered| {
+                &registered.actor == actor
+                    && registered.grant.digest == grant.digest
+                    && registered.grant.scope == grant.scope
+                    && registered.authority_digest == authority_digest
+                    && &registered.policy_digest == policy_digest
+                    && &registered.configuration_digest == configuration_digest
+            })
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct DaemonLspOwnerRegistrar {
     service: DaemonInvocationService,
 }
@@ -5473,7 +5626,7 @@ impl LspSessionAdmissionPort for AdmittedRootSessionAdmission {
         Ok(AuthorizedLspSession {
             session_id,
             credential,
-            root: self.root.clone(),
+            workspace: AuthorizedLspWorkspace::single(self.root.clone()),
             expires_at_ms: now_ms.saturating_add(LSP_SESSION_TTL_MS),
         })
     }
@@ -6318,6 +6471,229 @@ fn concealed_application_problem(request_id: String) -> DaemonInvocationResponse
     )
 }
 
+fn work_execution_problem(error: &WorkExecutionError) -> DaemonInvocationProblem {
+    match error {
+        WorkExecutionError::NotFound
+        | WorkExecutionError::AlreadyExists
+        | WorkExecutionError::StaleLease
+        | WorkExecutionError::TerminalConflict => DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        WorkExecutionError::Contract(_) => DaemonInvocationProblem::InvalidRequest,
+        WorkExecutionError::Persistence(_) => DaemonInvocationProblem::Unavailable,
+        WorkExecutionError::Provider(
+            tracedecay_application::WorkProviderExecutionError::Unavailable(_),
+        ) => DaemonInvocationProblem::Unavailable,
+        WorkExecutionError::Provider(
+            tracedecay_application::WorkProviderExecutionError::Rejected(_),
+        ) => DaemonInvocationProblem::InvalidRequest,
+    }
+}
+
+async fn execute_work_attempt(
+    registered: RegisteredWorkRuntime,
+    request_id: String,
+    request: WorkAttemptInvocationV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let operation_key = request.operation_key();
+    let Some((_, capability, use_case)) = tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1
+        .iter()
+        .find(|(operation, _, _)| *operation == operation_key)
+    else {
+        return DaemonInvocationResponse::problem(
+            request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    };
+    let capability = match CapabilityId::new(*capability) {
+        Ok(capability) => capability,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let use_case = match UseCaseId::new(*use_case) {
+        Ok(use_case) => use_case,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    let canonical_request_id = match RequestId::new(request_id.clone()) {
+        Ok(request_id) => request_id,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
+    };
+    let context = match RequestContext::new(
+        registered.actor.clone(),
+        registered.grant.scope.clone(),
+        registered.grant.clone(),
+        canonical_request_id.clone(),
+        deadline.clone(),
+        cancellation,
+    ) {
+        Ok(context)
+            if observed_at < registered.grant.expires_at
+                && context.allows(&capability, &use_case) =>
+        {
+            context
+        }
+        _ => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        }
+    };
+    let input_digest = match canonical_sha256(&request) {
+        Ok(digest) => digest,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
+    };
+    let result = match registered.runtime.dispatch(request).await {
+        Ok(result) => result,
+        Err(error) => {
+            return DaemonInvocationResponse::problem(request_id, work_execution_problem(&error));
+        }
+    };
+    let outcome = work_attempt_effect(
+        &registered,
+        &context,
+        canonical_request_id,
+        operation_key,
+        use_case,
+        input_digest,
+        result,
+        observed_at,
+        deadline,
+    );
+    match outcome {
+        Ok(outcome) => DaemonInvocationResponse::with_outcome(
+            request_id,
+            DaemonInvocationOutcome::WorkAttempt {
+                scope: context.scope().clone(),
+                outcome,
+            },
+        ),
+        Err(_) => {
+            DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn work_attempt_effect(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    request_id: RequestId,
+    operation_key: &str,
+    use_case: UseCaseId,
+    input_digest: ManifestDigest,
+    result: WorkAttemptResponseV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+) -> Result<ApplicationOutcome<WorkAttemptResponseV1>, ApplicationContractError> {
+    let policy_digest = canonical_sha256(&(
+        "tracedecay.daemon.work-attempt-policy.v1",
+        &registered.policy_digest,
+        &registered.grant.digest,
+        operation_key,
+        &use_case,
+    ))?;
+    let policy = PolicyDecisionRef::new(
+        format!("policy.daemon.work.{operation_key}.v1"),
+        1,
+        policy_digest,
+        ComponentVersion::new("tracedecay.daemon.work-policy.v1").map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "Work attempt policy evaluator",
+            }
+        })?,
+    )?;
+    let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
+    let suffix = input_digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "Work attempt input digest",
+        })?
+        .to_owned();
+    let idempotency_key = IdempotencyKey::new(format!("work.attempt.{operation_key}.{suffix}"))?;
+    let expected_state = canonical_sha256(&(
+        "tracedecay.work-attempt.expected-state.v1",
+        operation_key,
+        &input_digest,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "Work attempt expected state",
+    })?;
+    let committed_state = canonical_sha256(&(
+        "tracedecay.work-attempt.committed-state.v1",
+        operation_key,
+        &result,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "Work attempt committed state",
+    })?;
+    let execution = OperationReceipt::completed(
+        observed_at,
+        current_micros(),
+        deadline,
+        OperationBudgetUsage::default(),
+    )?;
+    let receipt = EffectReceipt {
+        operation: use_case,
+        request_id,
+        actor: registered.actor.clone(),
+        scope: context.scope().clone(),
+        effect_class: EffectClass::Administrative,
+        idempotency_key: idempotency_key.clone(),
+        input_digest,
+        expected_state: expected_state.clone(),
+        policy_digest: authority.policy.digest.clone(),
+        configuration_digest: registered.configuration_digest.clone(),
+        catalog_digest: canonical_sha256(&("tracedecay.work-attempt.catalog.v1", operation_key))
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "Work attempt catalog digest",
+            })?,
+        privacy_digest: canonical_sha256(&(
+            "tracedecay.work-attempt.privacy.v1",
+            context.scope(),
+            context.grant().disclosure,
+        ))
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "Work attempt privacy digest",
+        })?,
+        outcome: EffectTermination::Completed,
+        committed_state: Some(committed_state),
+        external_proof: None,
+    };
+    Ok(ApplicationOutcome::Effect(EffectResult::new(
+        EffectId::new(format!("effect.work.{operation_key}.{suffix}"))?,
+        EffectClass::Administrative,
+        idempotency_key,
+        authority,
+        expected_state,
+        execution,
+        ReconciliationState::Reconciled,
+        receipt,
+        Some(result),
+    )?))
+}
+
 #[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(crate) fn operation_events(&self) -> OperationEventAuthority {
@@ -6390,6 +6766,11 @@ impl DaemonInvocationService {
             .await
             .get(project_root)
             .cloned()
+    }
+
+    async fn work_runtime(&self, project_root: Option<&Path>) -> Option<RegisteredWorkRuntime> {
+        let project_root = project_root?;
+        self.work_runtimes.lock().await.get(project_root).cloned()
     }
 
     pub(crate) async fn semantic_configuration_operation(
@@ -6975,6 +7356,28 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::WorkAttempt {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let Some(registered) = self.work_runtime(project_root).await else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                execute_work_attempt(
+                    registered,
+                    request_id,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
                 self.execute_semantic_evaluation(project_root, request_id, candidate)
                     .await
@@ -7054,6 +7457,7 @@ impl DaemonInvocationService {
         self.feedback_cycles.lock().await.clear();
         self.primitive_runtimes.lock().await.clear();
         self.configuration_runtimes.lock().await.clear();
+        self.work_runtimes.lock().await.clear();
         let semantic_runtimes = std::mem::take(&mut *self.semantic_runtimes.lock().await);
         for (project_root, handle) in semantic_runtimes {
             crate::application::semantic_runtime::unregister_project_semantic_runtime(
@@ -7467,6 +7871,7 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::CodeReferences
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
+        | DaemonInvocationOperation::WorkAttempt
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
         | DaemonInvocationOperation::GitStatus
         | DaemonInvocationOperation::GitDiff
@@ -7496,6 +7901,7 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
         | DaemonInvocationOutcome::GitApply { .. }
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
+        | DaemonInvocationOutcome::WorkAttempt { .. }
         | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
@@ -9419,5 +9825,215 @@ mod tests {
         assert!(!encoded.contains("source"));
         assert!(!encoded.contains("comment"));
         assert!(!encoded.contains("log"));
+    }
+
+    #[tokio::test]
+    async fn registered_work_runtime_dispatches_attempt_requests() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project root");
+        let project_id = ProjectId::new("project.work.invocation").expect("project id");
+        let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
+        let database = host
+            .project_observation_database_arc_for_test()
+            .expect("registered project database");
+        let actor = ActorId::new("actor.work.invocation").expect("actor id");
+        let scope = ResolvedScope::new(
+            project_id.clone(),
+            tracedecay_domain::RepositoryId::new("repository.work.invocation")
+                .expect("repository id"),
+            tracedecay_domain::WorktreeId::new("worktree.work.invocation").expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope");
+        let grant_digest =
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.work.invocation").expect("grant id"),
+            1,
+            grant_digest.clone(),
+            actor.clone(),
+            UtcMicros(1),
+            UtcMicros(10_000),
+            scope.clone(),
+            std::collections::BTreeSet::from([CapabilityId::new(
+                "capability.work.attempt_renew_lease",
+            )
+            .expect("capability")]),
+            std::collections::BTreeSet::from([
+                UseCaseId::new("use-case.work.attempt_renew_lease").expect("use case")
+            ]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("Work grant");
+        let authority = WorkAuthority::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            actor.clone(),
+            grant_digest,
+        )
+        .expect("Work authority");
+        let policy_digest =
+            ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("policy digest");
+        let configuration_digest = ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
+            .expect("configuration digest");
+        let service = DaemonInvocationService::default();
+        DaemonWorkRuntimeRegistrar::new(&service)
+            .register(
+                project.path().to_path_buf(),
+                Arc::clone(&database),
+                authority.clone(),
+                actor.clone(),
+                grant.clone(),
+                policy_digest.clone(),
+                configuration_digest.clone(),
+                crate::sessions::codex_app_server::CodexAppServerSummaryConfig {
+                    codex_bin: "tracedecay-work-provider-not-used".to_owned(),
+                    model: None,
+                    timeout: Duration::from_secs(5),
+                },
+            )
+            .await
+            .expect("registered Work runtime");
+        assert!(
+            DaemonWorkRuntimeRegistrar::new(&service)
+                .authority_matches(
+                    project.path(),
+                    &authority,
+                    &actor,
+                    &grant,
+                    &policy_digest,
+                    &configuration_digest,
+                )
+                .await
+        );
+        let rotated_grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.work.invocation.rotated").expect("grant id"),
+            1,
+            grant.digest.clone(),
+            actor.clone(),
+            UtcMicros(2),
+            UtcMicros(20_000),
+            scope.clone(),
+            grant.allowed_capabilities.clone(),
+            grant.allowed_use_cases.clone(),
+            DisclosureClass::Sensitive,
+        )
+        .expect("rotated Work grant");
+        let rotated_authority = WorkAuthority::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            actor.clone(),
+            rotated_grant.digest.clone(),
+        )
+        .expect("rotated Work authority");
+        DaemonWorkRuntimeRegistrar::new(&service)
+            .register(
+                project.path().to_path_buf(),
+                Arc::clone(&database),
+                rotated_authority.clone(),
+                actor.clone(),
+                rotated_grant.clone(),
+                policy_digest.clone(),
+                configuration_digest.clone(),
+                crate::sessions::codex_app_server::CodexAppServerSummaryConfig {
+                    codex_bin: "tracedecay-work-provider-not-used".to_owned(),
+                    model: None,
+                    timeout: Duration::from_secs(5),
+                },
+            )
+            .await
+            .expect("rotated Work runtime authority");
+        assert!(
+            DaemonWorkRuntimeRegistrar::new(&service)
+                .authority_matches(
+                    project.path(),
+                    &rotated_authority,
+                    &actor,
+                    &rotated_grant,
+                    &policy_digest,
+                    &configuration_digest,
+                )
+                .await
+        );
+        let mismatched_authority = WorkAuthority::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            ActorId::new("actor.work.mismatched").expect("mismatched actor"),
+            rotated_grant.digest.clone(),
+        )
+        .expect("mismatched Work authority");
+        assert!(
+            DaemonWorkRuntimeRegistrar::new(&service)
+                .register(
+                    project.path().to_path_buf(),
+                    database,
+                    mismatched_authority,
+                    actor.clone(),
+                    rotated_grant.clone(),
+                    policy_digest.clone(),
+                    configuration_digest.clone(),
+                    crate::sessions::codex_app_server::CodexAppServerSummaryConfig {
+                        codex_bin: "tracedecay-work-provider-not-used".to_owned(),
+                        model: None,
+                        timeout: Duration::from_secs(5),
+                    },
+                )
+                .await
+                .is_err()
+        );
+        let identity = tracedecay_domain::WorkAttemptIdentityV1::new(
+            tracedecay_domain::TaskId::new("task.work.invocation").expect("task id"),
+            tracedecay_domain::RunId::new("run.work.invocation").expect("run id"),
+            tracedecay_domain::AttemptId::new("attempt.work.invocation").expect("attempt id"),
+        )
+        .expect("attempt identity");
+        let expected = tracedecay_domain::WorkLeaseFenceV1::new(
+            tracedecay_domain::WorkLeaseId::new("lease.work.invocation").expect("lease id"),
+            tracedecay_domain::WorkFenceEpochV1::new(1).expect("fence epoch"),
+        )
+        .expect("expected lease");
+        let replacement = tracedecay_domain::WorkLeaseFenceV1::new(
+            tracedecay_domain::WorkLeaseId::new("lease.work.invocation").expect("lease id"),
+            tracedecay_domain::WorkFenceEpochV1::new(2).expect("fence epoch"),
+        )
+        .expect("replacement lease");
+        let request = DaemonInvocationRequest::work_attempt(
+            "request.work.invocation",
+            WorkAttemptInvocationV1::RenewLease(
+                tracedecay_application::WorkAttemptRenewLeaseRequestV1 {
+                    identity,
+                    expected,
+                    replacement,
+                },
+            ),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.work.invocation").expect("cancellation"),
+        );
+        assert_eq!(request.operation(), DaemonInvocationOperation::WorkAttempt);
+        let response = service
+            .invoke(
+                &Arc::new(Mutex::new(BTreeMap::new())),
+                Some(project.path()),
+                None,
+                None,
+                request,
+            )
+            .await;
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+            }
+        ));
     }
 }

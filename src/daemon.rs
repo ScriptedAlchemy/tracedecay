@@ -1275,10 +1275,10 @@ pub(crate) use service::invocation::{
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationService,
     DaemonLspOwnerRegistrar, DaemonLspSessionAccess, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrationError, Pr13AdvisoryCycleInvocationFutureV1,
-    Pr13AdvisoryCycleInvocationOutcomeV1, Pr13AdvisoryCycleInvocationPortV1,
-    Pr13AdvisoryCycleInvocationRequestV1, Pr13AdvisoryCycleTerminalV1,
-    Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
+    DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
+    Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationOutcomeV1,
+    Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
+    Pr13AdvisoryCycleTerminalV1, Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
     daemon_operation_event_authority, parse_daemon_invocation_request,
 };
@@ -1838,6 +1838,10 @@ impl DaemonInvocationState {
 
     fn configuration_runtime_registrar(&self) -> DaemonConfigurationRuntimeRegistrar {
         DaemonConfigurationRuntimeRegistrar::new(&self.service)
+    }
+
+    fn work_runtime_registrar(&self) -> DaemonWorkRuntimeRegistrar {
+        DaemonWorkRuntimeRegistrar::new(&self.service)
     }
 
     fn semantic_runtime_registrar(&self) -> DaemonSemanticRuntimeRegistrar {
