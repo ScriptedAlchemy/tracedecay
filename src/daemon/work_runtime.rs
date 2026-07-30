@@ -49,6 +49,21 @@ pub(crate) enum WorkAttemptInvocationV1 {
     Terminalize(WorkAttemptTerminalizeRequestV1),
 }
 
+impl WorkAttemptInvocationV1 {
+    pub(crate) const fn operation_key(&self) -> &'static str {
+        match self {
+            Self::AcquireLease(_) => "attempt_acquire_lease",
+            Self::RenewLease(_) => "attempt_renew_lease",
+            Self::Start(_) => "attempt_start",
+            Self::PublishProgress(_) => "attempt_publish_progress",
+            Self::PublishArtifact(_) => "attempt_publish_artifact",
+            Self::Cancel(_) => "attempt_cancel",
+            Self::Recover(_) => "attempt_recover",
+            Self::Terminalize(_) => "attempt_terminalize",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CodexAppServerWorkProviderV1<S> {
     storage: S,

@@ -1081,12 +1081,60 @@ pub(super) async fn register_project_open_production_owners(
             requester.clone(),
             grant_expires_at,
             None,
-            configuration_policy_digest,
+            configuration_policy_digest.clone(),
         )
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
+    let work_grant = project_open_work_grant(&access, now_micros()).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("project-open Work grant is invalid: {error}"),
+        }
+    })?;
+    let work_authority = tracedecay_domain::WorkAuthority::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        requester.clone(),
+        work_grant.digest.clone(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open Work authority is invalid: {error}"),
+    })?;
+    invocation
+        .work_runtime_registrar()
+        .register(
+            project_root.to_path_buf(),
+            Arc::clone(&session_db),
+            work_authority.clone(),
+            requester.clone(),
+            work_grant.clone(),
+            configuration_policy_digest.clone(),
+            access.configuration_digest.clone(),
+            crate::sessions::codex_app_server::CodexAppServerSummaryConfig::from_env(),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open Work runtime registration failed: {error}"),
+        })?;
+    if !invocation
+        .work_runtime_registrar()
+        .authority_matches(
+            project_root,
+            &work_authority,
+            &requester,
+            &work_grant,
+            &configuration_policy_digest,
+            &access.configuration_digest,
+        )
+        .await
+    {
+        return Err(TraceDecayError::Config {
+            message: "project-open Work runtime authority registration did not match the admitted project"
+                .to_owned(),
+        });
+    }
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -2665,6 +2713,63 @@ pub(super) fn daemon_owned_project_source_access_at(
     })
 }
 
+fn project_open_work_grant(
+    access: &ProjectSourceAccessSnapshot,
+    observed_at: UtcMicros,
+) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
+{
+    let capabilities = tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1
+        .iter()
+        .map(|(_, capability, _)| CapabilityId::new(*capability))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open Work capabilities",
+        })?;
+    if observed_at >= access.grant_expires_at
+        || !capabilities
+            .iter()
+            .all(|capability| access.effective_capabilities.contains(capability))
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "project-open Work capability grant",
+        });
+    }
+    let use_cases = tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1
+        .iter()
+        .map(|(_, _, use_case)| tracedecay_tool_catalog::UseCaseId::new(*use_case))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open Work use cases",
+        })?;
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.project-open.work-grant.v1",
+        &access.scope,
+        &access.requester,
+        &access.configuration_digest,
+        &access.configuration_provenance_digest,
+        &capabilities,
+        &use_cases,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open Work grant digest",
+    })?;
+    tracedecay_application::CapabilityGrantSnapshot::new(
+        tracedecay_application::CapabilityGrantId::new(format!(
+            "grant.tracedecay-daemon.project-open.work.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))?,
+        POLICY_REVISION_V1,
+        grant_digest,
+        access.requester.clone(),
+        observed_at,
+        access.grant_expires_at,
+        access.scope.clone(),
+        capabilities,
+        use_cases,
+        tracedecay_application::DisclosureClass::Sensitive,
+    )
+}
+
 fn production_owner_capabilities()
 -> std::result::Result<BTreeSet<CapabilityId>, ApplicationContractError> {
     let mut capabilities = BTreeSet::new();
@@ -2720,6 +2825,13 @@ fn production_owner_capabilities()
         capabilities.insert(CapabilityId::new(capability.to_owned()).map_err(|_| {
             ApplicationContractError::Inconsistent {
                 field: "project-open capability",
+            }
+        })?);
+    }
+    for (_, capability, _) in tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1 {
+        capabilities.insert(CapabilityId::new(capability).map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "project-open Work capability",
             }
         })?);
     }
@@ -2780,6 +2892,20 @@ mod tests {
             assert!(
                 capabilities.contains(&capability),
                 "{} must be granted to the daemon-owned project route",
+                capability.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn production_project_owner_grants_every_work_attempt_operation() {
+        let capabilities = production_owner_capabilities().expect("production capabilities");
+
+        for (_, capability, _) in tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1 {
+            let capability = CapabilityId::new(capability).expect("Work attempt capability");
+            assert!(
+                capabilities.contains(&capability),
+                "{} must be granted to the daemon-owned Work route",
                 capability.as_str()
             );
         }

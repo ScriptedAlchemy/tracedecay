@@ -549,7 +549,7 @@ impl<T> CanonicalInvocationResult<T>
 where
     T: Serialize,
 {
-    fn into_http_response(self) -> Response {
+    pub fn into_http_response(self) -> Response {
         let status = self.http_status();
         (status, Json(self.into_http_json())).into_response()
     }
