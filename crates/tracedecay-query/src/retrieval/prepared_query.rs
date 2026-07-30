@@ -141,6 +141,9 @@ impl PreparedQueryV1 {
     where
         T: Serialize,
     {
+        if page_size == 0 {
+            return Err(PreparedQueryErrorV1::Invalid);
+        }
         let total = u64::try_from(items.len()).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
         let candidate_set_digest =
             canonical_sha256(&items).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
@@ -169,11 +172,14 @@ impl PreparedQueryV1 {
         let page_size = usize::try_from(page_size).map_err(|_| PreparedQueryErrorV1::Invalid)?;
         let end = start.saturating_add(page_size).min(items.len());
         let next_cursor = if end < items.len() {
-            let expires_at = UtcMicros(
-                now.0
-                    .checked_add(PREPARED_QUERY_CURSOR_TTL_MICROS_V1)
-                    .ok_or(PreparedQueryErrorV1::Unavailable)?,
-            );
+            let expires_at = match &self.cursor {
+                Some(cursor) => cursor.payload.expires_at,
+                None => UtcMicros(
+                    now.0
+                        .checked_add(PREPARED_QUERY_CURSOR_TTL_MICROS_V1)
+                        .ok_or(PreparedQueryErrorV1::Unavailable)?,
+                ),
+            };
             let payload = PreparedQueryCursorPayloadV1 {
                 revision: PREPARED_QUERY_CURSOR_REVISION_V1,
                 operation: bindings.operation.clone(),
@@ -379,6 +385,10 @@ mod tests {
         let second = cursor(2, UtcMicros(1_000));
 
         assert_eq!(first, second);
+        assert_eq!(
+            first,
+            "ccq1.7b227061796c6f6164223a7b227265766973696f6e223a312c226f7065726174696f6e223a22636f64655f65786163745f6f6363757272656e6365222c2273636f70655f646967657374223a227368613235363a32653534336135303264393764333038306466363631313337386438633532633336623933633731653762663064373862313961313234353166313432363031222c2267656e65726174696f6e223a2267656e65726174696f6e2e63616c6c61626c652d70616765222c2271756572795f62696e64696e675f646967657374223a227368613235363a34633466323861306663396134663239353030323964353230373734343530366362316136633261383336626534366264643132366366366666353037333039222c2263616e6469646174655f7365745f646967657374223a227368613235363a66623464373630353138396533313032646463623665323431656531336566353530313739373333616130306266313834663732633133653565333263323065222c2261757468656e7469636174696f6e5f6b65795f6964223a22637572736f722d6b65792e63616c6c61626c652d70616765222c226e6578745f6f6666736574223a322c22657870697265735f6174223a313030307d2c2261757468656e7469636174696f6e223a7b22707269766163795f646f6d61696e223a22707269766163792e63616c6c61626c652d70616765222c226b65795f65706f6368223a312c226d6163223a22686d61632d7368613235363a37373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737227d7d"
+        );
         let first_bytes = hex::decode(
             first
                 .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V1)
