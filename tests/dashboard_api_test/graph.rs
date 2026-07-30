@@ -185,6 +185,61 @@ async fn seed_graph_fixture(cg: &TraceDecay) {
     }
 }
 
+async fn seed_neighbor_symmetry_fixture(cg: &TraceDecay) {
+    let db = cg.db();
+    let nodes = [
+        make_node(
+            "n-sym-center",
+            NodeKind::Function,
+            "symmetry_center",
+            "src/dashboard/symmetry.rs",
+            30,
+        ),
+        make_node(
+            "n-sym-alpha",
+            NodeKind::Function,
+            "alpha_neighbor",
+            "src/dashboard/symmetry.rs",
+            40,
+        ),
+        make_node(
+            "n-sym-beta",
+            NodeKind::Function,
+            "beta_neighbor",
+            "src/dashboard/symmetry.rs",
+            50,
+        ),
+        make_node(
+            "n-sym-gamma",
+            NodeKind::Function,
+            "gamma_neighbor",
+            "src/dashboard/symmetry.rs",
+            60,
+        ),
+    ];
+    if let Err(err) = db.insert_nodes(&nodes).await {
+        panic!("failed to seed symmetric graph nodes: {err}");
+    }
+
+    let edges = [
+        ("n-sym-alpha", "n-sym-center", 101),
+        ("n-sym-center", "n-sym-alpha", 101),
+        ("n-sym-beta", "n-sym-center", 102),
+        ("n-sym-center", "n-sym-beta", 102),
+        ("n-sym-gamma", "n-sym-center", 103),
+        ("n-sym-center", "n-sym-gamma", 103),
+    ]
+    .map(|(source, target, line)| Edge {
+        source: source.to_string(),
+        target: target.to_string(),
+        kind: EdgeKind::Calls,
+        line: Some(line),
+    });
+    if let Err(err) = db.insert_edges(&edges).await {
+        panic!("failed to seed symmetric graph edges: {err}");
+    }
+}
+
 async fn seed_structure_fixture(cg: &TraceDecay) {
     let db = cg.db();
     let test_node = make_node(
@@ -236,12 +291,13 @@ async fn seed_structure_fixture(cg: &TraceDecay) {
 }
 
 async fn start_dashboard_fixture() -> DashboardFixture {
-    start_dashboard_fixture_with(false, false).await
+    start_dashboard_fixture_with(false, false, false).await
 }
 
 async fn start_dashboard_fixture_with(
     with_orphan: bool,
     with_structure_fixture: bool,
+    with_neighbor_symmetry_fixture: bool,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let project_root = tmp.path().join("project");
@@ -261,6 +317,9 @@ async fn start_dashboard_fixture_with(
     }
     if with_structure_fixture {
         seed_structure_fixture(&cg).await;
+    }
+    if with_neighbor_symmetry_fixture {
+        seed_neighbor_symmetry_fixture(&cg).await;
     }
 
     let port = pick_free_port();
@@ -435,6 +494,54 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
 }
 
 #[test]
+fn graph_api_caller_and_callee_traversal_are_behaviorally_symmetric() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_with(false, false, true).await;
+        let agent = http_agent();
+        let (status, neighbors) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/node/n-sym-center/neighbors?limit=2",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{neighbors}");
+        assert_eq!(neighbors["limit"], 2);
+
+        let callers = neighbors["callers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected caller rows: {neighbors}"));
+        let callees = neighbors["callees"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected callee rows: {neighbors}"));
+        assert_eq!(callers, callees, "direction must preserve row mapping");
+        assert_eq!(callers.len(), 2, "both directions must honor the limit");
+        assert_eq!(
+            callers
+                .iter()
+                .map(|row| row["id"].as_str())
+                .collect::<Vec<_>>(),
+            vec![Some("n-sym-alpha"), Some("n-sym-beta")],
+            "both directions must use qualified-name ordering before limiting"
+        );
+
+        for (row, expected_line, expected_start_line) in callers.iter().zip([(101, 40), (102, 50)])
+        {
+            assert_eq!(row["kind"], "function");
+            assert_eq!(row["file_path"], "src/dashboard/symmetry.rs");
+            assert_eq!(row["edge_kind"], "calls");
+            assert_eq!(row["edge_line"], expected_line);
+            assert_eq!(row["degree"], 2);
+            assert_eq!(row["span"]["start_line"], expected_start_line);
+        }
+    });
+}
+
+#[test]
 fn graph_api_finds_shortest_path_and_analytics() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -512,7 +619,7 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
     let runtime = create_runtime();
     runtime.block_on(async {
         // 4 interconnected nodes + 1 orphan with no edges.
-        let fixture = start_dashboard_fixture_with(true, false).await;
+        let fixture = start_dashboard_fixture_with(true, false, false).await;
         let agent = http_agent();
 
         // No seed at all: the default overview slice. Everything fits under
@@ -622,7 +729,7 @@ fn structure_visualization_endpoints_report_measured_data() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture_with(false, true).await;
+        let fixture = start_dashboard_fixture_with(false, true, false).await;
         let agent = http_agent();
 
         let (status, chain) = get_json(
