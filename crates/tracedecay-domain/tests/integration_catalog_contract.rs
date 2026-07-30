@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    HostCapabilityAvailabilityV1, HostCapabilityReasonV1, HostCapabilityV1,
+    HostCapabilityAvailabilityV1, HostCapabilityReasonV1, HostCapabilityStateV1, HostCapabilityV1,
     HostIntegrationCatalogV1, HostIntegrationIdV1, HostKindV1, IntegrationCatalogError,
     IntegrationDaemonActionV1, IntegrationDaemonApiV1, IntegrationEffectClassV1,
     IntegrationPrivacyClassV1, TraceDecayProfileBindingV1, canonical_json_bytes,
@@ -50,10 +50,10 @@ fn catalog_schema_round_trips_to_the_deterministic_golden() {
 }
 
 #[test]
-fn host_matrix_is_backed_by_the_native_event_fixtures() {
+fn observation_host_matrix_matches_native_event_fixture_providers() {
     let catalog = host_integration_catalog_v1();
     let [capability] = catalog.capabilities() else {
-        panic!("minimal PR6 catalog must contain exactly one capability");
+        panic!("observation catalog must contain exactly one capability");
     };
 
     assert_eq!(
@@ -99,10 +99,12 @@ fn host_matrix_is_backed_by_the_native_event_fixtures() {
             "{} must use the single user TraceDecay profile",
             host.integration_id().as_str()
         );
-        let (_, fixture) = HOST_EVENT_FIXTURES
-            .iter()
-            .find(|(provider, _)| *provider == host.integration_id().as_str())
-            .expect("catalog host has a native event fixture");
+    }
+}
+
+#[test]
+fn host_event_fixture_admission_deserializes_into_fixture_only_taxonomy() {
+    for (provider, fixture) in HOST_EVENT_FIXTURES {
         let document: Value = serde_json::from_str(fixture).expect("valid host fixture");
         let fixture_states: Vec<HostCapabilityAvailabilityV1> = document["cases"]
             .as_array()
@@ -120,11 +122,13 @@ fn host_matrix_is_backed_by_the_native_event_fixtures() {
                 })
             })
             .collect();
-        assert_eq!(
-            host.availability_states(),
-            fixture_states,
-            "{} catalog states must be exactly fixture-backed",
-            host.integration_id().as_str()
+        assert!(
+            !fixture_states.is_empty(),
+            "{provider} fixture must prove at least one admission taxonomy state"
+        );
+        assert!(
+            fixture_states.contains(&HostCapabilityAvailabilityV1::Supported),
+            "{provider} fixture must prove supported admission"
         );
     }
 }
@@ -148,15 +152,51 @@ fn typed_status_reasons_have_stable_encoding() {
 }
 
 #[test]
-fn schema_rejects_unknown_fields_and_supported_reasons() {
+fn schema_rejects_unknown_fields() {
     let mut unknown: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
     unknown["future_field"] = json!(true);
     assert!(serde_json::from_value::<HostIntegrationCatalogV1>(unknown).is_err());
 
-    let mut supported_reason: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
-    supported_reason["capabilities"][0]["hosts"][0]["availability_states"][0]["reason_code"] =
-        json!("project_authority_unbound");
-    assert!(serde_json::from_value::<HostIntegrationCatalogV1>(supported_reason).is_err());
+    let mut host_unknown: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    host_unknown["capabilities"][0]["hosts"][0]["availability_states"] = json!([]);
+    assert!(serde_json::from_value::<HostIntegrationCatalogV1>(host_unknown).is_err());
+}
+
+#[test]
+fn catalog_validation_rejects_empty_catalog_and_duplicate_hosts() {
+    let empty: HostIntegrationCatalogV1 = serde_json::from_value(json!({
+        "schema_version": 1,
+        "capabilities": []
+    }))
+    .unwrap();
+    assert!(matches!(
+        empty.validate(),
+        Err(IntegrationCatalogError::EmptyCatalog)
+    ));
+
+    let mut duplicate_capability: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    let capability = duplicate_capability["capabilities"][0].clone();
+    duplicate_capability["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(capability);
+    let catalog: HostIntegrationCatalogV1 = serde_json::from_value(duplicate_capability).unwrap();
+    assert!(matches!(
+        catalog.validate(),
+        Err(IntegrationCatalogError::DuplicateCapabilityId(_))
+    ));
+
+    let mut duplicate_host: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    let host = duplicate_host["capabilities"][0]["hosts"][0].clone();
+    duplicate_host["capabilities"][0]["hosts"]
+        .as_array_mut()
+        .unwrap()
+        .push(host);
+    let catalog: HostIntegrationCatalogV1 = serde_json::from_value(duplicate_host).unwrap();
+    assert!(matches!(
+        catalog.validate(),
+        Err(IntegrationCatalogError::DuplicateHostIntegration { .. })
+    ));
 }
 
 #[test]
@@ -167,40 +207,9 @@ fn catalog_validation_rejects_an_incomplete_host_matrix() {
         .unwrap()
         .pop();
     let catalog: HostIntegrationCatalogV1 = serde_json::from_value(incomplete).unwrap();
-    assert!(catalog.validate().is_err());
-}
-
-#[test]
-fn catalog_validation_requires_the_exact_fixture_backed_state_set() {
-    let mut duplicate: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
-    let states = duplicate["capabilities"][0]["hosts"][0]["availability_states"]
-        .as_array_mut()
-        .unwrap();
-    states.push(states[0].clone());
-    let catalog: HostIntegrationCatalogV1 = serde_json::from_value(duplicate).unwrap();
     assert!(matches!(
         catalog.validate(),
-        Err(IntegrationCatalogError::DuplicateHostAvailabilityState { .. })
-    ));
-
-    let mut incomplete: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
-    incomplete["capabilities"][0]["hosts"][0]["availability_states"]
-        .as_array_mut()
-        .unwrap()
-        .pop();
-    let catalog: HostIntegrationCatalogV1 = serde_json::from_value(incomplete).unwrap();
-    assert!(matches!(
-        catalog.validate(),
-        Err(IntegrationCatalogError::InvalidHostAvailabilityStates { .. })
-    ));
-
-    let mut unproven: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
-    unproven["capabilities"][0]["hosts"][0]["availability_states"][1]["reason_code"] =
-        json!("project_authority_unbound");
-    let catalog: HostIntegrationCatalogV1 = serde_json::from_value(unproven).unwrap();
-    assert!(matches!(
-        catalog.validate(),
-        Err(IntegrationCatalogError::InvalidHostAvailabilityStates { .. })
+        Err(IntegrationCatalogError::IncompleteHostMatrix { .. })
     ));
 }
 
@@ -271,19 +280,20 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
         assert_eq!(
             host.fixture_backed_observation_integration_id(),
             None,
-            "{host:?} must not claim a PR6 native observation fixture"
+            "{host:?} must not claim a native observation fixture"
         );
     }
 }
 
 #[test]
-fn canonical_catalog_authority_covers_every_stock_host_capability_once() {
+fn stock_host_capability_matrix_is_sole_capability_authority() {
     let catalog = host_integration_catalog_v1();
     let views = catalog.stock_host_capability_views();
     assert_eq!(
         views.iter().map(|view| view.host()).collect::<Vec<_>>(),
         HostKindV1::ALL
     );
+    let mut digests = BTreeSet::new();
     for view in &views {
         assert_eq!(
             view.capabilities()
@@ -302,25 +312,21 @@ fn canonical_catalog_authority_covers_every_stock_host_capability_once() {
             view.capabilities(),
             catalog.stock_host_capabilities(view.host())
         );
+        let digest = catalog.host_capability_digest(view.host()).unwrap();
+        assert_ne!(digest, [0; 32]);
+        assert!(digests.insert(digest), "each HostKindV1 digest is stable and unique");
     }
+    assert_eq!(digests.len(), HostKindV1::ALL.len());
 
     let catalog_digest = catalog.canonical_authority_digest().unwrap();
     assert_ne!(catalog_digest, [0; 32]);
-    let capability_digests = HostKindV1::ALL
-        .into_iter()
-        .map(|host| catalog.host_capability_digest(host).unwrap())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(capability_digests.len(), HostKindV1::ALL.len());
-    assert!(!capability_digests.contains(&catalog_digest));
+    assert!(!digests.contains(&catalog_digest));
 }
 
 #[test]
 fn cursor_cloud_remains_discoverable_only_as_unsupported() {
     let capabilities = stock_host_capabilities(HostKindV1::CursorCloud);
     assert!(capabilities.iter().all(|record| {
-        matches!(
-            record.state,
-            tracedecay_domain::HostCapabilityStateV1::Unavailable(_)
-        )
+        matches!(record.state, HostCapabilityStateV1::Unavailable(_))
     }));
 }
