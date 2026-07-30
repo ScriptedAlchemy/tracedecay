@@ -39,20 +39,52 @@ describe('the Work authority ledger', () => {
    * error directions are checked against the names codegen actually produces.
    */
   it('detects a landed read model under every suffix codegen produces', () => {
-    // Codegen emits an interface, a `V1` revision and a zod const for one type,
-    // and a read contract arrives beside the request type that calls it. Each is
-    // the same arrival, so each has to flip the row on its own.
+    // Codegen emits an interface, a `V<n>` revision and a zod const for one
+    // type. Those are the same arrival, so each has to flip the row on its own.
     for (const name of [
       'WorkProjectionSnapshot',
       'WorkProjectionSnapshotV1',
+      'WorkProjectionSnapshotSchema',
       'WorkProjectionSnapshotV1Schema',
-      'WorkProjectionSnapshotRequestV1Schema',
     ]) {
       expect(
         wireStateFor(surface('kanban'), new Set([name])),
         `${name} did not read as an arrival`,
       ).toMatchObject({ kind: 'landed', contract: name });
     }
+  });
+
+  /**
+   * The arrival this page must not invent.
+   *
+   * The domain mints its identifiers as schemars string-id newtypes sitting
+   * beside the payloads that carry them — `WorkCommandId`,
+   * `WorkCancellationRequestId`, `WorkProviderRouteId`
+   * (`crates/tracedecay-domain/src/research/id.rs`). Any Work read model
+   * embedding one generates the identifier's schema, and an unanchored prefix
+   * match would read that as the payload landing: the page would announce
+   * contracts that had not arrived and count them in its headline. A request
+   * DTO is the same mistake in milder form — it is what calls the read, not the
+   * read.
+   */
+  it('does not mistake an identifier or a request for the payload', () => {
+    const nearMisses = new Set([
+      'WorkCommandIdSchema',
+      'WorkCancellationRequestIdSchema',
+      'WorkProviderRouteIdSchema',
+      'WorkLeaseIdSchema',
+      'WorkArtifactIdSchema',
+      'WorkProjectionSnapshotRequestV1Schema',
+      'WorkProjectionDeltaRequestV1Schema',
+    ]);
+
+    for (const candidate of SURFACES) {
+      expect(
+        wireStateFor(candidate, nearMisses).kind,
+        `${candidate.id} read an identifier or a request as its contract`,
+      ).toBe('withheld');
+    }
+    expect(resolveWorkWire(resolveWorkStates(nearMisses)).kind).toBe('closed');
   });
 
   /**

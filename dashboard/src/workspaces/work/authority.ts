@@ -157,9 +157,10 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Timeline',
         draws: 'one task’s event order at a chosen graph version',
         requires: 'WorkEvent',
-        // `WorkEvent` covers the `WorkEventKind` union beside it, so the row
-        // fires whether the ordered event or its discriminant lands first.
-        watches: [...DELTA_NAMES, 'WorkEvent'],
+        // Both names, because the match is anchored: `WorkEvent` no longer
+        // subsumes the `WorkEventKind` union beside it, and the row should fire
+        // whether the ordered event or its discriminant lands first.
+        watches: [...DELTA_NAMES, 'WorkEvent', 'WorkEventKind'],
         reason: 'read_model_absent',
       },
       {
@@ -215,7 +216,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'History',
         draws: 'current, as-of, evolution and forensic reads of one TaskId',
         requires: 'WorkEvent',
-        watches: [...DELTA_NAMES, 'WorkProjectionResumeCursor', 'WorkEvent'],
+        watches: [...DELTA_NAMES, 'WorkProjectionResumeCursor', 'WorkEvent', 'WorkEventKind'],
         reason: 'read_model_absent',
       },
     ],
@@ -261,9 +262,14 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         // No longer design-only: the canonical runtime contracts carry
         // cancellation request, acknowledgement and escalation, recovery state,
         // and the lease fence every one of them is fenced against.
+        // Named to the exact stems rather than the `WorkCancellation` family:
+        // anchored matching aside, that shorter stem also reaches
+        // `WorkCancellationRequestId`, and an identifier is not the payload
+        // this row needs.
         watches: [
           ...ATTEMPT_NAMES,
-          'WorkCancellation',
+          'WorkCancellationRequest',
+          'WorkCancellationState',
           'WorkRecoveryState',
           'WorkLeaseFence',
         ],
