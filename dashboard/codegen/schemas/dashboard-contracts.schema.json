@@ -6951,7 +6951,7 @@
         },
         "next_page": {
           "format": "uint64",
-          "minimum": 0,
+          "minimum": 1,
           "type": "integer"
         },
         "order_digest": {
@@ -9160,7 +9160,7 @@
     "ScopeSetRevision": {
       "description": "Monotonic optimistic-concurrency revision of one scope set.",
       "format": "uint64",
-      "minimum": 0,
+      "minimum": 1,
       "type": "integer"
     },
     "ScopeSourceBinding": {
