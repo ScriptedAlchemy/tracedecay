@@ -118,6 +118,7 @@ async fn dropping_lsp_client_sends_immediate_session_detach() {
     let handshake = DaemonHandshake {
         project_path: Some(profile.path().to_path_buf()),
         scope_prefix: None,
+        attested_scope: None,
         timings: false,
         allow_init: false,
         allow_initialize_root_routing: false,
@@ -332,6 +333,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
     let handshake = DaemonHandshake {
         project_path: Some(profile.path().to_path_buf()),
         scope_prefix: None,
+        attested_scope: None,
         timings: false,
         allow_init: false,
         allow_initialize_root_routing: false,

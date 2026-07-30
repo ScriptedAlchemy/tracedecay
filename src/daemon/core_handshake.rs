@@ -35,6 +35,13 @@ pub struct DaemonHandshake {
     /// request. Old clients omit it and deserialize to an empty string.
     #[serde(default)]
     pub client_instance_id: String,
+    /// Exact application scope the client already resolved for this
+    /// connection's project, when the client resolved one. The daemon may
+    /// consume this attestation instead of re-deriving the scope, but only
+    /// after revalidating it (see [`Self::validated_attested_scope`]); an
+    /// absent or invalid attestation always falls back to derivation.
+    #[serde(default)]
+    pub attested_scope: Option<tracedecay_application::ResolvedScope>,
     /// Whether this proxy already forwarded an initialize response declaring
     /// `tools.listChanged=true` to its MCP host.
     #[serde(default)]
@@ -56,6 +63,7 @@ impl DaemonHandshake {
         Ok(Self {
             project_path,
             scope_prefix,
+            attested_scope: None,
             timings,
             allow_init,
             allow_initialize_root_routing: false,
@@ -80,6 +88,16 @@ impl DaemonHandshake {
 
     pub fn from_line(line: &str) -> Result<Self> {
         Ok(serde_json::from_str(line.trim())?)
+    }
+
+    /// The attested scope when it survives revalidation: identity fields are
+    /// consistent with its canonical digest. An attestation that fails
+    /// validation is dropped (fail closed), never trusted; `None` always means
+    /// "derive the scope the ordinary way".
+    pub fn validated_attested_scope(&self) -> Option<&tracedecay_application::ResolvedScope> {
+        self.attested_scope
+            .as_ref()
+            .filter(|scope| scope.validate().is_ok())
     }
 }
 
