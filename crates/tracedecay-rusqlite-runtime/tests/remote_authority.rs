@@ -1,3 +1,5 @@
+use rusqlite::Connection;
+use tempfile::TempDir;
 use tracedecay_application::remote::capture::RemoteWriterAuthorityV1;
 use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, CurrentRemoteAuthorityV1, EntityVersionId, ProjectId,
@@ -136,8 +138,31 @@ fn reachability_resolves_the_replacement_authority_for_an_old_writer() {
 }
 
 #[test]
-fn publication_waits_for_every_durable_fence_and_rejects_old_epochs() {
+fn initial_authority_publication_does_not_require_an_old_writer_fence() {
     let store = RusqliteRemoteAuthorityStoreV1::open_in_memory().unwrap();
+    let initial = binding(4);
+    let initial_writer = writer(4, "placement.remote.11");
+    let frontier = watermark(&initial, 9);
+    store
+        .initialize_authority(&initial_writer, &initial, 11, &frontier)
+        .unwrap();
+    store
+        .install_fence("writer", &initial_writer, &initial, 11)
+        .unwrap();
+
+    assert!(
+        store
+            .publish_and_enable_serving(&initial, &initial_writer, 11, &frontier, &["writer"],)
+            .is_ok()
+    );
+}
+
+#[test]
+fn publication_waits_for_every_durable_fence_and_rejects_old_epochs() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("remote-authority.sqlite");
+    let store =
+        RusqliteRemoteAuthorityStoreV1::from_connection(Connection::open(&path).unwrap()).unwrap();
     let initial = binding(4);
     let replacement = binding(5);
     let initial_writer = writer(4, "placement.remote.11");
@@ -161,9 +186,6 @@ fn publication_waits_for_every_durable_fence_and_rejects_old_epochs() {
         .unwrap();
 
     store
-        .fence_old_authority_read_only(&initial_writer, &replacement_writer, &replacement)
-        .unwrap();
-    store
         .install_fence("writer", &replacement_writer, &replacement, 12)
         .unwrap();
     assert_eq!(
@@ -181,6 +203,22 @@ fn publication_waits_for_every_durable_fence_and_rejects_old_epochs() {
     store
         .install_fence("receipt", &replacement_writer, &replacement, 12)
         .unwrap();
+    assert_eq!(
+        store.publish_and_enable_serving(
+            &replacement,
+            &replacement_writer,
+            12,
+            &replacement_frontier,
+            &["writer", "receipt"],
+        ),
+        Err(RemoteAuthorityStorageErrorV1::OldAuthorityStillWritable)
+    );
+    store
+        .fence_old_authority_read_only(&initial_writer, &replacement_writer, &replacement)
+        .unwrap();
+    drop(store);
+    let store =
+        RusqliteRemoteAuthorityStoreV1::from_connection(Connection::open(&path).unwrap()).unwrap();
     let publication = store
         .publish_and_enable_serving(
             &replacement,
