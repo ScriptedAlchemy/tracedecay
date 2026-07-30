@@ -986,7 +986,7 @@ jobs:
         run: npm test
 
       - name: Run dashboard integration tests
-        run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked
+        run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked --no-tests=fail
 
   hermes-integration:
     name: Hermes integration (stock)
