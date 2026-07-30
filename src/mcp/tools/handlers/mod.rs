@@ -75,6 +75,7 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
+use tracedecay_sessions::WorkflowIndexReadPort;
 
 pub async fn handle_user_lcm_tool(
     tool_name: &str,
@@ -497,7 +498,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
-        Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
+        Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:
         Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
     pub dashboard_application_invocation_executor:
