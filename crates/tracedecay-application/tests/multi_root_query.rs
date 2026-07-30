@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use schemars::schema_for;
 use tracedecay_application::{
     AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, MultiRootQueryError,
@@ -208,5 +209,41 @@ fn cursor_mismatch_and_denied_root_never_become_empty_success() {
         MultiRootQueryError::CursorMismatch {
             field: "query digest"
         }
+    );
+}
+
+#[test]
+fn continuation_schema_and_runtime_reject_page_zero() {
+    let schema =
+        serde_json::to_value(schema_for!(tracedecay_application::MultiRootContinuationV1)).unwrap();
+    assert_eq!(schema["properties"]["next_page"]["minimum"], 1);
+
+    let generations = vec![generation(
+        &context("worktree.main", "schema").scope().clone(),
+        'b',
+    )];
+    assert!(
+        tracedecay_application::MultiRootContinuationV1::new(
+            digest('a'),
+            generations.clone(),
+            digest('c'),
+            digest('d'),
+            0,
+        )
+        .is_err()
+    );
+
+    let continuation = tracedecay_application::MultiRootContinuationV1::new(
+        digest('a'),
+        generations,
+        digest('c'),
+        digest('d'),
+        1,
+    )
+    .unwrap();
+    let mut wire = serde_json::to_value(continuation).unwrap();
+    wire["next_page"] = serde_json::json!(0);
+    assert!(
+        serde_json::from_value::<tracedecay_application::MultiRootContinuationV1>(wire).is_err()
     );
 }
