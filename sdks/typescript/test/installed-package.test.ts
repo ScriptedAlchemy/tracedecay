@@ -215,8 +215,9 @@ import * as clientEntry from "@tracedecay/sdk/client";
 
 if (typeof sdk.createClient !== "function" ||
     typeof clientEntry.createClient !== "function" ||
-    !Array.isArray(sdk.UNAVAILABLE_OPERATIONS) ||
-    sdk.UNAVAILABLE_OPERATIONS.length !== 8) {
+    !Array.isArray(sdk.SERVER_OPERATIONS) ||
+    sdk.SERVER_OPERATIONS.length !== 64 ||
+    !Array.isArray(sdk.UNAVAILABLE_OPERATIONS)) {
   throw new Error("installed package exports are incomplete");
 }
 console.log(JSON.stringify({
@@ -225,37 +226,109 @@ console.log(JSON.stringify({
   client: typeof clientEntry.createClient,
 }));
 
-const client = sdk.createClient({
+const availabilityClient = sdk.createClient({
   baseUrl: process.env.TRACEDECAY_SDK_BASE_URL,
   projectId: process.env.TRACEDECAY_SDK_PROJECT_ID,
   token: process.env.TRACEDECAY_SDK_TOKEN,
 });
+if ("work_snapshot" in availabilityClient.operations ||
+    !sdk.UNAVAILABLE_OPERATIONS.some(
+      (operation) => operation.operation === "work_snapshot" &&
+        operation.disposition === "route_unavailable",
+    )) {
+  throw new Error("unmounted Work routes must remain typed unavailable capabilities");
+}
 
-try {
-  const cancellation = await client.cancelOperation("request.installed-package-probe");
-  console.log(JSON.stringify({ evidence: "daemon-reached", cancellation }));
-} catch (error) {
-  if (error instanceof sdk.TraceDecayDisconnectedError ||
-      error instanceof sdk.TraceDecayAuthenticationError) {
-    throw error;
+const baseUrl = process.env.TRACEDECAY_SDK_BASE_URL;
+for (const mode of ["local", "remote"]) {
+  const client = sdk.createClient({
+    baseUrl,
+    projectId: process.env.TRACEDECAY_SDK_PROJECT_ID,
+    token: process.env.TRACEDECAY_SDK_TOKEN,
+    ...(mode === "remote" ? { origin: new URL(baseUrl).origin } : {}),
+  });
+  if ("work_attempt_start" in client.operations) {
+    try {
+      await client.operations.work_attempt_start({
+        identity: {
+          task_id: "task.sdk-conformance",
+          run_id: "run.sdk-conformance",
+          attempt_id: "attempt.sdk-conformance",
+        },
+        lease: { lease_id: "lease.sdk-conformance", epoch: 1 },
+        recovery: { state: "fresh" },
+      });
+    } catch (error) {
+      if (!(error instanceof sdk.TraceDecayProblemError)) {
+        throw error;
+      }
+    }
+  }
+  let operationId;
+  try {
+    const result = await client.operations.test_results({}, { page: { size: 1 } });
+    operationId = result.request_id;
+  } catch (error) {
+    if (!(error instanceof sdk.TraceDecayUnavailableError) ||
+        error.problem.code !== "application.pr12-primitive.unavailable") {
+      throw error;
+    }
+    operationId = error.envelope.request_id;
+  }
+  let terminal;
+  try {
+    const initial = client.streamOperation(operationId);
+    const opened = await initial.next();
+    if (opened.done || opened.value.event !== "open") {
+      throw new Error("operation stream did not expose an open frontier");
+    }
+    const frontier = opened.value.data.data.frontier;
+    await initial.return();
+    const resumed = [];
+    for await (const event of client.streamOperation(operationId, {
+      resume: {
+        resumeToken: frontier.resume_token,
+        nextSequence: frontier.next_sequence,
+      },
+    })) {
+      resumed.push(event);
+    }
+    terminal = resumed.at(-1)?.event;
+  } catch (error) {
+    if (!(error instanceof sdk.TraceDecayUnavailableError) ||
+        error.problem.code !== "operation_event.unavailable") {
+      throw error;
+    }
+    try {
+      await client.streamOperation(operationId, {
+        resume: { resumeToken: "resume.unavailable", nextSequence: 1 },
+      }).next();
+      throw new Error("unavailable resume unexpectedly opened");
+    } catch (resumeError) {
+      if (!(resumeError instanceof sdk.TraceDecayStaleError) ||
+          resumeError.problem.code !== "operation_event.resume_expired") {
+        throw resumeError;
+      }
+    }
+    terminal = "unavailable";
+  }
+  let cancellation;
+  try {
+    cancellation = (await client.cancelOperation(operationId)).status;
+  } catch (error) {
+    if (!(error instanceof sdk.TraceDecayUnavailableError) ||
+        error.problem.code !== "operation_event.unavailable") {
+      throw error;
+    }
+    cancellation = "unavailable";
   }
   console.log(JSON.stringify({
-    evidence: "daemon-reached",
-    response: error?.name,
-    status: error?.status,
+    evidence: "production-lifecycle",
+    mode,
+    terminal,
+    cancellation,
   }));
 }
-
-if ("work_attempt_start" in client.operations ||
-    !sdk.UNAVAILABLE_OPERATIONS.some(
-      (operation) => operation.operation === "work_attempt_start" &&
-        operation.disposition === "service_not_registered",
-    )) {
-  throw new Error("runtime attempts must remain typed unavailable capabilities");
-}
-
-const result = await client.operations.work_snapshot({ page_size: 1 });
-console.log(JSON.stringify({ evidence: "canonical-work-snapshot", result }));
 `,
       );
 

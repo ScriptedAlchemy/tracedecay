@@ -8,9 +8,11 @@ from typing import Any
 
 from tracedecay_sdk import (
     PageOptions,
+    SERVER_OPERATIONS,
     StreamOptions,
     StreamResume,
     TraceDecayClient,
+    UNAVAILABLE_OPERATIONS,
 )
 
 
@@ -136,6 +138,16 @@ class ClientTest(unittest.TestCase):
         path, headers = Handler.requests[-1]
         self.assertIn("page_size=25&cursor=cursor.next", path)
         self.assertEqual(headers["Authorization"], "Bearer sdk-token")
+
+    def test_inventory_covers_server_and_every_work_capability(self) -> None:
+        server_names = set(SERVER_OPERATIONS)
+        base_names = {name for name in server_names if not name.startswith("work_")}
+        available_work = {name for name in server_names if name.startswith("work_")}
+        unavailable_work = set(UNAVAILABLE_OPERATIONS)
+
+        self.assertEqual(len(base_names), 64)
+        self.assertEqual(len(available_work | unavailable_work), 17)
+        self.assertFalse(available_work & unavailable_work)
 
     def test_cancellation_and_resume_are_real_lifecycle_requests(self) -> None:
         client = self.client()

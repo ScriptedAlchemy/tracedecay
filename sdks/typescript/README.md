@@ -3,9 +3,10 @@
 `@tracedecay/sdk` provides generated TypeScript contracts and a strict client
 for TraceDecay's public application API.
 
-The generated operation surface comes only from canonical executable bindings.
-Operations without a reviewed route or schema body are omitted rather than
-exposed as partially functional methods.
+The generated operation surface includes all 64 canonical production HTTP
+operations and the cancellation/resumable-stream lifecycle. Operations without
+a mounted production route are exported as typed unavailable capabilities
+rather than partially functional methods.
 
 ## Requirements
 
@@ -23,6 +24,11 @@ const client = createClient({
   projectId: "project.example",
   token: process.env.TRACEDECAY_APPLICATION_TOKEN!,
 });
+
+const status = await client.operations.storage_status(
+  {},
+  { page: { size: 25 } },
+);
 ```
 
 Request and result types, decoders, and operation methods are generated from
