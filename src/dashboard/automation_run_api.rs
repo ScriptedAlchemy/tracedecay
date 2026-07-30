@@ -18,7 +18,7 @@ use crate::automation::backend::{
 use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
 use crate::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
-    AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record, load_run_records,
+    AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record,
     read_run_artifact_payload,
 };
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
@@ -451,12 +451,11 @@ async fn append_failed_if_missing(
     task: AgentTaskKind,
     err: String,
 ) {
-    let terminal_exists = load_run_records(&state.dashboard_root, 200)
+    let terminal_exists = find_run_record(&state.dashboard_root, run_id)
         .await
         .ok()
-        .into_iter()
         .flatten()
-        .any(|record| record.run_id == run_id && record.status.is_terminal());
+        .is_some_and(|record| record.status.is_terminal());
     if terminal_exists {
         return;
     }
@@ -640,6 +639,8 @@ fn dashboard_job_record(
         error_classification,
         error_retryable: error_classification
             .map(crate::automation::backend::AgentTaskFailureClass::is_retryable),
+        backend_attempt_count: 0,
+        backend_attempts: Vec::new(),
         fallback_status,
         report_ref: Some(json!({
             "run_id": run_id,

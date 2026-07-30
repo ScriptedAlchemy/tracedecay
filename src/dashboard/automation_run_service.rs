@@ -384,11 +384,6 @@ async fn session_reflection_run_payload_with_run_id_direct(
             return Err(err.to_string());
         }
     };
-    if run.ledger_record.status == crate::automation::run_ledger::AutomationRunStatus::Skipped {
-        crate::automation::run_ledger::append_run_record(&state.dashboard_root, &run.ledger_record)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
     push_dashboard_automation_activity_result(state, "session-reflector", &run.ledger_record).await;
 
     Ok(automation_run_payload(
@@ -476,11 +471,6 @@ async fn skill_writing_run_payload_with_run_id_direct(
             return Err(err.to_string());
         }
     };
-    if run.ledger_record.status == crate::automation::run_ledger::AutomationRunStatus::Skipped {
-        crate::automation::run_ledger::append_run_record(&state.dashboard_root, &run.ledger_record)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
     push_dashboard_automation_activity_result(state, "skill-writer", &run.ledger_record).await;
 
     Ok(automation_run_payload(

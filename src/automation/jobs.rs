@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
-    classify_agent_task_error_message, run_agent_task_with_retry,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
+    BackendRetryPolicy, classify_agent_task_error_message, run_agent_task_with_retry_report,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::job_webhook;
@@ -32,7 +32,7 @@ use super::lifecycle::generated_run_id;
 use super::managed_skills::{ManagedSkillState, load_managed_skill};
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
-    load_run_records,
+    load_run_records_for_task_key,
 };
 use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
 use super::text::truncate_chars_for_prompt;
@@ -463,7 +463,14 @@ pub async fn run_user_job_with_backend(
     }
 
     let scheduler_records = if trigger == AutomationTrigger::Scheduler {
-        Some(load_run_records(dashboard_root, JOB_LEDGER_LOOKBACK).await?)
+        Some(
+            load_run_records_for_task_key(
+                dashboard_root,
+                &job_task_key(&job.id),
+                JOB_LEDGER_LOOKBACK,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -516,7 +523,12 @@ pub async fn run_user_job_with_backend(
             Ok(output) => Some(output),
             Err(err) => {
                 let record = ctx
-                    .append_failed(None, format!("job pre-run command failed: {err}"), None)
+                    .append_failed(
+                        None,
+                        format!("job pre-run command failed: {err}"),
+                        None,
+                        None,
+                    )
                     .await?;
                 return Ok(failed_run(record));
             }
@@ -548,13 +560,19 @@ pub async fn run_user_job_with_backend(
     let input_hash = Some(request.input_hash.clone());
 
     let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-    let response = match run_agent_task_with_retry(backend, &request, &retry_policy).await {
-        Ok(response) => response,
-        Err(err) => {
-            let record = ctx.append_failed(input_hash, err.to_string(), None).await?;
-            return Ok(failed_run(record));
-        }
-    };
+    let mut retry_report = AgentTaskRetryReport::default();
+    let response =
+        match run_agent_task_with_retry_report(backend, &request, &retry_policy, &mut retry_report)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let record = ctx
+                    .append_failed(input_hash, err.to_string(), None, Some(&retry_report))
+                    .await?;
+                return Ok(failed_run(record));
+            }
+        };
 
     let delivery_report = match deliver_job_output(dashboard_root, job, &run_id, &response).await {
         Ok(report) => report,
@@ -564,6 +582,7 @@ pub async fn run_user_job_with_backend(
                     input_hash,
                     format!("job delivery failed: {err}"),
                     response.model.clone(),
+                    Some(&retry_report),
                 )
                 .await?;
             return Ok(failed_run(record));
@@ -574,6 +593,8 @@ pub async fn run_user_job_with_backend(
     record.model = response.model.clone();
     record.input_hash = input_hash;
     record.output_hash = Some(sha256_json(&json!(response.output_text)));
+    record.backend_attempt_count = retry_report.attempt_count();
+    record.backend_attempts = retry_report.attempts().to_vec();
     record.validation_report = Some(json!({
         "status": "delivered",
         "delivery": delivery_report,
@@ -675,6 +696,8 @@ impl JobRunContext<'_> {
             error_classification,
             error_retryable: error_classification
                 .map(super::backend::AgentTaskFailureClass::is_retryable),
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
             report_ref: Some(json!({
                 "dashboard_jobs": "/api/automation/jobs",
                 "job_id": self.job.id,
@@ -727,9 +750,14 @@ impl JobRunContext<'_> {
         input_hash: Option<String>,
         error: String,
         model: Option<String>,
+        retry_report: Option<&AgentTaskRetryReport>,
     ) -> Result<AutomationRunLedgerRecord> {
         let mut record = self.base_record(AutomationRunStatus::Failed, Some(error));
         record.input_hash = input_hash;
+        if let Some(retry_report) = retry_report {
+            record.backend_attempt_count = retry_report.attempt_count();
+            record.backend_attempts = retry_report.attempts().to_vec();
+        }
         if model.is_some() {
             record.model = model;
         }

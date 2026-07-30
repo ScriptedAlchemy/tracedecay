@@ -89,6 +89,8 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         error: None,
         error_classification: None,
         error_retryable: None,
+        backend_attempt_count: 0,
+        backend_attempts: Vec::new(),
         fallback_status: Some("scheduler_interval_not_elapsed".to_string()),
         report_ref: None,
         artifacts: Vec::new(),

@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::backend::{AgentTaskFailureClass, AgentTaskKind};
+use super::backend::{
+    AgentTaskFailureClass, AgentTaskKind, AgentTaskRetryAttempt, task_key as canonical_task_key,
+};
 use super::config_error;
 use crate::errors::{Result, TraceDecayError};
 
@@ -133,6 +135,10 @@ pub struct AutomationRunLedgerRecord {
     pub error_classification: Option<AgentTaskFailureClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_retryable: Option<bool>,
+    #[serde(default)]
+    pub backend_attempt_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backend_attempts: Vec<AgentTaskRetryAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,6 +303,48 @@ pub async fn load_run_records(
         .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
 }
 
+pub async fn load_run_records_for_task_key(
+    dashboard_root: &Path,
+    requested_task_key: &str,
+    limit: usize,
+) -> Result<Vec<AutomationRunLedgerRecord>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let path = run_ledger_path(dashboard_root);
+    let task_key = requested_task_key.to_string();
+    tokio::task::spawn_blocking(move || {
+        read_run_records_tail_with_filter(
+            &path,
+            limit,
+            RUN_LEDGER_TAIL_CHUNK_BYTES,
+            &RunRecordFilter::TaskKey(task_key),
+        )
+    })
+    .await
+    .map_err(|e| config_error(format!("failed to join automation task ledger read: {e}")))?
+}
+
+enum RunRecordFilter {
+    Any,
+    TaskKey(String),
+}
+
+impl RunRecordFilter {
+    fn matches(&self, record: &AutomationRunLedgerRecord) -> bool {
+        match self {
+            Self::Any => true,
+            Self::TaskKey(requested) => {
+                record
+                    .task_key
+                    .as_deref()
+                    .unwrap_or_else(|| canonical_task_key(record.task))
+                    == requested
+            }
+        }
+    }
+}
+
 /// Reads the tail of the ledger and parses the newest `limit` distinct
 /// records. Only complete lines are parsed: when the read window does not
 /// begin at the start of the file, the (possibly truncated) leading line is
@@ -309,6 +357,15 @@ fn read_run_records_tail_with_window(
     path: &Path,
     limit: usize,
     initial_window: u64,
+) -> Result<Vec<AutomationRunLedgerRecord>> {
+    read_run_records_tail_with_filter(path, limit, initial_window, &RunRecordFilter::Any)
+}
+
+fn read_run_records_tail_with_filter(
+    path: &Path,
+    limit: usize,
+    initial_window: u64,
+    filter: &RunRecordFilter,
 ) -> Result<Vec<AutomationRunLedgerRecord>> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -366,7 +423,7 @@ fn read_run_records_tail_with_window(
             }
         };
         let text = String::from_utf8_lossy(slice);
-        let records = parse_run_records_newest_first(&text, limit, path);
+        let records = parse_run_records_newest_first(&text, limit, path, filter);
         if records.len() >= limit || reached_start {
             return Ok(records);
         }
@@ -380,6 +437,7 @@ fn parse_run_records_newest_first(
     text: &str,
     limit: usize,
     path: &Path,
+    filter: &RunRecordFilter,
 ) -> Vec<AutomationRunLedgerRecord> {
     let mut records = Vec::new();
     let mut seen_run_ids = std::collections::BTreeSet::new();
@@ -393,6 +451,9 @@ fn parse_run_records_newest_first(
         }
         match serde_json::from_str::<AutomationRunLedgerRecord>(trimmed) {
             Ok(record) => {
+                if !filter.matches(&record) {
+                    continue;
+                }
                 if !seen_run_ids.insert(record.run_id.clone()) {
                     continue;
                 }
@@ -564,5 +625,22 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn task_key_read_finds_record_behind_more_than_two_hundred_unrelated_runs() {
+        let mut lines = vec![ledger_line("skill-target", 1).replace(
+            "\"task\":\"memory_curator\"",
+            "\"task\":\"skill_writer\",\"task_key\":\"skill_writer\"",
+        )];
+        lines.extend((0..250).map(|index| ledger_line(&format!("unrelated-{index}"), 2 + index)));
+        let (temp, _path) = write_ledger(&lines);
+
+        let records = load_run_records_for_task_key(temp.path(), "skill_writer", 1)
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].run_id, "skill-target");
     }
 }

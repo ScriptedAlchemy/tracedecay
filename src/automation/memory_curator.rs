@@ -5,8 +5,8 @@ use std::sync::Arc;
 use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy, value_as_usize};
 use super::artifacts::sha256_json;
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
-    run_agent_task_with_retry,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
+    BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
 use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
@@ -218,22 +218,26 @@ async fn run_memory_curator_for_store(
     let finalizer = run.finalizer(input_hash.clone());
 
     let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-    let response = match run_agent_task_with_retry(backend, &request, &retry_policy).await {
-        Ok(response) => response,
-        Err(err) => {
-            let record = finalizer
-                .append_backend_fallback_record(evidence_hash, err.to_string())
-                .await?;
-            return Ok(MemoryCuratorAutomationRun {
-                run_id: record.run_id.clone(),
-                report: failed_backend_fallback_report(&record),
-                ledger_record: record,
-                backend_response: None,
-            });
-        }
-    };
+    let mut retry_report = AgentTaskRetryReport::default();
+    let response =
+        match run_agent_task_with_retry_report(backend, &request, &retry_policy, &mut retry_report)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let record = finalizer
+                    .append_backend_fallback_record(evidence_hash, err.to_string(), &retry_report)
+                    .await?;
+                return Ok(MemoryCuratorAutomationRun {
+                    run_id: record.run_id.clone(),
+                    report: failed_backend_fallback_report(&record),
+                    ledger_record: record,
+                    backend_response: None,
+                });
+            }
+        };
     let proposed_ops = finalizer
-        .response_output_json(&response, evidence_hash.clone())
+        .response_output_json(&response, evidence_hash.clone(), &retry_report)
         .await?;
 
     let dry_run_report = match store
@@ -254,6 +258,7 @@ async fn run_memory_curator_for_store(
                     evidence_hash,
                     Some(proposed_ops),
                     err.to_string(),
+                    &retry_report,
                 )
                 .await?;
             return Err(err);
@@ -285,6 +290,7 @@ async fn run_memory_curator_for_store(
                         evidence_hash,
                         Some(proposed_ops),
                         err.to_string(),
+                        &retry_report,
                     )
                     .await?;
                 return Err(err);
@@ -330,7 +336,7 @@ async fn run_memory_curator_for_store(
     record.rejected_ops = rejected_ops;
     record.validation_report = validation_report;
     let record = finalizer
-        .append_success_record(&request, &response, record)
+        .append_success_record(&request, &response, &retry_report, record)
         .await?;
 
     Ok(MemoryCuratorAutomationRun {

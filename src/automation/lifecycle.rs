@@ -8,14 +8,14 @@ use serde_json::{Value, json};
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
-    AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy, agent_task_contract,
-    classify_agent_task_error_message, extract_json_object_prefix, prompt_version,
-    run_agent_task_with_retry, task_key,
+    AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport, BackendRetryPolicy,
+    agent_task_contract, classify_agent_task_error_message, extract_json_object_prefix,
+    prompt_version, run_agent_task_with_retry_report, task_key,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
-    load_run_records,
+    load_run_records_for_task_key,
 };
 use super::scheduler::{
     AutomationScheduleDecision, AutomationTaskLock, load_session_activity, schedule_decision,
@@ -33,7 +33,10 @@ pub(crate) enum SchedulerGate {
 }
 
 pub(crate) enum BackendTaskRun {
-    Response(AgentTaskResponse),
+    Response {
+        response: AgentTaskResponse,
+        retry_report: AgentTaskRetryReport,
+    },
     Fallback(Box<AutomationRunLedgerRecord>),
 }
 
@@ -164,7 +167,7 @@ pub(crate) async fn scheduler_gate(
     }
 
     let now_secs = current_timestamp();
-    let records = load_run_records(dashboard_root, 200).await?;
+    let records = load_run_records_for_task_key(dashboard_root, task_key(task), 200).await?;
     let Some(lock) = AutomationTaskLock::try_acquire(
         dashboard_root,
         task,
@@ -371,6 +374,7 @@ impl<'a> AgentRunFinalizer<'a> {
         &self,
         evidence_hash: Option<String>,
         error: String,
+        retry_report: &AgentTaskRetryReport,
     ) -> Result<AutomationRunLedgerRecord> {
         let fallback_output = noop_output_for_task(self.task);
         let mut record = self.record(RunRecordOutcome {
@@ -385,6 +389,7 @@ impl<'a> AgentRunFinalizer<'a> {
         record.input_hash.clone_from(&self.input_hash);
         record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
         record.fallback_status = Some("backend_failed_noop".to_string());
+        apply_retry_report(&mut record, retry_report);
         self.annotate_combined_run(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
         Ok(record)
@@ -397,10 +402,16 @@ impl<'a> AgentRunFinalizer<'a> {
         evidence_hash: Option<String>,
     ) -> Result<BackendTaskRun> {
         let retry_policy = BackendRetryPolicy::from_timeout_secs(self.config.timeout_secs);
-        match run_agent_task_with_retry(backend, request, &retry_policy).await {
-            Ok(response) => Ok(BackendTaskRun::Response(response)),
+        let mut retry_report = AgentTaskRetryReport::default();
+        match run_agent_task_with_retry_report(backend, request, &retry_policy, &mut retry_report)
+            .await
+        {
+            Ok(response) => Ok(BackendTaskRun::Response {
+                response,
+                retry_report,
+            }),
             Err(err) => self
-                .append_backend_fallback_record(evidence_hash, err.to_string())
+                .append_backend_fallback_record(evidence_hash, err.to_string(), &retry_report)
                 .await
                 .map(Box::new)
                 .map(BackendTaskRun::Fallback),
@@ -413,6 +424,7 @@ impl<'a> AgentRunFinalizer<'a> {
         evidence_hash: Option<String>,
         proposed_ops: Option<Value>,
         error: String,
+        retry_report: &AgentTaskRetryReport,
     ) -> Result<AutomationRunLedgerRecord> {
         let mut record = self.record(RunRecordOutcome {
             model,
@@ -423,6 +435,7 @@ impl<'a> AgentRunFinalizer<'a> {
             rejected_count: 0,
             error: Some(error),
         });
+        apply_retry_report(&mut record, retry_report);
         self.finish_record(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
         Ok(record)
@@ -451,8 +464,10 @@ impl<'a> AgentRunFinalizer<'a> {
         &self,
         request: &AgentTaskRequest,
         response: &AgentTaskResponse,
+        retry_report: &AgentTaskRetryReport,
         mut record: AutomationRunLedgerRecord,
     ) -> Result<AutomationRunLedgerRecord> {
+        apply_retry_report(&mut record, retry_report);
         self.finish_record(&mut record);
         record.artifacts = write_improvement_artifacts(
             self.dashboard_root,
@@ -471,6 +486,7 @@ impl<'a> AgentRunFinalizer<'a> {
         &self,
         response: &AgentTaskResponse,
         evidence_hash: Option<String>,
+        retry_report: &AgentTaskRetryReport,
     ) -> Result<Value> {
         match response
             .output_json
@@ -484,6 +500,7 @@ impl<'a> AgentRunFinalizer<'a> {
                     evidence_hash,
                     None,
                     err.to_string(),
+                    retry_report,
                 )
                 .await?;
                 Err(err)
@@ -495,11 +512,12 @@ impl<'a> AgentRunFinalizer<'a> {
         &self,
         response: &AgentTaskResponse,
         evidence_hash: Option<String>,
+        retry_report: &AgentTaskRetryReport,
         field: &'static str,
         missing_array_message: &'static str,
     ) -> Result<(Value, Vec<Value>)> {
         let output = self
-            .response_output_json(response, evidence_hash.clone())
+            .response_output_json(response, evidence_hash.clone(), retry_report)
             .await?;
         if let Some(values) = output.get(field).and_then(Value::as_array).cloned() {
             return Ok((output, values));
@@ -513,6 +531,7 @@ impl<'a> AgentRunFinalizer<'a> {
             evidence_hash,
             Some(output),
             err.to_string(),
+            retry_report,
         )
         .await?;
         Err(err)
@@ -566,6 +585,8 @@ impl<'a> AgentRunFinalizer<'a> {
             error_classification,
             error_retryable: error_classification
                 .map(super::backend::AgentTaskFailureClass::is_retryable),
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
             report_ref: Some(json!({
                 "dashboard_runs": "/api/plugins/holographic/curation/runs",
                 "run_id": self.run_id,
@@ -591,6 +612,11 @@ impl<'a> AgentRunFinalizer<'a> {
             );
         }
     }
+}
+
+fn apply_retry_report(record: &mut AutomationRunLedgerRecord, retry_report: &AgentTaskRetryReport) {
+    record.backend_attempt_count = retry_report.attempt_count();
+    record.backend_attempts = retry_report.attempts().to_vec();
 }
 
 fn task_disabled(config: &AutomationConfig, task: AgentTaskKind) -> bool {

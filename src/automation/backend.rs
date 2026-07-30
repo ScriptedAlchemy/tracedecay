@@ -8,8 +8,9 @@ use tracedecay_automation::backend as leaf_backend;
 pub use tracedecay_automation::backend::{
     AGENT_TASK_MAX_ATTEMPTS, AGENT_TASK_RETRY_BACKOFFS, AgentBackendAvailability, AgentTaskBackend,
     AgentTaskContract, AgentTaskFailureClass, AgentTaskFailureDisposition, AgentTaskKind,
-    AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy, agent_task_contract,
-    agent_task_failure_disposition, classify_agent_task_error_message, prompt_version, task_key,
+    AgentTaskRequest, AgentTaskResponse, AgentTaskRetryAttempt, AgentTaskRetryReport,
+    BackendRetryPolicy, agent_task_contract, agent_task_failure_disposition,
+    classify_agent_task_error_message, prompt_version, task_key,
 };
 use tracedecay_automation::{AutomationError, Result as AutomationResult};
 
@@ -73,6 +74,15 @@ pub async fn run_agent_task_with_retry(
     policy: &BackendRetryPolicy,
 ) -> Result<AgentTaskResponse> {
     Ok(leaf_backend::run_agent_task_with_retry(backend, request, policy).await?)
+}
+
+pub async fn run_agent_task_with_retry_report(
+    backend: &dyn AgentTaskBackend,
+    request: &AgentTaskRequest,
+    policy: &BackendRetryPolicy,
+    report: &mut AgentTaskRetryReport,
+) -> Result<AgentTaskResponse> {
+    Ok(leaf_backend::run_agent_task_with_retry_report(backend, request, policy, report).await?)
 }
 
 pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
