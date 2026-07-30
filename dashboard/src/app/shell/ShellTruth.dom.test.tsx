@@ -267,6 +267,25 @@ describe('shared shell truthfulness', () => {
     expect(writability.reason).not.toContain('not known yet');
   });
 
+  it('keeps an unattributable 404 unconfirmed rather than asserting absence', async () => {
+    useScope.getState().selectProject('proj-ghost', 'Looks Legitimate', 'unresolved');
+    stubRoutes({
+      '/api/projects/proj-ghost': { status: 404, body: { detail: 'nginx: not found' } },
+    });
+
+    const { findByText } = render(queryWrapper(<ScopeBar />));
+
+    expect(await findByText('Looks Legitimate')).toBeTruthy();
+    const annotated = await waitFor(() => {
+      const found = document.querySelector('[data-scope-label-annotation]');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(annotated.getAttribute('data-scope-label-annotation')).toContain('unconfirmed');
+    expect(useScope.getState().scope).toMatchObject({ activation: 'unresolved' });
+    expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
+  });
+
   it('keeps a project unconfirmed when the registry itself is unavailable', async () => {
     // 503, not 404: the registry could not be read, so it established nothing
     // about this project. Reporting absence here would discard a good label and
