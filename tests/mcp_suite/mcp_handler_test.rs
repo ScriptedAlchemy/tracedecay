@@ -2007,6 +2007,48 @@ async fn test_grep_respects_gitignore() {
 }
 
 #[tokio::test]
+async fn test_grep_prunes_generated_dependency_directories_without_gitignore() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::create_dir_all(root.join(".venv/lib/python/site-packages/pkg")).unwrap();
+    fs::write(
+        root.join(".venv/lib/python/site-packages/pkg/generated.py"),
+        "UNIQUE_GENERATED_DIR_TOKEN\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/tracked.rs"),
+        "// UNIQUE_GENERATED_DIR_TOKEN\n",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "UNIQUE_GENERATED_DIR_TOKEN"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files: Vec<&str> = payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["file"].as_str().unwrap())
+        .collect();
+    assert!(
+        files.contains(&"src/tracked.rs"),
+        "source file should match: {payload}"
+    );
+    assert!(
+        !files.iter().any(|file| file.starts_with(".venv/")),
+        "generated dependency trees must be pruned even without .gitignore coverage: {payload}"
+    );
+}
+
+#[tokio::test]
 async fn test_grep_skips_binary_files() {
     let (cg, _dir) = setup_project().await;
     let root = cg.project_root().to_path_buf();
