@@ -54,7 +54,7 @@ fn inject_rehearsal_publication_fault(
 }
 
 const BACKUP_MANIFEST_SCHEMA_VERSION: u32 = 1;
-const REHEARSAL_MARKER_SCHEMA_VERSION: u32 = 1;
+const REHEARSAL_MARKER_SCHEMA_VERSION: u32 = 2;
 const REHEARSAL_MARKER_FILENAME: &str = ".tracedecay-profile-rehearsal.json";
 const REQUIRED_PROFILE_PATHS: &[&str] = &[
     "global.db",
@@ -97,7 +97,16 @@ pub struct CompleteProfileBackupManifest {
 struct ProfileBackupRehearsalMarker {
     schema_version: u32,
     backup_id: String,
+    backup_root: PathBuf,
+    manifest_sha256: String,
+    source_profile_identity_sha256: Option<String>,
     restore_root: PathBuf,
+}
+
+struct VerifiedCompleteProfileBackup {
+    root: PathBuf,
+    manifest: CompleteProfileBackupManifest,
+    manifest_sha256: String,
 }
 
 pub fn create_complete_profile_backup(
@@ -161,13 +170,21 @@ pub fn rehearse_complete_profile_backup(
     backup_root: &Path,
     restore_root: &Path,
 ) -> Result<CompleteProfileBackupManifest, String> {
-    let manifest = load_and_verify_backup(backup_root)?;
+    let backup = load_verified_backup(backup_root)?;
     let restore_root = absolute_destination(restore_root)?;
-    if recover_interrupted_publication(&restore_root, &manifest.backup_id)? {
-        return Ok(manifest);
+    let marker = ProfileBackupRehearsalMarker {
+        schema_version: REHEARSAL_MARKER_SCHEMA_VERSION,
+        backup_id: backup.manifest.backup_id.clone(),
+        backup_root: backup.root.clone(),
+        manifest_sha256: backup.manifest_sha256,
+        source_profile_identity_sha256: backup.manifest.source_profile_identity_sha256.clone(),
+        restore_root: restore_root.clone(),
+    };
+    if recover_interrupted_publication(&restore_root, &marker)? {
+        return Ok(backup.manifest);
     }
     let staging = rehearsal_staging_path(&restore_root)?;
-    recover_interrupted_staging(&staging, &manifest.backup_id, &restore_root)?;
+    recover_interrupted_staging(&staging, &marker)?;
     if restore_root.exists() {
         return Err("restore destination must not already exist".to_owned());
     }
@@ -178,11 +195,6 @@ pub fn rehearse_complete_profile_backup(
         )
     })?;
     restrict_private_directory(&staging)?;
-    let marker = ProfileBackupRehearsalMarker {
-        schema_version: REHEARSAL_MARKER_SCHEMA_VERSION,
-        backup_id: manifest.backup_id.clone(),
-        restore_root: restore_root.clone(),
-    };
     let marker_path = staging.join(REHEARSAL_MARKER_FILENAME);
     write_new_synced(
         &marker_path,
@@ -190,13 +202,13 @@ pub fn rehearse_complete_profile_backup(
             .map_err(|error| format!("encode profile rehearsal marker: {error}"))?,
     )?;
     let result = (|| {
-        for entry in manifest.entries.iter().filter(|entry| entry.present) {
-            let source = checked_join(backup_root, &entry.logical_path)?;
+        for entry in backup.manifest.entries.iter().filter(|entry| entry.present) {
+            let source = checked_join(&backup.root, &entry.logical_path)?;
             let destination = checked_join(&staging, &entry.logical_path)?;
             copy_verified_file(&source, &destination, entry)?;
         }
-        let restored = verify_restored_copy(&staging, &manifest)?;
-        if restored != manifest {
+        let restored = verify_restored_copy(&staging, &backup.manifest)?;
+        if restored != backup.manifest {
             return Err("restored profile inventory differs from backup manifest".to_owned());
         }
         rebind_restored_store_manifests(&staging, &restore_root)?;
@@ -212,10 +224,8 @@ pub fn rehearse_complete_profile_backup(
                 restore_root.display()
             )
         })?;
-        inject_rehearsal_publication_fault(
-            RehearsalPublicationFault::AfterRenameBeforeParentSync,
-        )?;
-        finish_published_rehearsal(&restore_root, &manifest.backup_id)
+        inject_rehearsal_publication_fault(RehearsalPublicationFault::AfterRenameBeforeParentSync)?;
+        finish_published_rehearsal(&restore_root, &marker)
     })();
     if let Err(error) = result {
         // Leave marker-owned staging or published roots for crash recovery.
@@ -227,7 +237,7 @@ pub fn rehearse_complete_profile_backup(
         }
         return Err(error);
     }
-    Ok(manifest)
+    Ok(backup.manifest)
 }
 
 fn absolute_destination(path: &Path) -> Result<PathBuf, String> {
@@ -257,7 +267,7 @@ fn rehearsal_staging_path(restore_root: &Path) -> Result<PathBuf, String> {
 
 fn recover_interrupted_publication(
     restore_root: &Path,
-    backup_id: &str,
+    expected_marker: &ProfileBackupRehearsalMarker,
 ) -> Result<bool, String> {
     let metadata = match fs::symlink_metadata(restore_root) {
         Ok(metadata) => metadata,
@@ -291,23 +301,19 @@ fn recover_interrupted_publication(
         }
     }
     let marker = read_rehearsal_marker(&marker_path)?;
-    if marker.schema_version != REHEARSAL_MARKER_SCHEMA_VERSION
-        || marker.backup_id != backup_id
-        || marker.restore_root != restore_root
-    {
+    if marker != *expected_marker {
         return Err(format!(
             "published rehearsal root '{}' belongs to another restore attempt",
             restore_root.display()
         ));
     }
-    finish_published_rehearsal(restore_root, backup_id)?;
+    finish_published_rehearsal(restore_root, expected_marker)?;
     Ok(true)
 }
 
 fn recover_interrupted_staging(
     staging: &Path,
-    backup_id: &str,
-    restore_root: &Path,
+    expected_marker: &ProfileBackupRehearsalMarker,
 ) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(staging) {
         Ok(metadata) => metadata,
@@ -339,10 +345,7 @@ fn recover_interrupted_staging(
         ));
     }
     let marker = read_rehearsal_marker(&marker_path)?;
-    if marker.schema_version != REHEARSAL_MARKER_SCHEMA_VERSION
-        || marker.backup_id != backup_id
-        || marker.restore_root != restore_root
-    {
+    if marker != *expected_marker {
         return Err(format!(
             "profile rehearsal staging '{}' belongs to another restore attempt",
             staging.display()
@@ -361,13 +364,13 @@ fn recover_interrupted_staging(
     )
 }
 
-fn finish_published_rehearsal(restore_root: &Path, backup_id: &str) -> Result<(), String> {
+fn finish_published_rehearsal(
+    restore_root: &Path,
+    expected_marker: &ProfileBackupRehearsalMarker,
+) -> Result<(), String> {
     let marker_path = restore_root.join(REHEARSAL_MARKER_FILENAME);
     let marker = read_rehearsal_marker(&marker_path)?;
-    if marker.schema_version != REHEARSAL_MARKER_SCHEMA_VERSION
-        || marker.backup_id != backup_id
-        || marker.restore_root != restore_root
-    {
+    if marker != *expected_marker {
         return Err(format!(
             "published rehearsal root '{}' belongs to another restore attempt",
             restore_root.display()
@@ -532,7 +535,21 @@ fn validate_restored_store_relative_path(path: &Path) -> Result<(), String> {
 }
 
 pub fn load_and_verify_backup(backup_root: &Path) -> Result<CompleteProfileBackupManifest, String> {
-    let manifest_path = backup_root.join("backup-manifest.json");
+    Ok(load_verified_backup(backup_root)?.manifest)
+}
+
+fn load_verified_backup(backup_root: &Path) -> Result<VerifiedCompleteProfileBackup, String> {
+    let root = fs::canonicalize(backup_root)
+        .map_err(|error| format!("canonicalize backup '{}': {error}", backup_root.display()))?;
+    let metadata = fs::symlink_metadata(&root)
+        .map_err(|error| format!("inspect backup root '{}': {error}", root.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "complete-profile backup root '{}' is not a directory",
+            root.display()
+        ));
+    }
+    let manifest_path = root.join("backup-manifest.json");
     let bytes = fs::read(&manifest_path).map_err(|error| {
         format!(
             "read backup manifest '{}': {error}",
@@ -543,10 +560,14 @@ pub fn load_and_verify_backup(backup_root: &Path) -> Result<CompleteProfileBacku
         .map_err(|error| format!("decode backup manifest: {error}"))?;
     validate_manifest(&manifest)?;
     for entry in manifest.entries.iter().filter(|entry| entry.present) {
-        let path = checked_join(backup_root, &entry.logical_path)?;
+        let path = checked_join(&root, &entry.logical_path)?;
         verify_file(&path, entry)?;
     }
-    Ok(manifest)
+    Ok(VerifiedCompleteProfileBackup {
+        root,
+        manifest,
+        manifest_sha256: hex::encode(Sha256::digest(&bytes)),
+    })
 }
 
 fn create_backup_contents(
@@ -731,6 +752,16 @@ fn validate_manifest(manifest: &CompleteProfileBackupManifest) -> Result<(), Str
         }) {
             return Err(format!("backup manifest omits required path '{required}'"));
         }
+    }
+    let profile_identity_sha256 = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.logical_path == "profile-identity.json" && entry.present)
+        .and_then(|entry| entry.sha256.clone());
+    if manifest.source_profile_identity_sha256 != profile_identity_sha256 {
+        return Err(
+            "backup manifest source profile identity digest does not match content".to_owned(),
+        );
     }
     Ok(())
 }
