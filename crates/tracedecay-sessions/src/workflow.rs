@@ -169,6 +169,12 @@ pub enum WorkflowRunListOutcome {
 pub struct WorkflowRunDetail {
     pub run: WorkflowRun,
     pub agents: Vec<WorkflowAgent>,
+    /// Total indexed agents for the run, independent of the requested bound.
+    pub agent_count: i64,
+    /// Whether `agents` completely answers the request. For run detail this
+    /// means every indexed agent is present; for an exact-label lookup it
+    /// means the label was checked without relying on a bounded prefix.
+    pub agents_complete: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +214,31 @@ pub trait WorkflowIndexReadPort: Send + Sync {
     fn runs(&self, request: WorkflowRunListRequest) -> WorkflowRunListFuture<'_>;
 
     fn run(&self, request: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_>;
+
+    /// Looks up one agent label without treating a bounded run prefix as
+    /// authoritative absence.
+    ///
+    /// Implementations with exact storage lookup should override this method.
+    /// The fallback performs one bounded probe and leaves `agents_complete`
+    /// false when that cannot prove absence.
+    fn agent(&self, run_id: String, agent_label: String) -> WorkflowRunDetailFuture<'_> {
+        Box::pin(async move {
+            let outcome = self
+                .run(WorkflowRunDetailRequest { run_id, limit: 1 })
+                .await?;
+            let mut detail = match outcome {
+                WorkflowRunDetailOutcome::Run(detail) => detail,
+                other => return Ok(other),
+            };
+            detail
+                .agents
+                .retain(|agent| agent.agent_label == agent_label);
+            if !detail.agents.is_empty() {
+                detail.agents_complete = true;
+            }
+            Ok(WorkflowRunDetailOutcome::Run(detail))
+        })
+    }
 }
 
 fn matches_token(value: &str, tokens: &[&str]) -> bool {

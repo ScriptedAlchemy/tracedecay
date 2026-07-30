@@ -111,16 +111,60 @@ impl DaemonWorkflowIndexReadService {
                 WorkflowIndexState::IndexNotBuilt,
             ));
         }
-        let Some(run) = snapshot.run_for_id(&run_id).await.map_err(workflow_error)? else {
+        let Some(mut run) = snapshot.run_for_id(&run_id).await.map_err(workflow_error)? else {
             return Ok(WorkflowRunDetailOutcome::NotFound);
         };
+        let agent_count = snapshot
+            .agent_count_for_run(&run_id)
+            .await
+            .map_err(workflow_error)?;
+        run.agent_count = agent_count;
         let agents = snapshot
             .agents_for_run(&run_id, limit)
             .await
             .map_err(workflow_error)?;
+        let agents_complete =
+            i64::try_from(agents.len()).is_ok_and(|returned| returned == agent_count);
         Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
             run,
             agents,
+            agent_count,
+            agents_complete,
+        }))
+    }
+
+    /// Resolves a label with an exact predicate, so a missing agent is never
+    /// inferred from the bounded prefix used by run detail.
+    async fn execute_agent(
+        &self,
+        run_id: String,
+        agent_label: String,
+    ) -> Result<WorkflowRunDetailOutcome, WorkflowReadError> {
+        let snapshot = self.snapshot().await?;
+        if Self::schema_missing(&snapshot).await? {
+            return Ok(WorkflowRunDetailOutcome::Unavailable(
+                WorkflowIndexState::IndexNotBuilt,
+            ));
+        }
+        let Some(mut run) = snapshot.run_for_id(&run_id).await.map_err(workflow_error)? else {
+            return Ok(WorkflowRunDetailOutcome::NotFound);
+        };
+        let agent_count = snapshot
+            .agent_count_for_run(&run_id)
+            .await
+            .map_err(workflow_error)?;
+        run.agent_count = agent_count;
+        let agents = snapshot
+            .agent_for_run_label(&run_id, &agent_label)
+            .await
+            .map_err(workflow_error)?
+            .into_iter()
+            .collect();
+        Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+            run,
+            agents,
+            agent_count,
+            agents_complete: true,
         }))
     }
 }
@@ -132,5 +176,9 @@ impl WorkflowIndexReadPort for DaemonWorkflowIndexReadService {
 
     fn run(&self, command: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_> {
         Box::pin(async move { self.execute_run(command).await })
+    }
+
+    fn agent(&self, run_id: String, agent_label: String) -> WorkflowRunDetailFuture<'_> {
+        Box::pin(async move { self.execute_agent(run_id, agent_label).await })
     }
 }
