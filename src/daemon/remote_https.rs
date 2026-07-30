@@ -206,7 +206,7 @@ impl RemoteBrainHttpsService {
         Self::bind(config, router).await
     }
 
-    pub async fn bind(
+    async fn bind(
         config: &RemoteBrainHttpsConfigV1,
         router: Router,
     ) -> Result<Self, RemoteBrainHttpsError> {
@@ -292,9 +292,25 @@ async fn run_listener(
             }
         }
     }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
-    Ok(())
+    drop(listener);
+    match timeout(REMOTE_CONNECTION_DRAIN_TIMEOUT, async {
+        while let Some(joined) = connections.join_next().await {
+            joined.map_err(|error| RemoteBrainHttpsError::Io(std::io::Error::other(error)))?;
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+            Err(RemoteBrainHttpsError::Io(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "Remote Brain HTTPS listener did not drain",
+            )))
+        }
+    }
 }
 
 fn load_server_config(
