@@ -785,7 +785,7 @@ mod tests {
             display_root: None,
             git_common_dir: None,
             alias_roots: Vec::new(),
-            manifest_readable: true,
+            manifest_readable: false,
             data_root: store_root.to_path_buf(),
             manifest_root: None,
             last_write_secs: NOW,
