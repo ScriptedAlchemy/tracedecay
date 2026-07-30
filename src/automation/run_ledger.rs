@@ -63,6 +63,7 @@ pub enum AutomationRunArtifactKind {
     ValidationGate,
     OptimizerDiagnosis,
     CodexHandoff,
+    Manifest,
 }
 
 impl AutomationRunArtifactKind {
@@ -74,6 +75,20 @@ impl AutomationRunArtifactKind {
             Self::ValidationGate => "validation_gate",
             Self::OptimizerDiagnosis => "optimizer_diagnosis",
             Self::CodexHandoff => "codex_handoff",
+            Self::Manifest => "manifest",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "traces" => Some(Self::Traces),
+            "feedback" => Some(Self::Feedback),
+            "generated_evals" => Some(Self::GeneratedEvals),
+            "validation_gate" => Some(Self::ValidationGate),
+            "optimizer_diagnosis" => Some(Self::OptimizerDiagnosis),
+            "codex_handoff" => Some(Self::CodexHandoff),
+            "manifest" => Some(Self::Manifest),
+            _ => None,
         }
     }
 }
@@ -173,13 +188,13 @@ pub async fn write_run_artifact(
     summary: Option<String>,
     created_at: &str,
 ) -> Result<AutomationRunArtifact> {
+    let (artifact, bytes) = prepare_run_artifact(run_id, kind, payload, summary, created_at)?;
     let path = run_artifact_path(dashboard_root, run_id, kind)?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| config_error(format!("failed to create run artifact directory: {e}")))?;
     }
-    let bytes = serde_json::to_vec_pretty(payload).map_err(TraceDecayError::from)?;
     tokio::fs::write(&path, &bytes).await.map_err(|e| {
         config_error(format!(
             "failed to write automation run artifact '{}': {e}",
@@ -187,14 +202,325 @@ pub async fn write_run_artifact(
         ))
     })?;
 
-    Ok(AutomationRunArtifact {
+    Ok(artifact)
+}
+
+pub(crate) fn prepare_run_artifact(
+    run_id: &str,
+    kind: AutomationRunArtifactKind,
+    payload: &Value,
+    summary: Option<String>,
+    created_at: &str,
+) -> Result<(AutomationRunArtifact, Vec<u8>)> {
+    validate_run_id_component(run_id)?;
+    let bytes = serde_json::to_vec_pretty(payload).map_err(TraceDecayError::from)?;
+    let artifact = AutomationRunArtifact {
         schema_version: 1,
         kind: kind.as_str().to_string(),
         path: artifact_relative_path(run_id, kind),
         sha256: super::artifact_refs::sha256_bytes(&bytes),
         summary,
         created_at: created_at.to_string(),
+    };
+    Ok((artifact, bytes))
+}
+
+pub(crate) async fn read_published_artifact_manifest(
+    dashboard_root: &Path,
+    run_id: &str,
+    expected_identity: Option<&Value>,
+) -> Result<Option<Vec<AutomationRunArtifact>>> {
+    let manifest_path =
+        run_artifact_path(dashboard_root, run_id, AutomationRunArtifactKind::Manifest)?;
+    crate::storage::reject_symlink_components(&manifest_path, "automation artifact manifest")
+        .map_err(TraceDecayError::from)?;
+    let bytes = match tokio::fs::read(&manifest_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to read artifact manifest '{}': {error}",
+                manifest_path.display()
+            )));
+        }
+    };
+    let payload: Value = serde_json::from_slice(&bytes).map_err(TraceDecayError::from)?;
+    if payload.get("run_id").and_then(Value::as_str) != Some(run_id) {
+        return Err(config_error(
+            "artifact manifest run_id does not match its path",
+        ));
+    }
+    if let Some(expected_identity) = expected_identity
+        && payload.get("identity") != Some(expected_identity)
+    {
+        return Err(config_error(
+            "published artifact manifest does not match the current run identity",
+        ));
+    }
+    let mut artifacts = serde_json::from_value::<Vec<AutomationRunArtifact>>(
+        payload
+            .get("artifacts")
+            .cloned()
+            .ok_or_else(|| config_error("artifact manifest is missing artifacts"))?,
+    )
+    .map_err(TraceDecayError::from)?;
+    let expected = [
+        AutomationRunArtifactKind::Traces,
+        AutomationRunArtifactKind::Feedback,
+        AutomationRunArtifactKind::GeneratedEvals,
+        AutomationRunArtifactKind::ValidationGate,
+        AutomationRunArtifactKind::OptimizerDiagnosis,
+        AutomationRunArtifactKind::CodexHandoff,
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for artifact in &artifacts {
+        let kind = AutomationRunArtifactKind::parse(&artifact.kind)
+            .filter(|kind| *kind != AutomationRunArtifactKind::Manifest)
+            .ok_or_else(|| {
+                config_error(format!("invalid manifested artifact '{}'", artifact.kind))
+            })?;
+        if !seen.insert(kind.as_str()) || artifact.path != artifact_relative_path(run_id, kind) {
+            return Err(config_error(format!(
+                "artifact manifest contains a duplicate or non-canonical '{}' entry",
+                artifact.kind
+            )));
+        }
+        read_run_artifact_payload(dashboard_root, run_id, artifact).await?;
+    }
+    if artifacts.len() != expected.len()
+        || expected.iter().any(|kind| !seen.contains(kind.as_str()))
+    {
+        return Err(config_error(
+            "artifact manifest does not contain the complete chain",
+        ));
+    }
+    let created_at = artifacts
+        .first()
+        .map(|artifact| artifact.created_at.clone())
+        .unwrap_or_default();
+    artifacts.push(AutomationRunArtifact {
+        schema_version: 1,
+        kind: AutomationRunArtifactKind::Manifest.as_str().to_string(),
+        path: artifact_relative_path(run_id, AutomationRunArtifactKind::Manifest),
+        sha256: super::artifact_refs::sha256_bytes(&bytes),
+        summary: Some("canonical atomic artifact manifest".to_string()),
+        created_at,
+    });
+    let dashboard_root = dashboard_root.to_path_buf();
+    let run_directory = manifest_path
+        .parent()
+        .ok_or_else(|| config_error("artifact manifest is missing its run directory"))?
+        .to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        sync_directory(&run_directory)?;
+        let artifacts_root = run_directory
+            .parent()
+            .ok_or_else(|| config_error("artifact run is missing its root"))?;
+        sync_directory(artifacts_root)?;
+        sync_directory(&dashboard_root)
     })
+    .await
+    .map_err(|error| {
+        config_error(format!("failed to join artifact durability fence: {error}"))
+    })??;
+    Ok(Some(artifacts))
+}
+
+pub(crate) async fn publish_run_artifact_chain(
+    dashboard_root: &Path,
+    run_id: &str,
+    artifacts: Vec<(AutomationRunArtifact, Vec<u8>)>,
+) -> Result<()> {
+    validate_run_id_component(run_id)?;
+    let dashboard_root = dashboard_root.to_path_buf();
+    let run_id = run_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        publish_run_artifact_chain_blocking(&dashboard_root, &run_id, &artifacts)
+    })
+    .await
+    .map_err(|error| config_error(format!("failed to join artifact publication: {error}")))?
+}
+
+fn publish_run_artifact_chain_blocking(
+    dashboard_root: &Path,
+    run_id: &str,
+    artifacts: &[(AutomationRunArtifact, Vec<u8>)],
+) -> Result<()> {
+    publish_run_artifact_chain_blocking_with_fault(dashboard_root, run_id, artifacts, &mut |_| {
+        Ok(())
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtifactPublishBoundary {
+    BeforeArtifact(usize),
+    AfterArtifactSync(usize),
+    BeforeStageSync,
+    BeforeRename,
+    AfterRename,
+}
+
+fn publish_run_artifact_chain_blocking_with_fault(
+    dashboard_root: &Path,
+    run_id: &str,
+    artifacts: &[(AutomationRunArtifact, Vec<u8>)],
+    fault: &mut impl FnMut(ArtifactPublishBoundary) -> Result<()>,
+) -> Result<()> {
+    use std::io::Write;
+
+    let artifacts_root = dashboard_root.join(RUN_ARTIFACTS_DIR);
+    std::fs::create_dir_all(dashboard_root).map_err(|error| {
+        config_error(format!(
+            "failed to create dashboard root '{}': {error}",
+            dashboard_root.display()
+        ))
+    })?;
+    crate::storage::reject_symlink_components(&artifacts_root, "automation artifact")
+        .map_err(TraceDecayError::from)?;
+    std::fs::create_dir_all(&artifacts_root).map_err(|error| {
+        config_error(format!(
+            "failed to create artifact root '{}': {error}",
+            artifacts_root.display()
+        ))
+    })?;
+    sync_directory(dashboard_root)?;
+    let mut kinds = std::collections::BTreeSet::new();
+    for (artifact, bytes) in artifacts {
+        let kind = AutomationRunArtifactKind::parse(&artifact.kind)
+            .ok_or_else(|| config_error(format!("unknown artifact kind '{}'", artifact.kind)))?;
+        if !kinds.insert(kind.as_str()) {
+            return Err(config_error(format!(
+                "artifact chain contains duplicate kind '{}'",
+                artifact.kind
+            )));
+        }
+        if artifact.path != artifact_relative_path(run_id, kind) {
+            return Err(config_error(format!(
+                "artifact '{}' does not use its canonical path",
+                artifact.kind
+            )));
+        }
+        if artifact.sha256 != super::artifact_refs::sha256_bytes(bytes) {
+            return Err(config_error(format!(
+                "artifact '{}' metadata hash does not match its bytes",
+                artifact.kind
+            )));
+        }
+    }
+    let final_directory = artifacts_root.join(run_id);
+    crate::storage::reject_symlink_components(&final_directory, "automation artifact run")
+        .map_err(TraceDecayError::from)?;
+    let chain_matches = |directory: &Path| -> Result<bool> {
+        for (artifact, expected) in artifacts {
+            let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
+            let filename = path
+                .file_name()
+                .ok_or_else(|| config_error("artifact path is missing a filename"))?;
+            match std::fs::read(directory.join(filename)) {
+                Ok(actual) if actual.as_slice() == expected.as_slice() => {}
+                Ok(_) => return Ok(false),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => {
+                    return Err(config_error(format!(
+                        "failed to verify artifact chain '{}': {error}",
+                        directory.display()
+                    )));
+                }
+            }
+        }
+        Ok(true)
+    };
+    if final_directory.exists() {
+        return if chain_matches(&final_directory)? {
+            sync_directory(&final_directory)?;
+            sync_directory(&artifacts_root)?;
+            sync_directory(dashboard_root)?;
+            Ok(())
+        } else {
+            Err(config_error(format!(
+                "artifact chain '{}' already exists with different content",
+                final_directory.display()
+            )))
+        };
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let stage_directory =
+        artifacts_root.join(format!(".stage-{run_id}-{}-{nonce}", std::process::id()));
+    let mut publish = || -> Result<()> {
+        std::fs::create_dir(&stage_directory).map_err(|error| {
+            config_error(format!(
+                "failed to create artifact stage '{}': {error}",
+                stage_directory.display()
+            ))
+        })?;
+        for (index, (artifact, bytes)) in artifacts.iter().enumerate() {
+            fault(ArtifactPublishBoundary::BeforeArtifact(index))?;
+            let destination = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
+            let filename = destination
+                .file_name()
+                .ok_or_else(|| config_error("artifact path is missing a filename"))?;
+            let staged = stage_directory.join(filename);
+            let mut file = std::fs::File::create(&staged).map_err(|error| {
+                config_error(format!(
+                    "failed to create staged artifact '{}': {error}",
+                    staged.display()
+                ))
+            })?;
+            file.write_all(bytes).map_err(|error| {
+                config_error(format!(
+                    "failed to write staged artifact '{}': {error}",
+                    staged.display()
+                ))
+            })?;
+            file.sync_all().map_err(|error| {
+                config_error(format!(
+                    "failed to sync staged artifact '{}': {error}",
+                    staged.display()
+                ))
+            })?;
+            fault(ArtifactPublishBoundary::AfterArtifactSync(index))?;
+        }
+        fault(ArtifactPublishBoundary::BeforeStageSync)?;
+        sync_directory(&stage_directory)?;
+        fault(ArtifactPublishBoundary::BeforeRename)?;
+        std::fs::rename(&stage_directory, &final_directory).map_err(|error| {
+            config_error(format!(
+                "failed to publish artifact chain '{}': {error}",
+                final_directory.display()
+            ))
+        })?;
+        fault(ArtifactPublishBoundary::AfterRename)?;
+        sync_directory(&artifacts_root)
+    };
+    if let Err(error) = publish() {
+        let _ = std::fs::remove_dir_all(&stage_directory);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
+fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                config_error(format!(
+                    "failed to sync artifact directory '{}': {error}",
+                    path.display()
+                ))
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 pub async fn read_run_artifact_payload(
@@ -202,7 +528,17 @@ pub async fn read_run_artifact_payload(
     run_id: &str,
     artifact: &AutomationRunArtifact,
 ) -> Result<Value> {
+    let kind = AutomationRunArtifactKind::parse(&artifact.kind)
+        .ok_or_else(|| config_error(format!("unknown artifact kind '{}'", artifact.kind)))?;
+    if artifact.path != artifact_relative_path(run_id, kind) {
+        return Err(config_error(format!(
+            "artifact '{}' does not use its canonical path",
+            artifact.kind
+        )));
+    }
     let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
+    crate::storage::reject_symlink_components(&path, "automation artifact")
+        .map_err(TraceDecayError::from)?;
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         config_error(format!(
             "failed to read automation run artifact '{}': {e}",
@@ -270,13 +606,63 @@ pub async fn append_run_record(
 }
 
 fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Serializes on the shared read+write `<path>.lock` sidecar handle; see the
-    // sidecar-lock module note in `src/storage.rs` for the Windows rationale.
     crate::storage::retry_transient_file_op(|| {
-        crate::storage::append_line_locked(path, line, false)
+        let lock_path = crate::storage::append_lock_path(path);
+        let lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path)?;
+        let write_result: std::io::Result<()> = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(path)?;
+            let file_len = file.metadata()?.len();
+            let mut requested = RUN_LEDGER_TAIL_CHUNK_BYTES.max(1);
+            let duplicate = loop {
+                let window = requested.min(file_len);
+                let start = file_len.saturating_sub(window);
+                file.seek(SeekFrom::Start(start))?;
+                let mut tail = vec![0u8; window as usize];
+                file.read_exact(&mut tail)?;
+                let complete = if start == 0 {
+                    tail.as_slice()
+                } else {
+                    tail.iter()
+                        .position(|byte| *byte == b'\n')
+                        .map_or(&[][..], |newline| &tail[newline + 1..])
+                };
+                if let Some(newest) = complete
+                    .split(|byte| *byte == b'\n')
+                    .rev()
+                    .find(|candidate| !candidate.is_empty())
+                {
+                    break newest == line.as_bytes();
+                }
+                if start == 0 {
+                    break false;
+                }
+                requested = requested.saturating_mul(2);
+            };
+            if duplicate {
+                file.sync_all()?;
+            } else {
+                file.write_all(format!("{line}\n").as_bytes())?;
+                file.sync_all()?;
+            }
+            if let Some(parent) = path.parent() {
+                #[cfg(unix)]
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        let unlock_result = fs2::FileExt::unlock(&lock);
+        write_result?;
+        unlock_result?;
+        Ok(())
     })
 }
 
@@ -627,6 +1013,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn durable_append_deduplicates_large_unicode_terminal_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let line = format!(
+            "{{\"run_id\":\"large-unicode\",\"payload\":\"{}🧪{}\"}}",
+            "a".repeat(RUN_LEDGER_TAIL_CHUNK_BYTES as usize),
+            "b".repeat(1024),
+        );
+
+        append_jsonl_line_locked(&path, &line).unwrap();
+        append_jsonl_line_locked(&path, &line).unwrap();
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert_eq!(contents.lines().next(), Some(line.as_str()));
+    }
+
     #[tokio::test]
     async fn task_key_read_finds_record_behind_more_than_two_hundred_unrelated_runs() {
         let mut lines = vec![ledger_line("skill-target", 1).replace(
@@ -642,5 +1046,126 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].run_id, "skill-target");
+    }
+
+    fn test_artifact_chain(run_id: &str) -> Vec<(AutomationRunArtifact, Vec<u8>)> {
+        [
+            (
+                AutomationRunArtifactKind::Traces,
+                serde_json::json!({"trace": 1}),
+            ),
+            (
+                AutomationRunArtifactKind::Feedback,
+                serde_json::json!({"feedback": 2}),
+            ),
+            (
+                AutomationRunArtifactKind::Manifest,
+                serde_json::json!({"manifest": 3}),
+            ),
+        ]
+        .into_iter()
+        .map(|(kind, payload)| prepare_run_artifact(run_id, kind, &payload, None, "1").unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn artifact_publication_faults_never_expose_a_partial_final_chain() {
+        let boundaries = [
+            ArtifactPublishBoundary::BeforeArtifact(0),
+            ArtifactPublishBoundary::BeforeArtifact(1),
+            ArtifactPublishBoundary::BeforeArtifact(2),
+            ArtifactPublishBoundary::AfterArtifactSync(0),
+            ArtifactPublishBoundary::AfterArtifactSync(1),
+            ArtifactPublishBoundary::AfterArtifactSync(2),
+            ArtifactPublishBoundary::BeforeStageSync,
+            ArtifactPublishBoundary::BeforeRename,
+        ];
+        for (index, boundary) in boundaries.into_iter().enumerate() {
+            let temp = tempfile::TempDir::new().unwrap();
+            let run_id = format!("fault-{index}");
+            let artifacts = test_artifact_chain(&run_id);
+            let error = publish_run_artifact_chain_blocking_with_fault(
+                temp.path(),
+                &run_id,
+                &artifacts,
+                &mut |current| {
+                    if current == boundary {
+                        Err(config_error("injected artifact publication fault"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("injected"));
+            assert!(!temp.path().join(RUN_ARTIFACTS_DIR).join(&run_id).exists());
+            assert!(!run_ledger_path(temp.path()).exists());
+        }
+    }
+
+    #[test]
+    fn post_rename_fault_leaves_a_complete_idempotent_chain_without_a_receipt() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let run_id = "post-rename-fault";
+        let artifacts = test_artifact_chain(run_id);
+
+        publish_run_artifact_chain_blocking_with_fault(
+            temp.path(),
+            run_id,
+            &artifacts,
+            &mut |boundary| {
+                if boundary == ArtifactPublishBoundary::AfterRename {
+                    Err(config_error("injected post-rename fault"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        let final_directory = temp.path().join(RUN_ARTIFACTS_DIR).join(run_id);
+        assert!(final_directory.is_dir());
+        assert_eq!(
+            std::fs::read_dir(&final_directory).unwrap().count(),
+            artifacts.len()
+        );
+        assert!(!run_ledger_path(temp.path()).exists());
+        publish_run_artifact_chain_blocking(temp.path(), run_id, &artifacts).unwrap();
+    }
+
+    #[test]
+    fn artifact_publication_rejects_non_canonical_metadata_paths() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut artifacts = test_artifact_chain("mismatched-path");
+        artifacts[0].0.path = "automation_artifacts/mismatched-path/nested/traces.json".to_string();
+
+        let error = publish_run_artifact_chain_blocking(temp.path(), "mismatched-path", &artifacts)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("canonical path"));
+        assert!(
+            !temp
+                .path()
+                .join(RUN_ARTIFACTS_DIR)
+                .join("mismatched-path")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_publication_rejects_symlinked_run_directories() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let artifacts_root = temp.path().join(RUN_ARTIFACTS_DIR);
+        std::fs::create_dir_all(&artifacts_root).unwrap();
+        std::os::unix::fs::symlink(outside.path(), artifacts_root.join("symlink-run")).unwrap();
+        let artifacts = test_artifact_chain("symlink-run");
+
+        let error = publish_run_artifact_chain_blocking(temp.path(), "symlink-run", &artifacts)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must not contain symlinks"));
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 }
