@@ -26,6 +26,7 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 pub mod watermark;
+pub mod work;
 mod writer;
 
 pub use authority::{
