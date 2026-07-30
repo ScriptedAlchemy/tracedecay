@@ -186,7 +186,9 @@ fn request(fixture: &ReleasedV0067Fixture) -> FinalV2ExecutionRequest {
 }
 
 fn released_inspection() -> ReadOnlyReleasedSchemaInspection {
+    let fixture = ReleasedV0067Fixture::from_json(RELEASED_FIXTURE).unwrap();
     ReadOnlyReleasedSchemaInspection {
+        source: source_identity(&fixture),
         project_schema: Some(18),
         lcm_schema: Some(5),
         store_manifest_schema: Some(1),
@@ -196,10 +198,6 @@ fn released_inspection() -> ReadOnlyReleasedSchemaInspection {
         lcm_structural_members: ReleasedSchemaFixture::for_kind(ReleasedStoreKind::Lcm)
             .structural_members,
         durable_families: ReleasedDurableFamily::all(),
-        profile_id: "profile.release".to_owned(),
-        repository_id: "repository.release".to_owned(),
-        project_id: "project.release".to_owned(),
-        store_id: "store.release".to_owned(),
     }
 }
 
@@ -293,6 +291,7 @@ fn checked_in_fixture_is_exact_released_18_5_and_target_25_7() {
 fn admission_uses_read_only_schema_and_identity_evidence_not_null_hints() {
     let fixture = ReleasedV0067Fixture::from_json(RELEASED_FIXTURE).unwrap();
     let exact = ReadOnlyReleasedSchemaInspection {
+        source: source_identity(&fixture),
         project_schema: Some(18),
         lcm_schema: Some(5),
         store_manifest_schema: Some(1),
@@ -302,10 +301,6 @@ fn admission_uses_read_only_schema_and_identity_evidence_not_null_hints() {
         lcm_structural_members: ReleasedSchemaFixture::for_kind(ReleasedStoreKind::Lcm)
             .structural_members,
         durable_families: ReleasedDurableFamily::all(),
-        profile_id: fixture.profile_id().to_owned(),
-        repository_id: fixture.repository_id().to_owned(),
-        project_id: fixture.project_id().to_owned(),
-        store_id: fixture.store_id().to_owned(),
     };
     fixture.admit_read_only_inspection(&exact).unwrap();
 
