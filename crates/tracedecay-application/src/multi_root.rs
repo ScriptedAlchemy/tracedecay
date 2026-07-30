@@ -111,10 +111,10 @@ impl AuthorizedScopeSet {
                     right.reference.as_ref().map(|reference| reference.as_str()),
                 ))
         });
-        if roots.windows(2).any(|pair| {
-            pair[0].scope_digest == pair[1].scope_digest
-                || pair[0].worktree_id == pair[1].worktree_id
-        }) {
+        if roots
+            .windows(2)
+            .any(|pair| pair[0].scope_digest == pair[1].scope_digest)
+        {
             return Err(AuthorizedScopeSetError::DuplicateRoot);
         }
         let digest = canonical_sha256(&(

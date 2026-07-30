@@ -27,9 +27,13 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 fn context(worktree: &str, suffix: &str) -> RequestContext {
+    context_at("project.fixture", "repository.fixture", worktree, suffix)
+}
+
+fn context_at(project: &str, repository: &str, worktree: &str, suffix: &str) -> RequestContext {
     let scope = ResolvedScope::new(
-        id::<ProjectId>("project.fixture"),
-        id::<RepositoryId>("repository.fixture"),
+        id::<ProjectId>(project),
+        id::<RepositoryId>(repository),
         id::<WorktreeId>(worktree),
         Some(id::<RefId>("refs/heads/main")),
     )
@@ -100,4 +104,20 @@ fn scope_set_digest_and_deserialization_reject_identity_drift() {
     let mut actor_drift = serde_json::to_value(&set).unwrap();
     actor_drift["actor_id"] = serde_json::json!("actor.other");
     assert!(serde_json::from_value::<AuthorizedScopeSet>(actor_drift).is_err());
+}
+
+#[test]
+fn local_worktree_ids_are_qualified_by_project_and_repository() {
+    let set = authorize(vec![
+        context_at(
+            "project.alpha",
+            "repository.alpha",
+            "worktree.local",
+            "alpha",
+        ),
+        context_at("project.beta", "repository.beta", "worktree.local", "beta"),
+    ]);
+
+    assert_eq!(set.roots().len(), 2);
+    assert_ne!(set.roots()[0].scope_digest, set.roots()[1].scope_digest);
 }
