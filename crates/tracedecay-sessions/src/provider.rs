@@ -58,8 +58,10 @@ impl SessionProvider {
         }
     }
 
-    /// Whether this provider emits the canonical observation contract used by
-    /// host admission. Vibe remains transcript-only.
+    /// Whether the daemon's direct host-admission boundary accepts this
+    /// provider identifier. Canonical capture from provider ingestion is a
+    /// separate capability: Vibe has canonical capture but is not admitted
+    /// through direct host calls.
     pub const fn supports_host_admission(self) -> bool {
         !matches!(self, Self::Vibe)
     }
