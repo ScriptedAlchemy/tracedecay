@@ -7942,7 +7942,14 @@ impl DaemonInvocationService {
         self.feedback_cycles.lock().await.clear();
         self.primitive_runtimes.lock().await.clear();
         self.configuration_runtimes.lock().await.clear();
-        self.work_runtimes.lock().await.clear();
+        // Work runtimes own live provider processes. Dropping the registry only
+        // detaches them, so every execution is stopped and joined before the
+        // runtime goes away.
+        let work_runtimes = std::mem::take(&mut *self.work_runtimes.lock().await);
+        for registered in work_runtimes.into_values() {
+            let runtime = Arc::clone(&registered.runtime);
+            let _ = tokio::task::spawn_blocking(move || runtime.shutdown()).await;
+        }
         let semantic_runtimes = std::mem::take(&mut *self.semantic_runtimes.lock().await);
         for (project_root, handle) in semantic_runtimes {
             crate::application::semantic_runtime::unregister_project_semantic_runtime(
@@ -10811,5 +10818,188 @@ mod tests {
                 problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
             }
         ));
+    }
+
+    /// Daemon expiry must stop the provider processes a registered Work runtime
+    /// owns, not merely drop the registry that owned them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn expiring_registries_reaps_running_work_executions() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project root");
+        let project_id = ProjectId::new("project.work.expire").expect("project id");
+        let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
+        let database = host
+            .project_observation_database_arc_for_test()
+            .expect("registered project database");
+        let actor = ActorId::new("actor.work.expire").expect("actor id");
+        let scope = ResolvedScope::new(
+            project_id,
+            tracedecay_domain::RepositoryId::new("repository.work.expire").expect("repository id"),
+            tracedecay_domain::WorktreeId::new("worktree.work.expire").expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope");
+        let grant_digest =
+            ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.work.expire").expect("grant id"),
+            1,
+            grant_digest.clone(),
+            actor.clone(),
+            UtcMicros(1),
+            UtcMicros(10_000),
+            scope.clone(),
+            std::collections::BTreeSet::from([
+                CapabilityId::new("capability.work.expire").expect("capability"),
+            ]),
+            std::collections::BTreeSet::from([
+                UseCaseId::new("use-case.work.expire").expect("use case"),
+            ]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("Work grant");
+        let authority = WorkAuthority::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            actor.clone(),
+            grant_digest,
+        )
+        .expect("Work authority");
+        let context = RequestContext::new(
+            actor.clone(),
+            scope,
+            grant.clone(),
+            RequestId::new("request.work.expire").expect("request id"),
+            Deadline::new(UtcMicros(9_000)).expect("deadline"),
+            CancellationContext::active("cancel.work.expire").expect("cancellation"),
+        )
+        .expect("request context");
+
+        let storage = database.work_storage().expect("Work storage");
+        let work = tracedecay_application::WorkService::new(storage);
+        let task_id = tracedecay_domain::TaskId::new("task.work.expire").expect("task id");
+        work.create(
+            &context,
+            CreateWorkCommand {
+                task_id: task_id.clone(),
+                title: "Reap the provider on expiry".to_owned(),
+                dependencies: std::collections::BTreeSet::new(),
+                command_id: tracedecay_domain::WorkCommandId::new("command.work.expire.create")
+                    .expect("command id"),
+                occurred_at: UtcMicros(10),
+            },
+        )
+        .expect("created Work");
+        work.accept_proposal(
+            &context,
+            AcceptProposalCommand {
+                review: tracedecay_application::ReviewProposalCommand {
+                    task_id: task_id.clone(),
+                    proposal_id: tracedecay_domain::ProposalId::new("proposal.work.expire")
+                        .expect("proposal id"),
+                    proposal_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+                        .expect("proposal digest"),
+                    expected_version: tracedecay_domain::WorkVersion::initial(),
+                    command_id: tracedecay_domain::WorkCommandId::new("command.work.expire.proposal")
+                    .expect("command id"),
+                    occurred_at: UtcMicros(20),
+                },
+            },
+        )
+        .expect("accepted proposal");
+        work.admit_execution(
+            &context,
+            AdmitExecutionCommand {
+                task_id: task_id.clone(),
+                expected_version: tracedecay_domain::WorkVersion::new(2).expect("version"),
+                command_id: tracedecay_domain::WorkCommandId::new("command.work.expire.admit")
+                    .expect("command id"),
+                occurred_at: UtcMicros(30),
+            },
+        )
+        .expect("admitted execution");
+        let snapshot = tracedecay_domain::WorkProjectionSnapshotV1::new(
+            tracedecay_domain::ProjectionGenerationId::new("generation.work.expire")
+                .expect("generation id"),
+            tracedecay_domain::WorkProjectionSequenceV1::new(3),
+            vec![work.load(&context, &task_id).expect("projection")],
+            tracedecay_domain::WorkProjectionCoverageV1::complete(1, 1).expect("coverage"),
+        )
+        .expect("projection snapshot");
+
+        let fixture = project.path().join("codex-work-expire-fixture");
+        std::fs::write(&fixture, "#!/usr/bin/env python3\nimport time\nwhile True:\n    time.sleep(1)\n")
+            .expect("fixture");
+        let mut permissions = std::fs::metadata(&fixture).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&fixture, permissions).expect("fixture mode");
+
+        let service = DaemonInvocationService::default();
+        DaemonWorkRuntimeRegistrar::new(&service)
+            .register(
+                project.path().to_path_buf(),
+                Arc::clone(&database),
+                authority,
+                actor,
+                grant,
+                ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("policy digest"),
+                ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
+                    .expect("configuration digest"),
+                crate::sessions::codex_app_server::CodexAppServerSummaryConfig {
+                    codex_bin: fixture.to_string_lossy().into_owned(),
+                    model: None,
+                    timeout: Duration::from_secs(30),
+                },
+            )
+            .await
+            .expect("registered Work runtime");
+        let registered = service
+            .work_runtime(Some(project.path()))
+            .await
+            .expect("registered Work runtime handle");
+
+        let identity = tracedecay_domain::WorkAttemptIdentityV1::new(
+            task_id,
+            tracedecay_domain::RunId::new("run.work.expire").expect("run id"),
+            tracedecay_domain::AttemptId::new("attempt.work.expire").expect("attempt id"),
+        )
+        .expect("attempt identity");
+        let lease = tracedecay_domain::WorkLeaseFenceV1::new(
+            tracedecay_domain::WorkLeaseId::new("lease.work.expire").expect("lease id"),
+            tracedecay_domain::WorkFenceEpochV1::new(1).expect("fence epoch"),
+        )
+        .expect("lease");
+        registered
+            .runtime
+            .acquire_lease(&snapshot, identity.clone(), lease.clone())
+            .await
+            .expect("leased attempt");
+        registered
+            .runtime
+            .start(&identity, &lease, tracedecay_domain::WorkRecoveryStateV1::Fresh)
+            .await
+            .expect("started attempt");
+        assert_eq!(
+            registered.runtime.in_flight().expect("in-flight count"),
+            1,
+            "the registered runtime must own the provider execution"
+        );
+
+        service.expire_all().await;
+
+        assert_eq!(
+            registered.runtime.in_flight().expect("in-flight count"),
+            0,
+            "daemon expiry must stop and join every provider execution"
+        );
+        assert!(service.work_runtimes.lock().await.is_empty());
     }
 }
