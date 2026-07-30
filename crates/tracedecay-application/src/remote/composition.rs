@@ -4,6 +4,8 @@
 //! Each claim is independent so a valid digest cannot imply authorization,
 //! freshness, completeness, or shard coverage.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -73,6 +75,24 @@ pub struct QueryManifestBindingV1 {
     pub authority_epoch: u64,
     pub cache_age_millis: u64,
     pub cache_lag_commits: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedRemoteShardV1 {
+    pub brain_id: String,
+    pub shard_id: String,
+    pub generation_id: String,
+}
+
+impl From<&QueryManifestBindingV1> for ExpectedRemoteShardV1 {
+    fn from(manifest: &QueryManifestBindingV1) -> Self {
+        Self {
+            brain_id: manifest.brain_id.clone(),
+            shard_id: manifest.shard_id.clone(),
+            generation_id: manifest.generation_id.clone(),
+        }
+    }
 }
 
 impl QueryManifestBindingV1 {
@@ -180,15 +200,21 @@ pub struct RemoteQueryCompositionV1<T> {
 
 impl<T> RemoteQueryCompositionV1<T> {
     pub fn compose(
+        expected_shards: BTreeSet<ExpectedRemoteShardV1>,
         contributions: Vec<ShardQueryContributionV1<T>>,
         pending_local: PendingLocalObservationsV1,
+        maximum_current_cache_age_millis: u64,
     ) -> Result<Self, ApplicationProblem> {
-        if contributions.is_empty() {
+        if expected_shards.is_empty()
+            || contributions.is_empty()
+            || maximum_current_cache_age_millis == 0
+        {
             return Err(remote_unavailable(
                 "remote_query_authority_unavailable",
                 "Remote query authority is unavailable.",
             ));
         }
+        let mut actual_shards = BTreeSet::new();
         for contribution in &contributions {
             contribution.validate().map_err(|_| {
                 remote_unavailable(
@@ -196,6 +222,27 @@ impl<T> RemoteQueryCompositionV1<T> {
                     "Remote query material could not be verified.",
                 )
             })?;
+            if contribution.freshness == RemoteFreshnessV1::Current
+                && (contribution.manifest.cache_lag_commits != 0
+                    || contribution.manifest.cache_age_millis > maximum_current_cache_age_millis)
+            {
+                return Err(remote_unavailable(
+                    "remote_query_freshness_invalid",
+                    "Remote query freshness could not be verified.",
+                ));
+            }
+            if !actual_shards.insert(ExpectedRemoteShardV1::from(&contribution.manifest)) {
+                return Err(remote_unavailable(
+                    "remote_query_shard_duplicate",
+                    "Remote query shard inventory contains a duplicate.",
+                ));
+            }
+        }
+        if actual_shards != expected_shards {
+            return Err(remote_unavailable(
+                "remote_query_shard_inventory_mismatch",
+                "Remote query shard inventory is incomplete.",
+            ));
         }
         let coverage = aggregate_coverage(&contributions, &pending_local);
         Ok(Self {
@@ -271,9 +318,14 @@ mod tests {
         }
     }
 
+    fn expected_shards() -> BTreeSet<ExpectedRemoteShardV1> {
+        BTreeSet::from([ExpectedRemoteShardV1::from(&manifest())])
+    }
+
     #[test]
     fn absent_authority_is_unavailable_not_empty_success() {
         let result = RemoteQueryCompositionV1::<String>::compose(
+            expected_shards(),
             Vec::new(),
             PendingLocalObservationsV1 {
                 count: 0,
@@ -281,6 +333,7 @@ mod tests {
                 has_sequence_gap: false,
                 has_quarantined: false,
             },
+            100,
         );
         assert!(matches!(
             result,
@@ -303,6 +356,7 @@ mod tests {
             reason_code: Some("authorization_receipt_unavailable".into()),
         };
         let result = RemoteQueryCompositionV1::compose(
+            expected_shards(),
             vec![contribution],
             PendingLocalObservationsV1 {
                 count: 2,
@@ -310,6 +364,7 @@ mod tests {
                 has_sequence_gap: false,
                 has_quarantined: false,
             },
+            100,
         )
         .unwrap();
         assert_eq!(result.coverage, ShardCoverageStateV1::Partial);
@@ -330,5 +385,36 @@ mod tests {
             reason_code: Some("integrity_unknown".into()),
         };
         assert!(contribution.validate().is_err());
+    }
+
+    #[test]
+    fn duplicate_or_missing_shards_cannot_claim_complete_coverage() {
+        let contribution = ShardQueryContributionV1 {
+            manifest: manifest(),
+            integrity: IntegrityClaimV1::Unknown,
+            authenticity: AuthenticityClaimV1::Unknown,
+            freshness: RemoteFreshnessV1::Unknown,
+            completeness: RemoteCompletenessV1::Unknown,
+            authorization: AuthorizationClaimV1::Unknown,
+            authority_receipt: None,
+            coverage: ShardCoverageStateV1::Unavailable,
+            value: None::<String>,
+            reason_code: Some("authority_unavailable".into()),
+        };
+        let pending = PendingLocalObservationsV1 {
+            count: 0,
+            oldest_age_millis: None,
+            has_sequence_gap: false,
+            has_quarantined: false,
+        };
+        assert!(
+            RemoteQueryCompositionV1::compose(
+                expected_shards(),
+                vec![contribution.clone(), contribution],
+                pending,
+                100,
+            )
+            .is_err()
+        );
     }
 }

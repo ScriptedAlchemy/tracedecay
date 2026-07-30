@@ -418,7 +418,7 @@ mod tests {
                 "brain_id": "brain.runtime",
                 "shard_id": "shard.remote",
                 "generation_id": "generation.remote",
-                "placement_revision": "placement.remote.1",
+                "placement_revision": 1,
                 "authority_epoch": binding.authority_epoch.get(),
                 "authority_node_id": "node.authority"
             }))

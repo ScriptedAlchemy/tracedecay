@@ -48,7 +48,7 @@ impl ReplicaCacheManifestV1 {
         expected_schema_digest: ContentDigestV1,
         now_micros: i64,
     ) -> Result<(), RemoteRecoveryContractErrorV1> {
-        validate_authentication(&self.authentication)?;
+        validate_authentication(&self.authentication, now_micros)?;
         validate_writer_binding(&self.writer, &self.runtime)?;
         validate_binding_watermark(&self.runtime, &self.watermark)?;
         if &self.writer != expected_writer || &self.runtime != expected_runtime {
@@ -119,7 +119,7 @@ pub struct BackupManifestV1 {
 impl BackupManifestV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), RemoteRecoveryContractErrorV1> {
         validate_identifier(&self.backup_id)?;
-        validate_authentication(&self.authentication)?;
+        validate_authentication(&self.authentication, now_micros)?;
         validate_writer_binding(&self.writer, &self.runtime)?;
         validate_binding_watermark(&self.runtime, &self.source_frontier)?;
         if self.schema_digest == [0; 32] || self.lineage_digest == [0; 32] {
@@ -437,15 +437,17 @@ fn validate_writer_binding(
 
 fn validate_authentication(
     authentication: &AuthenticatedManifestContextV1,
+    now_micros: i64,
 ) -> Result<(), RemoteRecoveryContractErrorV1> {
+    let observed_at = UtcMicros(now_micros);
     if authentication.enrollment.validate().is_err()
-        || authentication.enrollment.state_at(authentication.authenticated_at)
-            != EnrollmentCredentialStateV1::Active
-        || authentication.authorization_revision == 0
         || authentication
-            .authentication_receipt_id
-            .validate()
-            .is_err()
+            .enrollment
+            .state_at(authentication.authenticated_at)
+            != EnrollmentCredentialStateV1::Active
+        || authentication.enrollment.state_at(observed_at) != EnrollmentCredentialStateV1::Active
+        || authentication.authorization_revision == 0
+        || authentication.authentication_receipt_id.validate().is_err()
     {
         return Err(RemoteRecoveryContractErrorV1::AuthenticationInvalid);
     }
@@ -505,7 +507,7 @@ mod tests {
             "brain_id": "brain.remote",
             "shard_id": "shard.remote",
             "generation_id": "generation.remote",
-            "placement_revision": "placement.remote.1",
+            "placement_revision": 1,
             "authority_epoch": epoch,
             "authority_node_id": "node.authority"
         }))

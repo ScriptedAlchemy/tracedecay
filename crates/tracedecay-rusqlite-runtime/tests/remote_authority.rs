@@ -2,9 +2,10 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_application::remote::capture::RemoteWriterAuthorityV1;
 use tracedecay_domain::{
-    AuthorityEpoch, BrainId, BrainNodeId, CurrentRemoteAuthorityV1, EntityVersionId, ProjectId,
-    ProjectionGenerationId, RefId, RemoteAuthorityUnavailableReasonV1, RemoteRepositoryScopeV1,
-    RepositoryId, RepositoryStateSnapshotId, ShardId, UserProfileId, UtcMicros, WorktreeId,
+    AuthorityEpoch, BrainId, BrainNodeId, CurrentRemoteAuthorityV1, ProjectId,
+    ProjectionGenerationId, RefId, RemoteAuthorityUnavailableReasonV1, RemotePlacementRevisionV1,
+    RemoteRepositoryScopeV1, RepositoryId, RepositoryStateSnapshotId, ShardId, UserProfileId,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::remote_authority::{
     RemoteAuthorityStorageErrorV1, RusqliteRemoteAuthorityStoreV1,
@@ -43,10 +44,11 @@ fn watermark(binding: &StoreRuntimeBindingV1, sequence: u64) -> ShardWatermarkV1
     }
 }
 
-fn writer(epoch: u64, placement: &str) -> RemoteWriterAuthorityV1 {
+fn writer(epoch: u64, placement: u64) -> RemoteWriterAuthorityV1 {
     RemoteWriterAuthorityV1 {
         project_id: id::<ProjectId>("project.remote"),
         scope: RemoteRepositoryScopeV1 {
+            project_id: id::<ProjectId>("project.remote"),
             repository_id: id::<RepositoryId>("repository.remote"),
             worktree_id: id::<WorktreeId>("worktree.remote"),
             reference: Some(id::<RefId>("refs/heads/main")),
@@ -57,7 +59,7 @@ fn writer(epoch: u64, placement: &str) -> RemoteWriterAuthorityV1 {
                 brain_id: id::<BrainId>("brain.remote"),
                 shard_id: id::<ShardId>("shard.remote"),
                 generation_id: id::<ProjectionGenerationId>("generation.remote"),
-                placement_revision: id::<EntityVersionId>(placement),
+                placement_revision: RemotePlacementRevisionV1::new(placement).unwrap(),
                 authority_epoch: AuthorityEpoch(epoch),
                 authority_node_id: id::<BrainNodeId>("node.authority"),
             },
@@ -72,8 +74,8 @@ fn authority_cas_rejects_stale_expected_binding() {
     let store = RusqliteRemoteAuthorityStoreV1::open_in_memory().unwrap();
     let initial = binding(4);
     let replacement = binding(5);
-    let initial_writer = writer(4, "placement.remote.11");
-    let replacement_writer = writer(5, "placement.remote.12");
+    let initial_writer = writer(4, 11);
+    let replacement_writer = writer(5, 12);
     store
         .initialize_authority(&initial_writer, &initial, 11, &watermark(&initial, 9))
         .unwrap();
@@ -97,12 +99,12 @@ fn authority_cas_rejects_stale_expected_binding() {
 }
 
 #[test]
-fn reachability_resolves_the_replacement_authority_for_an_old_writer() {
+fn reachability_withholds_the_replacement_until_publication_is_complete() {
     let store = RusqliteRemoteAuthorityStoreV1::open_in_memory().unwrap();
     let initial = binding(4);
     let replacement = binding(5);
-    let initial_writer = writer(4, "placement.remote.11");
-    let replacement_writer = writer(5, "placement.remote.12");
+    let initial_writer = writer(4, 11);
+    let replacement_writer = writer(5, 12);
     store
         .initialize_authority(&initial_writer, &initial, 11, &watermark(&initial, 9))
         .unwrap();
@@ -122,9 +124,13 @@ fn reachability_resolves_the_replacement_authority_for_an_old_writer() {
 
     assert_eq!(
         store.current_writer_authority(&initial_writer).unwrap(),
-        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(
-            replacement_writer.authority.clone()
-        )
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Partial {
+            known_fence: Some(replacement_writer.authority.fence.clone()),
+            missing: std::collections::BTreeSet::from([
+                RemoteAuthorityUnavailableReasonV1::FenceUnverified
+            ]),
+            observed_at: replacement_writer.authority.observed_at,
+        }
     );
     let mut unknown = initial_writer;
     unknown.project_id = id::<ProjectId>("project.other");
@@ -138,10 +144,21 @@ fn reachability_resolves_the_replacement_authority_for_an_old_writer() {
 }
 
 #[test]
+fn placement_identity_must_match_the_persisted_revision() {
+    let store = RusqliteRemoteAuthorityStoreV1::open_in_memory().unwrap();
+    let binding = binding(4);
+    let writer = writer(4, 11);
+    assert_eq!(
+        store.initialize_authority(&writer, &binding, 12, &watermark(&binding, 9)),
+        Err(RemoteAuthorityStorageErrorV1::InvalidContract)
+    );
+}
+
+#[test]
 fn initial_authority_publication_does_not_require_an_old_writer_fence() {
     let store = RusqliteRemoteAuthorityStoreV1::open_in_memory().unwrap();
     let initial = binding(4);
-    let initial_writer = writer(4, "placement.remote.11");
+    let initial_writer = writer(4, 11);
     let frontier = watermark(&initial, 9);
     store
         .initialize_authority(&initial_writer, &initial, 11, &frontier)
@@ -165,8 +182,8 @@ fn publication_waits_for_every_durable_fence_and_rejects_old_epochs() {
         RusqliteRemoteAuthorityStoreV1::from_connection(Connection::open(&path).unwrap()).unwrap();
     let initial = binding(4);
     let replacement = binding(5);
-    let initial_writer = writer(4, "placement.remote.11");
-    let replacement_writer = writer(5, "placement.remote.12");
+    let initial_writer = writer(4, 11);
+    let replacement_writer = writer(5, 12);
     let replacement_frontier = watermark(&replacement, 9);
     store
         .initialize_authority(&initial_writer, &initial, 11, &watermark(&initial, 9))
@@ -231,6 +248,12 @@ fn publication_waits_for_every_durable_fence_and_rejects_old_epochs() {
     assert_eq!(publication.binding, replacement);
     assert_eq!(publication.writer, replacement_writer);
     assert_eq!(publication.frontier, replacement_frontier);
+    assert_eq!(
+        store.current_writer_authority(&initial_writer).unwrap(),
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(
+            publication.writer.authority.clone()
+        )
+    );
     assert_eq!(
         store.install_fence("writer", &initial_writer, &initial, 11),
         Err(RemoteAuthorityStorageErrorV1::StaleFence)

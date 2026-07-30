@@ -82,6 +82,27 @@ pub struct AdmittedRemoteCaptureV1 {
     pub captured_at: UtcMicros,
 }
 
+/// Durable capture lifecycle, kept distinct from replay transaction outcomes.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCaptureStateV1 {
+    Captured,
+    Pending,
+    Acknowledged,
+    GarbageCollectionEligible,
+}
+
+impl RemoteCaptureStateV1 {
+    pub const fn permits_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Captured, Self::Pending)
+                | (Self::Pending, Self::Acknowledged)
+                | (Self::Acknowledged, Self::GarbageCollectionEligible)
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteCaptureDispositionV1 {
@@ -167,6 +188,9 @@ fn admit_capture(
         .map_err(|_| RemoteCaptureApplicationErrorV1::InvalidEnrollment)?;
     match command.enrollment.state_at(command.captured_at) {
         EnrollmentCredentialStateV1::Active => {}
+        EnrollmentCredentialStateV1::NotYetValid => {
+            return Err(RemoteCaptureApplicationErrorV1::InvalidEnrollment);
+        }
         EnrollmentCredentialStateV1::Expired => {
             return Err(RemoteCaptureApplicationErrorV1::EnrollmentExpired);
         }
@@ -327,6 +351,24 @@ mod tests {
         assert_eq!(
             receipt.validate_for(&sequence),
             Err(RemoteCaptureApplicationErrorV1::InvalidPortResult)
+        );
+    }
+
+    #[test]
+    fn capture_lifecycle_preserves_spool_and_acknowledgement_boundaries() {
+        assert!(
+            RemoteCaptureStateV1::Captured.permits_transition_to(RemoteCaptureStateV1::Pending)
+        );
+        assert!(
+            RemoteCaptureStateV1::Pending.permits_transition_to(RemoteCaptureStateV1::Acknowledged)
+        );
+        assert!(
+            RemoteCaptureStateV1::Acknowledged
+                .permits_transition_to(RemoteCaptureStateV1::GarbageCollectionEligible)
+        );
+        assert!(
+            !RemoteCaptureStateV1::Pending
+                .permits_transition_to(RemoteCaptureStateV1::GarbageCollectionEligible)
         );
     }
 }

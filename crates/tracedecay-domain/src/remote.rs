@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthorityEpoch, BrainId, BrainNodeId, DomainError, EntityId, EntityVersionId, ManifestDigest,
+    AuthorityEpoch, BrainId, BrainNodeId, DomainError, EntityId, ManifestDigest, ProjectId,
     ProjectionGenerationId, RefId, RepositoryId, RepositoryStateSnapshotId, ShardId, UtcMicros,
     WorktreeId, canonical_sha256,
 };
@@ -25,6 +25,7 @@ pub const MAX_REMOTE_CREDENTIAL_BYTES: usize = 4_096;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteRepositoryScopeV1 {
+    pub project_id: ProjectId,
     pub repository_id: RepositoryId,
     pub worktree_id: WorktreeId,
     pub reference: Option<RefId>,
@@ -33,12 +34,53 @@ pub struct RemoteRepositoryScopeV1 {
 
 impl RemoteRepositoryScopeV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
+        self.project_id.validate()?;
         self.repository_id.validate()?;
         self.worktree_id.validate()?;
         if let Some(reference) = &self.reference {
             reference.validate()?;
         }
         self.snapshot_id.validate()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct RemotePlacementRevisionV1(u64);
+
+impl RemotePlacementRevisionV1 {
+    pub const fn new(value: u64) -> Result<Self, DomainError> {
+        if value == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "remote placement revision",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    pub const fn validate(&self) -> Result<(), DomainError> {
+        if self.0 == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "remote placement revision",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for RemotePlacementRevisionV1 {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::new(value).map_err(|_| {
+            serde::de::Error::custom("remote placement revision must be greater than zero")
+        })
     }
 }
 
@@ -49,9 +91,7 @@ pub struct RemoteWriterFenceV1 {
     pub brain_id: BrainId,
     pub shard_id: ShardId,
     pub generation_id: ProjectionGenerationId,
-    /// Canonical placement revision; this reuses the domain's entity-version
-    /// identity rather than introducing a second revision namespace.
-    pub placement_revision: EntityVersionId,
+    pub placement_revision: RemotePlacementRevisionV1,
     pub authority_epoch: AuthorityEpoch,
     pub authority_node_id: BrainNodeId,
 }
@@ -75,7 +115,6 @@ impl RemoteWriterFenceV1 {
         self.brain_id == other.brain_id
             && self.shard_id == other.shard_id
             && self.generation_id == other.generation_id
-            && self.placement_revision == other.placement_revision
     }
 
     pub fn fences(&self, older: &Self) -> bool {
@@ -247,7 +286,9 @@ impl CredentialValidity<'_> {
     }
 
     fn state_at(&self, observed_at: UtcMicros) -> EnrollmentCredentialStateV1 {
-        if self
+        if observed_at < self.issued_at {
+            EnrollmentCredentialStateV1::NotYetValid
+        } else if self
             .revoked_at
             .is_some_and(|revoked_at| observed_at >= revoked_at)
         {
@@ -324,6 +365,7 @@ impl EnrollmentCredentialRecordV1 {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EnrollmentCredentialStateV1 {
+    NotYetValid,
     Active,
     Expired,
     Revoked,
@@ -441,6 +483,7 @@ mod tests {
 
     fn scope() -> RemoteRepositoryScopeV1 {
         RemoteRepositoryScopeV1 {
+            project_id: id(ProjectId::new, "project.remote"),
             repository_id: id(RepositoryId::new, "repository.remote"),
             worktree_id: id(WorktreeId::new, "worktree.remote"),
             reference: Some(id(RefId::new, "refs/heads/main")),
@@ -495,13 +538,13 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&record).unwrap(),
             format!(
-                r#"{{"enrollment_id":"enrollment.remote","brain_id":"brain.remote","node_id":"node.remote","fingerprint":"{fingerprint}","revision":1,"issued_at":10,"expires_at":100,"revoked_at":null,"capabilities":["query"],"scope":{{"repository_id":"repository.remote","worktree_id":"worktree.remote","reference":"refs/heads/main","snapshot_id":"repository.state.remote"}}}}"#
+                r#"{{"enrollment_id":"enrollment.remote","brain_id":"brain.remote","node_id":"node.remote","fingerprint":"{fingerprint}","revision":1,"issued_at":10,"expires_at":100,"revoked_at":null,"capabilities":["query"],"scope":{{"project_id":"project.remote","repository_id":"repository.remote","worktree_id":"worktree.remote","reference":"refs/heads/main","snapshot_id":"repository.state.remote"}}}}"#
             )
         );
         assert_eq!(
             serde_json::to_string(&grant).unwrap(),
             format!(
-                r#"{{"grant_id":"grant.remote","brain_id":"brain.remote","node_id":"node.remote","fingerprint":"{fingerprint}","revision":1,"issued_at":10,"expires_at":100,"revoked_at":null,"capabilities":["query"],"scope":{{"repository_id":"repository.remote","worktree_id":"worktree.remote","reference":"refs/heads/main","snapshot_id":"repository.state.remote"}}}}"#
+                r#"{{"grant_id":"grant.remote","brain_id":"brain.remote","node_id":"node.remote","fingerprint":"{fingerprint}","revision":1,"issued_at":10,"expires_at":100,"revoked_at":null,"capabilities":["query"],"scope":{{"project_id":"project.remote","repository_id":"repository.remote","worktree_id":"worktree.remote","reference":"refs/heads/main","snapshot_id":"repository.state.remote"}}}}"#
             )
         );
     }
@@ -526,6 +569,11 @@ mod tests {
     #[test]
     fn credential_state_and_scope_fail_closed() {
         let mut credential = record(b"0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            credential.state_at(UtcMicros(9)),
+            EnrollmentCredentialStateV1::NotYetValid
+        );
+        assert!(!credential.permits(RemoteCapabilityV1::Query, &scope(), UtcMicros(9)));
         assert!(credential.permits(RemoteCapabilityV1::Query, &scope(), UtcMicros(99)));
         assert!(!credential.permits(RemoteCapabilityV1::Replay, &scope(), UtcMicros(99)));
         assert!(!credential.permits(RemoteCapabilityV1::Query, &scope(), UtcMicros(100)));
@@ -542,7 +590,7 @@ mod tests {
             brain_id: id(BrainId::new, "brain.remote"),
             shard_id: id(ShardId::new, "shard.remote"),
             generation_id: id(ProjectionGenerationId::new, "generation.remote"),
-            placement_revision: id(EntityVersionId::new, "placement.remote.1"),
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
             authority_epoch: AuthorityEpoch(7),
             authority_node_id: id(BrainNodeId::new, "node.old"),
         };
@@ -551,8 +599,35 @@ mod tests {
         newer.authority_node_id = id(BrainNodeId::new, "node.new");
         assert!(newer.fences(&older));
 
-        newer.placement_revision = id(EntityVersionId::new, "placement.remote.2");
+        newer.placement_revision = RemotePlacementRevisionV1::new(2).unwrap();
+        assert!(newer.fences(&older));
+
+        newer.authority_epoch = older.authority_epoch;
         assert!(!newer.fences(&older));
+    }
+
+    #[test]
+    fn placement_revision_rejects_zero_and_round_trips_numeric_identity() {
+        assert!(serde_json::from_str::<RemotePlacementRevisionV1>("0").is_err());
+        let revision = RemotePlacementRevisionV1::new(9).unwrap();
+        let encoded = serde_json::to_string(&revision).unwrap();
+        assert_eq!(encoded, "9");
+        assert_eq!(
+            serde_json::from_str::<RemotePlacementRevisionV1>(&encoded).unwrap(),
+            revision
+        );
+
+        let mut invalid_fence = RemoteWriterFenceV1 {
+            brain_id: id(BrainId::new, "brain.remote"),
+            shard_id: id(ShardId::new, "shard.remote"),
+            generation_id: id(ProjectionGenerationId::new, "generation.remote"),
+            placement_revision: RemotePlacementRevisionV1(0),
+            authority_epoch: AuthorityEpoch(7),
+            authority_node_id: id(BrainNodeId::new, "node.remote"),
+        };
+        assert!(invalid_fence.validate().is_err());
+        invalid_fence.placement_revision = revision;
+        assert!(invalid_fence.validate().is_ok());
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, EntityId,
-    EntityVersionId, ProjectionGenerationId, RemoteCapabilityV1, RemoteRepositoryScopeV1,
+    ProjectionGenerationId, RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
     RemoteWriterFenceV1, ShardId, UtcMicros,
 };
 
@@ -91,7 +91,7 @@ impl<Port> RemoteProtocolServiceV1<Port> {
     where
         Port: RemoteEnrollmentProtocolPortV1,
     {
-        request.validate_metadata()?;
+        request.validate_initial_enrollment_metadata()?;
         request
             .body
             .validate_remote_protocol_body(request.sent_at)?;
@@ -142,6 +142,16 @@ impl<T> RemoteProtocolRequestV1<T> {
     }
 
     pub fn validate_metadata(&self) -> Result<(), ApplicationContractError> {
+        self.validate_common_metadata()?;
+        if self.enrollment_revision == 0 {
+            return Err(ApplicationContractError::ZeroValue {
+                field: "remote enrollment revision",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_common_metadata(&self) -> Result<(), ApplicationContractError> {
         if self.protocol_version != REMOTE_PROTOCOL_VERSION_V1 {
             return Err(ApplicationContractError::Inconsistent {
                 field: "remote protocol version",
@@ -149,11 +159,6 @@ impl<T> RemoteProtocolRequestV1<T> {
         }
         self.brain_id.validate()?;
         self.caller_node_id.validate()?;
-        if self.enrollment_revision == 0 {
-            return Err(ApplicationContractError::ZeroValue {
-                field: "remote enrollment revision",
-            });
-        }
         if let Some(authority) = &self.expected_authority {
             authority.validate()?;
             if authority.brain_id != self.brain_id {
@@ -161,6 +166,39 @@ impl<T> RemoteProtocolRequestV1<T> {
                     field: "remote request authority Brain identity",
                 });
             }
+        }
+        Ok(())
+    }
+}
+
+impl RemoteProtocolRequestV1<EnrollmentRequestV1> {
+    pub fn new_initial_enrollment(
+        request_id: RequestId,
+        brain_id: BrainId,
+        caller_node_id: BrainNodeId,
+        sent_at: UtcMicros,
+        body: EnrollmentRequestV1,
+    ) -> Result<Self, ApplicationContractError> {
+        let request = Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION_V1,
+            request_id,
+            brain_id,
+            caller_node_id,
+            enrollment_revision: 0,
+            expected_authority: None,
+            sent_at,
+            body,
+        };
+        request.validate_initial_enrollment_metadata()?;
+        Ok(request)
+    }
+
+    pub fn validate_initial_enrollment_metadata(&self) -> Result<(), ApplicationContractError> {
+        self.validate_common_metadata()?;
+        if self.enrollment_revision != 0 || self.expected_authority.is_some() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "initial remote enrollment metadata",
+            });
         }
         Ok(())
     }
@@ -210,7 +248,7 @@ pub struct CurrentAuthorityRequestV1 {
     pub brain_id: BrainId,
     pub shard_id: ShardId,
     pub generation_id: ProjectionGenerationId,
-    pub placement_revision: EntityVersionId,
+    pub placement_revision: RemotePlacementRevisionV1,
 }
 
 impl CurrentAuthorityRequestV1 {
@@ -451,10 +489,11 @@ mod tests {
 
     use super::*;
     use tracedecay_domain::{
-        AuthorityEpoch, ObservabilityTerminalResultV1, OperationActivationOutcomeV1,
-        OperationAvailabilityV1, OperationPhaseTimingV1, OperationPhaseV1, OperationReadinessV1,
-        OperationResourceObservedV1, OperationStageTimingV1, OperationStageV1, RepositoryId,
-        RepositoryStateSnapshotId, WorktreeId,
+        AuthorityEpoch, CurrentRemoteAuthorityV1, ObservabilityTerminalResultV1,
+        OperationActivationOutcomeV1, OperationAvailabilityV1, OperationPhaseTimingV1,
+        OperationPhaseV1, OperationReadinessV1, OperationResourceObservedV1,
+        OperationStageTimingV1, OperationStageV1, ProjectId, RemotePlacementRevisionV1,
+        RepositoryId, RepositoryStateSnapshotId, WorktreeId,
     };
     use tracedecay_tool_catalog::SchemaId;
 
@@ -463,7 +502,7 @@ mod tests {
             brain_id: BrainId::new("brain.remote").unwrap(),
             shard_id: ShardId::new("shard.remote").unwrap(),
             generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
-            placement_revision: EntityVersionId::new("placement.remote").unwrap(),
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
             authority_epoch: AuthorityEpoch(4),
             authority_node_id: BrainNodeId::new("node.authority").unwrap(),
         }
@@ -662,6 +701,52 @@ mod tests {
     }
 
     #[test]
+    fn authority_discovery_requires_the_exact_typed_placement_revision() {
+        let request = CurrentAuthorityRequestV1 {
+            brain_id: BrainId::new("brain.remote").unwrap(),
+            shard_id: ShardId::new("shard.remote").unwrap(),
+            generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
+            placement_revision: RemotePlacementRevisionV1::new(2).unwrap(),
+        };
+        let state = CurrentRemoteAuthorityStateV1::Available(CurrentRemoteAuthorityV1 {
+            fence: fence(),
+            credential_revision: 1,
+            observed_at: UtcMicros(10),
+        });
+        assert!(validate_current_authority_state(&request, &state).is_err());
+
+        let exact = CurrentAuthorityRequestV1 {
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+            ..request
+        };
+        assert!(validate_current_authority_state(&exact, &state).is_ok());
+    }
+
+    #[test]
+    fn authority_discovery_rejects_zero_placement_on_the_wire() {
+        let invalid = serde_json::json!({
+            "brain_id": "brain.remote",
+            "shard_id": "shard.remote",
+            "generation_id": "generation.remote",
+            "placement_revision": 0,
+        });
+        assert!(serde_json::from_value::<CurrentAuthorityRequestV1>(invalid).is_err());
+
+        let valid = CurrentAuthorityRequestV1 {
+            brain_id: BrainId::new("brain.remote").unwrap(),
+            shard_id: ShardId::new("shard.remote").unwrap(),
+            generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
+            placement_revision: RemotePlacementRevisionV1::new(9).unwrap(),
+        };
+        let encoded = serde_json::to_value(&valid).unwrap();
+        assert_eq!(encoded["placement_revision"], 9);
+        assert_eq!(
+            serde_json::from_value::<CurrentAuthorityRequestV1>(encoded).unwrap(),
+            valid
+        );
+    }
+
+    #[test]
     fn wire_request_contains_exact_identity_and_no_transport_or_secret_fields() {
         let body = EnrollmentRequestV1 {
             grant_id: EntityId::new("grant.remote").unwrap(),
@@ -672,18 +757,17 @@ mod tests {
             expires_at: UtcMicros(100),
             capabilities: BTreeSet::from([RemoteCapabilityV1::Query]),
             scope: RemoteRepositoryScopeV1 {
+                project_id: ProjectId::new("project.remote").unwrap(),
                 repository_id: RepositoryId::new("repository.remote").unwrap(),
                 worktree_id: WorktreeId::new("worktree.remote").unwrap(),
                 reference: None,
                 snapshot_id: RepositoryStateSnapshotId::new("repository.state.remote").unwrap(),
             },
         };
-        let request = RemoteProtocolRequestV1::new(
+        let request = RemoteProtocolRequestV1::new_initial_enrollment(
             RequestId::new("request.remote").unwrap(),
             body.brain_id.clone(),
             body.node_id.clone(),
-            1,
-            None,
             UtcMicros(10),
             body,
         )

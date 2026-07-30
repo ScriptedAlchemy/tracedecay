@@ -94,7 +94,7 @@ impl RusqliteRemoteAuthorityStoreV1 {
                 "INSERT OR IGNORE INTO remote_authority_v1 (
                     shard_key, writer_json, binding_json, placement_revision,
                     frontier_json, serving, old_writer_json, old_authority_read_only
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL, 0)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, 0)",
                 params![
                     shard_key,
                     encode(writer)?,
@@ -386,24 +386,37 @@ impl RemoteAuthorityReachabilityPortV1 for RusqliteRemoteAuthorityStoreV1 {
             .lock()
             .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
         let mut statement = connection
-            .prepare("SELECT writer_json FROM remote_authority_v1")
+            .prepare("SELECT shard_key FROM remote_authority_v1")
             .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
-        let writers = statement
+        let shard_keys = statement
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
-        for writer_json in writers {
-            let writer_json =
-                writer_json.map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
-            let stored: RemoteWriterAuthorityV1 =
-                decode(&writer_json).map_err(|error| match error {
-                    RemoteAuthorityStorageErrorV1::Corruption
-                    | RemoteAuthorityStorageErrorV1::Encoding => {
-                        RemoteCapturePersistenceErrorV1::Corruption
-                    }
-                    _ => RemoteCapturePersistenceErrorV1::Unavailable,
-                })?;
-            if same_remote_target(&stored, requested) {
-                return Ok(CurrentRemoteAuthorityStateV1::Available(stored.authority));
+        let shard_keys = shard_keys
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
+        drop(statement);
+        for shard_key in shard_keys {
+            let stored = read_authority(&connection, &shard_key)
+                .map_err(capture_storage)?
+                .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
+            if same_remote_target(&stored.writer, requested) {
+                if !stored.serving
+                    || stored.frontier.is_none()
+                    || stored.old_writer.is_some() && !stored.old_authority_read_only
+                    || !publication_matches(&connection, &shard_key, &stored)
+                        .map_err(capture_storage)?
+                {
+                    return Ok(CurrentRemoteAuthorityStateV1::Partial {
+                        known_fence: Some(stored.writer.authority.fence),
+                        missing: std::collections::BTreeSet::from([
+                            RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                        ]),
+                        observed_at: stored.writer.authority.observed_at,
+                    });
+                }
+                return Ok(CurrentRemoteAuthorityStateV1::Available(
+                    stored.writer.authority,
+                ));
             }
         }
         Ok(CurrentRemoteAuthorityStateV1::Unavailable {
@@ -418,6 +431,8 @@ struct StoredAuthorityV1 {
     writer: RemoteWriterAuthorityV1,
     binding: StoreRuntimeBindingV1,
     placement_revision: u64,
+    frontier: Option<ShardWatermarkV1>,
+    serving: bool,
     old_writer: Option<RemoteWriterAuthorityV1>,
     old_authority_read_only: bool,
 }
@@ -428,20 +443,24 @@ fn read_authority(
 ) -> Result<Option<StoredAuthorityV1>, RemoteAuthorityStorageErrorV1> {
     connection
         .query_row(
-            "SELECT writer_json, binding_json, placement_revision,
-                    old_writer_json, old_authority_read_only
+            "SELECT writer_json, binding_json, placement_revision, frontier_json,
+                    serving, old_writer_json, old_authority_read_only
              FROM remote_authority_v1 WHERE shard_key = ?1",
             [shard_key],
             |row| {
                 let writer_json: String = row.get(0)?;
                 let binding_json: String = row.get(1)?;
                 let placement_revision: i64 = row.get(2)?;
-                let old_writer_json: Option<String> = row.get(3)?;
-                let old_authority_read_only: bool = row.get(4)?;
+                let frontier_json: Option<String> = row.get(3)?;
+                let serving: bool = row.get(4)?;
+                let old_writer_json: Option<String> = row.get(5)?;
+                let old_authority_read_only: bool = row.get(6)?;
                 Ok((
                     writer_json,
                     binding_json,
                     placement_revision,
+                    frontier_json,
+                    serving,
                     old_writer_json,
                     old_authority_read_only,
                 ))
@@ -450,14 +469,33 @@ fn read_authority(
         .optional()
         .map_err(storage)?
         .map(
-            |(writer, binding, placement, old_writer, old_authority_read_only)| {
-                Ok(StoredAuthorityV1 {
+            |(
+                writer,
+                binding,
+                placement,
+                frontier,
+                serving,
+                old_writer,
+                old_authority_read_only,
+            )| {
+                let stored = StoredAuthorityV1 {
                     writer: decode(&writer)?,
                     binding: decode(&binding)?,
                     placement_revision: decode_u64(placement)?,
+                    frontier: frontier.as_deref().map(decode).transpose()?,
+                    serving,
                     old_writer: old_writer.as_deref().map(decode).transpose()?,
                     old_authority_read_only,
-                })
+                };
+                validate_authority_binding(
+                    &stored.writer,
+                    &stored.binding,
+                    stored.placement_revision,
+                )?;
+                if let Some(frontier) = &stored.frontier {
+                    validate_frontier(&stored.binding, frontier)?;
+                }
+                Ok(stored)
             },
         )
         .transpose()
@@ -502,10 +540,54 @@ fn validate_authority_binding(
         || !binding.shard_id.is_mutable()
         || writer.authority.fence.brain_id != binding.shard_id.brain_id
         || writer.authority.fence.authority_epoch.0 != binding.authority_epoch.get()
+        || writer.authority.fence.placement_revision.get() != placement_revision
     {
         return Err(RemoteAuthorityStorageErrorV1::InvalidContract);
     }
     Ok(())
+}
+
+fn publication_matches(
+    connection: &Connection,
+    shard_key: &str,
+    authority: &StoredAuthorityV1,
+) -> Result<bool, RemoteAuthorityStorageErrorV1> {
+    let publication = connection
+        .query_row(
+            "SELECT writer_json, binding_json, placement_revision, frontier_json
+             FROM remote_publication_v1 WHERE shard_key = ?1",
+            [shard_key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage)?;
+    let Some((writer, binding, placement, frontier)) = publication else {
+        return Ok(false);
+    };
+    Ok(
+        decode::<RemoteWriterAuthorityV1>(&writer)? == authority.writer
+            && decode::<StoreRuntimeBindingV1>(&binding)? == authority.binding
+            && decode_u64(placement)? == authority.placement_revision
+            && Some(decode::<ShardWatermarkV1>(&frontier)?) == authority.frontier,
+    )
+}
+
+fn capture_storage(error: RemoteAuthorityStorageErrorV1) -> RemoteCapturePersistenceErrorV1 {
+    match error {
+        RemoteAuthorityStorageErrorV1::Corruption
+        | RemoteAuthorityStorageErrorV1::Encoding
+        | RemoteAuthorityStorageErrorV1::InvalidContract => {
+            RemoteCapturePersistenceErrorV1::Corruption
+        }
+        _ => RemoteCapturePersistenceErrorV1::Unavailable,
+    }
 }
 
 fn same_remote_target(left: &RemoteWriterAuthorityV1, right: &RemoteWriterAuthorityV1) -> bool {

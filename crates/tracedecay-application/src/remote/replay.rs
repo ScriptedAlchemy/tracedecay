@@ -280,6 +280,17 @@ pub fn replay_remote_capture(
     let spool_state = spool
         .state(&frame.event_id)
         .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
+    if let Some(previous_event_id) = &frame.capture.sequence.previous_event_id {
+        let predecessor = spool
+            .state(previous_event_id)
+            .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
+        if !matches!(
+            predecessor.state,
+            RemoteReplayStateV1::Acknowledged | RemoteReplayStateV1::GarbageCollectionEligible
+        ) {
+            return Err(RemoteReplayApplicationErrorV1::InvalidSpoolState);
+        }
+    }
     if matches!(
         spool_state.state,
         RemoteReplayStateV1::Admitted | RemoteReplayStateV1::Duplicate
@@ -409,10 +420,9 @@ fn validate_scope_and_fence(
         .validate()
         .map_err(|_| RemoteReplayApplicationErrorV1::FenceMismatch)?;
     let captured = &frame.capture.writer;
-    if !captured
-        .authority
-        .fence
-        .same_mutable_shard(&current_writer.authority.fence)
+    let captured_fence = &captured.authority.fence;
+    let current_fence = &current_writer.authority.fence;
+    if !(current_fence == captured_fence || current_fence.fences(captured_fence))
         || captured.project_id != current_writer.project_id
         || captured.scope != current_writer.scope
         || caller.enrollment_id != frame.capture.enrollment_id

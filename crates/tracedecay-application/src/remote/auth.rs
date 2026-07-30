@@ -103,6 +103,9 @@ pub fn issue_enrollment(
         .map_err(|_| RemoteAuthenticationError::InvalidEnrollment)?;
     match grant.state_at(request.issued_at) {
         EnrollmentCredentialStateV1::Active => {}
+        EnrollmentCredentialStateV1::NotYetValid => {
+            return Err(RemoteAuthenticationError::InvalidEnrollment);
+        }
         EnrollmentCredentialStateV1::Expired => return Err(RemoteAuthenticationError::Expired),
         EnrollmentCredentialStateV1::Revoked => return Err(RemoteAuthenticationError::Revoked),
     }
@@ -196,6 +199,9 @@ pub fn authenticate_caller(
         .map_err(|_| RemoteAuthenticationError::InvalidEnrollment)?;
     match record.state_at(observed_at) {
         EnrollmentCredentialStateV1::Active => {}
+        EnrollmentCredentialStateV1::NotYetValid => {
+            return Err(RemoteAuthenticationError::InvalidEnrollment);
+        }
         EnrollmentCredentialStateV1::Expired => return Err(RemoteAuthenticationError::Expired),
         EnrollmentCredentialStateV1::Revoked => return Err(RemoteAuthenticationError::Revoked),
     }
@@ -363,8 +369,8 @@ fn fingerprints_equal(
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        AuthorityEpoch, EntityVersionId, ProjectionGenerationId, RefId, RemoteWriterFenceV1,
-        RepositoryId, RepositoryStateSnapshotId, ShardId, WorktreeId,
+        AuthorityEpoch, ProjectId, ProjectionGenerationId, RefId, RemotePlacementRevisionV1,
+        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, WorktreeId,
     };
 
     fn credential(value: u8) -> OpaqueRemoteCredential {
@@ -373,6 +379,7 @@ mod tests {
 
     fn scope() -> RemoteRepositoryScopeV1 {
         RemoteRepositoryScopeV1 {
+            project_id: ProjectId::new("project.remote").unwrap(),
             repository_id: RepositoryId::new("repository.remote").unwrap(),
             worktree_id: WorktreeId::new("worktree.remote").unwrap(),
             reference: Some(RefId::new("refs/heads/main").unwrap()),
@@ -542,7 +549,7 @@ mod tests {
             brain_id: authority.brain_id.clone(),
             shard_id: ShardId::new("shard.remote").unwrap(),
             generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
-            placement_revision: EntityVersionId::new("placement.remote").unwrap(),
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
             authority_epoch: AuthorityEpoch(1),
             authority_node_id: authority.node_id.clone(),
         };
