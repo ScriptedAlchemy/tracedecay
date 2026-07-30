@@ -35,6 +35,10 @@ use crate::migration_sql::{
 };
 use crate::remote_spool::RemoteAuthorityReachabilityPortV1;
 
+#[path = "remote_query.rs"]
+mod query;
+pub use query::RusqliteRemoteExactObservationQueryPortV1;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS remote_authority_v1 (
     shard_key TEXT PRIMARY KEY,
@@ -677,6 +681,17 @@ pub struct RemotePublicationReceiptV1 {
     pub frontier: ShardWatermarkV1,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteQueryAuthoritySnapshotV1 {
+    pub project_id: tracedecay_domain::ProjectId,
+    pub scope: RemoteRepositoryScopeV1,
+    pub authority: CurrentRemoteAuthorityStateV1,
+    pub placement_revision: u64,
+    pub binding: StoreRuntimeBindingV1,
+    pub frontier: Option<ShardWatermarkV1>,
+    pub observed_at: UtcMicros,
+}
+
 pub struct RusqliteRemoteAuthorityStoreV1 {
     connection: Mutex<Connection>,
 }
@@ -692,6 +707,92 @@ impl RusqliteRemoteAuthorityStoreV1 {
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub fn query_authority_snapshot(
+        &self,
+        project_id: &tracedecay_domain::ProjectId,
+        scope: &RemoteRepositoryScopeV1,
+        expected_fence: &tracedecay_domain::RemoteWriterFenceV1,
+        observed_at: UtcMicros,
+    ) -> Result<RemoteQueryAuthoritySnapshotV1, RemoteAuthorityStorageErrorV1> {
+        scope
+            .validate()
+            .map_err(|_| RemoteAuthorityStorageErrorV1::InvalidContract)?;
+        expected_fence
+            .validate()
+            .map_err(|_| RemoteAuthorityStorageErrorV1::InvalidContract)?;
+        if project_id != &scope.project_id {
+            return Err(RemoteAuthorityStorageErrorV1::InvalidContract);
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RemoteAuthorityStorageErrorV1::Unavailable)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(storage)?;
+        let mut statement = transaction
+            .prepare("SELECT shard_key FROM remote_authority_v1")
+            .map_err(storage)?;
+        let keys = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        drop(statement);
+        for key in keys {
+            let stored = read_authority(&transaction, &key)?
+                .ok_or(RemoteAuthorityStorageErrorV1::Corruption)?;
+            if stored.writer.project_id == *project_id
+                && stored.writer.scope == *scope
+                && stored.writer.authority.fence.brain_id == expected_fence.brain_id
+                && stored.writer.authority.fence.shard_id == expected_fence.shard_id
+                && stored.writer.authority.fence.generation_id == expected_fence.generation_id
+            {
+                validate_authority_binding(
+                    &stored.writer,
+                    &stored.binding,
+                    stored.placement_revision,
+                )
+                .map_err(|_| RemoteAuthorityStorageErrorV1::Corruption)?;
+                if let Some(frontier) = &stored.frontier {
+                    validate_frontier(&stored.binding, frontier)
+                        .map_err(|_| RemoteAuthorityStorageErrorV1::Corruption)?;
+                }
+                let state = if !stored.serving
+                    || stored.frontier.is_none()
+                    || stored.old_writer.is_some() && !stored.old_authority_read_only
+                    || !publication_matches(&transaction, &key, &stored)?
+                {
+                    CurrentRemoteAuthorityStateV1::Partial {
+                        known_fence: Some(stored.writer.authority.fence.clone()),
+                        missing: std::collections::BTreeSet::from([
+                            RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                        ]),
+                        observed_at,
+                    }
+                } else {
+                    CurrentRemoteAuthorityStateV1::Available(CurrentRemoteAuthorityV1 {
+                        observed_at,
+                        ..stored.writer.authority.clone()
+                    })
+                };
+                let snapshot = RemoteQueryAuthoritySnapshotV1 {
+                    project_id: stored.writer.project_id,
+                    scope: stored.writer.scope,
+                    authority: state,
+                    placement_revision: stored.placement_revision,
+                    binding: stored.binding,
+                    frontier: stored.frontier,
+                    observed_at,
+                };
+                transaction.commit().map_err(storage)?;
+                return Ok(snapshot);
+            }
+        }
+        transaction.commit().map_err(storage)?;
+        Err(RemoteAuthorityStorageErrorV1::Unavailable)
     }
 
     pub fn initialize_authority(

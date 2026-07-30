@@ -10,13 +10,17 @@ use super::query::{
     RemoteExactObservationResultV1, RemoteQueryCompleteValueV1, RemoteQueryOperationV1,
     RemoteQueryPageBoundsV1, RemoteQueryRequestV1, RemoteQueryResultV1, query_protocol_failure,
     remote_exact_observation_query_result_contract_v1, validate_composition,
-    validate_protocol_authority_binding,
+    validate_protocol_authority_binding, validate_result_identity, validate_returned_authority,
+    validate_returned_observation_identity, validate_returned_provenance,
 };
-use crate::RequestId;
+use crate::{RequestId, ResolvedScope};
 use tracedecay_domain::{
-    AuthorityEpoch, BrainId, BrainNodeId, CanonicalObservationIdV1, ProjectId,
-    ProjectionGenerationId, RefId, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
-    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, WorktreeId,
+    AuthorityEpoch, BrainId, BrainNodeId, CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1,
+    CurrentRemoteAuthorityV1, EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1,
+    ObservationScopeV1, PrivacyDomainBoundLocatorDigest, ProjectId, ProjectionGenerationId, RefId,
+    RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, RepositoryEvidenceV1,
+    RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, RepositoryStateSnapshotId,
+    ShardId, UtcMicros, WorktreeId,
 };
 
 fn scope() -> RemoteRepositoryScopeV1 {
@@ -248,5 +252,246 @@ fn receipt_mismatch_maps_to_unavailable_not_scope_concealment() {
     assert_eq!(
         query_protocol_failure(RemoteExactObservationQueryErrorV1::ScopeMismatch),
         super::protocol::RemoteProtocolFailureV1::ScopeMismatch
+    );
+}
+
+#[test]
+fn faulty_adapter_result_identity_is_rejected() {
+    let expected_request = RequestId::new("request.remote-query").unwrap();
+    let expected_scope = scope();
+    let resolved = ResolvedScope::new(
+        expected_scope.project_id.clone(),
+        expected_scope.repository_id.clone(),
+        expected_scope.worktree_id.clone(),
+        expected_scope.reference.clone(),
+    )
+    .unwrap();
+    let contract = remote_exact_observation_query_result_contract_v1();
+    assert!(
+        validate_result_identity(
+            &contract,
+            &expected_request,
+            &resolved,
+            &expected_request,
+            &expected_scope
+        )
+        .is_ok()
+    );
+
+    let wrong_contract = super::protocol::remote_replay_result_contract_v1();
+    assert!(
+        validate_result_identity(
+            &wrong_contract,
+            &expected_request,
+            &resolved,
+            &expected_request,
+            &expected_scope
+        )
+        .is_err()
+    );
+    assert!(
+        validate_result_identity(
+            &contract,
+            &RequestId::new("request.other").unwrap(),
+            &resolved,
+            &expected_request,
+            &expected_scope
+        )
+        .is_err()
+    );
+    let wrong_scope = ResolvedScope::new(
+        ProjectId::new("project.other").unwrap(),
+        expected_scope.repository_id.clone(),
+        expected_scope.worktree_id.clone(),
+        expected_scope.reference.clone(),
+    )
+    .unwrap();
+    assert!(
+        validate_result_identity(
+            &contract,
+            &expected_request,
+            &wrong_scope,
+            &expected_request,
+            &expected_scope
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn faulty_adapter_observation_identity_is_rejected() {
+    let expected_scope = scope();
+    let expected_id = CanonicalObservationIdV1::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+    let generation = ProjectionGenerationId::new("generation.remote-query.1").unwrap();
+    let observation_scope = ObservationScopeV1::Project {
+        project_id: expected_scope.project_id.clone(),
+    };
+    assert!(
+        validate_returned_observation_identity(
+            &expected_id,
+            &generation,
+            &observation_scope,
+            &expected_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_ok()
+    );
+    let wrong_id = CanonicalObservationIdV1::new(format!("sha256:{}", "b".repeat(64))).unwrap();
+    assert!(
+        validate_returned_observation_identity(
+            &wrong_id,
+            &generation,
+            &observation_scope,
+            &expected_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_returned_observation_identity(
+            &expected_id,
+            &ProjectionGenerationId::new("generation.other").unwrap(),
+            &observation_scope,
+            &expected_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_returned_observation_identity(
+            &expected_id,
+            &generation,
+            &ObservationScopeV1::Project {
+                project_id: ProjectId::new("project.other").unwrap(),
+            },
+            &expected_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn faulty_adapter_current_authority_is_rejected() {
+    let expected = request(vec![shard(1)]).expected_authority;
+    let available = CurrentRemoteAuthorityStateV1::Available(CurrentRemoteAuthorityV1 {
+        fence: expected.clone(),
+        credential_revision: 1,
+        observed_at: UtcMicros(10),
+    });
+    assert!(validate_returned_authority(&available, &expected).is_ok());
+
+    let mut wrong = expected.clone();
+    wrong.authority_epoch = AuthorityEpoch(2);
+    let stale = CurrentRemoteAuthorityStateV1::Available(CurrentRemoteAuthorityV1 {
+        fence: wrong,
+        credential_revision: 1,
+        observed_at: UtcMicros(10),
+    });
+    assert_eq!(
+        validate_returned_authority(&stale, &expected),
+        Err(RemoteExactObservationQueryErrorV1::StaleFence)
+    );
+    assert_eq!(
+        validate_returned_authority(
+            &CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                observed_at: UtcMicros(10),
+            },
+            &expected,
+        ),
+        Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable)
+    );
+}
+
+fn provenance(
+    scope: &RemoteRepositoryScopeV1,
+    generation: &ProjectionGenerationId,
+    observation_id: &CanonicalObservationIdV1,
+) -> EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> {
+    let evidence = RepositoryEvidenceV1::new(
+        scope.reference.clone().map_or(
+            EvidenceAvailabilityV1::Unavailable,
+            EvidenceAvailabilityV1::Known,
+        ),
+        EvidenceAvailabilityV1::Unavailable,
+        EvidenceAvailabilityV1::Unavailable,
+        EvidenceAvailabilityV1::Unavailable,
+        RepositoryRemoteIdentityV1::Unknown,
+        EvidenceAvailabilityV1::Unavailable,
+    )
+    .unwrap();
+    let capture = RepositoryProvenanceV1::new(
+        scope.repository_id.clone(),
+        Some(scope.project_id.clone()),
+        Some(scope.worktree_id.clone()),
+        PrivacyDomainBoundLocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+        evidence,
+        UtcMicros(9),
+    )
+    .unwrap();
+    EvidenceAvailabilityV1::Known(
+        GenerationBoundRepositoryProvenanceV1::new(
+            generation.clone(),
+            capture,
+            Some(observation_id.clone()),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn faulty_adapter_repository_provenance_is_rejected() {
+    let expected_scope = scope();
+    let observation_id =
+        CanonicalObservationIdV1::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+    let generation = ProjectionGenerationId::new("generation.remote-query.1").unwrap();
+    let valid = provenance(&expected_scope, &generation, &observation_id);
+    assert!(
+        validate_returned_provenance(
+            &valid,
+            Some(&generation),
+            &observation_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_returned_provenance(
+            &EvidenceAvailabilityV1::Unavailable,
+            Some(&generation),
+            &observation_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_err()
+    );
+    let wrong_generation = ProjectionGenerationId::new("generation.other").unwrap();
+    assert!(
+        validate_returned_provenance(
+            &valid,
+            Some(&wrong_generation),
+            &observation_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_err()
+    );
+    let mut wrong_scope = expected_scope.clone();
+    wrong_scope.repository_id = RepositoryId::new("repository.other").unwrap();
+    assert!(
+        validate_returned_provenance(
+            &provenance(&wrong_scope, &generation, &observation_id),
+            Some(&generation),
+            &observation_id,
+            &generation,
+            &expected_scope,
+        )
+        .is_err()
     );
 }
