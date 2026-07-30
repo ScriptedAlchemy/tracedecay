@@ -4,6 +4,7 @@ use serde::Serialize;
 use tracedecay_domain::{
     HydrationStateV1, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1,
 };
+use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 
 use super::lcm_args::*;
 use super::lcm_compact::{
@@ -19,13 +20,15 @@ use super::message_search::{
     SessionTemporalMetadataView,
 };
 use super::*;
-use crate::application::session::{SessionRetrievalScope, SessionTemporalQuery};
-use crate::query::temporal::context::ContextBudget;
-use crate::query::temporal::ranking::DiversityLimits;
+use crate::application::session::{
+    SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
+};
 use crate::sessions::lcm::{
     LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
     LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmSourceRef,
 };
+use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 fn lcm_status_payload<T: Serialize>(
     provider: &str,
@@ -253,6 +256,38 @@ fn apply_lcm_temporal_fields(payload: &mut Value, temporal: &SessionTemporalMeta
     }
 }
 
+fn apply_lcm_retrieval_fields(payload: &mut Value, retrieval: LcmRetrievalOutcome) {
+    let Some(payload) = payload.as_object_mut() else {
+        return;
+    };
+    payload.insert("retrieval".to_string(), json!(retrieval));
+    payload.insert("omitted".to_string(), json!(retrieval.omitted()));
+}
+
+const fn session_data_freshness(freshness: LcmDataFreshness) -> SessionDataFreshness {
+    match freshness {
+        LcmDataFreshness::Fresh => SessionDataFreshness::Fresh,
+        LcmDataFreshness::Stored { generation_lag } => {
+            SessionDataFreshness::Stored { generation_lag }
+        }
+        LcmDataFreshness::Partial { generation_lag } => {
+            SessionDataFreshness::Partial { generation_lag }
+        }
+    }
+}
+
+const fn lcm_data_freshness(freshness: SessionDataFreshness) -> LcmDataFreshness {
+    match freshness {
+        SessionDataFreshness::Fresh => LcmDataFreshness::Fresh,
+        SessionDataFreshness::Stored { generation_lag } => {
+            LcmDataFreshness::Stored { generation_lag }
+        }
+        SessionDataFreshness::Partial { generation_lag } => {
+            LcmDataFreshness::Partial { generation_lag }
+        }
+    }
+}
+
 fn apply_lcm_expand_query_input_truncation(
     payload: &mut Value,
     prompt_truncated: bool,
@@ -295,6 +330,40 @@ fn lcm_typed_outcome(
     legacy_key: &str,
     outcome: SessionRetrievalServiceOutcome,
 ) -> ToolResult {
+    let outcome = match outcome {
+        SessionRetrievalServiceOutcome::Partial {
+            page,
+            freshness,
+            omitted,
+        } => {
+            let retrieval = LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted);
+            let mut payload = json!({
+                "status": "partial",
+                "omitted": omitted,
+                "retrieval": retrieval,
+                "capped_sessions": {},
+            });
+            apply_lcm_temporal_fields(&mut payload, &page.temporal);
+            payload[legacy_key] = json!([]);
+            return tool_json(project_root, args, &payload);
+        }
+        SessionRetrievalServiceOutcome::Stale {
+            temporal,
+            freshness,
+        } => {
+            let retrieval = LcmRetrievalOutcome::stale(lcm_data_freshness(freshness));
+            let mut payload = json!({
+                "status": "stale",
+                "omitted": 0,
+                "retrieval": retrieval,
+                "capped_sessions": {},
+            });
+            apply_lcm_temporal_fields(&mut payload, &temporal);
+            payload[legacy_key] = json!([]);
+            return tool_json(project_root, args, &payload);
+        }
+        outcome => outcome,
+    };
     let unavailable = match &outcome {
         SessionRetrievalServiceOutcome::Unavailable(unavailable) => Some(*unavailable),
         _ => None,
@@ -733,6 +802,7 @@ pub(in super::super) async fn handle_lcm_describe(
             grain,
             state,
             lineage,
+            retrieval,
         } => {
             let mut payload = json!({
                 "status": "ok",
@@ -744,6 +814,42 @@ pub(in super::super) async fn handle_lcm_describe(
                 "lineage": lineage,
             });
             apply_lcm_temporal_fields(&mut payload, &temporal);
+            apply_lcm_retrieval_fields(&mut payload, retrieval);
+            Ok(tool_json(context.project_root, &args, &payload))
+        }
+        LcmDescribeServiceOutcome::Partial {
+            description,
+            temporal,
+            grain,
+            state,
+            lineage,
+            retrieval,
+        } => {
+            let mut payload = json!({
+                "status": "partial",
+                "provider": provider,
+                "session_id": session_id.as_str(),
+                "description": description,
+                "grain": grain,
+                "state": state,
+                "lineage": lineage,
+            });
+            apply_lcm_temporal_fields(&mut payload, &temporal);
+            apply_lcm_retrieval_fields(&mut payload, retrieval);
+            Ok(tool_json(context.project_root, &args, &payload))
+        }
+        LcmDescribeServiceOutcome::Stale {
+            temporal,
+            retrieval,
+        } => {
+            let mut payload = json!({
+                "status": "stale",
+                "provider": provider,
+                "session_id": session_id.as_str(),
+                "description": Value::Null,
+            });
+            apply_lcm_temporal_fields(&mut payload, &temporal);
+            apply_lcm_retrieval_fields(&mut payload, retrieval);
             Ok(tool_json(context.project_root, &args, &payload))
         }
         terminal => Ok(lcm_typed_outcome(
@@ -765,6 +871,25 @@ fn describe_terminal_outcome(outcome: LcmDescribeServiceOutcome) -> SessionRetri
         LcmDescribeServiceOutcome::Unavailable(unavailable) => {
             SessionRetrievalServiceOutcome::Unavailable(unavailable)
         }
+        LcmDescribeServiceOutcome::Partial {
+            temporal,
+            retrieval,
+            ..
+        } => SessionRetrievalServiceOutcome::Partial {
+            page: SessionRetrievalPageView {
+                results: Vec::new(),
+                temporal,
+            },
+            freshness: session_data_freshness(retrieval.freshness()),
+            omitted: retrieval.omitted(),
+        },
+        LcmDescribeServiceOutcome::Stale {
+            temporal,
+            retrieval,
+        } => SessionRetrievalServiceOutcome::Stale {
+            temporal,
+            freshness: session_data_freshness(retrieval.freshness()),
+        },
         LcmDescribeServiceOutcome::BudgetExhausted => {
             SessionRetrievalServiceOutcome::BudgetExhausted
         }
@@ -785,6 +910,25 @@ fn expand_terminal_outcome(outcome: LcmExpandServiceOutcome) -> SessionRetrieval
         LcmExpandServiceOutcome::Unavailable(unavailable) => {
             SessionRetrievalServiceOutcome::Unavailable(unavailable)
         }
+        LcmExpandServiceOutcome::Partial {
+            temporal,
+            retrieval,
+            ..
+        } => SessionRetrievalServiceOutcome::Partial {
+            page: SessionRetrievalPageView {
+                results: Vec::new(),
+                temporal,
+            },
+            freshness: session_data_freshness(retrieval.freshness()),
+            omitted: retrieval.omitted(),
+        },
+        LcmExpandServiceOutcome::Stale {
+            temporal,
+            retrieval,
+        } => SessionRetrievalServiceOutcome::Stale {
+            temporal,
+            freshness: session_data_freshness(retrieval.freshness()),
+        },
         LcmExpandServiceOutcome::BudgetExhausted => SessionRetrievalServiceOutcome::BudgetExhausted,
         LcmExpandServiceOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
         LcmExpandServiceOutcome::Complete { .. } => SessionRetrievalServiceOutcome::Unavailable(
@@ -853,15 +997,10 @@ pub(in super::super) async fn handle_lcm_expand(
             temporal,
             grain,
             state,
+            retrieval,
         } => {
-            let omitted = expansion
-                .summary_sources
-                .iter()
-                .filter(|source| source.state != HydrationStateV1::Available)
-                .count();
             let mut payload = json!({
-                "status": if omitted == 0 { "ok" } else { "partial" },
-                "omitted": omitted,
+                "status": "ok",
                 "provider": provider,
                 "session_id": session_id.as_str(),
                 "expansion": expansion,
@@ -869,6 +1008,40 @@ pub(in super::super) async fn handle_lcm_expand(
                 "state": state,
             });
             apply_lcm_temporal_fields(&mut payload, &temporal);
+            apply_lcm_retrieval_fields(&mut payload, retrieval);
+            Ok(tool_json(context.project_root, &args, &payload))
+        }
+        LcmExpandServiceOutcome::Partial {
+            expansion,
+            temporal,
+            grain,
+            state,
+            retrieval,
+        } => {
+            let mut payload = json!({
+                "status": "partial",
+                "provider": provider,
+                "session_id": session_id.as_str(),
+                "expansion": expansion,
+                "grain": grain,
+                "state": state,
+            });
+            apply_lcm_temporal_fields(&mut payload, &temporal);
+            apply_lcm_retrieval_fields(&mut payload, retrieval);
+            Ok(tool_json(context.project_root, &args, &payload))
+        }
+        LcmExpandServiceOutcome::Stale {
+            temporal,
+            retrieval,
+        } => {
+            let mut payload = json!({
+                "status": "stale",
+                "provider": provider,
+                "session_id": session_id.as_str(),
+                "expansion": Value::Null,
+            });
+            apply_lcm_temporal_fields(&mut payload, &temporal);
+            apply_lcm_retrieval_fields(&mut payload, retrieval);
             Ok(tool_json(context.project_root, &args, &payload))
         }
         terminal => Ok(lcm_typed_outcome(
@@ -929,7 +1102,7 @@ fn expand_query_response_from_sources(
     });
     let source_count = sources.len();
     let mut context =
-        crate::query::temporal::context::OrderedTextContextAssembler::new(context_max_tokens);
+        tracedecay_temporal_query::context::OrderedTextContextAssembler::new(context_max_tokens);
     let mut context_truncated = false;
     let mut matches = Vec::new();
     let mut context_blocks = Vec::new();
@@ -1149,6 +1322,26 @@ pub(in super::super) async fn handle_lcm_expand_query(
                     context.retrieval_store_scope,
                 ))
                 .await;
+            let outcome = match outcome {
+                LcmExpandServiceOutcome::Partial {
+                    expansion: Some(expansion),
+                    temporal,
+                    grain,
+                    state: Some(state),
+                    retrieval,
+                } => {
+                    source_omitted = source_omitted
+                        .saturating_add(usize::try_from(retrieval.omitted()).unwrap_or(usize::MAX));
+                    LcmExpandServiceOutcome::Complete {
+                        expansion,
+                        temporal,
+                        grain,
+                        state,
+                        retrieval,
+                    }
+                }
+                outcome => outcome,
+            };
             match outcome {
                 LcmExpandServiceOutcome::Complete {
                     expansion,

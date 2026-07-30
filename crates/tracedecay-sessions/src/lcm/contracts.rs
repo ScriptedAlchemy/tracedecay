@@ -96,6 +96,58 @@ pub struct LcmContentRange {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LcmDataFreshness {
+    Fresh,
+    Stored { generation_lag: u64 },
+    Partial { generation_lag: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum LcmRetrievalOutcome {
+    Complete {
+        freshness: LcmDataFreshness,
+    },
+    Partial {
+        freshness: LcmDataFreshness,
+        omitted: u64,
+    },
+    Stale {
+        freshness: LcmDataFreshness,
+    },
+}
+
+impl LcmRetrievalOutcome {
+    pub const fn complete(freshness: LcmDataFreshness) -> Self {
+        Self::Complete { freshness }
+    }
+
+    pub const fn partial(freshness: LcmDataFreshness, omitted: u64) -> Self {
+        Self::Partial { freshness, omitted }
+    }
+
+    pub const fn stale(freshness: LcmDataFreshness) -> Self {
+        Self::Stale { freshness }
+    }
+
+    pub const fn freshness(self) -> LcmDataFreshness {
+        match self {
+            Self::Complete { freshness }
+            | Self::Partial { freshness, .. }
+            | Self::Stale { freshness } => freshness,
+        }
+    }
+
+    pub const fn omitted(self) -> u64 {
+        match self {
+            Self::Partial { omitted, .. } => omitted,
+            Self::Complete { .. } | Self::Stale { .. } => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LcmExpandTarget {
@@ -424,3 +476,29 @@ impl std::fmt::Display for LcmError {
 }
 
 impl std::error::Error for LcmError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrieval_outcomes_serialize_freshness_and_omitted_counts() {
+        let stale = serde_json::to_value(LcmRetrievalOutcome::stale(LcmDataFreshness::Stored {
+            generation_lag: 7,
+        }))
+        .expect("serialize stale outcome");
+        assert_eq!(stale["outcome"], "stale");
+        assert_eq!(stale["freshness"]["state"], "stored");
+        assert_eq!(stale["freshness"]["generation_lag"], 7);
+
+        let partial = serde_json::to_value(LcmRetrievalOutcome::partial(
+            LcmDataFreshness::Partial { generation_lag: 3 },
+            5,
+        ))
+        .expect("serialize partial outcome");
+        assert_eq!(partial["outcome"], "partial");
+        assert_eq!(partial["freshness"]["state"], "partial");
+        assert_eq!(partial["freshness"]["generation_lag"], 3);
+        assert_eq!(partial["omitted"], 5);
+    }
+}
