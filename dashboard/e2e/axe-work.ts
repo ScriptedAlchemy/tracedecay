@@ -1,119 +1,197 @@
 /**
- * The thirteenth channel, whose data plane is deliberately closed — Work.
+ * The thirteenth channel, now that its data plane is open — Work.
  *
- * Work is routed and navigable and has no generated read model behind it, so
- * the only claim it makes is about its own contract inventory. That makes it
- * the easiest surface in the app to get wrong in the direction this whole
- * gate exists to catch: an uncontracted workspace that quietly starts drawing
- * lanes, figures and controls it never read. No override is needed — the
- * surface issues no request at all, which is itself part of the claim.
+ * Work reads nine mounted routes, so this file replaces the inventory of a
+ * closed gate with evidence about a board drawn from real payloads. Two
+ * scenarios, because this surface has two branches that must never look alike:
+ * a snapshot the daemon answered, and a refusal it returned instead. The old
+ * gate could only ever scan one branch, which is how a defect in the other one
+ * survived; both are scanned here.
  *
- * Own module rather than more of `axe-audit.ts` for that last reason: it is the
- * one surface whose evidence is entirely negative, so it has no payload builder
- * and never will, and the assertion is a per-row inventory no other route
- * performs.
+ * The fixtures below are the daemon's own `HttpJsonEnvelope` — `kind`/`value`,
+ * the outcome tag, then the packet holding the payload. Written out rather than
+ * simplified, because a fixture that skipped the wrapper would pass while the
+ * real wire failed.
  */
 import { expectAbsent, expectEqual, expectVisibleText, type Scenario } from './axe-harness.ts';
 
+const AUTHORITY = {
+  actor_id: 'actor.dashboard',
+  policy_digest: 'digest.policy',
+  project_id: 'project.tracedecay',
+  repository_id: 'repository.tracedecay',
+  worktree_id: 'worktree.primary',
+};
+
+function task(overrides: Record<string, unknown>) {
+  return {
+    accepted_proposal: null,
+    authority: AUTHORITY,
+    dependencies: [],
+    execution_admitted: false,
+    history_len: 3,
+    runtime_evidence: [],
+    task_accepted: false,
+    ...overrides,
+  };
+}
+
+/** One task at each recorded gate, so every stage group has content and the
+ * densest layout is the one that gets scanned. */
+const PROJECTIONS = [
+  task({ task_id: 'task.parse', title: 'Parse the manifest', version: 2 }),
+  task({
+    task_id: 'task.index',
+    title: 'Index the workspace',
+    version: 5,
+    accepted_proposal: 'proposal.index',
+    dependencies: ['task.parse'],
+  }),
+  task({
+    task_id: 'task.resolve',
+    title: 'Resolve the dependency graph',
+    version: 9,
+    accepted_proposal: 'proposal.resolve',
+    task_accepted: true,
+    dependencies: ['task.parse', 'task.index'],
+  }),
+  task({
+    task_id: 'task.compact',
+    title: 'Compact the session archive',
+    version: 14,
+    accepted_proposal: 'proposal.compact',
+    task_accepted: true,
+    execution_admitted: true,
+    runtime_evidence: [{ evidence_digest: 'digest.run.1', run_id: 'run.1', terminal: false }],
+  }),
+  task({
+    task_id: 'task.publish',
+    title: 'Publish the read model',
+    version: 21,
+    accepted_proposal: 'proposal.publish',
+    task_accepted: true,
+    execution_admitted: true,
+    runtime_evidence: [{ evidence_digest: 'digest.run.2', run_id: 'run.2', terminal: true }],
+  }),
+];
+
+function envelope(payload: unknown) {
+  return {
+    kind: 'success',
+    value: {
+      binding_id: 'binding.http.work.snapshot',
+      contract: { schema_id: 'schema.work.snapshot.result', schema_revision: 1 },
+      request_id: 'request.axe',
+      scope: {},
+      outcome: { outcome: 'evidence', value: { payload } },
+    },
+  };
+}
+
+const SNAPSHOT = envelope({
+  coverage: { state: 'complete', returned: PROJECTIONS.length, total: PROJECTIONS.length },
+  generation_id: 'generation.axe',
+  projections: PROJECTIONS,
+  sequence: 128,
+});
+
 export const WORK_SCENARIOS: readonly Scenario[] = [
   {
-    id: 'work-contract-gate',
+    id: 'work-board',
     route: '/work',
     proves:
-      'the thirteenth channel states its withheld authority per surface, and draws no figure, lane or command it has no contract for',
-    overrides: {},
-    // A dense ruled ledger is exactly the shape that traps content in a
-    // collapsed scroller at 400% zoom, and this is the newest surface in the
-    // app, so it carries the matrix for /work.
+      'the thirteenth channel draws its board from the snapshot the daemon returned, states how much of it it is showing, and offers a command only where the recorded state allows one',
+    overrides: { '/api/work/snapshot': { status: 200, body: SNAPSHOT } },
+    // A dense ruled board across five stage groups is exactly the shape that
+    // traps content in a collapsed scroller at 400% zoom, so this surface
+    // carries the matrix for /work.
     matrix: true,
     assert: async (page) => {
       expectEqual(
         (await page.locator('[data-work-authority]').getAttribute('data-work-authority')) ?? '',
-        'uncontracted',
+        'read',
         'the Work authority reading',
       );
-      await expectVisibleText(
-        page,
-        'No generated Work read model is available in this build.',
-        'the contract-gate sentence',
+      await expectVisibleText(page, 'Publish the read model', 'a task the snapshot returned');
+
+      // Every task the fixture supplied must be on the board. A board that
+      // dropped one would still look plausible.
+      const drawn = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-work-task]')).map(
+          (row) => row.getAttribute('data-work-task') ?? '',
+        ),
       );
-      // Per row, not per page: a ledger that lost one row's state would still
-      // pass a page-level check for "some unsupported chip is present".
-      const rows = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('[data-work-surface]')).map((row) => ({
-          id: row.getAttribute('data-work-surface') ?? '',
-          state: row.querySelector('[data-state]')?.getAttribute('data-state') ?? '',
-          requires: (row.querySelector('td .td-value')?.textContent ?? '').trim(),
-          detail: (row.querySelector('[data-state]')?.textContent ?? '').trim(),
-        })),
+      const expected = [
+        'task.parse',
+        'task.index',
+        'task.resolve',
+        'task.compact',
+        'task.publish',
+      ];
+      for (const taskId of expected) {
+        if (!drawn.includes(taskId)) {
+          throw new Error(`FALSIFIED: the board omits ${taskId}, drawing ${JSON.stringify(drawn)}`);
+        }
+      }
+      if (drawn.length !== expected.length) {
+        throw new Error(
+          `FALSIFIED: the board drew ${drawn.length} tasks from a snapshot of ${expected.length}`,
+        );
+      }
+
+      // Each stage group is present, so an empty stage reads as empty rather
+      // than as a stage this build does not know about.
+      const stages = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-work-stage]')).map(
+          (group) => group.getAttribute('data-work-stage') ?? '',
+        ),
       );
-      if (rows.length === 0) throw new Error('Work rendered no withheld surfaces at all');
-      // The task-activity row is the one surface this build genuinely consumes:
-      // the daemon emits the family and the dashboard subscribes to it, with no
-      // projection to refetch, which is a partial rather than an absence. Pinned
-      // by id and by count so the allowance cannot spread — any other row going
-      // partial means a projection started claiming half-read data.
-      const partial = rows.filter((row) => row.state === 'partial');
-      if (partial.length !== 1 || partial[0]?.id !== 'task-activity') {
-        throw new Error(
-          `FALSIFIED: partial belongs to the subscribed stream row alone, found ${JSON.stringify(partial)}`,
-        );
+      for (const stage of [
+        'proposal_open',
+        'proposal_accepted',
+        'task_accepted',
+        'execution_admitted',
+        'evidence_terminal',
+      ]) {
+        if (!stages.includes(stage)) throw new Error(`the board omits the ${stage} group`);
       }
-      const unstated = rows.filter(
-        (row) =>
-          row.state !== 'unsupported'
-          && row.state !== 'unsupported_schema'
-          && !(row.id === 'task-activity' && row.state === 'partial'),
-      );
-      if (unstated.length > 0) {
-        throw new Error(
-          `FALSIFIED: a withheld Work surface carries an available state: ${JSON.stringify(unstated)}`,
-        );
-      }
-      // The subscribed row has to say which of the three situations it is in, or
-      // a silent stream and an unreachable one read identically. Matched against
-      // the exact set of allowed readings rather than the word "subscribed":
-      // every branch contains that word, so a regression collapsing all three
-      // into one reading would sail through a `/subscribed/` test.
-      const activity = rows.find((row) => row.id === 'task-activity');
-      if (activity === undefined) {
-        throw new Error('the subscribed stream row is absent from the ledger');
-      }
-      const stated =
-        [
-          'subscribed · stream unreachable',
-          'subscribed · connecting',
-          'subscribed · none in live window',
-        ].some((reading) => activity.detail.includes(reading))
-        || /subscribed · \d+ in live window/.test(activity.detail);
-      if (!stated) {
-        throw new Error(
-          `the subscribed stream row states no known reading: ${JSON.stringify(activity)}`,
-        );
-      }
-      const nameless = rows.filter((row) => row.requires === '');
-      if (nameless.length > 0) {
-        throw new Error(
-          `a withheld surface names no contract, so the gap is unactionable: ${JSON.stringify(nameless)}`,
-        );
-      }
-      // The defect this route is most exposed to. The header's channel number
-      // is a real reading; below it there is nothing measured, nothing to
-      // command, and nowhere to deep-link into.
+
+      // The coverage reading is the claim about completeness. A board without
+      // one is a fraction presented as a whole.
+      await expectVisibleText(page, '5 of 5', 'the coverage reading');
+
+      // The three commands whose inputs no generated contract supplies must be
+      // named as gaps, never drawn as controls that could only fail.
       await expectAbsent(
         page,
-        '[data-work-ledger] [data-cell="numeric"]',
-        'no figure on a surface with nothing to measure',
+        'button:has-text("Attach runtime evidence")',
+        'no control for a command whose inputs this build cannot source',
       );
       await expectAbsent(
         page,
-        '[data-work-ledger] button',
-        'no command offered without a command contract',
+        'button:has-text("Accept proposal")',
+        'no proposal control without a proposal inventory',
       );
-      await expectAbsent(
-        page,
-        '[data-work-ledger] a[href]',
-        'no deep link into a projection that does not exist',
+    },
+  },
+  {
+    id: 'work-unavailable',
+    route: '/work',
+    proves:
+      'a Work runtime that refuses is drawn as the refusal it was, and never as an empty board',
+    overrides: {
+      '/api/work/snapshot': { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+    },
+    assert: async (page) => {
+      await expectVisibleText(page, 'Work runtime is unavailable', 'the refusal reading');
+      // The whole point. An unavailable runtime and a board of zero tasks are
+      // different facts, and the first must not borrow the second's appearance.
+      await expectAbsent(page, '[data-work-board]', 'no board drawn from a refusal');
+      await expectAbsent(page, '[data-work-task]', 'no task drawn from a refusal');
+      expectEqual(
+        (await page.locator('[data-work-authority]').getAttribute('data-work-authority')) ?? '',
+        'unread',
+        'the Work authority reading under refusal',
       );
     },
   },
