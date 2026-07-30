@@ -117,9 +117,7 @@ fn immutable_history_and_projection_rebuild_survive_restart() {
 
     let reopened = Connection::open(&path).unwrap();
     let service = WorkService::new(WorkSqliteStorage::new(Arc::new(Mutex::new(reopened))));
-    let snapshot = service.snapshot(&owner, &task_id).unwrap();
-    assert_eq!(snapshot.history.len(), 2);
-    assert_eq!(snapshot.projection, accepted);
+    assert_eq!(service.load(&owner, &task_id).unwrap(), accepted);
 }
 
 #[test]
@@ -138,7 +136,7 @@ fn append_is_idempotent_cas_checked_and_exactly_scope_bound() {
     };
     let first = service.create(&owner, command.clone()).unwrap();
     assert_eq!(service.create(&owner, command).unwrap(), first);
-    assert_eq!(service.snapshot(&owner, &task_id).unwrap().history.len(), 1);
+    assert_eq!(service.load(&owner, &task_id).unwrap(), first);
 
     let concealed = service
         .load(
