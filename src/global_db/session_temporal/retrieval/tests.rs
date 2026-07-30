@@ -11,13 +11,13 @@ use super::records::*;
 use super::*;
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::db::engine::{Connection, Executor, ReadSnapshot, TestConnection, Value as SqlValue};
-use crate::query::temporal::candidates::CandidateChannel;
-use crate::query::temporal::ports::{
+use tracedecay_temporal_query::candidates::CandidateChannel;
+use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, PageRequest, TemporalAuthorizedRoot, TemporalExecutionSnapshot,
     TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalWatermarks,
 };
-use crate::query::temporal::ranking::RankingCandidate;
-use crate::query::temporal::resolution::{SummarySourceState, ValidatedAuthorization};
+use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
 
 const REQUIRED_SCHEMA_INDEXES: &[&str] = &[
     "idx_session_temporal_generations_session_state",
@@ -2226,7 +2226,8 @@ fn record_query_has_no_offset_or_per_candidate_subqueries() {
 
 #[test]
 fn root_record_query_carries_session_identity_through_hydration() {
-    let scope = crate::query::temporal::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot;
+    let scope =
+        tracedecay_temporal_query::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot;
     let mut candidate = record_candidate();
     candidate.session = Some("session-b".to_string());
     let query = build_record_query(
