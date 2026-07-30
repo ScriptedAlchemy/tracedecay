@@ -1,0 +1,75 @@
+{
+  "binaries": {
+    "baseline_sha256": "81484427366af40e09de3939626d9d71a126bf9e9648caef4f7ff6f96549998d",
+    "treatment_sha256": "4e06349a71afac8e1f25f927ae1196f3f38649704e1e1c9a22ab13f2ee19578a"
+  },
+  "evidence_class": "repeated_raw_samples",
+  "fixture": {
+    "id": "runtime-v2-final",
+    "input_sha256": "80e81b62256384d434d31ea30770d3b1f091065984b9651e45c65d98d45bc582",
+    "same_input": true
+  },
+  "outcome": {
+    "digest_match": true,
+    "error_count": 0,
+    "process_leak_count": 0
+  },
+  "policy": {
+    "journey_margins": {
+      "p50_regression_margin_pct": 15,
+      "p95_regression_margin_pct": 20,
+      "resource_regression_margin_pct": 20
+    },
+    "journey_policy_id": "runtime-journey-margins-v1",
+    "journey_policy_sha256": "6db22e48d7e45a6cc751baaf1ae40e67905aafb5b315157f646a94cf57695d45",
+    "latency_mode": "advisory",
+    "policy_id": "runtime-acceptance-v1",
+    "policy_sha256": "7c74637ac91439e8d04870d322c7e9c9d1d4dc926958c01c475c3c7f37651878"
+  },
+  "report_id": "paired-db9fdc49b2934d2d8b788737cc512cb8",
+  "samples_sha256": "b2776ee1beff35f4cad99c8c3b54530ef1f110f8c1499d1c7781a4fa4642a071",
+  "schedule": "ABBA",
+  "schema_version": 1,
+  "variants": {
+    "baseline": {
+      "latency_ns": {
+        "p50": {
+          "available": true,
+          "minimum_samples": 2,
+          "value": 2133798292
+        },
+        "p95": {
+          "available": false,
+          "minimum_samples": 40,
+          "value": null
+        },
+        "p99": {
+          "available": false,
+          "minimum_samples": 100,
+          "value": null
+        }
+      },
+      "sample_count": 2
+    },
+    "treatment": {
+      "latency_ns": {
+        "p50": {
+          "available": true,
+          "minimum_samples": 2,
+          "value": 1979884870
+        },
+        "p95": {
+          "available": false,
+          "minimum_samples": 40,
+          "value": null
+        },
+        "p99": {
+          "available": false,
+          "minimum_samples": 100,
+          "value": null
+        }
+      },
+      "sample_count": 2
+    }
+  }
+}
