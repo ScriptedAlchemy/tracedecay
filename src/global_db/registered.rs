@@ -24,6 +24,31 @@ pub(crate) struct RegisteredGlobalDb {
     authority: DatabaseAuthority,
 }
 
+pub(crate) struct RegisteredWorkApplicationServicesV1 {
+    commands:
+        tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>,
+    projections: tracedecay_application::WorkProjectionReadService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+}
+
+impl RegisteredWorkApplicationServicesV1 {
+    pub(crate) fn commands(
+        &self,
+    ) -> &tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
+    {
+        &self.commands
+    }
+
+    pub(crate) fn projections(
+        &self,
+    ) -> &tracedecay_application::WorkProjectionReadService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.projections
+    }
+}
+
 impl RegisteredGlobalDb {
     /// Migrates an already-published runtime before validating and exposing
     /// the registered global database facade. No path is reopened.
@@ -245,6 +270,55 @@ impl RegisteredGlobalDb {
             self.runtime.clone(),
             self.authority.clone(),
         )
+    }
+
+    pub(crate) fn work_storage(
+        &self,
+    ) -> crate::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage> {
+        let handle = self
+            .runtime
+            .authorized_migration_sql_handle(self.authority.clone())
+            .map_err(|error| {
+                registered_error("attach registered Work storage", format!("{error:?}"))
+            })?;
+        validate_registered_identity(
+            handle.binding(),
+            handle.verified_locator(),
+            self.runtime.binding(),
+            self.runtime.locator().verified(),
+        )?;
+        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
+    }
+
+    pub(crate) fn work_application_services(
+        &self,
+    ) -> crate::errors::Result<RegisteredWorkApplicationServicesV1> {
+        let storage = self.work_storage()?;
+        Ok(RegisteredWorkApplicationServicesV1 {
+            commands: tracedecay_application::WorkService::new(storage.clone()),
+            projections: tracedecay_application::WorkProjectionReadService::new(storage),
+        })
+    }
+
+    pub(crate) fn work_runtime(
+        &self,
+        authority: tracedecay_domain::WorkAuthority,
+        config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
+        project_root: std::path::PathBuf,
+    ) -> crate::errors::Result<
+        crate::daemon::work_runtime::DaemonWorkRuntimeV1<
+            '_,
+            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        >,
+    > {
+        let storage = self.work_storage()?;
+        Ok(crate::daemon::work_runtime::DaemonWorkRuntimeV1::new(
+            authority,
+            storage,
+            config,
+            self,
+            project_root,
+        ))
     }
 
     pub(crate) fn storage_telemetry_handle(
