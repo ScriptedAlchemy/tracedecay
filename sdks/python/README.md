@@ -15,7 +15,7 @@ response = client.operations.work_snapshot({"page_size": 25})
 snapshot = response.result
 ```
 
-The 17 mounted Work operations expose generated `TypedDict` request/result
+The 18 mounted Work operations expose generated `TypedDict` request/result
 models and runtime schema decoders. The 64 older production routes remain in
 `SERVER_OPERATIONS` for discovery and are explicitly `schema_unavailable` in
 `UNAVAILABLE_OPERATIONS`.

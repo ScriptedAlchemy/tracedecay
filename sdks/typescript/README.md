@@ -3,7 +3,7 @@
 `@tracedecay/sdk` provides generated TypeScript contracts and a strict client
 for TraceDecay's public application API.
 
-The generated callable surface includes the 17 mounted Work operations and the
+The generated callable surface includes the 18 mounted Work operations and the
 cancellation/resumable-stream lifecycle. The 64 older production routes remain
 in `SERVER_OPERATIONS` for discovery with `schema_unavailable`; they are not
 exposed as partially typed methods.
