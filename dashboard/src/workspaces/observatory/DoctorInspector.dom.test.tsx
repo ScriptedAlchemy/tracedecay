@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DoctorEvidenceStateSchema } from '../../contracts/generated.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
 import { saveActiveDoctorOperation } from './doctorModel.ts';
 
@@ -17,6 +18,8 @@ describe('DoctorInspector', () => {
     window.localStorage.clear();
     vi.restoreAllMocks();
   });
+
+  afterEach(() => useScope.getState().selectAllProjects());
 
   it('renders an unavailable Doctor source as unsupported, never empty or healthy', async () => {
     vi.stubGlobal(
@@ -388,6 +391,107 @@ describe('DoctorInspector', () => {
       await screen.findByText(/saved remediation belongs to a different dashboard scope/),
     ).toBeTruthy();
     expect(calls).toEqual(['/api/doctor/findings']);
+  });
+
+  /**
+   * Doctor reads through the project gateway like everything around it.
+   *
+   * It used to request `/api/doctor/findings` unprefixed, which the daemon
+   * answers for whichever project *it* has active. Selecting a project therefore
+   * put one project's diagnosis in this panel and another's in the storage
+   * telemetry beside it and the health dot in the rail, and nothing on screen
+   * said which project the findings belonged to.
+   */
+  it('reads findings in the selected scope rather than the daemon-active project', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_other',
+        label: 'Other project',
+        activation: 'selected',
+      },
+    });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        calls.push(String(input));
+        return jsonResponse(findingsEnvelope());
+      }),
+    );
+
+    renderDoctor();
+    await screen.findByLabelText('Doctor diagnosis');
+
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    expect(calls).toEqual(['/api/projects/proj_other/doctor/findings']);
+  });
+
+  /**
+   * The gateway serves a non-active project's reads and refuses its writes, so
+   * a selected project shows its diagnosis with its controls disabled. Enabling
+   * them would offer a remediation the daemon will refuse — on a control whose
+   * whole purpose is to mutate a store.
+   */
+  it('shows a selected project’s findings with its remediation controls disabled', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_other',
+        label: 'Other project',
+        activation: 'selected',
+      },
+    });
+    const methods: Array<string> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        methods.push(init?.method ?? 'GET');
+        return jsonResponse(findingsEnvelope());
+      }),
+    );
+
+    renderDoctor();
+
+    // The finding itself is on screen: a read-only scope is not a reason to
+    // withhold the diagnosis.
+    expect(await screen.findByText('configuration drift observed')).toBeTruthy();
+    const preview = screen.getByRole<HTMLButtonElement>('button', { name: /Preview/ });
+    const review = screen.getByRole<HTMLButtonElement>('button', {
+      name: /Review remediation/,
+    });
+    expect(preview.disabled).toBe(true);
+    expect(review.disabled).toBe(true);
+
+    const note = document.querySelector('[data-scope-writability]');
+    expect(note?.getAttribute('data-scope-writability')).toBe('read_only');
+    expect(note?.textContent).toContain('Switch scope to the active project');
+
+    // A preview is a POST, so it is a write to the gateway and must not have
+    // been sent — the disabled button is not the only guard, but nothing tried.
+    expect(methods.filter((method) => method !== 'GET')).toEqual([]);
+  });
+
+  it('names the target of a remediation the active scope does accept', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_active',
+        label: 'Active project',
+        activation: 'active',
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(findingsEnvelope())));
+
+    renderDoctor();
+    await screen.findByText('configuration drift observed');
+
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', { name: /Preview/ }).disabled,
+    ).toBe(false);
+    const note = document.querySelector('[data-scope-writability]');
+    expect(note?.getAttribute('data-scope-writability')).toBe('writable');
+    expect(note?.textContent).toBe('Remediations apply to Active project.');
   });
 });
 

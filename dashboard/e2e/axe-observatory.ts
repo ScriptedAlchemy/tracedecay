@@ -74,13 +74,19 @@ const DOCTOR_EVIDENCE_STATES = DoctorEvidenceStateSchema.options.map((option) =>
  * translucent chip is read against what shows through, not against the chip's
  * declared colour.
  */
-const BADGE_CONTRAST_PROBE = `(() => {
-  // Resolve through a canvas rather than by parsing the string. The theme is
-  // authored in \`oklch()\` and Chromium serializes those computed values in
-  // their own colour space, so a naive "grab the first three numbers" parse
-  // reads L, C and H as if they were 8-bit RGB — which scored every badge at
-  // 1.39:1 regardless of state while axe's own rule reported no violation.
-  // The 2d context converts any CSS colour to sRGB bytes for us.
+/**
+ * Contrast measurement, shared by every probe below.
+ *
+ * Colours resolve through a canvas rather than by parsing the string. The theme
+ * is authored in `oklch()` and Chromium serializes those computed values in
+ * their own colour space, so a naive "grab the first three numbers" parse reads
+ * L, C and H as if they were 8-bit RGB — which scored every badge at 1.39:1
+ * regardless of state while axe's own rule reported no violation. The 2d
+ * context converts any CSS colour to sRGB bytes for us.
+ *
+ * Defines `parse`, `lum`, `over`, `backdrop` and `contrast` for the caller.
+ */
+const CONTRAST_PRELUDE = `
   const canvas = document.createElement('canvas');
   canvas.width = 1;
   canvas.height = 1;
@@ -105,20 +111,65 @@ const BADGE_CONTRAST_PROBE = `(() => {
     }
     return [255, 255, 255];
   };
-  return Array.from(document.querySelectorAll('[data-evidence-state]')).map((badge) => {
-    const label = Array.from(badge.querySelectorAll('span')).find(
-      (s) => s.querySelector('span') === null && (s.textContent ?? '').trim() !== '',
-    ) ?? badge;
-    const style = getComputedStyle(label);
-    const bg = backdrop(label);
+  const contrast = (el) => {
+    const style = getComputedStyle(el);
+    const bg = backdrop(el);
     const fgRaw = parse(style.color) ?? [0, 0, 0, 1];
     const fg = fgRaw[3] === 1 ? fgRaw.slice(0, 3) : over(fgRaw, bg);
     const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a);
     return {
-      state: badge.getAttribute('data-evidence-state') ?? '',
-      text: (label.textContent ?? '').trim(),
       fontPx: Number.parseFloat(style.fontSize),
       ratio: Number((((hi + 0.05) / (lo + 0.05))).toFixed(2)),
+    };
+  };
+`;
+
+/**
+ * The scope sentence beside each remediation control, and whether the controls
+ * it explains are actually disabled.
+ *
+ * Measured rather than asserted from the DOM alone, because the failure mode
+ * this guards is a reason rendered too dim to read beside a control that has
+ * been greyed out — which reads as a broken page rather than a scope the daemon
+ * will not accept a write for.
+ */
+const SCOPE_NOTE_PROBE = `(() => {
+  ${CONTRAST_PRELUDE}
+  return Array.from(document.querySelectorAll('[data-scope-writability]')).map((note) => {
+    // The controls this sentence explains: the card or dialog it sits in.
+    const owner = note.closest('div') ?? document.body;
+    const buttons = Array.from(owner.querySelectorAll('button'));
+    return {
+      state: note.getAttribute('data-scope-writability') ?? '',
+      text: (note.textContent ?? '').trim(),
+      disabledControls: buttons.filter((button) => button.disabled).length,
+      ...contrast(note),
+    };
+  });
+})()`;
+
+interface ScopeNote {
+  state: string;
+  text: string;
+  disabledControls: number;
+  fontPx: number;
+  ratio: number;
+}
+
+const BADGE_CONTRAST_PROBE = `(() => {
+  ${CONTRAST_PRELUDE}
+  return Array.from(document.querySelectorAll('[data-evidence-state]')).map((badge) => {
+    // The innermost element carrying the label text, or the badge itself when
+    // the label is a bare child of it — which is how the defective version
+    // rendered, and the case that has to reach the measurement rather than
+    // stopping short of it.
+    const label = Array.from(badge.querySelectorAll('span')).find(
+      (s) => s.querySelector('span') === null && (s.textContent ?? '').trim() !== '',
+    ) ?? badge;
+    return {
+      state: badge.getAttribute('data-evidence-state') ?? '',
+      text: (label.textContent ?? '').trim(),
+      ...contrast(label),
     };
   });
 })()`;
@@ -196,6 +247,72 @@ export const OBSERVATORY_SCENARIOS: readonly Scenario[] = [
         'five of seven finding families were consulted',
         "the report's own coverage statement",
       );
+    },
+  },
+  {
+    id: 'observatory-doctor-read-only-scope',
+    // A deep link into a project the fixture registry does not name active
+    // (`active_project_id` is `tracedecay`), so the scope resolves to
+    // `selected` and the gateway would serve this project read-only. The
+    // reconciliation runs against the real `/api/projects` payload rather than
+    // an override, so the state under audit is one the product can reach.
+    route: '/observatory?scope=other-project&scopeLabel=Other%20project',
+    proves:
+      'a read-only scope shows the diagnosis with its remediation controls disabled, and the reason stays legible rather than being carried by the greying alone',
+    overrides: {},
+    matrix: true,
+    assert: async (page) => {
+      // The finding is still on screen: a scope that refuses writes is not a
+      // reason to withhold what Doctor observed.
+      await expectVisibleText(
+        page,
+        'five of seven finding families were consulted',
+        "the report's coverage statement under a read-only scope",
+      );
+
+      const notes = (await page.evaluate(SCOPE_NOTE_PROBE)) as ScopeNote[];
+      if (notes.length === 0) {
+        throw new Error(
+          'FALSIFIED: a read-only scope rendered no scope sentence, so every disabled control on this page is unexplained',
+        );
+      }
+      const wrongState = notes.filter((note) => note.state !== 'read_only');
+      if (wrongState.length > 0) {
+        throw new Error(
+          `FALSIFIED: a project the registry does not name active must read as read_only, not ${wrongState
+            .map((note) => note.state)
+            .join(', ')}`,
+        );
+      }
+      // The remedy has to be in the words. A disabled control whose sentence
+      // does not say how to enable it is indistinguishable from a broken one.
+      const silent = notes.filter(
+        (note) => !note.text.includes('Switch scope to the active project'),
+      );
+      if (silent.length > 0) {
+        throw new Error(
+          `FALSIFIED: the refusal names no remedy: ${silent.map((n) => n.text).join(' | ')}`,
+        );
+      }
+      console.log(
+        `[axe] doctor read-only scope notes: ${notes
+          .map((note) => `${note.ratio}:1 at ${note.fontPx}px, disabled=${note.disabledControls}`)
+          .join('; ')}`,
+      );
+      const dim = notes.filter((note) => note.ratio < (note.fontPx >= 24 ? 3 : 4.5));
+      if (dim.length > 0) {
+        throw new Error(
+          `FALSIFIED: the reason a control is disabled is itself below WCAG AA: ${dim
+            .map((note) => `${note.ratio}:1 at ${note.fontPx}px`)
+            .join(', ')}`,
+        );
+      }
+      // The sentence is worthless if the control it explains is still live.
+      if (notes.every((note) => note.disabledControls === 0)) {
+        throw new Error(
+          'FALSIFIED: the page states the scope is read-only while offering every remediation control, so it invites a write the gateway will refuse',
+        );
+      }
     },
   },
   {
