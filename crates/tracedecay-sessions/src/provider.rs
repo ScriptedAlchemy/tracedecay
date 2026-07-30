@@ -58,10 +58,14 @@ impl SessionProvider {
         }
     }
 
+    /// Whether this provider emits the canonical observation contract used by
+    /// host admission. Vibe remains transcript-only.
     pub const fn supports_host_admission(self) -> bool {
-        true
+        !matches!(self, Self::Vibe)
     }
 
+    /// Whether this provider's driver scans every destination store in one pass,
+    /// so a per-destination catch-up loop must skip it once user ingestion ran.
     pub const fn scans_all_destinations(self) -> bool {
         matches!(self, Self::Hermes)
     }
@@ -149,6 +153,24 @@ mod tests {
     fn provider_ids_round_trip() {
         for provider in SessionProvider::ALL {
             assert_eq!(SessionProvider::parse(provider.id()), Some(provider));
+        }
+    }
+
+    #[test]
+    fn provider_capabilities_match_runtime_boundaries() {
+        for provider in SessionProvider::ALL {
+            assert_eq!(
+                provider.supports_host_admission(),
+                provider != SessionProvider::Vibe,
+                "{} host-admission capability",
+                provider.id()
+            );
+            assert_eq!(
+                provider.scans_all_destinations(),
+                provider == SessionProvider::Hermes,
+                "{} destination-scan capability",
+                provider.id()
+            );
         }
     }
 
