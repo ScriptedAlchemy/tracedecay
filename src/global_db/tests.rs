@@ -35,6 +35,10 @@ async fn registered_mount_publishes_complete_migrated_schema() {
     super::schema_contract::validate_authority_schema_contract(&snapshot)
         .await
         .expect("registered runtime must publish the complete authority schema");
+    assert!(
+        table_exists(&harness.registered, "authorized_scope_sets_v1").await,
+        "registered runtime omitted canonical scope-set CAS schema"
+    );
 
     for (table, column) in [
         ("code_projects", "primary_root_platform"),

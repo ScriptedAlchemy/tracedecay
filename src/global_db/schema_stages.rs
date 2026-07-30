@@ -11,6 +11,7 @@ use super::{
     observation_projection, project_registry, session_temporal,
 };
 use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
 
 const REGISTRY_SCHEMA: &str = "
@@ -282,6 +283,12 @@ pub(crate) async fn ensure_registered_schema_for_admission(
             .execute_batch(WORK_SCHEMA_V1)
             .await
             .map_err(|error| global_db_operation_error("initialize Work schema", error))?;
+        transaction
+            .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize authorized scope-set schema", error)
+            })?;
         ensure_session_parent_columns(&transaction)
             .await
             .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
