@@ -344,6 +344,11 @@ export function browseLane<T>(
       return { state: 'unsupported_schema', lane };
     case 'error':
       return { state: 'error', lane, errorCode: null, detail: result.detail };
+    // The transport carried the source's own report of not being able to
+    // serve, which is the state this lane already has for the same condition
+    // arriving inside a 200 envelope.
+    case 'unavailable':
+      return { state: 'unavailable', lane, errorCode: result.status, detail: result.reason };
     default: {
       const exhaustive: never = result;
       return exhaustive;

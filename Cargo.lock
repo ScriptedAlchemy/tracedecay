@@ -5481,6 +5481,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracedecay-application",
+ "tracedecay-domain",
  "tracedecay-tool-catalog",
 ]
 
@@ -5660,11 +5661,13 @@ name = "tracedecay-rusqlite-runtime"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracedecay-application",
  "tracedecay-domain",

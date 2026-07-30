@@ -15,8 +15,15 @@ import { z } from 'zod';
  * dashboard does not know which of the other two this is — and must not guess,
  * in either direction: guessing `active` offers a write that will be refused,
  * guessing `selected` withdraws one that would have worked.
+ *
+ * `absent` is the registry having answered that it holds no such project —
+ * `GET /api/projects/{id}` replying 404 `not_found`. It is separate from
+ * `unresolved` because the two say opposite things about what is known: one is
+ * a pending read, the other a completed one, and a stale deep link that
+ * reported "not checked yet" forever would never tell its reader why nothing
+ * on the page ever resolved.
  */
-export type ProjectActivation = 'active' | 'selected' | 'unresolved';
+export type ProjectActivation = 'active' | 'selected' | 'unresolved' | 'absent';
 
 /** Dashboard-wide scope (plan 11a all-projects-first model): every workspace
  * renders the all-projects aggregate until a specific project is selected.
@@ -30,32 +37,45 @@ export type DashboardScope =
       activation: ProjectActivation;
     };
 
-/** A project as the registry lists it: the id the dashboard routes by, and the
- * label that id is actually called. */
-export interface RegistryProject {
-  projectId: string;
-  label: string;
-}
-
 /**
- * What the project registry said, both about which project is active and about
- * what the listed projects are called.
+ * What the registry established about the *selected* project.
  *
- * `measured` with a null id is a real answer — the daemon has no active
- * project — and is different from `unknown`, which is the registry declining
- * to answer at all. Folding the second into the first would turn an unread
- * registry into a confident "this project is not active", which is the false
- * negative this union exists to prevent.
+ * Two facts, each separately measurable, and each `null` when the answer did
+ * not carry it. That shape is the fix for a specific defect: reconciliation
+ * used to search the `/api/projects` listing, which the daemon truncates to a
+ * page (100 by default, 250 at most). A selected project past the end of that
+ * page is missing from the response for a reason that has nothing to do with
+ * whether it exists, and treating it as absent replaced a perfectly good label
+ * with a raw id and announced "not in registry" about a project that was in the
+ * registry. Nothing here can express absence, so nothing can infer it from a
+ * page — the reading is sourced from `GET /api/projects/{id}`, which answers
+ * about one project and is bounded no matter how many are registered.
  *
- * `projects` rides along because the same read settles both facts, and a scope
- * reconciled against one of them but not the other would route by a canonical
- * id while calling it by whatever name the URL supplied.
+ * `unknown` is the registry declining to answer. Folding it into `measured`
+ * would turn an unread registry into a confident "this project is not active",
+ * which is the false negative this union exists to prevent.
+ *
+ * `absent` is the opposite risk, and needs its own state for the same reason:
+ * the bounded lookup answering 404 `not_found` is a real measurement — this id
+ * is not registered — and collapsing it into `unknown` would leave a dead deep
+ * link resolving forever.
  */
 export type RegistryReading =
   | {
       state: 'measured';
-      activeProjectId: string | null;
-      projects: readonly RegistryProject[];
+      /** The canonical label, or `null` when the answer carried no project
+       * record — unconfirmed, which is not the same as contradicted. */
+      label: string | null;
+      /** Whether this is the active project, or `null` when the answer did not
+       * say. The daemon computes it against the same `active_project_id` that
+       * decides whether the gateway accepts a write. */
+      isActive: boolean | null;
+    }
+  | {
+      state: 'absent';
+      /** The registry's own `error` sentence, when it sent one. Carried rather
+       * than reworded so the surface repeats the daemon's account. */
+      reason: string | null;
     }
   | { state: 'unknown' };
 
@@ -68,10 +88,16 @@ interface ScopeState {
   reconcileScope: (reading: RegistryReading) => void;
 }
 
-export function activationFor(projectId: string, reading: RegistryReading): ProjectActivation {
+export function activationFor(reading: RegistryReading): ProjectActivation {
   switch (reading.state) {
     case 'measured':
-      return reading.activeProjectId === projectId ? 'active' : 'selected';
+      // `null` is the registry not saying. It is not a no: answering `selected`
+      // here would withdraw a write the gateway would have accepted, on the
+      // strength of a field the daemon left out.
+      if (reading.isActive === null) return 'unresolved';
+      return reading.isActive ? 'active' : 'selected';
+    case 'absent':
+      return 'absent';
     case 'unknown':
       return 'unresolved';
     default: {
@@ -87,28 +113,24 @@ export function activationFor(projectId: string, reading: RegistryReading): Proj
  * A deep link's `scopeLabel` is an unverified claim: it can be stale from
  * before a rename, or simply be whatever text was pasted next to a real
  * project id. It is a display string that reaches prose about what a write
- * will affect, so once the registry has answered, its entry is the label —
- * anything else lets a URL choose the name the dashboard uses for a project it
+ * will affect, so once the registry has named the project, that name is the
+ * label — anything else lets a URL choose what the dashboard calls a project it
  * is about to write to.
  *
- * Two cases are deliberately not the same:
- *
- *   the registry did not answer, so the URL label is all there is and is kept
- *   as the best available name; and
- *
- *   the registry answered and does not list this id, so the claimed label has
- *   been contradicted rather than merely unconfirmed. Keeping it would state a
- *   name no authority backs, so the id — which is at least what the dashboard
- *   routes by — stands in for it.
+ * Short of a name from the registry, the claim stands. It is the only name
+ * available, and substituting a raw id would be a correction in its own right —
+ * asserted on no measurement, and (because corrections propagate to the address
+ * bar) written back over a label that may well have been right.
  */
-export function reconciledLabel(
-  projectId: string,
-  claimed: string,
-  reading: RegistryReading,
-): string {
+export function reconciledLabel(claimed: string, reading: RegistryReading): string {
   switch (reading.state) {
     case 'measured':
-      return reading.projects.find((p) => p.projectId === projectId)?.label ?? projectId;
+      return reading.label ?? claimed;
+    // The registry holds no project under this id, so it has no name to offer
+    // in place of the claim. The claim is left standing — it is the only thing
+    // that identifies the link its reader followed — and `absent` activation is
+    // what says the name belongs to nothing.
+    case 'absent':
     case 'unknown':
       return claimed;
     default: {
@@ -128,11 +150,10 @@ export const useScope = create<ScopeState>((set) => ({
   reconcileScope: (reading) =>
     set((state) => {
       if (state.scope.kind !== 'project') return state;
-      const { projectId, label } = state.scope;
       const next = {
         ...state.scope,
-        label: reconciledLabel(projectId, label, reading),
-        activation: activationFor(projectId, reading),
+        label: reconciledLabel(state.scope.label, reading),
+        activation: activationFor(reading),
       };
       // Identity-stable when nothing moved. Every consumer selects the scope
       // object, and this runs on each registry read, so returning a fresh one
@@ -188,6 +209,14 @@ export function scopeWritable(scope: DashboardScope): ScopeWritability {
           return {
             state: 'unknown',
             reason: `Whether ${scope.label} accepts writes is not known yet: this scope came from a link and has not been checked against the project registry.`,
+          };
+        // Refused before dispatch, not left unknown: the registry answered,
+        // and a write against an id it does not hold cannot be accepted by
+        // the gateway that would have to route it.
+        case 'absent':
+          return {
+            state: 'read_only',
+            reason: `The project registry holds no project with id ${scope.projectId}, so there is nothing here to write to. This scope came from a link that names a project that has been removed or never existed — switch to a registered project.`,
           };
         default: {
           const exhaustive: never = scope.activation;
@@ -261,4 +290,27 @@ export function scopedUrl(scope: DashboardScope, url: string): string {
  * discard every cached read the moment the registry resolved. */
 export function scopeKey(scope: DashboardScope): string {
   return scope.kind === 'project' ? `project:${scope.projectId}` : 'all';
+}
+
+/** The token for a request that carries no project at all. */
+export const UNSCOPED_CACHE_KEY = 'unscoped';
+
+/**
+ * Cache-key token for one REQUEST, which is not always the token for the scope
+ * it was made under.
+ *
+ * `/api/projects` and `/api/dashboard` are never rewritten — the registry is
+ * the thing that lists projects, and the chrome is above all of them — so the
+ * same URL is fetched under every scope. Keying those by scope anyway split one
+ * answer into a cache entry per project: switching project refetched a listing
+ * that had not changed, four surfaces reading the registry each held their own
+ * copy of it, and an entry warmed under one scope was invisible under the next.
+ *
+ * Derived by asking `scopedUrl` what it would do rather than re-listing the
+ * unscoped prefixes here. The two cannot then disagree, and a route added to
+ * that list is keyed correctly without anyone remembering this function
+ * exists.
+ */
+export function requestScopeKey(scope: DashboardScope, url: string): string {
+  return scopedUrl(scope, url) === url ? UNSCOPED_CACHE_KEY : scopeKey(scope);
 }

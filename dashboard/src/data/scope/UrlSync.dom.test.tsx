@@ -4,9 +4,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { ScopeUrlSync } from './UrlSync.tsx';
 import { scopeWritable, useScope, type RegistryReading } from './store.ts';
 
-/** A measured registry answer naming one project. */
-function measured(activeProjectId: string, label = `label-${activeProjectId}`): RegistryReading {
-  return { state: 'measured', activeProjectId, projects: [{ projectId: activeProjectId, label }] };
+/** A measured answer about the selected project: its canonical name, and whether
+ * it is the active one. */
+function measured(label: string, isActive = true): RegistryReading {
+  return { state: 'measured', label, isActive };
 }
 
 let currentSearch = '';
@@ -61,7 +62,7 @@ describe('ScopeUrlSync', () => {
     await waitFor(() =>
       expect(useScope.getState().scope).toMatchObject({ projectId: 'proj_abc' }),
     );
-    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'tracedecay')));
+    act(() => useScope.getState().reconcileScope(measured('tracedecay')));
     expect(scopeWritable(useScope.getState().scope).state).toBe('writable');
 
     act(() => setSearch('scope=proj_abc&scopeLabel=tracedecay&window=7d'));
@@ -80,7 +81,7 @@ describe('ScopeUrlSync', () => {
     await waitFor(() =>
       expect(useScope.getState().scope).toMatchObject({ label: 'Stale Bookmark Name' }),
     );
-    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'Canonical Name')));
+    act(() => useScope.getState().reconcileScope(measured('Canonical Name')));
     expect(useScope.getState().scope).toMatchObject({
       label: 'Canonical Name',
       activation: 'active',
@@ -106,7 +107,7 @@ describe('ScopeUrlSync', () => {
     await waitFor(() =>
       expect(useScope.getState().scope).toMatchObject({ label: 'Stale Bookmark Name' }),
     );
-    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'Canonical Name')));
+    act(() => useScope.getState().reconcileScope(measured('Canonical Name')));
     await waitFor(() => expect(currentSearch).toContain('scopeLabel=Canonical+Name'));
     expect(currentSearch).toContain('scope=proj_abc');
     // Corrected, not duplicated.
@@ -118,7 +119,7 @@ describe('ScopeUrlSync', () => {
     await waitFor(() =>
       expect(useScope.getState().scope).toMatchObject({ projectId: 'proj_abc' }),
     );
-    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'tracedecay')));
+    act(() => useScope.getState().reconcileScope(measured('tracedecay')));
 
     act(() => setSearch('scope=proj_other&scopeLabel=other'));
     await waitFor(() =>

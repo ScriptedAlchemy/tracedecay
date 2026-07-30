@@ -309,6 +309,7 @@ where
         let result_id = diagnostic_result_id(
             self.lifecycle.gateway.workspace().scope_set_digest(),
             root.scope_digest(),
+            self.lifecycle.gateway.workspace().root_ordinal(root),
             generation,
             version,
         );

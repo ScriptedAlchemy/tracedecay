@@ -284,6 +284,11 @@ class TraceDecayClient:
         url = self._lifecycle_url(operation_id, "cancel")
         status, value = self._json_request(url, method="POST")
         if value.get("kind") == "problem":
+            if status < 400:
+                raise TraceDecayProtocolError(
+                    "daemon returned a problem with a successful HTTP status",
+                    status=status,
+                )
             raise TraceDecayProblemError(
                 status, _object(value.get("value"), "cancellation problem")
             )

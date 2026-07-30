@@ -4,11 +4,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
-import { useLegacy } from '../../data/query/useLegacy.ts';
-import { useScope } from '../../data/scope/store.ts';
-import {
-  ProjectsPayloadSchema,
-} from '../../contracts/wire.ts';
+import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
+import { activationFor, useScope } from '../../data/scope/store.ts';
 
 interface PaletteEntry {
   id: string;
@@ -36,12 +33,10 @@ export function CommandPalette({
   // Entities: registered projects become scope-setting results. Fetched only
   // while the palette is open; a failed registry read simply yields no
   // project rows (workspace navigation never depends on it).
-  const projects = useLegacy(
-    ['palette', 'projects'],
-    '/api/projects?limit=100',
-    ProjectsPayloadSchema,
-    { enabled: open },
-  );
+  // The shared registry read, so opening the palette on a surface that already
+  // listed the registry costs nothing, and so a registry change invalidates this
+  // too — it used to have a private key that no event named.
+  const projects = useProjectRegistry({ enabled: open });
 
   const entries = useMemo<PaletteEntry[]>(() => {
     const workspaceEntries = WORKSPACES.map((w) => ({
@@ -61,7 +56,21 @@ export function CommandPalette({
               label: project.label,
               hint: `project · ${group.label}`,
               action: () => {
-                selectProject(project.project_id, project.label);
+                // The listing already measured `is_active`, against the same
+                // `active_project_id` the gateway accepts writes on, so the
+                // pick starts from that answer instead of `unresolved`. It is
+                // read through the shared authority rather than compared here,
+                // so a row that omits the field stays unresolved — the daemon
+                // marks it optional, and absent is not "no".
+                selectProject(
+                  project.project_id,
+                  project.label,
+                  activationFor({
+                    state: 'measured',
+                    label: project.label,
+                    isActive: project.is_active ?? null,
+                  }),
+                );
                 navigate('/brain');
                 onOpenChange(false);
               },

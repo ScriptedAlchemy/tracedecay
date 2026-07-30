@@ -30,7 +30,8 @@ use tracedecay_application::{
     WorkAttemptCancelRequestV1, WorkAttemptPublishArtifactRequestV1,
     WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkAttemptFinishRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 
@@ -73,6 +74,7 @@ pub enum WorkOperation {
     AttemptPublishArtifact,
     AttemptCancel,
     AttemptRecover,
+    AttemptFinish,
     AttemptTerminalize,
 }
 
@@ -91,7 +93,7 @@ impl WorkOperation {
     ];
 
     /// The attempt-runtime operations, in mounted order.
-    pub const ATTEMPT: [Self; 8] = [
+    pub const ATTEMPT: [Self; 9] = [
         Self::AttemptAcquireLease,
         Self::AttemptRenewLease,
         Self::AttemptStart,
@@ -99,11 +101,12 @@ impl WorkOperation {
         Self::AttemptPublishArtifact,
         Self::AttemptCancel,
         Self::AttemptRecover,
+        Self::AttemptFinish,
         Self::AttemptTerminalize,
     ];
 
     /// Every mounted Work operation.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Snapshot,
         Self::Delta,
         Self::Create,
@@ -120,6 +123,7 @@ impl WorkOperation {
         Self::AttemptPublishArtifact,
         Self::AttemptCancel,
         Self::AttemptRecover,
+        Self::AttemptFinish,
         Self::AttemptTerminalize,
     ];
 
@@ -142,6 +146,7 @@ impl WorkOperation {
             Self::AttemptPublishArtifact => "attempt_publish_artifact",
             Self::AttemptCancel => "attempt_cancel",
             Self::AttemptRecover => "attempt_recover",
+            Self::AttemptFinish => "attempt_finish",
             Self::AttemptTerminalize => "attempt_terminalize",
         }
     }
@@ -170,6 +175,7 @@ impl WorkOperation {
             Self::AttemptPublishArtifact => "operation.work.attempt_publish_artifact",
             Self::AttemptCancel => "operation.work.attempt_cancel",
             Self::AttemptRecover => "operation.work.attempt_recover",
+            Self::AttemptFinish => "operation.work.attempt_finish",
             Self::AttemptTerminalize => "operation.work.attempt_terminalize",
         }
     }
@@ -193,6 +199,7 @@ impl WorkOperation {
             Self::AttemptPublishArtifact => "publish-artifact",
             Self::AttemptCancel => "cancel",
             Self::AttemptRecover => "recover",
+            Self::AttemptFinish => "finish",
             Self::AttemptTerminalize => "terminalize",
         }
     }
@@ -215,6 +222,7 @@ impl WorkOperation {
             | Self::AttemptPublishArtifact
             | Self::AttemptCancel
             | Self::AttemptRecover
+            | Self::AttemptFinish
             | Self::AttemptTerminalize => WorkOperationFamily::Attempt,
         }
     }
@@ -247,6 +255,7 @@ impl WorkOperation {
                 Self::AttemptPublishArtifact => "/work/attempt/publish-artifact",
                 Self::AttemptCancel => "/work/attempt/cancel",
                 Self::AttemptRecover => "/work/attempt/recover",
+                Self::AttemptFinish => "/work/attempt/finish",
                 Self::AttemptTerminalize => "/work/attempt/terminalize",
                 _ => unreachable!(),
             },
@@ -273,6 +282,7 @@ impl WorkOperation {
             Self::AttemptPublishArtifact => "/application/work/attempt/publish-artifact",
             Self::AttemptCancel => "/application/work/attempt/cancel",
             Self::AttemptRecover => "/application/work/attempt/recover",
+            Self::AttemptFinish => "/application/work/attempt/finish",
             Self::AttemptTerminalize => "/application/work/attempt/terminalize",
         }
     }
@@ -312,6 +322,7 @@ impl WorkOperation {
             Self::AttemptPublishArtifact => schema_name::<WorkAttemptPublishArtifactRequestV1>(),
             Self::AttemptCancel => schema_name::<WorkAttemptCancelRequestV1>(),
             Self::AttemptRecover => schema_name::<WorkAttemptRecoverRequestV1>(),
+            Self::AttemptFinish => schema_name::<WorkAttemptFinishRequestV1>(),
             Self::AttemptTerminalize => schema_name::<WorkAttemptTerminalizeRequestV1>(),
         }
     }
@@ -335,6 +346,7 @@ impl WorkOperation {
             | Self::AttemptPublishArtifact
             | Self::AttemptCancel
             | Self::AttemptRecover
+            | Self::AttemptFinish
             | Self::AttemptTerminalize => schema_name::<WorkAttemptResponseV1>(),
         }
     }

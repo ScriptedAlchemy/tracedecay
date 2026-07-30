@@ -209,3 +209,164 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
         "the refresh lands whole after the sweep rather than interleaving with it"
     );
 }
+
+/// Registry liveness must resolve the whole identity — aliases, the shared git
+/// common directory, and registered store instances — before an unreviewed
+/// pass retires a row. Deleting `code_projects` cascades those rows away, so a
+/// roots-only check silently destroys a live project's registration.
+mod liveness {
+    use std::path::{Path, PathBuf};
+
+    use crate::global_db::{
+        CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
+        StoreInstanceRecord,
+    };
+    use crate::migrate::registry::{
+        RootLivenessV1, StaleRootScope, code_project_root_exists, probe_root,
+        project_context_liveness, stale_project_contexts,
+    };
+
+    const GONE: &str = "/definitely/not/here/retired-checkout";
+
+    fn project(canonical_root: &str) -> CodeProjectRecord {
+        CodeProjectRecord {
+            project_id: "proj_live".to_string(),
+            canonical_root: canonical_root.to_string(),
+            display_root: canonical_root.to_string(),
+            git_common_dir: None,
+            git_remote_url: None,
+            default_branch: None,
+            created_at: 0,
+            last_seen_at: 0,
+        }
+    }
+
+    fn context(project: CodeProjectRecord) -> ProjectRegistryContext {
+        ProjectRegistryContext {
+            project,
+            aliases: Vec::new(),
+            stores: Vec::new(),
+        }
+    }
+
+    fn store_context() -> ProjectStoreContext {
+        ProjectStoreContext {
+            store: StoreInstanceRecord {
+                store_id: "store_live".to_string(),
+                project_id: "proj_live".to_string(),
+                store_kind: "graph".to_string(),
+                storage_mode: "profile_sharded".to_string(),
+                store_relpath: "stores/live".to_string(),
+                manifest_relpath: None,
+                created_at: 0,
+                last_verified_at: None,
+                last_write_at: None,
+            },
+            graph_scopes: Vec::new(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn live_dir() -> PathBuf {
+        std::env::current_dir().unwrap()
+    }
+
+    #[test]
+    fn a_live_alias_keeps_the_identity_live() {
+        let mut ctx = context(project(GONE));
+        ctx.aliases.push(ProjectAliasRecord {
+            alias_path: live_dir().to_string_lossy().into_owned(),
+            project_id: "proj_live".to_string(),
+            last_seen_at: 0,
+        });
+
+        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
+        assert!(
+            stale_project_contexts(
+                std::slice::from_ref(&ctx),
+                &[],
+                StaleRootScope::AllRootsMissing
+            )
+            .is_empty(),
+            "a project with a live alias must never be a GC candidate"
+        );
+    }
+
+    #[test]
+    fn a_registered_store_instance_keeps_the_identity_live() {
+        let mut ctx = context(project(GONE));
+        ctx.stores.push(store_context());
+
+        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
+        assert!(
+            stale_project_contexts(
+                std::slice::from_ref(&ctx),
+                &[],
+                StaleRootScope::AllRootsMissing
+            )
+            .is_empty(),
+            "deleting this row would cascade its live store instance away"
+        );
+    }
+
+    #[test]
+    fn a_live_git_common_dir_keeps_a_linked_worktree_identity_live() {
+        let mut record = project(GONE);
+        record.git_common_dir = Some(live_dir().to_string_lossy().into_owned());
+        let ctx = context(record);
+
+        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
+        assert!(
+            stale_project_contexts(
+                std::slice::from_ref(&ctx),
+                &[],
+                StaleRootScope::AllRootsMissing
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_root_proven_absent_is_still_a_candidate() {
+        let ctx = context(project(GONE));
+
+        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Absent);
+        assert_eq!(
+            stale_project_contexts(
+                std::slice::from_ref(&ctx),
+                &[],
+                StaleRootScope::AllRootsMissing
+            )
+            .len(),
+            1,
+            "proven absence is the one condition that permits retirement"
+        );
+    }
+
+    #[test]
+    fn an_unverifiable_root_is_never_treated_as_absent() {
+        assert_eq!(probe_root(&live_dir()), RootLivenessV1::Live);
+        assert_eq!(probe_root(Path::new(GONE)), RootLivenessV1::Absent);
+        assert!(!RootLivenessV1::Unverifiable.permits_retirement());
+        assert!(!RootLivenessV1::Live.permits_retirement());
+        assert!(RootLivenessV1::Absent.permits_retirement());
+
+        // Merging keeps the strongest evidence: unverifiable never decays into
+        // absence just because a sibling root was proven gone.
+        assert_eq!(
+            RootLivenessV1::Unverifiable.merge(RootLivenessV1::Absent),
+            RootLivenessV1::Unverifiable
+        );
+        assert_eq!(
+            RootLivenessV1::Unverifiable.merge(RootLivenessV1::Live),
+            RootLivenessV1::Live
+        );
+
+        let mut record = project(GONE);
+        record.git_common_dir = Some(GONE.to_string());
+        assert!(
+            !code_project_root_exists(&record),
+            "a row whose every root is proven absent still reports absent"
+        );
+    }
+}

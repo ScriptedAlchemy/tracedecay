@@ -1588,7 +1588,7 @@ fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
+pub(crate) fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
     let is_absolute = path.is_absolute();
     let mut current = PathBuf::new();
     let mut normal_components = 0usize;

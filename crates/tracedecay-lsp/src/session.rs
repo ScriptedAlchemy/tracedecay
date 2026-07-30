@@ -170,6 +170,10 @@ impl AuthorizedLspWorkspace {
         self.scope_set_digest.as_ref()
     }
 
+    pub fn root_ordinal(&self, root: &AdmittedRoot) -> Option<usize> {
+        self.roots.iter().position(|candidate| candidate == root)
+    }
+
     pub fn resolve_document(
         &self,
         document_uri: &str,
@@ -177,11 +181,19 @@ impl AuthorizedLspWorkspace {
         let mut matches = self
             .roots
             .iter()
-            .filter(|root| root.contains_document(document_uri));
-        let Some(root) = matches.next() else {
+            .filter_map(|root| {
+                root.document_root_depth(document_uri)
+                    .map(|depth| (depth, root))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+        let Some((deepest, root)) = matches.first().copied() else {
             return Err(LspWorkspaceRouteError::OutsideAdmittedRoots);
         };
-        if matches.next().is_some() {
+        if matches
+            .get(1)
+            .is_some_and(|(candidate_depth, _)| *candidate_depth == deepest)
+        {
             return Err(LspWorkspaceRouteError::AmbiguousAdmittedRoots);
         }
         Ok(root)
@@ -1030,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn authorized_workspace_rejects_ambiguous_nested_document_routes() {
+    fn authorized_workspace_routes_nested_documents_to_the_deepest_root() {
         let workspace = AuthorizedLspWorkspace::new(
             Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
             vec![
@@ -1047,8 +1059,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            workspace.resolve_document("file:///repo/nested/src/lib.rs"),
-            Err(LspWorkspaceRouteError::AmbiguousAdmittedRoots)
+            workspace
+                .resolve_document("file:///repo/nested/src/lib.rs")
+                .unwrap()
+                .uri(),
+            "file:///repo/nested"
         );
         assert_eq!(
             workspace.resolve_document("file:///outside/lib.rs"),
@@ -1057,6 +1072,35 @@ mod tests {
         assert!(
             !workspace
                 .admits_exact_root_hints(&["file:///repo".to_owned(), "file:///repo".to_owned(),])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_workspace_rejects_documents_through_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+        let root_uri = url::Url::from_file_path(root.path().canonicalize().unwrap())
+            .unwrap()
+            .to_string();
+        let workspace = AuthorizedLspWorkspace::new(
+            Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
+            vec![AdmittedRoot::authorized(
+                root_uri,
+                ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            )],
+        )
+        .unwrap();
+        let escaped_uri = url::Url::from_file_path(root.path().join("escape/lib.rs"))
+            .unwrap()
+            .to_string();
+
+        assert_eq!(
+            workspace.resolve_document(&escaped_uri),
+            Err(LspWorkspaceRouteError::OutsideAdmittedRoots)
         );
     }
 

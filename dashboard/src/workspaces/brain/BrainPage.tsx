@@ -8,6 +8,7 @@ import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { SignalPanel } from './SignalPanel.tsx';
 import {
@@ -21,7 +22,6 @@ import { ScopedBrain } from './ScopedBrain.tsx';
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
-  ProjectsPayloadSchema,
 } from '../../contracts/wire.ts';
 
 /** Brain. Two surfaces, because the question genuinely changes when a project
@@ -36,7 +36,7 @@ import {
  * which is a different surface entirely (see `ScopedBrain.tsx`). */
 export function BrainPage() {
   const scope = useScope((s) => s.scope);
-  const projects = useLegacy(['projects'], '/api/projects', ProjectsPayloadSchema);
+  const projects = useProjectRegistry();
 
   if (scope.kind === 'project') {
     return <ScopedBrain projectId={scope.projectId} label={scope.label} />;
@@ -46,10 +46,24 @@ export function BrainPage() {
     <LegacyBoundary title="Brain" pending={projects.isPending} result={projects.data}>
       {(data) => {
         switch (data.status) {
+          // Each carries the daemon's own `error`, which is the only part that
+          // says which registry path was expected or what failed to open it.
           case 'missing_registry':
-            return <CenteredState title="Project registry is not configured" kind="unknown" />;
+            return (
+              <CenteredState
+                title="Project registry is not configured"
+                kind="unavailable"
+                detail={data.error ?? undefined}
+              />
+            );
           case 'registry_unavailable':
-            return <CenteredState title="Project registry read failed" kind="error" />;
+            return (
+              <CenteredState
+                title="Project registry read failed"
+                kind="unavailable"
+                detail={data.error ?? undefined}
+              />
+            );
           case 'ok':
             break;
           default:
@@ -61,6 +75,7 @@ export function BrainPage() {
               <CenteredState
                 title={`Project registry reported an unrecognised status: ${data.status}`}
                 kind="unknown"
+                detail={data.error ?? undefined}
               />
             );
         }
@@ -444,9 +459,13 @@ function RepoGroupCard({
       <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
         <FolderGit2 aria-hidden size={14} className="text-text-muted" />
         <h2 className="min-w-0 truncate text-xs font-semibold">{group.label}</h2>
+        {/* Count and noun from the one array this header heads. `project_count`
+          * is set from `projects.len()` in `project_registry.rs`, so preferring
+          * it while pluralising from the array could only ever disagree by
+          * printing "3 project" over one row — a contract drift rendered as a
+          * typo. */}
         <span className="text-2xs text-text-muted">
-          {group.project_count > 0 ? group.project_count : group.projects.length}{' '}
-          {group.projects.length === 1 ? 'project' : 'projects'}
+          {group.projects.length} {group.projects.length === 1 ? 'project' : 'projects'}
         </span>
         <RecencyDot lastSeenAt={latestSeen(group)} className="ml-auto" />
       </header>

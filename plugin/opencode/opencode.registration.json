@@ -11,9 +11,7 @@
         "__TRACEDECAY_BIN__",
         "lsp",
         "bridge",
-        "--stdio",
-        "--project",
-        "."
+        "--stdio"
       ],
       "extensions": [
         ".rs",

@@ -442,9 +442,14 @@ export function WorkspaceHeader({
     // element, so the clipping assertion in `e2e/responsive.ts` can hold all of
     // them to the same invariant — nothing placed here may render outside this
     // element's padding box — without each surface growing a marker of its own.
+    // `min-h-9` rather than `h-9`, and wrapping: at the widths where the line
+    // fits, both render exactly as the fixed height did. Where it does not
+    // fit, a fixed height had no way to be honest — the overflowing child was
+    // painted outside the box and, on `/settings`, 276px of it off-screen. A
+    // header that grows keeps the content it was given.
     <header
       data-workspace-header
-      className="flex h-9 shrink-0 items-center gap-3 border-b border-edge-subtle bg-surface-1 px-3"
+      className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle bg-surface-1 py-1 px-3"
     >
       <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
         {channelNumber(path)}

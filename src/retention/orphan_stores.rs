@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::global_db::RegisteredGlobalDb;
+use crate::migrate::registry::{RootLivenessV1, probe_root};
 
 /// One profile-sharded store observed on disk, paired with the registry
 /// identity that points at it. This is the pure input to classification so the
@@ -34,6 +35,16 @@ pub struct StoreCensusEntry {
     pub canonical_root: PathBuf,
     /// Registry display root, when distinct from the canonical root.
     pub display_root: Option<PathBuf>,
+    /// Git common directory recorded for the project. A linked worktree shares
+    /// it with the primary checkout, so it keeps the identity live.
+    pub git_common_dir: Option<PathBuf>,
+    /// Every registered alias path for the project. Any live alias keeps the
+    /// store live even when the canonical root is gone.
+    pub alias_roots: Vec<PathBuf>,
+    /// Whether the store manifest was read and parsed. A malformed or
+    /// unreadable manifest makes the store's project root unverifiable, never
+    /// "absent".
+    pub manifest_readable: bool,
     /// On-disk store data directory (`profile_root` joined with the store relpath).
     pub data_root: PathBuf,
     /// `project_root` recorded in the store manifest, when the manifest was read.
@@ -49,6 +60,21 @@ pub struct StoreCensusEntry {
     /// Payload mtime and manifest bytes fence collection against revival.
     pub expected_payload_mtime_secs: i64,
     pub expected_manifest_bytes: Option<Vec<u8>>,
+    /// Registered graph-scope database paths, relative to `data_root`. Scopes
+    /// may sit at custom relative paths, so the durable-data check cannot infer
+    /// them from the main graph alone.
+    pub graph_scope_relpaths: Vec<PathBuf>,
+}
+
+/// Why a store's identity could not be resolved either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnverifiableReason {
+    /// A root could not be inspected (permission or I/O failure), so absence
+    /// was never proven.
+    RootInspectionFailed,
+    /// The store manifest was missing, unreadable, or malformed, so the store's
+    /// own record of its project root could not be trusted.
+    ManifestUnreadable,
 }
 
 /// What should happen to a store, decided purely from its census entry.
@@ -59,8 +85,11 @@ pub enum StoreDisposition {
     /// The registry roots are gone but the manifest points at a different,
     /// currently-live root: the repository moved. Re-link, never collect.
     Relinkable { live_root: PathBuf },
-    /// No live repository root resolves to this identity. Eligible for
-    /// collection once older than the retention window.
+    /// Liveness could not be determined. Never collected: retirement requires
+    /// proof of absence, and a failed inspection is not proof.
+    Unverifiable { reason: UnverifiableReason },
+    /// Every root of this identity was *proven* absent. Eligible for collection
+    /// once older than the retention window.
     Orphaned,
 }
 
@@ -80,6 +109,10 @@ pub struct OrphanStoreFinding {
     pub expected_last_write_at: Option<i64>,
     pub expected_payload_mtime_secs: i64,
     pub expected_manifest_bytes: Option<Vec<u8>>,
+    /// Registered graph-scope database paths, relative to `data_root`; carried
+    /// through so the durable-data check covers every scope, not just the main
+    /// graph.
+    pub graph_scope_relpaths: Vec<PathBuf>,
 }
 
 impl OrphanStoreFinding {
@@ -92,29 +125,59 @@ impl OrphanStoreFinding {
     }
 }
 
-/// A store directory is treated as a live repository root when the path exists.
-/// The registry keys off repository working-tree roots, so existence is the
-/// same liveness test `migrate::registry::code_project_root_exists` applies.
-fn root_is_live(root: &Path) -> bool {
-    root.exists()
+/// Every root that can keep this store's identity alive: the registry roots,
+/// the git common directory shared with linked worktrees, and every registered
+/// alias path. Collecting a store because one checkout vanished, while another
+/// checkout of the same repository is still enrolled, destroys live data.
+fn identity_roots(entry: &StoreCensusEntry) -> impl Iterator<Item = &Path> {
+    std::iter::once(entry.canonical_root.as_path())
+        .chain(entry.display_root.as_deref())
+        .chain(entry.git_common_dir.as_deref())
+        .chain(entry.alias_roots.iter().map(PathBuf::as_path))
 }
 
 fn classify_one(entry: &StoreCensusEntry) -> StoreDisposition {
-    if root_is_live(&entry.canonical_root)
-        || entry.display_root.as_deref().is_some_and(root_is_live)
-    {
-        return StoreDisposition::Live;
+    let identity = identity_roots(entry).fold(RootLivenessV1::Absent, |liveness, root| {
+        liveness.merge(probe_root(root))
+    });
+    match identity {
+        RootLivenessV1::Live => return StoreDisposition::Live,
+        // An inspection that failed proves nothing. Retiring on it would delete
+        // a store whose repository may be perfectly alive behind an unreadable
+        // parent directory or a stale mount.
+        RootLivenessV1::Unverifiable => {
+            return StoreDisposition::Unverifiable {
+                reason: UnverifiableReason::RootInspectionFailed,
+            };
+        }
+        RootLivenessV1::Absent => {}
+    }
+    // The manifest names this store's project root. If it could not be read or
+    // parsed, the identity is unproven and the store is not collectable.
+    if !entry.manifest_readable {
+        return StoreDisposition::Unverifiable {
+            reason: UnverifiableReason::ManifestUnreadable,
+        };
     }
     // Registry identity is dead. If the manifest still names a live root the
     // repository moved rather than vanished — re-link instead of collecting.
     if let Some(manifest_root) = entry.manifest_root.as_deref()
         && manifest_root != entry.canonical_root
         && entry.display_root.as_deref() != Some(manifest_root)
-        && root_is_live(manifest_root)
     {
-        return StoreDisposition::Relinkable {
-            live_root: manifest_root.to_path_buf(),
-        };
+        match probe_root(manifest_root) {
+            RootLivenessV1::Live => {
+                return StoreDisposition::Relinkable {
+                    live_root: manifest_root.to_path_buf(),
+                };
+            }
+            RootLivenessV1::Unverifiable => {
+                return StoreDisposition::Unverifiable {
+                    reason: UnverifiableReason::RootInspectionFailed,
+                };
+            }
+            RootLivenessV1::Absent => {}
+        }
     }
     StoreDisposition::Orphaned
 }
@@ -135,6 +198,7 @@ pub fn classify_stores(census: &[StoreCensusEntry], now: i64) -> Vec<OrphanStore
             expected_last_write_at: entry.expected_last_write_at,
             expected_payload_mtime_secs: entry.expected_payload_mtime_secs,
             expected_manifest_bytes: entry.expected_manifest_bytes.clone(),
+            graph_scope_relpaths: entry.graph_scope_relpaths.clone(),
         })
         .collect()
 }
@@ -149,6 +213,9 @@ pub struct CollectionPlan {
     /// Re-linkable (moved repository) — never collected; an applied sweep
     /// transfers these to the exact registered live project identity.
     pub relink: Vec<OrphanStoreFinding>,
+    /// Liveness could not be proven either way — never collected, surfaced so
+    /// an owner can resolve the inspection failure instead of losing the store.
+    pub unverifiable: Vec<OrphanStoreFinding>,
 }
 
 impl CollectionPlan {
@@ -168,6 +235,7 @@ pub fn plan_collection(findings: Vec<OrphanStoreFinding>, retention_secs: i64) -
         match &finding.disposition {
             StoreDisposition::Live => {}
             StoreDisposition::Relinkable { .. } => plan.relink.push(finding),
+            StoreDisposition::Unverifiable { .. } => plan.unverifiable.push(finding),
             StoreDisposition::Orphaned => {
                 if finding.age_secs >= retention_secs {
                     plan.collect.push(finding);
@@ -438,9 +506,14 @@ pub(crate) async fn execute_registered_collection(
             continue;
         }
 
-        let graph_db_relpath = store_graph_db_relpath(finding.expected_manifest_bytes.as_deref());
         let scratch_root = durable_check_scratch_root(profile_root);
-        match check_durable_memory_rows(&finding.data_root, &graph_db_relpath, &scratch_root).await
+        match check_store_durable_memory(
+            &finding.data_root,
+            finding.expected_manifest_bytes.as_deref(),
+            &finding.graph_scope_relpaths,
+            &scratch_root,
+        )
+        .await
         {
             DurableMemoryCheck::Empty => {}
             DurableMemoryCheck::Present | DurableMemoryCheck::Unverifiable => {
@@ -549,17 +622,99 @@ enum DurableMemoryCheck {
     Unverifiable,
 }
 
-/// Best-effort determination of the graph-database relative path for a store,
-/// from its manifest bytes when available. Falls back to the default graph DB
-/// filename, which is what every profile-sharded store uses absent an
-/// enrollment-time override.
-fn store_graph_db_relpath(manifest_bytes: Option<&[u8]>) -> PathBuf {
-    manifest_bytes
-        .and_then(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok())
-        .map_or_else(
-            || PathBuf::from(crate::config::DB_FILENAME),
-            |manifest| manifest.graph_db_relpath,
-        )
+/// Every database under a store that can carry durable rows, or a typed
+/// statement that the inventory itself could not be trusted.
+///
+/// A store is not one database. Besides the manifest-selected main graph there
+/// are registered graph scopes (which may live at custom relative paths) and
+/// per-branch databases under `branches/`, and legacy branch-exclusive memory
+/// rows are known to exist only in the latter. Checking the main graph alone
+/// declares a store empty while its branch databases still hold durable facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DurableDatabaseInventoryV1 {
+    /// The complete set of database paths, relative to the store's data root.
+    Resolved(Vec<PathBuf>),
+    /// The set could not be enumerated — a missing or malformed manifest, or a
+    /// directory that could not be listed. Never a green light for deletion.
+    Unverifiable,
+}
+
+/// Enumerates every durable database under `data_root`.
+///
+/// Fails closed. The manifest is the store's own record of where its graph
+/// lives; if it is absent or will not parse, guessing the default filename
+/// would check the wrong file (or no file) and report "empty" for a store whose
+/// real graph sits elsewhere.
+fn durable_database_inventory(
+    data_root: &Path,
+    manifest_bytes: Option<&[u8]>,
+    graph_scope_relpaths: &[PathBuf],
+) -> DurableDatabaseInventoryV1 {
+    let Some(bytes) = manifest_bytes else {
+        return DurableDatabaseInventoryV1::Unverifiable;
+    };
+    let Ok(manifest) = serde_json::from_slice::<crate::storage::StoreManifest>(bytes) else {
+        return DurableDatabaseInventoryV1::Unverifiable;
+    };
+
+    let mut inventory = vec![manifest.graph_db_relpath];
+    for relpath in graph_scope_relpaths {
+        if !inventory.contains(relpath) {
+            inventory.push(relpath.clone());
+        }
+    }
+
+    // Branch databases are discovered on disk: a legacy store can hold branch
+    // databases the registry never recorded a scope for.
+    let branches = data_root.join("branches");
+    match std::fs::read_dir(&branches) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    return DurableDatabaseInventoryV1::Unverifiable;
+                };
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("db") {
+                    continue;
+                }
+                let Some(name) = path.file_name() else {
+                    continue;
+                };
+                let relpath = Path::new("branches").join(name);
+                if !inventory.contains(&relpath) {
+                    inventory.push(relpath);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        // The directory exists but could not be listed: its contents are
+        // unknown, so the store's durable data is unproven.
+        Err(_) => return DurableDatabaseInventoryV1::Unverifiable,
+    }
+
+    DurableDatabaseInventoryV1::Resolved(inventory)
+}
+
+/// Runs [`check_durable_memory_rows`] over every database in the store's
+/// inventory. Any single `Present` or `Unverifiable` protects the whole store.
+async fn check_store_durable_memory(
+    data_root: &Path,
+    manifest_bytes: Option<&[u8]>,
+    graph_scope_relpaths: &[PathBuf],
+    scratch_root: &Path,
+) -> DurableMemoryCheck {
+    let inventory = match durable_database_inventory(data_root, manifest_bytes, graph_scope_relpaths)
+    {
+        DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
+        DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
+    };
+    for relpath in inventory {
+        match check_durable_memory_rows(data_root, &relpath, scratch_root).await {
+            DurableMemoryCheck::Empty => {}
+            protected => return protected,
+        }
+    }
+    DurableMemoryCheck::Empty
 }
 
 /// The read-snapshot scratch directory for durable-memory checks.
@@ -739,11 +894,30 @@ pub(crate) async fn build_store_census(
     profile_root: &Path,
 ) -> crate::errors::Result<Vec<StoreCensusEntry>> {
     let mut census = Vec::new();
-    for project in db.list_code_projects(usize::MAX).await? {
+    let projects = db.list_code_projects(usize::MAX).await?;
+    // Aliases and the git common directory are part of the identity: a linked
+    // worktree or a second enrolled checkout keeps the store live even when
+    // this row's canonical root is gone.
+    let contexts = db.project_registry_contexts_for_projects(&projects).await?;
+    for context in contexts {
+        let project = &context.project;
+        let alias_roots = context
+            .aliases
+            .iter()
+            .map(|alias| PathBuf::from(&alias.alias_path))
+            .collect::<Vec<_>>();
+        let git_common_dir = project.git_common_dir.as_deref().map(PathBuf::from);
         for store in db
             .try_list_store_instances_for_project(&project.project_id)
             .await?
         {
+            let graph_scope_relpaths = context
+                .stores
+                .iter()
+                .filter(|candidate| candidate.store.store_id == store.store_id)
+                .flat_map(|candidate| candidate.graph_scopes.iter())
+                .map(|scope| PathBuf::from(&scope.db_relpath))
+                .collect::<Vec<_>>();
             if store.storage_mode != "profile_sharded" {
                 continue;
             }
@@ -761,11 +935,16 @@ pub(crate) async fn build_store_census(
                     });
                 }
             };
-            let manifest_root = expected_manifest_bytes
-                .as_deref()
-                .and_then(|bytes| {
-                    serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok()
-                })
+            // A manifest that is absent or will not parse leaves this store's
+            // own record of its project root unknown. Fail closed: record that
+            // it is unverifiable rather than defaulting to "no manifest root",
+            // which reads downstream as a collectable orphan.
+            let parsed_manifest = expected_manifest_bytes.as_deref().map(|bytes| {
+                serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok()
+            });
+            let manifest_readable = matches!(parsed_manifest, Some(Some(_)));
+            let manifest_root = parsed_manifest
+                .flatten()
                 .map(|manifest| manifest.project_root);
             let expected_payload_mtime_secs = newest_mtime_secs(&data_root);
             let last_write_secs = store
@@ -779,6 +958,9 @@ pub(crate) async fn build_store_census(
                 canonical_root: PathBuf::from(&project.canonical_root),
                 display_root: (project.display_root != project.canonical_root)
                     .then(|| PathBuf::from(&project.display_root)),
+                git_common_dir: git_common_dir.clone(),
+                alias_roots: alias_roots.clone(),
+                manifest_readable,
                 data_root,
                 manifest_root,
                 last_write_secs,
@@ -788,6 +970,7 @@ pub(crate) async fn build_store_census(
                 expected_last_write_at: store.last_write_at,
                 expected_payload_mtime_secs,
                 expected_manifest_bytes,
+                graph_scope_relpaths,
             });
         }
     }
@@ -1086,15 +1269,24 @@ pub(crate) async fn execute_unregistered_collection(
             continue;
         }
 
+        // An unreadable manifest must not be swallowed into "no manifest": the
+        // inventory then fails closed instead of checking a guessed database.
         let manifest_bytes = std::fs::read(
             finding
                 .data_root
                 .join(crate::storage::STORE_MANIFEST_FILENAME),
         )
         .ok();
-        let graph_db_relpath = store_graph_db_relpath(manifest_bytes.as_deref());
         let scratch_root = durable_check_scratch_root(profile_root);
-        match check_durable_memory_rows(&finding.data_root, &graph_db_relpath, &scratch_root).await
+        // An unregistered store has no registry graph scopes by definition;
+        // its branch databases are still discovered from disk.
+        match check_store_durable_memory(
+            &finding.data_root,
+            manifest_bytes.as_deref(),
+            &[],
+            &scratch_root,
+        )
+        .await
         {
             DurableMemoryCheck::Empty => {}
             DurableMemoryCheck::Present | DurableMemoryCheck::Unverifiable => {

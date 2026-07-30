@@ -1,0 +1,160 @@
+/**
+ * Where a scheduler control's answer is allowed to land.
+ *
+ * The control writes the daemon's post-change reading straight into the status
+ * cache, which is what lets the badge update from a measurement instead of an
+ * assumption. The question this file settles is *whose* cache entry that is.
+ *
+ * A pause takes a round trip, and a reader can change project inside it. The
+ * hook derives its key from the scope of the render it last ran in, and React
+ * Query calls settlement callbacks from the current options — so unless the
+ * dispatch scope is captured when the request goes out, project A's answer
+ * settles against project B's key. The two ways that shows up are both here:
+ * A's reading written into B's entry, and B's entry invalidated because A's
+ * write failed. Neither is visible as an error; both make one project's panel
+ * answer for another's.
+ */
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement, type ReactNode } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { automationSchedulerKey, useSchedulerControl } from './automation.ts';
+import { scopeKey, useScope, type DashboardScope } from '../scope/store.ts';
+
+function activeProject(projectId: string, label: string): DashboardScope {
+  return { kind: 'project', projectId, label, activation: 'active' };
+}
+
+const PROJECT_A = activeProject('proj_a', 'Project A');
+const PROJECT_B = activeProject('proj_b', 'Project B');
+
+function statusKeyFor(scope: DashboardScope): unknown[] {
+  return [...automationSchedulerKey, scopeKey(scope)];
+}
+
+/** A scheduler body the contract accepts, distinguishable per project. */
+function schedulerBody(paused: boolean) {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    status: 'configured',
+    paused,
+    enabled: true,
+    scheduler_tick_secs: 900,
+    pending_fact_proposals: 0,
+    pending_skills: 0,
+    pending_review: {
+      fact_proposals: { state: 'measured', count: 0, reason: null },
+      skills: { state: 'measured', count: 0, reason: null },
+    },
+    now,
+    last_session_activity: null,
+    project_config_path: '/x/automation.toml',
+    control_path: '/x/automation.control.json',
+    tasks: [],
+  };
+}
+
+/** The request the test holds open, so the scope can change mid-flight. */
+let release: (() => void) | null = null;
+
+/** Answer the in-flight control once the test says so. */
+function stubHeldControl(respond: () => Response): void {
+  release = null;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(respond());
+        }),
+    ),
+  );
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+let client: QueryClient;
+
+function wrapper({ children }: { children: ReactNode }) {
+  return createElement(QueryClientProvider, { client }, children);
+}
+
+beforeEach(() => {
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  useScope.setState({ scope: PROJECT_A });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  useScope.getState().selectAllProjects();
+  release = null;
+});
+
+describe('a scheduler control answered after the reader changed project', () => {
+  it('writes the reading into the project it was dispatched to, not the one on screen', async () => {
+    // Project B already holds a reading of its own. If the late answer for A
+    // lands here, B's panel reports A's scheduler.
+    const bReading = { outcome: 'ok' as const, data: schedulerBody(false) };
+    client.setQueryData(statusKeyFor(PROJECT_B), bReading);
+
+    stubHeldControl(() => jsonResponse(200, schedulerBody(true)));
+    const { result, rerender } = renderHook(() => useSchedulerControl(), { wrapper });
+
+    act(() => result.current.mutate(true));
+    await waitFor(() => expect(release).not.toBeNull());
+
+    // The reader switches project while the pause is still in flight.
+    act(() => useScope.setState({ scope: PROJECT_B }));
+    rerender();
+
+    act(() => release?.());
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+
+    // B is untouched, still holding its own reading.
+    expect(client.getQueryData(statusKeyFor(PROJECT_B))).toEqual(bReading);
+    // A received the answer to A's request.
+    const landed = client.getQueryData(statusKeyFor(PROJECT_A)) as
+      | { outcome: string; data: { paused: boolean } }
+      | undefined;
+    expect(landed?.outcome).toBe('ok');
+    expect(landed?.data.paused).toBe(true);
+  });
+
+  it('invalidates the dispatched project after a failure, leaving the new one alone', async () => {
+    // The other half of the same defect: a failed control re-reads, and the
+    // re-read must be of the project that was asked, not the one now on
+    // screen. `staleTime: Infinity` makes an invalidation observable as the
+    // entry becoming stale — nothing else would mark it so.
+    client.setQueryData(statusKeyFor(PROJECT_A), { outcome: 'ok', data: schedulerBody(false) });
+    client.setQueryData(statusKeyFor(PROJECT_B), { outcome: 'ok', data: schedulerBody(false) });
+    for (const scope of [PROJECT_A, PROJECT_B]) {
+      const entry = client.getQueryCache().find({ queryKey: statusKeyFor(scope) });
+      expect(entry?.isStale()).toBe(false);
+    }
+
+    stubHeldControl(() => jsonResponse(500, { detail: 'scheduler unavailable' }));
+    const { result, rerender } = renderHook(() => useSchedulerControl(), { wrapper });
+
+    act(() => result.current.mutate(true));
+    await waitFor(() => expect(release).not.toBeNull());
+
+    act(() => useScope.setState({ scope: PROJECT_B }));
+    rerender();
+
+    act(() => release?.());
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+
+    expect(client.getQueryCache().find({ queryKey: statusKeyFor(PROJECT_A) })?.isStale()).toBe(
+      true,
+    );
+    expect(client.getQueryCache().find({ queryKey: statusKeyFor(PROJECT_B) })?.isStale()).toBe(
+      false,
+    );
+  });
+});

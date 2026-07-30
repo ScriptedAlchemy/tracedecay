@@ -18,8 +18,19 @@ export function LegacyBoundary<T>({
   if (pending) return <CenteredState title={title} kind="loading" />;
   if (!result) return <CenteredState title={title} kind="unknown" />;
   if (result.outcome === 'ok') return <>{children(result.data)}</>;
-  const detail = result.outcome === 'error' ? result.detail : undefined;
-  return <CenteredState title={title} kind={failureKind(result)} detail={detail} />;
+  return <CenteredState title={title} kind={failureKind(result)} detail={failureDetail(result)} />;
+}
+
+/** The line under the chip: whatever the source said about this state, and
+ * nothing where it said nothing.
+ *
+ * `unavailable` is the state that most needs it. Its chip word is the same for
+ * a registry that is missing and one that failed to open, and the payload's
+ * `status`/`error` is the only thing that tells them apart. */
+function failureDetail(result: Exclude<LegacyResult<unknown>, { outcome: 'ok' }>): string | undefined {
+  if (result.outcome === 'error') return result.detail;
+  if (result.outcome === 'unavailable') return result.reason ?? result.status;
+  return undefined;
 }
 
 /** The domain state a non-ok legacy read renders as.
@@ -40,6 +51,8 @@ function failureKind(result: Exclude<LegacyResult<unknown>, { outcome: 'ok' }>):
       return 'error';
     case 'unsupported_schema':
       return 'unsupported_schema';
+    case 'unavailable':
+      return 'unavailable';
     default: {
       const exhaustive: never = result;
       return exhaustive;

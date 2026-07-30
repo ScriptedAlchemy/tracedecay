@@ -206,10 +206,10 @@ export function summarise(run: RunTotals): Record<string, unknown> {
     seededDetectionsByRule: seededByRule,
     planFailures: run.planFailures,
     undersizedTargets: [...undersized.entries()].map(([selector, v]) => ({ selector, ...v })),
-    // Every child measured out of its header's box, gated or not. "Inside its
-    // own container" needs no judgement about what the element carries, which is
-    // exactly what kept the reflow heuristics from being able to fail on it;
-    // `HeaderOverflowChild.gated` carries why only state chips fail the build.
+    // Every child measured out of its header's box. "Inside its own container"
+    // needs no judgement about what the element carries, which is exactly what
+    // kept the reflow heuristics from being able to fail on it — and why every
+    // one of these now fails the build rather than only the state chips.
     headerScans,
     headerChildrenExamined,
     headerOverflowChildren: [...headerOverflow.values()],
@@ -293,30 +293,12 @@ export function reportRun(run: RunTotals, findingsPath: string): boolean {
     );
   }
   console.log(
-    `[axe] workspace header box (every width, state chips gated): ${headerFailed.length} scan(s) ` +
-      `put a state chip outside its header, from ${n('headerChildrenExamined')} child element(s) ` +
+    `[axe] workspace header box (every width, every child): ${headerFailed.length} scan(s) ` +
+      `put a child outside its header, from ${n('headerChildrenExamined')} child element(s) ` +
       `measured across ${n('headerScans')} scan(s) that rendered one`,
   );
   for (const f of [...new Map(headerFailed.map((f) => [f.detail, f])).values()].slice(0, 8)) {
     console.log(`         ${f.detail}`);
-  }
-  const headerReported = list<HeaderOverflowChild & { scans: number; where: string[] }>(
-    'headerOverflowChildren',
-  ).filter((o) => !o.gated);
-  if (headerReported.length > 0) {
-    console.log(
-      `[axe] diagnostic: ${headerReported.length} non-chip header child(ren) render outside their ` +
-        `workspace header — same defect class, reported rather than gated`,
-    );
-    for (const o of headerReported.slice(0, 8)) {
-      console.log(
-        `         ${o.selector} ${o.width}x${o.height} is ${o.pastRight}px past the right edge of ` +
-          `${o.contentWidth}px of content box` +
-          (o.viewportSlack < 0 ? `, ${Math.round(-o.viewportSlack)}px off-screen` : '') +
-          `  in ${o.scans} scan(s), e.g. ${o.where[0]}` +
-          (o.text === '' ? '' : `  "${o.text}"`),
-      );
-    }
   }
   const optOuts = list<ForcedColorsOptOut & { where: string[] }>('forcedColorOptOuts');
   console.log(

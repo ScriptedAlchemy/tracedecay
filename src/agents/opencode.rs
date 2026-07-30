@@ -551,7 +551,7 @@ fn install_registration_entries(
             lsp.insert(
                 "tracedecay".to_string(),
                 json!({
-                    "command": [tracedecay_bin, "lsp", "bridge", "--stdio", "--project", "."],
+                    "command": [tracedecay_bin, "lsp", "bridge", "--stdio"],
                     "extensions": TRACEDECAY_LSP_EXTENSIONS,
                     "env": {
                         "TRACEDECAY_LSP_BROKER_UPSTREAM": "0"

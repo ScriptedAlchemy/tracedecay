@@ -703,12 +703,13 @@ pub(crate) fn overlay_failure(error: OverlayError) -> RpcFailure {
 pub(crate) fn diagnostic_result_id(
     scope_set_digest: Option<&ManifestDigest>,
     scope_digest: Option<&ManifestDigest>,
+    root_ordinal: Option<usize>,
     generation: u64,
     version: i64,
 ) -> String {
-    match (scope_set_digest, scope_digest) {
-        (Some(scope_set), Some(scope)) => format!(
-            "scope-set={};scope={};generation={generation};version={version}",
+    match (scope_set_digest, scope_digest, root_ordinal) {
+        (Some(scope_set), Some(scope), Some(root_ordinal)) => format!(
+            "scope-set={};scope={};root={root_ordinal};generation={generation};version={version}",
             scope_set.as_str(),
             scope.as_str()
         ),

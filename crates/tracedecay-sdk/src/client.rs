@@ -8,14 +8,13 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client as HttpClient, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN};
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::operations::TypedOperation;
 
-const MAX_PAGE_SIZE: u32 = 1_000;
 const MAX_OPAQUE_BYTES: usize = 4_096;
 const MAX_REQUEST_ID_BYTES: usize = 512;
 
@@ -195,7 +194,10 @@ impl Client {
             .cloned()
             .ok_or_else(|| ClientError::Protocol {
                 status: Some(response.status()),
-                message: format!("daemon omitted the {} result payload", Operation::OPERATION_ID),
+                message: format!(
+                    "daemon omitted the {} result payload",
+                    Operation::OPERATION_ID
+                ),
             })?;
         let result = serde_json::from_value(payload).map_err(|error| ClientError::Protocol {
             status: Some(response.status()),
@@ -219,17 +221,14 @@ impl Client {
         request: &Value,
         options: RequestOptions,
     ) -> Result<ApplicationResponse, ClientError> {
-        let route = route
-            .strip_prefix("/application")
-            .ok_or_else(|| ClientError::InvalidConfiguration(
+        let route = route.strip_prefix("/application").ok_or_else(|| {
+            ClientError::InvalidConfiguration(
                 "typed operation route must begin with /application".into(),
-            ))?;
-        let mut url = reqwest::Url::parse(&format!(
-            "{}{}",
-            self.application_root, route
-        ))
-        .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
-        apply_page_options(&mut url, options.page.as_ref())?;
+            )
+        })?;
+        let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
+            .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+        let _ = options;
         let response = self
             .http
             .post(url)
@@ -257,7 +256,10 @@ impl Client {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ClientError::Authentication(status.as_u16()));
         }
-        let body: Value = response.json().map_err(ClientError::transport)?;
+        let body: Value = response.json().map_err(|error| ClientError::Protocol {
+            status: Some(status.as_u16()),
+            message: format!("daemon returned malformed cancellation JSON: {error}"),
+        })?;
         if body.get("kind").and_then(Value::as_str) == Some("problem") {
             let envelope = body
                 .get("value")
@@ -358,7 +360,10 @@ impl Client {
                 message: "daemon response is not application/json".into(),
             });
         }
-        let body: Value = response.json().map_err(ClientError::transport)?;
+        let body: Value = response.json().map_err(|error| ClientError::Protocol {
+            status: Some(status.as_u16()),
+            message: format!("daemon returned malformed application JSON: {error}"),
+        })?;
         match body.get("kind").and_then(Value::as_str) {
             Some("success") if status.is_success() => {
                 let value = body
@@ -398,18 +403,9 @@ pub struct TypedResponse<Result> {
     pub result: Result,
 }
 
-/// Canonical query paging controls.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PageOptions {
-    pub size: Option<u32>,
-    pub cursor: Option<String>,
-}
-
 /// Per-request lifecycle controls.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RequestOptions {
-    pub page: Option<PageOptions>,
-}
+pub struct RequestOptions;
 
 /// A decoded successful application envelope.
 #[derive(Clone, Debug, PartialEq)]
@@ -420,14 +416,7 @@ pub struct ApplicationResponse {
 
 impl ApplicationResponse {
     fn new(envelope: Value, status: u16) -> Result<Self, ClientError> {
-        let valid = envelope.get("request_id").and_then(Value::as_str).is_some()
-            && envelope.get("outcome").and_then(Value::as_object).is_some();
-        if !valid {
-            return Err(ClientError::Protocol {
-                status: Some(status),
-                message: "daemon returned a malformed success envelope".into(),
-            });
-        }
+        validate_success_envelope(&envelope, status)?;
         Ok(Self { status, envelope })
     }
 
@@ -442,6 +431,195 @@ impl ApplicationResponse {
     pub fn payload(&self) -> Option<&Value> {
         self.envelope.get("outcome")?.get("value")?.get("payload")
     }
+}
+
+fn protocol(status: u16, message: impl Into<String>) -> ClientError {
+    ClientError::Protocol {
+        status: Some(status),
+        message: message.into(),
+    }
+}
+
+fn object<'a>(
+    value: Option<&'a Value>,
+    status: u16,
+    field: &str,
+) -> Result<&'a serde_json::Map<String, Value>, ClientError> {
+    value
+        .and_then(Value::as_object)
+        .ok_or_else(|| protocol(status, format!("{field} must be an object")))
+}
+
+fn string<'a>(value: Option<&'a Value>, status: u16, field: &str) -> Result<&'a str, ClientError> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| protocol(status, format!("{field} must be a non-empty string")))
+}
+
+fn unsigned(value: Option<&Value>, status: u16, field: &str) -> Result<u64, ClientError> {
+    value
+        .and_then(Value::as_u64)
+        .ok_or_else(|| protocol(status, format!("{field} must be an unsigned integer")))
+}
+
+fn array(value: Option<&Value>, status: u16, field: &str) -> Result<(), ClientError> {
+    value
+        .and_then(Value::as_array)
+        .map(|_| ())
+        .ok_or_else(|| protocol(status, format!("{field} must be an array")))
+}
+
+fn nullable_unsigned(value: Option<&Value>, status: u16, field: &str) -> Result<(), ClientError> {
+    match value {
+        Some(Value::Null) => Ok(()),
+        Some(Value::Number(number)) if number.as_u64().is_some() => Ok(()),
+        _ => Err(protocol(
+            status,
+            format!("{field} must be null or an unsigned integer"),
+        )),
+    }
+}
+
+fn validate_receipt(value: Option<&Value>, status: u16, field: &str) -> Result<&str, ClientError> {
+    let receipt = object(value, status, field)?;
+    unsigned(receipt.get("started_at"), status, "execution.started_at")?;
+    unsigned(receipt.get("ended_at"), status, "execution.ended_at")?;
+    if !receipt.contains_key("effective_deadline") || !receipt.contains_key("cancellation") {
+        return Err(protocol(status, "execution lifecycle fields are required"));
+    }
+    let budget = object(receipt.get("budget"), status, "execution.budget")?;
+    unsigned(
+        budget.get("units_consumed"),
+        status,
+        "budget.units_consumed",
+    )?;
+    unsigned(
+        budget.get("bytes_consumed"),
+        status,
+        "budget.bytes_consumed",
+    )?;
+    unsigned(
+        budget.get("elapsed_micros"),
+        status,
+        "budget.elapsed_micros",
+    )?;
+    string(receipt.get("termination"), status, "execution.termination")
+}
+
+fn validate_page(value: Option<&Value>, status: u16) -> Result<(), ClientError> {
+    let page = object(value, status, "outcome.value.page")?;
+    string(
+        page.get("sort_contract_id"),
+        status,
+        "page.sort_contract_id",
+    )?;
+    if unsigned(page.get("sort_revision"), status, "page.sort_revision")? == 0 {
+        return Err(protocol(status, "page.sort_revision must be positive"));
+    }
+    nullable_unsigned(page.get("total"), status, "page.total")?;
+    unsigned(page.get("returned"), status, "page.returned")?;
+    if !matches!(
+        page.get("cursor"),
+        Some(Value::Null) | Some(Value::String(_))
+    ) {
+        return Err(protocol(status, "page.cursor must be null or a string"));
+    }
+    nullable_unsigned(page.get("expires_at"), status, "page.expires_at")?;
+    Ok(())
+}
+
+fn validate_success_envelope(envelope: &Value, status: u16) -> Result<(), ClientError> {
+    let envelope = object(Some(envelope), status, "success envelope")?;
+    string(envelope.get("binding_id"), status, "binding_id")?;
+    let contract = object(envelope.get("contract"), status, "contract")?;
+    string(contract.get("schema_id"), status, "contract.schema_id")?;
+    if unsigned(
+        contract.get("schema_revision"),
+        status,
+        "contract.schema_revision",
+    )? == 0
+    {
+        return Err(protocol(
+            status,
+            "contract.schema_revision must be positive",
+        ));
+    }
+    string(envelope.get("request_id"), status, "request_id")?;
+    object(envelope.get("scope"), status, "scope")?;
+    let outcome = object(envelope.get("outcome"), status, "outcome")?;
+    let outcome_kind = string(outcome.get("outcome"), status, "outcome.outcome")?;
+    let value = object(outcome.get("value"), status, "outcome.value")?;
+    if !value.contains_key("payload") {
+        return Err(protocol(status, "outcome.value.payload is required"));
+    }
+    validate_receipt(value.get("execution"), status, "outcome.value.execution")?;
+    match outcome_kind {
+        "evidence" => {
+            object(value.get("temporal"), status, "outcome.value.temporal")?;
+            object(value.get("authority"), status, "outcome.value.authority")?;
+            array(
+                value.get("evidence_authorities"),
+                status,
+                "outcome.value.evidence_authorities",
+            )?;
+            object(value.get("coverage"), status, "outcome.value.coverage")?;
+            array(value.get("omissions"), status, "outcome.value.omissions")?;
+            array(value.get("scores"), status, "outcome.value.scores")?;
+            array(
+                value.get("contributions"),
+                status,
+                "outcome.value.contributions",
+            )?;
+            validate_page(value.get("page"), status)?;
+        }
+        "preview" => {
+            string(value.get("preview_id"), status, "outcome.value.preview_id")?;
+            string(
+                value.get("preview_digest"),
+                status,
+                "outcome.value.preview_digest",
+            )?;
+            string(
+                value.get("effect_class"),
+                status,
+                "outcome.value.effect_class",
+            )?;
+            object(value.get("authority"), status, "outcome.value.authority")?;
+            string(
+                value.get("expected_state"),
+                status,
+                "outcome.value.expected_state",
+            )?;
+        }
+        "effect" => {
+            string(value.get("effect_id"), status, "outcome.value.effect_id")?;
+            string(
+                value.get("effect_class"),
+                status,
+                "outcome.value.effect_class",
+            )?;
+            string(
+                value.get("idempotency_key"),
+                status,
+                "outcome.value.idempotency_key",
+            )?;
+            object(value.get("authority"), status, "outcome.value.authority")?;
+            string(
+                value.get("expected_state"),
+                status,
+                "outcome.value.expected_state",
+            )?;
+            string(
+                value.get("reconciliation"),
+                status,
+                "outcome.value.reconciliation",
+            )?;
+            object(value.get("receipt"), status, "outcome.value.receipt")?;
+        }
+        _ => return Err(protocol(status, "outcome discriminator is not canonical")),
+    }
+    Ok(())
 }
 
 /// Canonical cancellation acknowledgement.
@@ -546,7 +724,10 @@ impl OperationStream {
             .and_then(|value| value.split(';').next())
             .map(str::trim);
         if !status.is_success() && media_type == Some("application/json") {
-            let body: Value = response.json().map_err(ClientError::transport)?;
+            let body: Value = response.json().map_err(|error| ClientError::Protocol {
+                status: Some(status.as_u16()),
+                message: format!("daemon returned malformed stream problem JSON: {error}"),
+            })?;
             if body.get("kind").and_then(Value::as_str) == Some("problem") {
                 let envelope = body
                     .get("value")
@@ -618,26 +799,161 @@ impl OperationStream {
                 }
                 let id = self.pending_id.take();
                 if event_name == "open" {
-                    if let Some(frontier) = data.get("data").and_then(|value| value.get("frontier"))
-                    {
-                        self.next_sequence = frontier.get("next_sequence").and_then(Value::as_u64);
-                        self.resume_token = frontier
-                            .get("resume_token")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
+                    if id.is_some() {
+                        return Err(ClientError::Protocol {
+                            status: None,
+                            message: "SSE open event must not carry an ID".into(),
+                        });
                     }
-                } else if let Some(sequence) = data
-                    .get("data")
-                    .and_then(|value| value.get("sequence"))
-                    .and_then(Value::as_u64)
-                {
+                    let open_data =
+                        data.get("data").and_then(Value::as_object).ok_or_else(|| {
+                            ClientError::Protocol {
+                                status: None,
+                                message: "SSE open data is malformed".into(),
+                            }
+                        })?;
+                    if open_data.get("correlation_id").and_then(Value::as_str)
+                        != Some(self.operation_id.as_str())
+                    {
+                        return Err(ClientError::Protocol {
+                            status: None,
+                            message: "SSE open correlation identity does not match operation"
+                                .into(),
+                        });
+                    }
+                    let frontier = open_data
+                        .get("frontier")
+                        .and_then(Value::as_object)
+                        .ok_or_else(|| ClientError::Protocol {
+                            status: None,
+                            message: "SSE open frontier is malformed".into(),
+                        })?;
+                    let next_sequence = frontier
+                        .get("next_sequence")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| ClientError::Protocol {
+                            status: None,
+                            message: "SSE open frontier has no next sequence".into(),
+                        })?;
+                    let retained = frontier
+                        .get("retained_from_sequence")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| ClientError::Protocol {
+                            status: None,
+                            message: "SSE open frontier has no retained sequence".into(),
+                        })?;
+                    if retained > next_sequence {
+                        return Err(ClientError::Protocol {
+                            status: None,
+                            message: "SSE open frontier sequence range is inconsistent".into(),
+                        });
+                    }
+                    self.next_sequence = Some(next_sequence);
+                    self.resume_token = match frontier.get("resume_token") {
+                        Some(Value::Null) => None,
+                        Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
+                        _ => {
+                            return Err(ClientError::Protocol {
+                                status: None,
+                                message: "SSE open frontier resume token is malformed".into(),
+                            });
+                        }
+                    };
+                } else {
+                    if !matches!(
+                        event_name.as_str(),
+                        "item"
+                            | "progress"
+                            | "resume_gap"
+                            | "completed"
+                            | "cancelled"
+                            | "timed_out"
+                            | "failed"
+                            | "partial"
+                            | "effect_unknown"
+                    ) {
+                        return Err(ClientError::Protocol {
+                            status: None,
+                            message: "SSE event name is not canonical".into(),
+                        });
+                    }
+                    let event_data =
+                        data.get("data").and_then(Value::as_object).ok_or_else(|| {
+                            ClientError::Protocol {
+                                status: None,
+                                message: "SSE event data is malformed".into(),
+                            }
+                        })?;
+                    let sequence = event_data
+                        .get("sequence")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| ClientError::Protocol {
+                            status: None,
+                            message: "SSE event has no canonical sequence".into(),
+                        })?;
                     if id.as_deref() != Some(sequence.to_string().as_str()) {
                         return Err(ClientError::Protocol {
                             status: None,
                             message: "SSE ID disagrees with its canonical sequence".into(),
                         });
                     }
-                    self.next_sequence = sequence.checked_add(1);
+                    if self
+                        .next_sequence
+                        .is_some_and(|expected| expected != sequence)
+                    {
+                        return Err(ClientError::Protocol {
+                            status: None,
+                            message: "SSE event sequence disagrees with the stream frontier".into(),
+                        });
+                    }
+                    match event_name.as_str() {
+                        "item" if !event_data.contains_key("item") => {
+                            return Err(ClientError::Protocol {
+                                status: None,
+                                message: "SSE item payload is missing".into(),
+                            });
+                        }
+                        "progress"
+                            if event_data
+                                .get("completed")
+                                .and_then(Value::as_u64)
+                                .is_none()
+                                || !matches!(event_data.get("total"), Some(Value::Null))
+                                    && event_data
+                                        .get("total")
+                                        .and_then(Value::as_u64)
+                                        .is_none() =>
+                        {
+                            return Err(ClientError::Protocol {
+                                status: None,
+                                message: "SSE progress payload is malformed".into(),
+                            });
+                        }
+                        "resume_gap" => validate_resume_gap(event_data)?,
+                        event
+                            if matches!(
+                                event,
+                                "completed"
+                                    | "cancelled"
+                                    | "timed_out"
+                                    | "failed"
+                                    | "partial"
+                                    | "effect_unknown"
+                            ) =>
+                        {
+                            validate_terminal(event_data, event)?;
+                        }
+                        _ => {}
+                    }
+                    self.next_sequence =
+                        Some(
+                            sequence
+                                .checked_add(1)
+                                .ok_or_else(|| ClientError::Protocol {
+                                    status: None,
+                                    message: "SSE sequence overflowed".into(),
+                                })?,
+                        );
                 }
                 let event = StreamEvent {
                     event: event_name,
@@ -661,6 +977,89 @@ impl OperationStream {
             }
         }
     }
+}
+
+fn validate_resume_gap(event_data: &serde_json::Map<String, Value>) -> Result<(), ClientError> {
+    let gap = event_data
+        .get("gap")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ClientError::Protocol {
+            status: None,
+            message: "SSE resume gap is malformed".into(),
+        })?;
+    let first = gap
+        .get("first_missing_sequence")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ClientError::Protocol {
+            status: None,
+            message: "SSE resume gap has no first sequence".into(),
+        })?;
+    let last = gap
+        .get("last_missing_sequence")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ClientError::Protocol {
+            status: None,
+            message: "SSE resume gap has no last sequence".into(),
+        })?;
+    let frontier = gap
+        .get("frontier")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ClientError::Protocol {
+            status: None,
+            message: "SSE resume gap frontier is malformed".into(),
+        })?;
+    let next = frontier
+        .get("next_sequence")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ClientError::Protocol {
+            status: None,
+            message: "SSE resume gap frontier has no next sequence".into(),
+        })?;
+    let retained = frontier
+        .get("retained_from_sequence")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ClientError::Protocol {
+            status: None,
+            message: "SSE resume gap frontier has no retained sequence".into(),
+        })?;
+    let token_valid = matches!(
+        frontier.get("resume_token"),
+        Some(Value::Null | Value::String(_))
+    );
+    if first > last || retained > next || !token_valid {
+        return Err(ClientError::Protocol {
+            status: None,
+            message: "SSE resume gap range or frontier is malformed".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_terminal(
+    event_data: &serde_json::Map<String, Value>,
+    event_name: &str,
+) -> Result<(), ClientError> {
+    let terminal = event_data
+        .get("terminal")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ClientError::Protocol {
+            status: None,
+            message: "SSE terminal payload is malformed".into(),
+        })?;
+    if terminal.get("termination").and_then(Value::as_str) != Some(event_name) {
+        return Err(ClientError::Protocol {
+            status: None,
+            message: "SSE terminal outcome disagrees with its event".into(),
+        });
+    }
+    let receipt_termination = validate_receipt(terminal.get("receipt"), 200, "terminal.receipt")?;
+    if receipt_termination != event_name {
+        return Err(ClientError::Protocol {
+            status: None,
+            message: "SSE terminal receipt disagrees with its event".into(),
+        });
+    }
+    Ok(())
 }
 
 impl Iterator for OperationStream {
@@ -703,48 +1102,153 @@ pub struct ProblemError {
     pub kind: String,
     pub code: String,
     pub message: String,
-    pub retry: Option<String>,
+    pub retry: String,
     pub envelope: Value,
 }
 
 impl ProblemError {
     fn new(status: u16, envelope: Value) -> Result<Self, ClientError> {
-        let (kind, code, message, retry) = {
-            let problem = envelope
-                .get("problem")
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(status),
-                    message: "problem envelope has no problem record".into(),
-                })?;
-            let field = |name: &str| {
-                problem
-                    .get(name)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| ClientError::Protocol {
-                        status: Some(status),
-                        message: format!("problem record has no {name}"),
-                    })
-            };
-            (
-                field("kind")?,
-                field("code")?,
-                field("message")?,
-                problem
-                    .get("retry")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            )
+        let envelope_object = object(Some(&envelope), status, "problem envelope")?;
+        let contract = object(envelope_object.get("contract"), status, "problem contract")?;
+        string(
+            contract.get("schema_id"),
+            status,
+            "problem contract.schema_id",
+        )?;
+        if unsigned(
+            contract.get("schema_revision"),
+            status,
+            "problem contract.schema_revision",
+        )? == 0
+        {
+            return Err(protocol(
+                status,
+                "problem contract revision must be positive",
+            ));
+        }
+        let request_id = string(
+            envelope_object.get("request_id"),
+            status,
+            "problem request_id",
+        )?;
+        let problem = object(envelope_object.get("problem"), status, "problem record")?;
+        if unsigned(problem.get("revision"), status, "problem.revision")? == 0 {
+            return Err(protocol(status, "problem revision must be positive"));
+        }
+        let kind = string(problem.get("kind"), status, "problem.kind")?;
+        if !matches!(
+            kind,
+            "invalid_request"
+                | "not_found_or_not_authorized"
+                | "conflict"
+                | "stale"
+                | "unsupported"
+                | "unavailable"
+                | "saturated"
+                | "cancelled"
+                | "timed_out"
+        ) {
+            return Err(protocol(status, "problem kind is not canonical"));
+        }
+        let code = string(problem.get("code"), status, "problem.code")?;
+        let message = string(problem.get("message"), status, "problem.message")?;
+        match problem.get("diagnostic") {
+            Some(Value::Null) => {}
+            Some(value) => validate_diagnostic(value, status, "problem.diagnostic")?,
+            None => return Err(protocol(status, "problem.diagnostic is required")),
+        }
+        string(problem.get("owning_layer"), status, "problem.owning_layer")?;
+        string(problem.get("terminality"), status, "problem.terminality")?;
+        let retryable = problem
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| protocol(status, "problem.retryable must be a boolean"))?;
+        let retry = string(problem.get("retry"), status, "problem.retry")?;
+        if !matches!(
+            retry,
+            "never" | "same_request" | "after_delay" | "after_revalidate" | "after_reconcile"
+        ) {
+            return Err(protocol(status, "problem retry directive is not canonical"));
+        }
+        if !matches!(
+            problem.get("retry_scope"),
+            Some(Value::Null | Value::String(_))
+        ) {
+            return Err(protocol(
+                status,
+                "problem.retry_scope must be null or a string",
+            ));
+        }
+        let retry_after = match problem.get("retry_after_millis") {
+            Some(Value::Null) => None,
+            Some(value) => Some(unsigned(Some(value), status, "problem.retry_after_millis")?),
+            None => return Err(protocol(status, "problem.retry_after_millis is required")),
         };
+        if !matches!(
+            problem.get("cancellation_stage"),
+            Some(Value::Null | Value::String(_))
+        ) {
+            return Err(protocol(
+                status,
+                "problem.cancellation_stage must be null or a string",
+            ));
+        }
+        if string(problem.get("request_id"), status, "problem.request_id")? != request_id {
+            return Err(protocol(status, "problem request identity is inconsistent"));
+        }
+        string(problem.get("trace_id"), status, "problem.trace_id")?;
+        let details = problem
+            .get("details")
+            .and_then(Value::as_array)
+            .ok_or_else(|| protocol(status, "problem.details must be an array"))?;
+        for detail in details {
+            validate_diagnostic(detail, status, "problem.details item")?;
+        }
+        let legal_actions = problem
+            .get("legal_actions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| protocol(status, "problem.legal_actions must be an array"))?;
+        if legal_actions.iter().any(|action| action.as_str().is_none()) {
+            return Err(protocol(
+                status,
+                "problem.legal_actions must contain strings",
+            ));
+        }
+        if !problem.contains_key("coverage") {
+            return Err(protocol(status, "problem.coverage is required"));
+        }
+        if retryable != (retry != "never") {
+            return Err(protocol(
+                status,
+                "problem retryable and retry directive are inconsistent",
+            ));
+        }
+        if (retry == "after_delay") != retry_after.is_some() {
+            return Err(protocol(
+                status,
+                "problem retry delay is inconsistent with its directive",
+            ));
+        }
         Ok(Self {
             status,
-            kind,
-            code,
-            message,
-            retry,
+            kind: kind.to_owned(),
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retry: retry.to_owned(),
             envelope,
         })
     }
+}
+
+fn validate_diagnostic(value: &Value, status: u16, field: &str) -> Result<(), ClientError> {
+    let diagnostic = object(Some(value), status, field)?;
+    string(diagnostic.get("code"), status, &format!("{field}.code"))?;
+    string(
+        diagnostic.get("message"),
+        status,
+        &format!("{field}.message"),
+    )?;
+    Ok(())
 }
 
 impl fmt::Display for ProblemError {
@@ -805,27 +1309,4 @@ fn validate_opaque(value: &str, maximum: usize, field: &str) -> Result<(), Clien
             "{field} is not a canonical opaque value"
         )))
     }
-}
-
-fn apply_page_options(
-    url: &mut reqwest::Url,
-    page: Option<&PageOptions>,
-) -> Result<(), ClientError> {
-    let Some(page) = page else {
-        return Ok(());
-    };
-    if let Some(size) = page.size {
-        if size == 0 || size > MAX_PAGE_SIZE {
-            return Err(ClientError::InvalidRequest(format!(
-                "page size must be between 1 and {MAX_PAGE_SIZE}"
-            )));
-        }
-        url.query_pairs_mut()
-            .append_pair("page_size", &size.to_string());
-    }
-    if let Some(cursor) = &page.cursor {
-        validate_opaque(cursor, MAX_OPAQUE_BYTES, "page cursor")?;
-        url.query_pairs_mut().append_pair("cursor", cursor);
-    }
-    Ok(())
 }

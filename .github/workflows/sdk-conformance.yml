@@ -47,7 +47,7 @@ jobs:
       - run: python -m pip wheel --no-deps --wheel-dir /tmp/tracedecay-sdk-wheel .
         working-directory: sdks/python
       - run: python -c "from pathlib import Path; wheels=list(Path('/tmp/tracedecay-sdk-wheel').glob('tracedecay_sdk-*.whl')); assert len(wheels) == 1 and wheels[0].stat().st_size > 0"
-      - run: python -m pip install --no-deps /tmp/tracedecay-sdk-wheel/tracedecay_sdk-*.whl
+      - run: python -m pip install /tmp/tracedecay-sdk-wheel/tracedecay_sdk-*.whl
       - run: python -m unittest discover -s tests -p "test_client.py"
         working-directory: sdks/python
 

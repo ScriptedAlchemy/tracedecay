@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cli::MigrateAction;
 
@@ -130,6 +130,12 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             project_root,
             json,
         } => handle_migrate_storage_report(profile_root, project_id, project_root, json).await,
+        MigrateAction::BackupProfile { to, backup_id } => {
+            handle_migrate_backup_profile(to, backup_id)
+        }
+        MigrateAction::RehearseProfileBackup { backup, restore } => {
+            handle_migrate_rehearse_profile_backup(backup, restore)
+        }
         MigrateAction::Rollback {
             manifest,
             confirm_token,
@@ -1035,6 +1041,58 @@ fn handle_migrate_cleanup_sources(
     println!(
         "migration cleanup-sources: {} source artifact(s) removed",
         cleanup_report.removed_artifacts
+    );
+    Ok(())
+}
+
+fn handle_migrate_backup_profile(
+    destination: String,
+    backup_id: String,
+) -> tracedecay::errors::Result<()> {
+    let profile_root = tracedecay::storage::default_profile_root()?;
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("system clock is before Unix epoch: {error}"),
+        })?
+        .as_secs()
+        .try_into()
+        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+            message: "system clock exceeds supported backup timestamp range".to_owned(),
+        })?;
+    let backup = tracedecay::daemon::with_quiesced_installed_service(
+        "complete profile backup",
+        |lifecycle| {
+            tracedecay::migrate::profile_backup::create_complete_profile_backup(
+                &profile_root,
+                Path::new(&destination),
+                &backup_id,
+                created_at,
+                lifecycle,
+            )
+            .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })
+        },
+    )?;
+    println!(
+        "complete profile backup created and verified: {}",
+        backup.display()
+    );
+    Ok(())
+}
+
+fn handle_migrate_rehearse_profile_backup(
+    backup: String,
+    restore: String,
+) -> tracedecay::errors::Result<()> {
+    let manifest = tracedecay::migrate::profile_backup::rehearse_complete_profile_backup(
+        Path::new(&backup),
+        Path::new(&restore),
+    )
+    .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+    println!(
+        "complete profile backup rehearsed: {} entries restored to {}",
+        manifest.entries.len(),
+        restore
     );
     Ok(())
 }

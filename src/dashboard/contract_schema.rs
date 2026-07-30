@@ -2,6 +2,7 @@
 
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
+use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
     CostsReadModelV1, CreateWorkCommand, ObservatoryReadModelV1, ReplanDependenciesCommand,
@@ -97,6 +98,8 @@ struct DashboardContractCatalogV1 {
     work_attach_runtime_evidence_command: AttachRuntimeEvidenceCommand,
     work_accept_task_command: AcceptTaskCommand,
     work_projection: WorkProjection,
+    multi_root_capability: MultiRootCapabilityV1,
+    multi_root_query: MultiRootQueryReadModelV1<DashboardPayloadMarkerV1>,
     /// Served identically by `GET /api/automation/scheduler/status` and by the
     /// `pause`/`resume` controls, which re-read rather than acknowledge.
     automation_scheduler_status: AutomationSchedulerStatusV1,

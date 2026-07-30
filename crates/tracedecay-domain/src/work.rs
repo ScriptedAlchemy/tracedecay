@@ -651,7 +651,13 @@ impl<'de> Deserialize<'de> for WorkProjectionStateV1 {
                 WorkContractError::InvalidProjectionHistory,
             ));
         }
-        if wire.next_version != wire.projection.version.next().map_err(serde::de::Error::custom)? {
+        if wire.next_version
+            != wire
+                .projection
+                .version
+                .next()
+                .map_err(serde::de::Error::custom)?
+        {
             return Err(serde::de::Error::custom(
                 WorkContractError::NonContiguousVersion,
             ));

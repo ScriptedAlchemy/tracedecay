@@ -29,7 +29,7 @@ pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::
 ///
 /// The loop only forwards bounded LSP frames through explicit session
 /// operations. When `--project` is omitted it parses exactly the first
-/// `initialize` frame to bind one canonical local workspace root; it never
+/// `initialize` frame to bind canonical local workspace roots; it never
 /// opens a project store, starts an analyzer, or connects the host to an
 /// arbitrary daemon socket.
 async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::Result<()> {
@@ -161,21 +161,19 @@ fn initialize_binding(frame: &str) -> tracedecay::errors::Result<InitializeBindi
         .get_mut("params")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| bridge_config_error("LSP initialize params are required"))?;
-    let folder_uri = match params.get("workspaceFolders") {
-        Some(Value::Array(folders)) if folders.len() > 1 => {
-            return Err(bridge_config_error(
-                "multiple LSP workspace folders are unsupported",
-            ));
-        }
-        Some(Value::Array(folders)) if folders.len() == 1 => Some(
-            folders[0]
-                .get("uri")
-                .and_then(Value::as_str)
-                .filter(|uri| !uri.is_empty())
-                .ok_or_else(|| bridge_config_error("LSP workspace folder URI is required"))?
-                .to_owned(),
-        ),
-        Some(Value::Array(_) | Value::Null) | None => None,
+    let folder_uris = match params.get("workspaceFolders") {
+        Some(Value::Array(folders)) => folders
+            .iter()
+            .map(|folder| {
+                folder
+                    .get("uri")
+                    .and_then(Value::as_str)
+                    .filter(|uri| !uri.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| bridge_config_error("LSP workspace folder URI is required"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(Value::Null) | None => Vec::new(),
         Some(_) => {
             return Err(bridge_config_error("LSP workspaceFolders must be an array"));
         }
@@ -193,20 +191,27 @@ fn initialize_binding(frame: &str) -> tracedecay::errors::Result<InitializeBindi
         .as_deref()
         .map(canonical_file_uri_path)
         .transpose()?;
-    let folder_path = folder_uri
-        .as_deref()
-        .map(canonical_file_uri_path)
-        .transpose()?;
-    if let (Some(root), Some(folder)) = (&root_path, &folder_path)
-        && root != folder
+    let mut folder_paths = folder_uris
+        .iter()
+        .map(|uri| canonical_file_uri_path(uri))
+        .collect::<Result<Vec<_>, _>>()?;
+    folder_paths.sort();
+    if folder_paths.windows(2).any(|roots| roots[0] == roots[1]) {
+        return Err(bridge_config_error(
+            "LSP workspace folders contain a duplicate canonical root",
+        ));
+    }
+    if let Some(root) = &root_path
+        && !folder_paths.is_empty()
+        && !folder_paths.contains(root)
     {
         return Err(bridge_config_error(
-            "LSP initialize rootUri and workspace folder differ",
+            "LSP initialize rootUri is not an admitted workspace folder",
         ));
     }
     let project_root = root_path
-        .or(folder_path)
-        .ok_or_else(|| bridge_config_error("LSP initialize requires one workspace root"))?;
+        .or_else(|| folder_paths.first().cloned())
+        .ok_or_else(|| bridge_config_error("LSP initialize requires a workspace root"))?;
     let canonical_root_uri = url::Url::from_file_path(&project_root)
         .map_err(|()| bridge_config_error("canonical LSP workspace root is not a file path"))?
         .to_string();
@@ -217,17 +222,40 @@ fn initialize_binding(frame: &str) -> tracedecay::errors::Result<InitializeBindi
             Value::String(canonical_root_uri.clone()),
         );
     }
-    let mut workspace_folders = Vec::new();
-    if folder_uri.is_some() {
+    let workspace_folders = folder_paths
+        .iter()
+        .map(|path| {
+            url::Url::from_file_path(path)
+                .map_err(|()| {
+                    bridge_config_error("canonical LSP workspace root is not a file path")
+                })
+                .map(|uri| uri.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !workspace_folders.is_empty() {
         let folders = params
             .get_mut("workspaceFolders")
             .and_then(Value::as_array_mut)
             .expect("validated workspace folders");
-        folders[0]
-            .as_object_mut()
-            .expect("validated workspace folder")
-            .insert("uri".to_owned(), Value::String(canonical_root_uri.clone()));
-        workspace_folders.push(canonical_root_uri.clone());
+        for folder in folders.iter_mut() {
+            let uri = folder
+                .get("uri")
+                .and_then(Value::as_str)
+                .expect("validated workspace folder URI");
+            let canonical = canonical_file_uri_path(uri)?;
+            folder
+                .as_object_mut()
+                .expect("validated workspace folder")
+                .insert(
+                    "uri".to_owned(),
+                    Value::String(
+                        url::Url::from_file_path(canonical)
+                            .expect("canonical file URI")
+                            .to_string(),
+                    ),
+                );
+        }
+        folders.sort_by(|left, right| left["uri"].as_str().cmp(&right["uri"].as_str()));
     }
     let frame = serde_json::to_string(&request)?;
     Ok(InitializeBinding {
@@ -454,7 +482,74 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("rootUri and workspace folder differ"),
+                .contains("rootUri is not an admitted workspace folder"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn initialize_binding_preserves_two_canonical_folders_in_stable_order() {
+        let first = tempfile::tempdir().expect("first workspace");
+        let second = tempfile::tempdir().expect("second workspace");
+        let first_uri = url::Url::from_file_path(first.path()).unwrap().to_string();
+        let second_uri = url::Url::from_file_path(second.path()).unwrap().to_string();
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "workspaceFolders": [
+                    {"uri": second_uri, "name": "second"},
+                    {"uri": first_uri, "name": "first"}
+                ],
+                "capabilities": {}
+            }
+        })
+        .to_string();
+
+        let binding = initialize_binding(&frame).expect("two-root initialize binding");
+        assert_eq!(binding.workspace_folders.len(), 2);
+        assert!(binding.workspace_folders.is_sorted());
+        assert_eq!(
+            binding.project_root,
+            first
+                .path()
+                .canonicalize()
+                .unwrap()
+                .min(second.path().canonicalize().unwrap())
+        );
+        let forwarded: Value = serde_json::from_str(&binding.frame).unwrap();
+        assert_eq!(
+            forwarded["params"]["workspaceFolders"][0]["uri"],
+            binding.workspace_folders[0]
+        );
+        assert_eq!(
+            forwarded["params"]["workspaceFolders"][1]["uri"],
+            binding.workspace_folders[1]
+        );
+    }
+
+    #[test]
+    fn initialize_binding_rejects_duplicate_folder_aliases() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let root_uri = url::Url::from_file_path(root.path()).unwrap().to_string();
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "workspaceFolders": [
+                    {"uri": root_uri, "name": "first"},
+                    {"uri": format!("{root_uri}/"), "name": "alias"}
+                ],
+                "capabilities": {}
+            }
+        })
+        .to_string();
+
+        let error = initialize_binding(&frame).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate canonical root"),
             "{error}"
         );
     }

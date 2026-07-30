@@ -241,14 +241,14 @@ impl Deadline {
 
 /// Immutable cancellation observation. Runtime cancellation execution belongs
 /// to the caller or owning runtime, never to this application crate.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum CancellationState {
     Active,
     Cancelled { requested_at: UtcMicros },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CancellationContext {
     pub token_id: CancellationTokenId,

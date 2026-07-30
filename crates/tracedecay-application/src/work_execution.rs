@@ -3,7 +3,7 @@ use std::fmt::Display;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAttemptProgressV1,
+    UtcMicros, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAttemptProgressV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
     WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestV1,
     WorkCancellationStateV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1, WorkProviderRouteV1,
@@ -74,6 +74,20 @@ pub struct WorkAttemptTerminalizeRequestV1 {
     pub identity: WorkAttemptIdentityV1,
     pub lease: WorkLeaseFenceV1,
     pub terminal: WorkTerminalEvidenceV1,
+}
+
+/// Seals the outcome the provider itself reported.
+///
+/// This carries no terminal: the caller does not get to say how the attempt
+/// ended, because the digest would then be whatever the caller invented rather
+/// than a hash of the evidence the provider produced. The runtime claims the
+/// settlement, seals its evidence as an artifact, and derives the terminal.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptFinishRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub observed_at: UtcMicros,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -259,6 +273,11 @@ where
         replacement: WorkLeaseFenceV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let current = self.load_with_fence(authority, identity, expected)?;
+        // A settled attempt has no execution left to hold, so raising its fence
+        // would only let a caller keep asserting ownership of a closed attempt.
+        if current.is_terminal() {
+            return Err(WorkExecutionError::TerminalConflict);
+        }
         if replacement.lease_id() != expected.lease_id() || replacement.epoch() <= expected.epoch()
         {
             return Err(WorkExecutionError::StaleLease);
@@ -364,6 +383,21 @@ where
         request: WorkCancellationRequestV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let current = self.load_with_fence(authority, identity, lease)?;
+        // Replaying a cancellation is how a caller retries after a refused
+        // provider stop, so the same request must be idempotent. A different
+        // request would silently rewrite who asked and why, and the terminal
+        // replay check would then answer against whichever landed last.
+        match current.cancellation() {
+            WorkCancellationStateV1::Requested(recorded) if recorded != &request => {
+                return Err(WorkExecutionError::TerminalConflict);
+            }
+            WorkCancellationStateV1::Acknowledged(acknowledgement)
+                if acknowledgement.request() != &request =>
+            {
+                return Err(WorkExecutionError::TerminalConflict);
+            }
+            _ => {}
+        }
         let artifacts = current.artifacts().to_vec();
         let recovery = current.recovery().clone();
         self.transition(
@@ -581,8 +615,9 @@ mod tests {
 
     use tracedecay_domain::{
         ActorId, AttemptId, ManifestDigest, ProjectId, ProjectionGenerationId, ProviderId,
-        RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkFenceEpochV1, WorkLeaseId,
-        WorkProjectionSequenceV1, WorkProviderRouteId, WorkVersion, WorktreeId,
+        RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkCancellationRequestId,
+        WorkFenceEpochV1, WorkLeaseId, WorkProjectionSequenceV1, WorkProviderRouteId, WorkVersion,
+        WorktreeId,
     };
 
     use super::*;
@@ -762,6 +797,107 @@ mod tests {
         assert_eq!(completed.progress().unwrap().completed(), 1);
         assert_eq!(completed.artifacts(), &[artifact]);
         assert!(completed.is_terminal());
+    }
+
+    fn cancellation_request(request_id: &str, requested_at: i64) -> WorkCancellationRequestV1 {
+        WorkCancellationRequestV1::new(
+            id::<WorkCancellationRequestId>(request_id),
+            UtcMicros(requested_at),
+        )
+        .unwrap()
+    }
+
+    /// Retrying a refused provider stop replays the same request, so the same
+    /// request must be idempotent while a different one must not silently
+    /// rewrite who asked for the cancellation.
+    #[test]
+    fn replaying_a_cancellation_keeps_the_original_request_and_refuses_another() {
+        let attempt = leased_attempt("attempt.work.cancel.replay");
+        let identity = attempt.identity().clone();
+        let persistence = FakePersistence::seeded(attempt);
+        let service = WorkExecutionService::new(persistence.clone());
+        service
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRecoveryStateV1::Fresh,
+                route("route.actual"),
+            )
+            .unwrap();
+        let original = cancellation_request("cancel.work.first", 30);
+
+        let requested = service
+            .request_cancellation(&authority(), &identity, &lease(1), original.clone())
+            .unwrap();
+        let replayed = service
+            .request_cancellation(&authority(), &identity, &lease(1), original.clone())
+            .unwrap();
+        assert_eq!(requested, replayed);
+
+        assert_eq!(
+            service
+                .request_cancellation(
+                    &authority(),
+                    &identity,
+                    &lease(1),
+                    cancellation_request("cancel.work.second", 31)
+                )
+                .unwrap_err(),
+            WorkExecutionError::TerminalConflict
+        );
+        assert_eq!(
+            persistence
+                .load(&authority(), &identity)
+                .unwrap()
+                .unwrap()
+                .cancellation(),
+            &WorkCancellationStateV1::Requested(original),
+            "a refused second request must leave the original requester recorded"
+        );
+    }
+
+    /// A settled attempt has no execution left to hold, so raising its fence
+    /// would only let a caller keep asserting ownership of a closed attempt.
+    #[test]
+    fn a_terminal_attempt_refuses_a_lease_renewal() {
+        let attempt = leased_attempt("attempt.work.renew.terminal");
+        let identity = attempt.identity().clone();
+        let persistence = FakePersistence::seeded(attempt);
+        let service = WorkExecutionService::new(persistence.clone());
+        service
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRecoveryStateV1::Fresh,
+                route("route.actual"),
+            )
+            .unwrap();
+        service
+            .terminalize(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkTerminalEvidenceV1::succeeded(digest('b'), UtcMicros(20)).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            service
+                .renew_lease(&authority(), &identity, &lease(1), lease(2))
+                .unwrap_err(),
+            WorkExecutionError::TerminalConflict
+        );
+        assert_eq!(
+            persistence
+                .load(&authority(), &identity)
+                .unwrap()
+                .unwrap()
+                .lease(),
+            &lease(1),
+            "a refused renewal must not raise the recorded fence"
+        );
     }
 
     #[test]

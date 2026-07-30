@@ -1194,6 +1194,7 @@ pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod pr9_authority_provider;
 pub(crate) mod project_open_owners;
+pub(crate) mod remote_brain;
 mod semantic_evaluation;
 pub(crate) use core_admission::*;
 pub use core_client::*;
@@ -1403,12 +1404,17 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     .await;
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
     cancel_project_server_startup_ingests(&store_administration).await;
-    invocation.shutdown().await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
         .is_ok();
     clients.abort_all();
     while clients.join_next().await.is_some() {}
+    // Client setup and in-flight requests may create schedulers, project
+    // servers, or provider executions. Sweep owned background work only after
+    // all client work drains, so nothing can admit a provider process after the
+    // execution registry is emptied and leave it running past shutdown. The
+    // deadline bounds a provider that refuses to stop.
+    let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, invocation.shutdown()).await;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     store_administration.shutdown_host_admission_replay().await;
     if !in_flight_drained {

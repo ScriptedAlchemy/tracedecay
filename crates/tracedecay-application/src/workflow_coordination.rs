@@ -7,12 +7,15 @@
 use std::fmt::{self, Display};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, UtcMicros,
     WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowStepId, WorktreeId,
     canonical_sha256,
 };
+
+/// Upper inclusive bound for calibrated placement scores (micros of unit interval).
+pub const MAX_CALIBRATED_SCORE_MICROS: u64 = 1_000_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowDefinitionAuthorityError {
@@ -175,10 +178,26 @@ fn coordination_authority_error(
 #[serde(deny_unknown_fields)]
 pub struct WorkflowPlacementRequestV1 {
     pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
     pub definition_version: u64,
     pub run_id: RunId,
     pub step_id: WorkflowStepId,
     pub task_id: TaskId,
+    pub required_expertise_digest: ManifestDigest,
+    pub calibration_profile_digest: ManifestDigest,
+    #[schemars(range(min = 0, max = 1_000_000))]
+    pub minimum_calibrated_score_micros: u64,
+}
+
+impl WorkflowPlacementRequestV1 {
+    pub fn validate(&self) -> Result<(), WorkflowPlacementError> {
+        if self.definition_version == 0
+            || self.minimum_calibrated_score_micros > MAX_CALIBRATED_SCORE_MICROS
+        {
+            return Err(WorkflowPlacementError::InvalidRequest);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -186,10 +205,24 @@ pub struct WorkflowPlacementRequestV1 {
 pub struct WorkflowPlacementCandidateV1 {
     pub route: WorkProviderRouteV1,
     pub priority: u32,
+    pub expertise_digest: ManifestDigest,
+    pub calibration_profile_digest: ManifestDigest,
+    #[schemars(range(min = 0, max = 1_000_000))]
+    pub calibrated_score_micros: u64,
+}
+
+impl WorkflowPlacementCandidateV1 {
+    fn evidence_matches(&self, request: &WorkflowPlacementRequestV1) -> bool {
+        self.expertise_digest == request.required_expertise_digest
+            && self.calibration_profile_digest == request.calibration_profile_digest
+            && self.calibrated_score_micros <= MAX_CALIBRATED_SCORE_MICROS
+            && self.calibrated_score_micros >= request.minimum_calibrated_score_micros
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowPlacementError {
+    InvalidRequest,
     Unavailable { step_id: WorkflowStepId },
     AuthorityUnavailable(String),
 }
@@ -217,7 +250,9 @@ where
         &self,
         request: &WorkflowPlacementRequestV1,
     ) -> Result<WorkProviderRouteV1, WorkflowPlacementError> {
+        request.validate()?;
         let mut candidates = self.placement.candidates(request)?;
+        candidates.retain(|candidate| candidate.evidence_matches(request));
         candidates.sort_by(|left, right| {
             (
                 left.priority,
@@ -246,7 +281,8 @@ pub struct TaskHandoffToken {
 
 impl TaskHandoffToken {
     pub fn new(secret: String) -> Result<Self, TaskHandoffError> {
-        if !(32..=512).contains(&secret.len())
+        let byte_len = secret.as_bytes().len();
+        if !(32..=512).contains(&byte_len)
             || secret.trim() != secret
             || secret.chars().any(char::is_control)
         {
@@ -267,19 +303,98 @@ impl fmt::Debug for TaskHandoffToken {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TaskHandoffScopeV1 {
     pub project_id: ProjectId,
     pub repository_id: RepositoryId,
     pub worktree_id: WorktreeId,
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    pub step_id: WorkflowStepId,
     pub task_id: TaskId,
     pub run_id: RunId,
     pub from_actor_id: ActorId,
     pub to_actor_id: ActorId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+impl TaskHandoffScopeV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        worktree_id: WorktreeId,
+        definition_id: WorkflowDefinitionId,
+        definition_version: u64,
+        step_id: WorkflowStepId,
+        task_id: TaskId,
+        run_id: RunId,
+        from_actor_id: ActorId,
+        to_actor_id: ActorId,
+    ) -> Result<Self, TaskHandoffError> {
+        let scope = Self {
+            project_id,
+            repository_id,
+            worktree_id,
+            definition_id,
+            definition_version,
+            step_id,
+            task_id,
+            run_id,
+            from_actor_id,
+            to_actor_id,
+        };
+        scope.validate()?;
+        Ok(scope)
+    }
+
+    pub fn validate(&self) -> Result<(), TaskHandoffError> {
+        if self.definition_version == 0 {
+            return Err(TaskHandoffError::InvalidScope);
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskHandoffScopeV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            project_id: ProjectId,
+            repository_id: RepositoryId,
+            worktree_id: WorktreeId,
+            definition_id: WorkflowDefinitionId,
+            definition_version: u64,
+            step_id: WorkflowStepId,
+            task_id: TaskId,
+            run_id: RunId,
+            from_actor_id: ActorId,
+            to_actor_id: ActorId,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.project_id,
+            wire.repository_id,
+            wire.worktree_id,
+            wire.definition_id,
+            wire.definition_version,
+            wire.step_id,
+            wire.task_id,
+            wire.run_id,
+            wire.from_actor_id,
+            wire.to_actor_id,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TaskHandoffGrantV1 {
     pub scope: TaskHandoffScopeV1,
@@ -289,8 +404,57 @@ pub struct TaskHandoffGrantV1 {
 }
 
 impl TaskHandoffGrantV1 {
+    pub fn new(
+        scope: TaskHandoffScopeV1,
+        token_digest: ManifestDigest,
+        issued_at: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Result<Self, TaskHandoffError> {
+        let grant = Self {
+            scope,
+            token_digest,
+            issued_at,
+            expires_at,
+        };
+        grant.validate()?;
+        Ok(grant)
+    }
+
+    pub fn validate(&self) -> Result<(), TaskHandoffError> {
+        self.scope.validate()?;
+        if !(self.issued_at < self.expires_at) {
+            return Err(TaskHandoffError::InvalidExpiry);
+        }
+        Ok(())
+    }
+
     pub fn token_digest(&self) -> &ManifestDigest {
         &self.token_digest
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskHandoffGrantV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            scope: TaskHandoffScopeV1,
+            token_digest: ManifestDigest,
+            issued_at: UtcMicros,
+            expires_at: UtcMicros,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.scope,
+            wire.token_digest,
+            wire.issued_at,
+            wire.expires_at,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -323,6 +487,7 @@ pub trait TaskHandoffAuthorityPort: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskHandoffError {
     InvalidToken,
+    InvalidScope,
     Unauthorized,
     InvalidExpiry,
     Conflict,
@@ -332,6 +497,27 @@ pub enum TaskHandoffError {
     Replay,
     AuthorityUnavailable(String),
 }
+
+impl Display for TaskHandoffError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidToken => formatter.write_str("task handoff token is invalid"),
+            Self::InvalidScope => formatter.write_str("task handoff scope is invalid"),
+            Self::Unauthorized => formatter.write_str("task handoff actor is unauthorized"),
+            Self::InvalidExpiry => formatter.write_str("task handoff expiry is invalid"),
+            Self::Conflict => formatter.write_str("task handoff grant conflicts"),
+            Self::Missing => formatter.write_str("task handoff grant is missing"),
+            Self::ScopeMismatch => formatter.write_str("task handoff scope mismatch"),
+            Self::Expired => formatter.write_str("task handoff grant expired"),
+            Self::Replay => formatter.write_str("task handoff grant already consumed"),
+            Self::AuthorityUnavailable(message) => {
+                write!(formatter, "task handoff authority unavailable: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TaskHandoffError {}
 
 pub struct TaskHandoffService<P> {
     authority: P,
@@ -356,15 +542,7 @@ where
         if issuer != &scope.from_actor_id {
             return Err(TaskHandoffError::Unauthorized);
         }
-        if expires_at <= issued_at {
-            return Err(TaskHandoffError::InvalidExpiry);
-        }
-        let grant = TaskHandoffGrantV1 {
-            scope,
-            token_digest: token.digest()?,
-            issued_at,
-            expires_at,
-        };
+        let grant = TaskHandoffGrantV1::new(scope, token.digest()?, issued_at, expires_at)?;
         self.authority
             .issue(&grant)
             .map_err(handoff_authority_error)?;
@@ -378,6 +556,7 @@ where
         redeemer: &ActorId,
         consumed_at: UtcMicros,
     ) -> Result<(), TaskHandoffError> {
+        expected_scope.validate()?;
         if redeemer != &expected_scope.to_actor_id {
             return Err(TaskHandoffError::Unauthorized);
         }

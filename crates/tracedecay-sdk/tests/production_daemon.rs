@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ClientError, ConnectionMode, PageOptions, RequestOptions,
-    StreamOptions, StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, RequestOptions, StreamOptions,
+    StreamResume,
 };
 use tracedecay_sdk::operations::{TypedOperation, WorkSnapshot};
 
@@ -39,7 +39,7 @@ impl Drop for Daemon {
 
 #[test]
 #[ignore = "requires a prebuilt production tracedecay daemon"]
-fn installed_rust_client_covers_local_remote_paging_resume_and_cancellation() {
+fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability() {
     let scratch = TempDir::new().unwrap();
     let home = scratch.path().join("home");
     let profile = home.join(".tracedecay");
@@ -97,10 +97,7 @@ fn installed_rust_client_covers_local_remote_paging_resume_and_cancellation() {
     );
     let token = authority["auth_token"].as_str().unwrap();
 
-    for mode in [
-        ConnectionMode::local(&endpoint, project_id, token),
-        ConnectionMode::remote(&endpoint, project_id, token),
-    ] {
+    for mode in [ConnectionMode::local(&endpoint, project_id, token)] {
         let client = Client::builder(mode)
             .origin(
                 reqwest::Url::parse(&endpoint)
@@ -114,21 +111,10 @@ fn installed_rust_client_covers_local_remote_paging_resume_and_cancellation() {
             json!({"page_size": 1}),
         )
         .unwrap();
-        let request_id = match client.execute::<WorkSnapshot>(
-            &request,
-            RequestOptions {
-                page: Some(PageOptions {
-                    size: Some(1),
-                    cursor: None,
-                }),
-            },
-        ) {
-            Ok(response) => response.request_id,
-            Err(ClientError::Problem(problem)) => {
-                problem.envelope["request_id"].as_str().unwrap().to_owned()
-            }
-            Err(error) => panic!("production operation failed unexpectedly: {error}"),
-        };
+        let request_id = client
+            .execute::<WorkSnapshot>(&request, RequestOptions)
+            .unwrap_or_else(|error| panic!("WorkSnapshot must succeed: {error}"))
+            .request_id;
         match client.stream_operation(&request_id, StreamOptions::default()) {
             Ok(mut initial) => {
                 let open = initial.next().unwrap().unwrap();

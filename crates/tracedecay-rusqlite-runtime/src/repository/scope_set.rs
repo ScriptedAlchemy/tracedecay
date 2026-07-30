@@ -13,6 +13,11 @@ use tracedecay_store::runtime::{
     ScopeSetStoreContractError,
 };
 
+use crate::migration_sql::{
+    MigrationSqlError, MigrationSqlHandle, MigrationSqlRow, MigrationSqlStatement,
+    MigrationSqlValue,
+};
+
 pub const AUTHORIZED_SCOPE_SET_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS authorized_scope_sets_v1 (
     scope_set_id TEXT PRIMARY KEY NOT NULL,
@@ -34,6 +39,10 @@ pub enum AuthorizedScopeSetStoreError {
     StoreContract(#[from] ScopeSetStoreContractError),
     #[error("authorized scope-set persisted data is invalid: {0}")]
     InvalidData(String),
+    #[error("authorized scope-set actor does not match the stored owner")]
+    OwnershipMismatch,
+    #[error(transparent)]
+    RegisteredStore(#[from] MigrationSqlError),
 }
 
 /// Persistence executor for one exact scope-set record.
@@ -79,6 +88,19 @@ impl AuthorizedScopeSetExecutor {
                 actual_revision,
             });
         }
+        if actual_revision.is_some() {
+            let current = read_record(&transaction, next.scope_set_id())?
+                .map(decode_record)
+                .transpose()?
+                .ok_or_else(|| {
+                    AuthorizedScopeSetStoreError::InvalidData(
+                        "scope-set revision exists without a canonical payload".to_owned(),
+                    )
+                })?;
+            if current.actor_id() != next.actor_id() {
+                return Err(AuthorizedScopeSetStoreError::OwnershipMismatch);
+            }
+        }
 
         match command.expected_revision {
             None => {
@@ -117,6 +139,125 @@ impl AuthorizedScopeSetExecutor {
         transaction.commit()?;
         Ok(ScopeSetCasOutcomeV1::Applied(record))
     }
+}
+
+/// Scope-set persistence over the exact registered and fenced project store.
+#[derive(Clone)]
+pub struct AuthorizedScopeSetSqliteStorage {
+    handle: MigrationSqlHandle,
+}
+
+impl AuthorizedScopeSetSqliteStorage {
+    pub fn from_registered(handle: MigrationSqlHandle) -> Self {
+        Self { handle }
+    }
+
+    pub fn read(
+        &self,
+        scope_set_id: &ScopeSetId,
+    ) -> Result<Option<AuthorizedScopeSet>, AuthorizedScopeSetStoreError> {
+        let rows = self.handle.query(
+            registered_read_statement(scope_set_id)?,
+            std::time::Duration::from_secs(5),
+        )?;
+        decode_registered_rows(rows.rows)
+    }
+
+    pub fn compare_and_swap(
+        &self,
+        expected_revision: Option<ScopeSetRevision>,
+        next: &AuthorizedScopeSet,
+    ) -> Result<ScopeSetCasOutcomeV1, AuthorizedScopeSetStoreError> {
+        let transaction = self.handle.begin_immediate()?;
+        let current = decode_registered_rows(
+            transaction
+                .query(registered_read_statement(next.scope_set_id())?)?
+                .rows,
+        )?;
+        let actual_revision = current.as_ref().map(AuthorizedScopeSet::revision);
+        if actual_revision != expected_revision {
+            transaction.rollback()?;
+            return Ok(ScopeSetCasOutcomeV1::Conflict {
+                expected_revision,
+                actual_revision,
+            });
+        }
+        if current
+            .as_ref()
+            .is_some_and(|current| current.actor_id() != next.actor_id())
+        {
+            transaction.rollback()?;
+            return Err(AuthorizedScopeSetStoreError::OwnershipMismatch);
+        }
+        let payload = serde_json::to_vec(next)?;
+        transaction.execute(MigrationSqlStatement::new(
+            "INSERT INTO authorized_scope_sets_v1 (
+                 scope_set_id, revision, digest, canonical_payload
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope_set_id) DO UPDATE SET
+                 revision = excluded.revision,
+                 digest = excluded.digest,
+                 canonical_payload = excluded.canonical_payload"
+                .to_owned(),
+            vec![
+                MigrationSqlValue::Text(next.scope_set_id().as_str().to_owned()),
+                MigrationSqlValue::Integer(revision_to_i64(next.revision())?),
+                MigrationSqlValue::Text(next.digest().as_str().to_owned()),
+                MigrationSqlValue::Blob(payload.clone()),
+            ],
+        )?)?;
+        transaction.commit()?;
+        Ok(ScopeSetCasOutcomeV1::Applied(
+            AuthorizedScopeSetRecordV1::new(
+                next.scope_set_id().clone(),
+                next.revision(),
+                next.digest().clone(),
+                payload,
+            )?,
+        ))
+    }
+}
+
+fn registered_read_statement(
+    scope_set_id: &ScopeSetId,
+) -> Result<MigrationSqlStatement, AuthorizedScopeSetStoreError> {
+    Ok(MigrationSqlStatement::new(
+        "SELECT revision, digest, canonical_payload
+         FROM authorized_scope_sets_v1
+         WHERE scope_set_id = ?1"
+            .to_owned(),
+        vec![MigrationSqlValue::Text(scope_set_id.as_str().to_owned())],
+    )?)
+}
+
+fn decode_registered_rows(
+    rows: Vec<MigrationSqlRow>,
+) -> Result<Option<AuthorizedScopeSet>, AuthorizedScopeSetStoreError> {
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let [
+        MigrationSqlValue::Integer(revision),
+        MigrationSqlValue::Text(digest),
+        MigrationSqlValue::Blob(payload),
+    ] = row.values.as_slice()
+    else {
+        return Err(AuthorizedScopeSetStoreError::InvalidData(
+            "registered scope-set row has an invalid shape".to_owned(),
+        ));
+    };
+    let scope_set: AuthorizedScopeSet = serde_json::from_slice(payload)?;
+    if scope_set.revision() != revision_from_i64(*revision)?
+        || scope_set.digest().as_str() != digest
+    {
+        return Err(AuthorizedScopeSetStoreError::InvalidData(
+            "registered scope-set metadata does not match its canonical payload".to_owned(),
+        ));
+    }
+    scope_set
+        .validate()
+        .map_err(|error| AuthorizedScopeSetStoreError::InvalidData(error.to_string()))?;
+    Ok(Some(scope_set))
 }
 
 fn read_record(

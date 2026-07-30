@@ -14,7 +14,25 @@ use crate::application::semantic_runtime::{
 use crate::errors::Result;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 
-pub(crate) const DOCTOR_GRAPH_SCHEMA_VERSION: i64 = 24;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorGraphSchemaState {
+    ReleasedV0067,
+    PreviousV2Candidate,
+    Current,
+    Unsupported,
+}
+
+fn doctor_graph_schema_state(actual: i64) -> DoctorGraphSchemaState {
+    match actual {
+        18 => DoctorGraphSchemaState::ReleasedV0067,
+        24 => DoctorGraphSchemaState::PreviousV2Candidate,
+        actual if actual == i64::from(crate::migrate::final_v2::FINAL_PROJECT_SCHEMA_VERSION) => {
+            DoctorGraphSchemaState::Current
+        }
+        _ => DoctorGraphSchemaState::Unsupported,
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct DoctorRuntimeRequest {
@@ -318,6 +336,18 @@ async fn doctor_runtime_value_inner(
         .map(|(page_size, page_count, _)| page_size.saturating_mul(page_count))
         .unwrap_or_default();
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
+    let schema_version = match graph
+        .db()
+        .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version")
+        .await
+    {
+        Ok(version) => version,
+        Err(_) => {
+            return doctor_runtime_unavailable(Some(project_path), "project_schema_unavailable");
+        }
+    };
+    let schema_state = doctor_graph_schema_state(schema_version);
+    let expected_schema_version = crate::migrate::final_v2::FINAL_PROJECT_SCHEMA_VERSION;
     let mut value = json!({
         "tracedecay_version": crate::version::build_version(),
         "process": {
@@ -335,7 +365,10 @@ async fn doctor_runtime_value_inner(
             "page_size": page_size,
             "quick_check_ok": quick_check_ok,
             "quick_check_error": quick_check_error,
-            "schema_version": DOCTOR_GRAPH_SCHEMA_VERSION,
+            "schema_version": schema_version,
+            "expected_schema_version": expected_schema_version,
+            "schema_state": schema_state,
+            "schema_drift": (schema_state != DoctorGraphSchemaState::Current),
         },
         "doctor_runtime": {
             "status": "complete",

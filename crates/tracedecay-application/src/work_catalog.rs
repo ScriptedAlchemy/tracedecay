@@ -15,7 +15,7 @@ use tracedecay_tool_catalog::{
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
     CreateWorkCommand, ReplanDependenciesCommand, ReviewProposalRequestV1,
-    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1,
+    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
     WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
     WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
     WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
@@ -62,7 +62,7 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 9] = [
         "use-case.work.accept_task",
     ),
 ];
-pub const WORK_ATTEMPT_OPERATION_IDS_V1: [(&str, &str, &str); 8] = [
+pub const WORK_ATTEMPT_OPERATION_IDS_V1: [(&str, &str, &str); 9] = [
     (
         "attempt_acquire_lease",
         "capability.work.attempt_acquire_lease",
@@ -97,6 +97,11 @@ pub const WORK_ATTEMPT_OPERATION_IDS_V1: [(&str, &str, &str); 8] = [
         "attempt_recover",
         "capability.work.attempt_recover",
         "use-case.work.attempt_recover",
+    ),
+    (
+        "attempt_finish",
+        "capability.work.attempt_finish",
+        "use-case.work.attempt_finish",
     ),
     (
         "attempt_terminalize",
@@ -188,6 +193,11 @@ pub fn work_executable_binding_registry()
         available::<WorkAttemptRecoverRequestV1, WorkAttemptResponseV1>(
             "attempt_recover",
             "/application/work/attempt/recover",
+            EffectClass::Administrative,
+        )?,
+        available::<WorkAttemptFinishRequestV1, WorkAttemptResponseV1>(
+            "attempt_finish",
+            "/application/work/attempt/finish",
             EffectClass::Administrative,
         )?,
         available::<WorkAttemptTerminalizeRequestV1, WorkAttemptResponseV1>(
@@ -413,6 +423,7 @@ mod tests {
             ),
             ("attempt_cancel", "WorkAttemptCancelRequestV1"),
             ("attempt_recover", "WorkAttemptRecoverRequestV1"),
+            ("attempt_finish", "WorkAttemptFinishRequestV1"),
             ("attempt_terminalize", "WorkAttemptTerminalizeRequestV1"),
         ] {
             let operation =
