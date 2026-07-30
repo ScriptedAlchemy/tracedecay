@@ -2554,6 +2554,15 @@ impl HostBundleWriterV1 {
             operation_id: request.operation_id,
             host: component_set.host,
             operation: request.lifecycle.operation,
+            explicit_confirmation: request.lifecycle.explicit_confirmation,
+            hermes_profile_bindings: request.lifecycle.hermes_profile_bindings,
+            confirmed_plan_digest: confirmed_preview.map(|preview| preview.plan_digest),
+            base_registration_revision: confirmed_preview
+                .map(|preview| preview.base_registration_revision),
+            current_registration_revision: confirmed_preview
+                .map(|preview| preview.current_registration_revision),
+            artifact_state_revision: confirmed_preview
+                .map(|preview| preview.artifact_state_revision),
             state: HostComponentSetJournalStateV1::Prepared,
             registration_staged: false,
             registration_applied: false,
@@ -2683,8 +2692,8 @@ impl HostBundleWriterV1 {
                     .iter()
                     .map(|component| component.manifest.component)
                     .collect(),
-                explicit_confirmation: true,
-                hermes_profile_bindings: u8::from(journal.host == HostKindV1::Hermes),
+                explicit_confirmation: journal.explicit_confirmation,
+                hermes_profile_bindings: journal.hermes_profile_bindings,
             },
             operation_id: journal.operation_id,
         };
@@ -4429,13 +4438,46 @@ fn validate_component_set_journal(
         || journal.operation_id == [0; 16]
         || journal.components.is_empty()
         || journal.components.len() > MAX_HOST_COMPONENTS
+        || !journal.explicit_confirmation
+        || matches!(
+            journal.host,
+            HostKindV1::Hermes if journal.hermes_profile_bindings != 1
+        )
+        || matches!(
+            journal.host,
+            host if host != HostKindV1::Hermes && journal.hermes_profile_bindings != 0
+        )
+    {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
+    let preview_authority = [
+        journal.confirmed_plan_digest,
+        journal.base_registration_revision,
+        journal.current_registration_revision,
+        journal.artifact_state_revision,
+    ];
+    if preview_authority.iter().any(Option::is_some)
+        && preview_authority.iter().any(Option::is_none)
     {
         return Err(HostBundleError::ReceiptCorrupted);
     }
     let mut components = BTreeMap::new();
     let mut paths = BTreeMap::new();
+    let mut configuration_authority = None;
     for component in &journal.components {
         component.manifest.validate_structure()?;
+        let authority = (
+            component.manifest.configuration_snapshot_id.as_str(),
+            component.manifest.integration_manifest_digest,
+            component.manifest.catalog_digest,
+        );
+        if let Some(expected) = configuration_authority {
+            if authority != expected {
+                return Err(HostBundleError::ReceiptCorrupted);
+            }
+        } else {
+            configuration_authority = Some(authority);
+        }
         if component.manifest.host != journal.host
             || components
                 .insert(component.manifest.component, ())
@@ -4972,10 +5014,19 @@ mod tests {
             component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Update, 22);
         let updated_verifier = ComponentSetVerifier::from_set(&updated);
         let mut failing_registration = FailingSetRegistration::default();
-        assert_eq!(
-            HostComponentSetTransactionV1::new(&mut writer).execute(
+        let preview = HostComponentSetTransactionV1::new(&mut writer)
+            .preview(
                 &updated,
                 &update_request,
+                &updated_verifier,
+                &mut failing_registration,
+            )
+            .unwrap();
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
+                &updated,
+                &update_request,
+                &preview,
                 &updated_verifier,
                 &mut failing_registration,
             ),
@@ -5013,6 +5064,25 @@ mod tests {
                 .join(component_set_journal_file(HostKindV1::OpenCode))
                 .is_file(),
             "a rollback journal must remain available for restart reconciliation"
+        );
+        let journal = writer
+            .load_component_set_journal_for(HostKindV1::OpenCode)
+            .unwrap()
+            .expect("interrupted rollback retains exact lifecycle authority");
+        assert!(journal.explicit_confirmation);
+        assert_eq!(journal.hermes_profile_bindings, 0);
+        assert_eq!(journal.confirmed_plan_digest, Some(preview.plan_digest));
+        assert_eq!(
+            journal.base_registration_revision,
+            Some(preview.base_registration_revision)
+        );
+        assert_eq!(
+            journal.current_registration_revision,
+            Some(preview.current_registration_revision)
+        );
+        assert_eq!(
+            journal.artifact_state_revision,
+            Some(preview.artifact_state_revision)
         );
         let doctor = inspect_installed_host_bundle_components_at(
             root.path(),
