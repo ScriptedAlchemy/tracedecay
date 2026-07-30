@@ -1,0 +1,120 @@
+use tracedecay_sdk::{
+    CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
+    application, domain, operation, remote,
+};
+
+#[test]
+fn canonical_contracts_are_available_without_sdk_copies() {
+    fn accepts_application_envelope<T>(_: Option<application::ApplicationEnvelope<T>>) {}
+    fn accepts_api_envelope<T>(_: Option<api::HttpJsonEnvelope<T>>) {}
+    fn accepts_domain_identity(_: Option<domain::RepositoryId>) {}
+    fn accepts_operation_metadata(_: Option<operation::CapabilityManifestV1>) {}
+    fn accepts_remote_authority(_: Option<domain::CurrentRemoteAuthorityStateV1>) {}
+    fn accepts_remote_response<T>(_: Option<remote::protocol::RemoteProtocolResponseV1<T>>) {}
+
+    accepts_application_envelope::<serde_json::Value>(None);
+    accepts_api_envelope::<serde_json::Value>(None);
+    accepts_domain_identity(None);
+    accepts_operation_metadata(None);
+    accepts_remote_authority(None);
+    accepts_remote_response::<serde_json::Value>(None);
+
+    let _: operation::ReceiptContract = operation::ReceiptContract::Operation;
+    let _: Option<application::ApplicationOperation> = None;
+}
+
+#[test]
+fn cancellation_types_are_the_canonical_application_types() {
+    let signal = CancellationSignal::active("cancel.sdk.facade").expect("cancellation signal");
+    let canonical_signal: application::CancellationSignal = signal.clone();
+    let _: CancellationSignal = canonical_signal;
+
+    assert!(signal.cancel(domain::UtcMicros(41)));
+    let context: CancellationContext = signal.context();
+    let token: CancellationTokenId = context.token_id.clone();
+    let _: application::CancellationTokenId = token;
+    assert!(matches!(
+        context.state,
+        CancellationState::Cancelled {
+            requested_at: domain::UtcMicros(41)
+        }
+    ));
+}
+
+#[test]
+fn remote_outcomes_are_the_canonical_application_types() {
+    let outcome = remote::replay::RemoteReplayOutcomeV1::Rejected;
+    let canonical: application::remote::replay::RemoteReplayOutcomeV1 = outcome;
+    let _: remote::replay::RemoteReplayOutcomeV1 = canonical;
+}
+
+#[test]
+fn canonical_problem_envelope_serializes_verbatim() {
+    let envelope = application::ApplicationProblemEnvelope::new(
+        application::ResultContractRef::new(
+            operation::SchemaId::new("schema.sdk.problem").expect("schema id"),
+            1,
+        )
+        .expect("result contract"),
+        application::RequestId::new("request.sdk.problem").expect("request id"),
+        application::ApplicationProblem::unavailable(
+            application::SafeDiagnostic::new(
+                "sdk.test_unavailable",
+                "The requested operation is unavailable",
+            )
+            .expect("safe diagnostic"),
+        ),
+    );
+
+    let value = serde_json::to_value(envelope).expect("serialize problem envelope");
+
+    assert_eq!(value["contract"]["schema_id"], "schema.sdk.problem");
+    assert_eq!(value["contract"]["schema_revision"], 1);
+    assert_eq!(value["request_id"], "request.sdk.problem");
+    assert_eq!(value["problem"]["kind"], "unavailable");
+    assert_eq!(value["problem"]["code"], "sdk.test_unavailable");
+    assert_eq!(
+        value["problem"]["diagnostic"]["code"],
+        "sdk.test_unavailable"
+    );
+    assert_eq!(value["problem"]["retry"], "after_delay");
+}
+
+#[test]
+fn canonical_operation_receipt_round_trips() {
+    let receipt = application::OperationReceipt::completed(
+        domain::UtcMicros(10),
+        domain::UtcMicros(20),
+        application::Deadline::new(domain::UtcMicros(30)).expect("deadline"),
+        application::OperationBudgetUsage {
+            units_consumed: 2,
+            bytes_consumed: 64,
+            elapsed_micros: 10,
+        },
+    )
+    .expect("completed receipt");
+
+    let value = serde_json::to_value(&receipt).expect("serialize receipt");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "started_at": 10,
+            "ended_at": 20,
+            "effective_deadline": {"expires_at": 30},
+            "cancellation": null,
+            "budget": {
+                "units_consumed": 2,
+                "bytes_consumed": 64,
+                "elapsed_micros": 10
+            },
+            "termination": "completed"
+        })
+    );
+
+    let decoded: application::OperationReceipt =
+        serde_json::from_value(value).expect("deserialize receipt");
+    assert_eq!(decoded, receipt);
+
+    let canonical: tracedecay_application::OperationReceipt = decoded;
+    let _: application::OperationReceipt = canonical;
+}
