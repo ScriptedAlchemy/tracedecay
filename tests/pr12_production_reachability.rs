@@ -14,7 +14,7 @@ use serde_json::Value;
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
     CallableCodeSurfaceMeta, CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest,
-    resolve_http_application_surface,
+    parse_application_surface_request, resolve_http_application_surface,
 };
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
@@ -173,6 +173,77 @@ fn run_symbol_search_cli(home: &Path, project: &Path, query: &str, cursor: Optio
         .expect("run code_symbol_search through the CLI")
 }
 
+fn run_application_cli(
+    fixture: &ProductionFixture,
+    operation: ApplicationSurfaceOperation,
+    arguments: &Value,
+) -> Output {
+    let project = fixture.project.to_string_lossy().into_owned();
+    let arguments = arguments.to_string();
+    common::tracedecay_command_with_home(fixture.home())
+        .current_dir(&fixture.project)
+        .args([
+            "tool",
+            "--project",
+            project.as_str(),
+            operation.as_str(),
+            "--args",
+            arguments.as_str(),
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("run {} through the CLI: {error}", operation.as_str()))
+}
+
+fn invocation_terminal(result: &ApplicationSurfaceInvocationResult) -> Value {
+    match &result.result {
+        Ok(envelope) => serde_json::to_value(envelope).expect("application evidence envelope"),
+        Err(envelope) => serde_json::to_value(envelope).expect("application problem envelope"),
+    }
+}
+
+fn terminal_disposition(value: &Value) -> (&str, &str) {
+    if let Some(outcome) = value.get("outcome") {
+        let outcome = outcome["outcome"]
+            .as_str()
+            .unwrap_or_else(|| panic!("typed application outcome: {value:#}"));
+        if outcome == "evidence" {
+            assert_eq!(
+                value["outcome"]["value"]["execution"]["termination"], "completed",
+                "evidence must be terminal rather than a route placeholder: {value:#}"
+            );
+        }
+        return ("outcome", outcome);
+    }
+    let problem = value.get("problem").unwrap_or_else(|| {
+        panic!("application call returned no outcome or typed problem: {value:#}")
+    });
+    let kind = problem["kind"]
+        .as_str()
+        .unwrap_or_else(|| panic!("typed application problem: {value:#}"));
+    assert!(
+        problem["diagnostic"]["code"].is_string(),
+        "application problem must identify its observed terminal state: {value:#}"
+    );
+    ("problem", kind)
+}
+
+async fn invoke_mcp_symbol_search(
+    client: &DaemonInvocationClient,
+    request_id: &str,
+) -> ApplicationSurfaceInvocationResult {
+    resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        RequestId::new(request_id).expect("request id"),
+        symbol_search_surface_request(PROBE_TOKEN, None),
+        RequestedOutputFormat::Json,
+        Some(client),
+    )
+    .await
+    .expect("MCP application dispatch")
+}
+
 /// Asserts the page is the first of several and was produced by the cursor
 /// authority rather than by truncation.
 fn assert_first_page_of_many(surface: &str, payload: &Value) {
@@ -222,6 +293,209 @@ fn assert_second_page_continues(surface: &str, first: &Value, second: &Value) {
         assert!(
             !first_items.contains(item),
             "{surface} resume repeated a first-page row: {item:#}"
+        );
+    }
+}
+
+/// The project-open completion boundary may not be published before its
+/// production owners are callable. Fresh concurrent connections and repeated
+/// reads must therefore observe the same real owner, never a placeholder,
+/// duplicate-registration failure, or partially mounted route.
+#[tokio::test(flavor = "multi_thread")]
+async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
+    let fixture = production_fixture().await;
+
+    // This is the first application request after the packaged `init` returns.
+    // It makes publication ordering externally observable at the only boundary
+    // users can rely on: an independent owner must already be callable without
+    // waiting for the generation-backed symbol owner used below.
+    let immediate_tests = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::TestResults,
+        RequestId::new("request.pr12-reachability.open.immediate-tests").expect("request id"),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::TestResults,
+            serde_json::json!({}),
+        )
+        .expect("test-results request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("immediate test-results dispatch");
+    let immediate_tests = evidence_payload(&immediate_tests);
+    assert!(
+        immediate_tests["head_commit_id"].is_string(),
+        "immediate independent owner must publish a commit identity: {immediate_tests:#}"
+    );
+    assert!(
+        immediate_tests["code_generation_id"].is_string(),
+        "immediate independent owner must publish a generation identity: {immediate_tests:#}"
+    );
+    assert!(
+        immediate_tests["results"].is_array(),
+        "immediate independent owner must return its typed result collection: {immediate_tests:#}"
+    );
+
+    let immediate =
+        invoke_mcp_symbol_search(&fixture.client, "request.pr12-reachability.open.immediate").await;
+    let immediate = evidence_payload(&immediate).clone();
+    assert_first_page_of_many("immediate post-open MCP", &immediate);
+
+    let fresh_client = || {
+        let handshake =
+            DaemonHandshake::for_current_client(Some(fixture.project.clone()), None, false, false)
+                .expect("daemon handshake");
+        DaemonInvocationClient::for_current(handshake).expect("daemon client")
+    };
+    let client_a = fresh_client();
+    let client_b = fresh_client();
+    let client_c = fresh_client();
+    let client_d = fresh_client();
+    let (a, b, c, d) = tokio::join!(
+        invoke_mcp_symbol_search(&client_a, "request.pr12-reachability.open.concurrent-a"),
+        invoke_mcp_symbol_search(&client_b, "request.pr12-reachability.open.concurrent-b"),
+        invoke_mcp_symbol_search(&client_c, "request.pr12-reachability.open.concurrent-c"),
+        invoke_mcp_symbol_search(&client_d, "request.pr12-reachability.open.concurrent-d"),
+    );
+    for (label, result) in [
+        ("concurrent-a", a),
+        ("concurrent-b", b),
+        ("concurrent-c", c),
+        ("concurrent-d", d),
+    ] {
+        let payload = evidence_payload(&result);
+        assert_first_page_of_many(label, payload);
+        assert_eq!(
+            payload["items"], immediate["items"],
+            "{label} must reach the same mounted owner"
+        );
+    }
+
+    for suffix in ["repeat-a", "repeat-b"] {
+        let result = invoke_mcp_symbol_search(
+            &fixture.client,
+            &format!("request.pr12-reachability.open.{suffix}"),
+        )
+        .await;
+        assert_eq!(
+            evidence_payload(&result)["items"],
+            immediate["items"],
+            "{suffix} must reuse the production owner without duplication"
+        );
+    }
+}
+
+/// Every operation formerly checked only by scanning the PR12 declaration must
+/// execute through all three shipped adapters. Missing fixture resources are
+/// allowed to produce a typed terminal problem, but an absent binding, adapter
+/// rejection, daemon disconnect, or placeholder response fails this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn pr12_operation_family_executes_through_cli_mcp_and_http() {
+    let fixture = production_fixture().await;
+    let cases = [
+        (
+            ApplicationSurfaceOperation::FeedbackImpact,
+            serde_json::json!({ "request_handle": "rh_missing-pr12-reachability" }),
+        ),
+        (
+            ApplicationSurfaceOperation::AffectedTests,
+            serde_json::json!({ "request_handle": "rh_missing-pr12-reachability" }),
+        ),
+        (
+            ApplicationSurfaceOperation::TestResults,
+            serde_json::json!({}),
+        ),
+        (
+            ApplicationSurfaceOperation::SessionLookup,
+            serde_json::json!({
+                "session_id": "session.pr12-reachability.missing",
+                "meta": {
+                    "temporal": { "kind": "current" },
+                    "page": { "page_size": 10, "cursor": null },
+                    "projection": "summary",
+                    "order": "stable_identity"
+                }
+            }),
+        ),
+        (
+            ApplicationSurfaceOperation::DiagnosticsRead,
+            serde_json::json!({
+                "scope": "workspace",
+                "maximum_diagnostics": 10
+            }),
+        ),
+    ];
+
+    for (operation, arguments) in cases {
+        let request = parse_application_surface_request(operation, arguments.clone())
+            .unwrap_or_else(|error| panic!("parse {} request: {error}", operation.as_str()));
+        let mcp = resolve_mcp_application_surface(
+            operation,
+            RequestId::new(format!("request.pr12-family.mcp.{}", operation.as_str()))
+                .expect("MCP request id"),
+            request,
+            RequestedOutputFormat::Json,
+            Some(&fixture.client),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dispatch MCP {}: {error}", operation.as_str()));
+        let request = parse_application_surface_request(operation, arguments.clone())
+            .unwrap_or_else(|error| panic!("parse {} request: {error}", operation.as_str()));
+        let http = resolve_http_application_surface(
+            operation,
+            RequestId::new(format!("request.pr12-family.http.{}", operation.as_str()))
+                .expect("HTTP request id"),
+            request,
+            RequestedOutputFormat::Json,
+            Some(&fixture.client),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dispatch HTTP {}: {error}", operation.as_str()));
+        let cli = run_application_cli(&fixture, operation, &arguments);
+        assert_eq!(
+            cli.status.success(),
+            mcp.result.is_ok(),
+            "CLI {} exit must agree with the daemon's typed terminal state\nstdout:\n{}\nstderr:\n{}",
+            operation.as_str(),
+            String::from_utf8_lossy(&cli.stdout),
+            String::from_utf8_lossy(&cli.stderr)
+        );
+        let cli: Value = serde_json::from_slice(&cli.stdout)
+            .unwrap_or_else(|error| panic!("parse CLI {} JSON: {error}", operation.as_str()));
+
+        assert_eq!(
+            mcp.binding_id.as_str(),
+            format!("binding.mcp.{}.v1", operation.as_str())
+        );
+        assert_eq!(
+            http.binding_id.as_str(),
+            format!("binding.http.{}.v1", operation.as_str())
+        );
+        let mcp = invocation_terminal(&mcp);
+        let http = invocation_terminal(&http);
+        assert_eq!(
+            mcp["contract"],
+            http["contract"],
+            "{} MCP and HTTP contracts",
+            operation.as_str()
+        );
+        assert_eq!(
+            mcp["contract"],
+            cli["contract"],
+            "{} daemon and CLI contracts",
+            operation.as_str()
+        );
+        assert_eq!(
+            terminal_disposition(&mcp),
+            terminal_disposition(&http),
+            "{} MCP and HTTP terminal behavior",
+            operation.as_str()
+        );
+        assert_eq!(
+            terminal_disposition(&mcp),
+            terminal_disposition(&cli),
+            "{} daemon and CLI terminal behavior",
+            operation.as_str()
         );
     }
 }
