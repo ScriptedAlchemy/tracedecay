@@ -40,13 +40,22 @@ pub struct WorkAppendRequest {
     pub event: WorkEvent,
 }
 
-/// Storage returns the authoritative history for both a new append and an
-/// idempotent replay.
+/// Storage returns the authoritative projection it validated and published,
+/// for both a new append and an idempotent replay. The projection is the one
+/// storage committed, so no caller re-folds history to learn the result.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "outcome", content = "history")]
+#[serde(rename_all = "snake_case", tag = "outcome", content = "projection")]
 pub enum WorkAppendOutcome {
-    Appended(Vec<WorkEvent>),
-    Replayed(Vec<WorkEvent>),
+    Appended(WorkProjection),
+    Replayed(WorkProjection),
+}
+
+impl WorkAppendOutcome {
+    pub fn into_projection(self) -> WorkProjection {
+        match self {
+            Self::Appended(projection) | Self::Replayed(projection) => projection,
+        }
+    }
 }
 
 /// Exact-authority storage boundary. Implementations must compare both the
@@ -525,12 +534,10 @@ where
     }
 
     fn append(&self, request: WorkAppendRequest) -> Result<WorkProjection, ApplicationProblem> {
-        let outcome = self.storage.append(&request).map_err(storage_problem)?;
-        match outcome {
-            WorkAppendOutcome::Appended(history) | WorkAppendOutcome::Replayed(history) => {
-                rebuild(history)
-            }
-        }
+        self.storage
+            .append(&request)
+            .map(WorkAppendOutcome::into_projection)
+            .map_err(storage_problem)
     }
 
     fn load_history(

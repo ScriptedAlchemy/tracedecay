@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
     CreateWorkCommand, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
@@ -18,8 +16,12 @@ use tracedecay_domain::{
     WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderRouteId, WorkProviderRouteV1,
     WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, WorkVersion, WorktreeId,
 };
-use tracedecay_rusqlite_runtime::work::{WorkSqliteStorage, install_work_schema};
+use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+mod work_registered_store;
+
+use work_registered_store::RegisteredWorkStore;
 
 fn id<T>(value: &str) -> T
 where
@@ -179,9 +181,8 @@ fn replace_attempt(
 
 #[test]
 fn application_execution_service_composes_with_sqlite_adapter() {
-    let connection = Connection::open_in_memory().unwrap();
-    install_work_schema(&connection).unwrap();
-    let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+    let store = RegisteredWorkStore::start("application");
+    let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
     let projection = WorkService::new(storage.clone())
@@ -274,11 +275,8 @@ fn application_execution_service_composes_with_sqlite_adapter() {
 
 #[test]
 fn attempt_transitions_replay_and_rebuild_after_restart() {
-    let temporary = tempfile::TempDir::new().unwrap();
-    let path = temporary.path().join("work-runtime.sqlite");
-    let connection = Connection::open(&path).unwrap();
-    install_work_schema(&connection).unwrap();
-    let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+    let store = RegisteredWorkStore::start("attempt-restart");
+    let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
     let leased = leased(task_id);
@@ -306,7 +304,8 @@ fn attempt_transitions_replay_and_rebuild_after_restart() {
     replace_attempt(&storage, &owner, &leased, &running).unwrap();
     drop(storage);
 
-    let reopened = WorkSqliteStorage::new(Arc::new(Mutex::new(Connection::open(path).unwrap())));
+    let store = store.restart("attempt-restart");
+    let reopened = store.storage().clone();
     assert_eq!(
         reopened
             .execution_attempt(&owner, running.identity())
@@ -325,9 +324,8 @@ fn attempt_transitions_replay_and_rebuild_after_restart() {
 
 #[test]
 fn lease_loss_rejects_stale_writer_without_partial_progress_or_artifacts() {
-    let connection = Connection::open_in_memory().unwrap();
-    install_work_schema(&connection).unwrap();
-    let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+    let store = RegisteredWorkStore::start("lease-loss");
+    let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
     let leased = leased(task_id);
@@ -357,9 +355,8 @@ fn lease_loss_rejects_stale_writer_without_partial_progress_or_artifacts() {
 
 #[test]
 fn terminal_evidence_is_published_exactly_once() {
-    let connection = Connection::open_in_memory().unwrap();
-    install_work_schema(&connection).unwrap();
-    let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+    let store = RegisteredWorkStore::start("terminal-once");
+    let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
     let leased = leased(task_id);
@@ -411,47 +408,43 @@ fn terminal_evidence_is_published_exactly_once() {
 
 #[test]
 fn failed_attempt_event_rolls_back_snapshot_idempotency_and_terminal_rows() {
-    let connection = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-    install_work_schema(&connection.lock().unwrap()).unwrap();
-    let storage = WorkSqliteStorage::new(Arc::clone(&connection));
+    let store = RegisteredWorkStore::start("attempt-atomic");
+    let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
-    connection
-        .lock()
-        .unwrap()
-        .execute_batch(
-            "CREATE TRIGGER reject_work_attempt_event
-             BEFORE INSERT ON work_attempt_events_v1
-             BEGIN
-               SELECT RAISE(ABORT, 'injected attempt append failure');
-             END;",
-        )
-        .unwrap();
+    store.inspect(|connection| {
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_work_attempt_event
+                 BEFORE INSERT ON work_attempt_events_v1
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected attempt append failure');
+                 END;",
+            )
+            .unwrap();
+    });
     assert!(matches!(
         insert_attempt(&storage, &authority(&context), &leased(task_id)),
         Err(WorkExecutionPersistenceError::Unavailable(_))
     ));
 
-    let connection = connection.lock().unwrap();
     for table in [
         "work_attempt_events_v1",
         "work_attempt_snapshots_v1",
         "work_attempt_idempotency_v1",
         "work_attempt_terminal_evidence_v1",
     ] {
-        let count: i64 = connection
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(count, 0, "{table} must share the append transaction");
+        assert_eq!(
+            store.count(table),
+            0,
+            "{table} must share the append transaction"
+        );
     }
 }
 
 #[test]
 fn recovery_candidate_resumes_and_clears_restart_work() {
-    let connection = Connection::open_in_memory().unwrap();
-    install_work_schema(&connection).unwrap();
-    let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+    let store = RegisteredWorkStore::start("recovery");
+    let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
     let leased = leased(task_id);
@@ -505,9 +498,8 @@ fn recovery_candidate_resumes_and_clears_restart_work() {
 
 #[test]
 fn cancellation_acknowledgement_and_terminal_evidence_persist_together() {
-    let connection = Connection::open_in_memory().unwrap();
-    install_work_schema(&connection).unwrap();
-    let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+    let store = RegisteredWorkStore::start("cancellation");
+    let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
     let leased = leased(task_id);
