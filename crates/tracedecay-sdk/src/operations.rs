@@ -31,6 +31,3211 @@ macro_rules! typed_operation {
     };
 }
 #[allow(clippy::all)]
+pub mod multi_root_execute {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Frozen continuation identity shared by all participating roots.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Frozen continuation identity shared by all participating roots.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "digest",
+        ///    "next_page",
+        ///    "order_digest",
+        ///    "query_digest",
+        ///    "root_generations",
+        ///    "scope_set_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "next_page": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "order_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "query_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "root_generations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RootScopeOutcomeV1_for_RootGenerationV1"
+        ///      }
+        ///    },
+        ///    "scope_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct MultiRootContinuationV1 {
+            pub digest: ManifestDigest,
+            pub next_page: ::std::num::NonZeroU64,
+            pub order_digest: ManifestDigest,
+            pub query_digest: ManifestDigest,
+            pub root_generations: ::std::vec::Vec<RootScopeOutcomeV1ForRootGenerationV1>,
+            pub scope_set_digest: ManifestDigest,
+        }
+        /**External federated request bound to one persisted scope-set revision and
+digest. Query/order digests and root generations are server-derived.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "MultiRootExecuteRequestV1",
+        ///  "description": "External federated request bound to one persisted scope-set revision and\ndigest. Query/order digests and root generations are server-derived.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "operation",
+        ///    "page",
+        ///    "scope_set_digest",
+        ///    "scope_set_id",
+        ///    "scope_set_revision"
+        ///  ],
+        ///  "properties": {
+        ///    "continuation": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/MultiRootContinuationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/MultiRootOperationV1"
+        ///    },
+        ///    "page": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "scope_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "scope_set_id": {
+        ///      "$ref": "#/definitions/ScopeSetId"
+        ///    },
+        ///    "scope_set_revision": {
+        ///      "$ref": "#/definitions/ScopeSetRevision"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct MultiRootExecuteRequestV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub continuation: ::std::option::Option<MultiRootContinuationV1>,
+            pub operation: MultiRootOperationV1,
+            pub page: u64,
+            pub scope_set_digest: ManifestDigest,
+            pub scope_set_id: ScopeSetId,
+            pub scope_set_revision: ScopeSetRevision,
+        }
+        /**Closed federated read families. The family is typed while its existing
+operation-specific request remains the canonical JSON payload owned by that
+application surface.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Closed federated read families. The family is typed while its existing\noperation-specific request remains the canonical JSON payload owned by that\napplication surface.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "request"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "work"
+        ///        },
+        ///        "request": true
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "request"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "git"
+        ///        },
+        ///        "request": true
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "request"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "feedback"
+        ///        },
+        ///        "request": true
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "request"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "impact"
+        ///        },
+        ///        "request": true
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "request"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "query"
+        ///        },
+        ///        "request": true
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "request")]
+        pub enum MultiRootOperationV1 {
+            #[serde(rename = "work")]
+            Work(::serde_json::Value),
+            #[serde(rename = "git")]
+            Git(::serde_json::Value),
+            #[serde(rename = "feedback")]
+            Feedback(::serde_json::Value),
+            #[serde(rename = "impact")]
+            Impact(::serde_json::Value),
+            #[serde(rename = "query")]
+            Query(::serde_json::Value),
+        }
+        ///Immutable collection and stack revisions for one exact resolved root.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable collection and stack revisions for one exact resolved root.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "collection_revision",
+        ///    "generation_digest",
+        ///    "scope_digest",
+        ///    "stack_revision"
+        ///  ],
+        ///  "properties": {
+        ///    "collection_revision": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "generation_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "stack_revision": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RootGenerationV1 {
+            pub collection_revision: ManifestDigest,
+            pub generation_digest: ManifestDigest,
+            pub scope_digest: ManifestDigest,
+            pub stack_revision: ManifestDigest,
+        }
+        ///One typed outcome pinned to the digest of an exact resolved root.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One typed outcome pinned to the digest of an exact resolved root.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outcome",
+        ///    "scope_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/ScopeOutcome_for_RootGenerationV1"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RootScopeOutcomeV1ForRootGenerationV1 {
+            pub outcome: ScopeOutcomeForRootGenerationV1,
+            pub scope_digest: ManifestDigest,
+        }
+        /**Truthful outcome for one authorized root or an aggregate over roots.
+
+`Denied` and `Unavailable` carry no value and therefore cannot be confused
+with a successful empty result.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "exact"
+        ///        },
+        ///        "value": {
+        ///          "$ref": "#/definitions/RootGenerationV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        },
+        ///        "value": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason",
+        ///            "value"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/ScopePartialReasonV1"
+        ///            },
+        ///            "value": {
+        ///              "$ref": "#/definitions/RootGenerationV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "denied"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "value": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/ScopeUnavailableReasonV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "outcome", content = "value")]
+        pub enum ScopeOutcomeForRootGenerationV1 {
+            #[serde(rename = "exact")]
+            Exact(RootGenerationV1),
+            #[serde(rename = "partial")]
+            Partial { reason: ScopePartialReasonV1, value: RootGenerationV1 },
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "unavailable")]
+            Unavailable { reason: ScopeUnavailableReasonV1 },
+        }
+        impl ::std::convert::From<RootGenerationV1> for ScopeOutcomeForRootGenerationV1 {
+            fn from(value: RootGenerationV1) -> Self {
+                Self::Exact(value)
+            }
+        }
+        ///Typed explanation for a root that returned usable but incomplete data.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed explanation for a root that returned usable but incomplete data.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "incomplete",
+        ///    "stale",
+        ///    "budget_exceeded",
+        ///    "root_denied",
+        ///    "root_unavailable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        pub enum ScopePartialReasonV1 {
+            #[serde(rename = "incomplete")]
+            Incomplete,
+            #[serde(rename = "stale")]
+            Stale,
+            #[serde(rename = "budget_exceeded")]
+            BudgetExceeded,
+            #[serde(rename = "root_denied")]
+            RootDenied,
+            #[serde(rename = "root_unavailable")]
+            RootUnavailable,
+        }
+        impl ::std::fmt::Display for ScopePartialReasonV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Incomplete => f.write_str("incomplete"),
+                    Self::Stale => f.write_str("stale"),
+                    Self::BudgetExceeded => f.write_str("budget_exceeded"),
+                    Self::RootDenied => f.write_str("root_denied"),
+                    Self::RootUnavailable => f.write_str("root_unavailable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for ScopePartialReasonV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "incomplete" => Ok(Self::Incomplete),
+                    "stale" => Ok(Self::Stale),
+                    "budget_exceeded" => Ok(Self::BudgetExceeded),
+                    "root_denied" => Ok(Self::RootDenied),
+                    "root_unavailable" => Ok(Self::RootUnavailable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopePartialReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for ScopePartialReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for ScopePartialReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Stable identity of one authorized scope-set record.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Stable identity of one authorized scope-set record.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ScopeSetId(pub ::std::string::String);
+        impl ::std::ops::Deref for ScopeSetId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetId> for ::std::string::String {
+            fn from(value: ScopeSetId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ScopeSetId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic optimistic-concurrency revision of one scope set.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic optimistic-concurrency revision of one scope set.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 1.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct ScopeSetRevision(pub ::std::num::NonZeroU64);
+        impl ::std::ops::Deref for ScopeSetRevision {
+            type Target = ::std::num::NonZeroU64;
+            fn deref(&self) -> &::std::num::NonZeroU64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetRevision> for ::std::num::NonZeroU64 {
+            fn from(value: ScopeSetRevision) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::num::NonZeroU64> for ScopeSetRevision {
+            fn from(value: ::std::num::NonZeroU64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetRevision {
+            type Err = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetRevision {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Typed explanation for a root that could not return usable data.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed explanation for a root that could not return usable data.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "authority_unavailable",
+        ///    "root_missing",
+        ///    "store_unavailable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        pub enum ScopeUnavailableReasonV1 {
+            #[serde(rename = "authority_unavailable")]
+            AuthorityUnavailable,
+            #[serde(rename = "root_missing")]
+            RootMissing,
+            #[serde(rename = "store_unavailable")]
+            StoreUnavailable,
+        }
+        impl ::std::fmt::Display for ScopeUnavailableReasonV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::AuthorityUnavailable => f.write_str("authority_unavailable"),
+                    Self::RootMissing => f.write_str("root_missing"),
+                    Self::StoreUnavailable => f.write_str("store_unavailable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for ScopeUnavailableReasonV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "authority_unavailable" => Ok(Self::AuthorityUnavailable),
+                    "root_missing" => Ok(Self::RootMissing),
+                    "store_unavailable" => Ok(Self::StoreUnavailable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopeUnavailableReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String>
+        for ScopeUnavailableReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String>
+        for ScopeUnavailableReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Frozen continuation identity shared by all participating roots.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Frozen continuation identity shared by all participating roots.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "digest",
+        ///    "next_page",
+        ///    "order_digest",
+        ///    "query_digest",
+        ///    "root_generations",
+        ///    "scope_set_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "next_page": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "order_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "query_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "root_generations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RootScopeOutcomeV1_for_RootGenerationV1"
+        ///      }
+        ///    },
+        ///    "scope_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct MultiRootContinuationV1 {
+            pub digest: ManifestDigest,
+            pub next_page: ::std::num::NonZeroU64,
+            pub order_digest: ManifestDigest,
+            pub query_digest: ManifestDigest,
+            pub root_generations: ::std::vec::Vec<RootScopeOutcomeV1ForRootGenerationV1>,
+            pub scope_set_digest: ManifestDigest,
+        }
+        ///Federated page preserving each root outcome and aggregate partial truth.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "MultiRootQueryPageV1_for_AnyValue",
+        ///  "description": "Federated page preserving each root outcome and aggregate partial truth.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "aggregate",
+        ///    "continuation",
+        ///    "roots",
+        ///    "scope_set_digest",
+        ///    "scope_set_id",
+        ///    "scope_set_revision"
+        ///  ],
+        ///  "properties": {
+        ///    "aggregate": {
+        ///      "$ref": "#/definitions/ScopeOutcome_for_Array_of_AnyValue"
+        ///    },
+        ///    "continuation": {
+        ///      "$ref": "#/definitions/MultiRootContinuationV1"
+        ///    },
+        ///    "roots": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/RootScopeOutcomeV1_for_Array_of_AnyValue"
+        ///      }
+        ///    },
+        ///    "scope_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "scope_set_id": {
+        ///      "$ref": "#/definitions/ScopeSetId"
+        ///    },
+        ///    "scope_set_revision": {
+        ///      "$ref": "#/definitions/ScopeSetRevision"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct MultiRootQueryPageV1ForAnyValue {
+            pub aggregate: ScopeOutcomeForArrayOfAnyValue,
+            pub continuation: MultiRootContinuationV1,
+            pub roots: ::std::vec::Vec<RootScopeOutcomeV1ForArrayOfAnyValue>,
+            pub scope_set_digest: ManifestDigest,
+            pub scope_set_id: ScopeSetId,
+            pub scope_set_revision: ScopeSetRevision,
+        }
+        ///Immutable collection and stack revisions for one exact resolved root.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable collection and stack revisions for one exact resolved root.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "collection_revision",
+        ///    "generation_digest",
+        ///    "scope_digest",
+        ///    "stack_revision"
+        ///  ],
+        ///  "properties": {
+        ///    "collection_revision": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "generation_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "stack_revision": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RootGenerationV1 {
+            pub collection_revision: ManifestDigest,
+            pub generation_digest: ManifestDigest,
+            pub scope_digest: ManifestDigest,
+            pub stack_revision: ManifestDigest,
+        }
+        ///One typed outcome pinned to the digest of an exact resolved root.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One typed outcome pinned to the digest of an exact resolved root.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outcome",
+        ///    "scope_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/ScopeOutcome_for_Array_of_AnyValue"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RootScopeOutcomeV1ForArrayOfAnyValue {
+            pub outcome: ScopeOutcomeForArrayOfAnyValue,
+            pub scope_digest: ManifestDigest,
+        }
+        ///One typed outcome pinned to the digest of an exact resolved root.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One typed outcome pinned to the digest of an exact resolved root.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outcome",
+        ///    "scope_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/ScopeOutcome_for_RootGenerationV1"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RootScopeOutcomeV1ForRootGenerationV1 {
+            pub outcome: ScopeOutcomeForRootGenerationV1,
+            pub scope_digest: ManifestDigest,
+        }
+        /**Truthful outcome for one authorized root or an aggregate over roots.
+
+`Denied` and `Unavailable` carry no value and therefore cannot be confused
+with a successful empty result.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "exact"
+        ///        },
+        ///        "value": {
+        ///          "type": "array",
+        ///          "items": true
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        },
+        ///        "value": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason",
+        ///            "value"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/ScopePartialReasonV1"
+        ///            },
+        ///            "value": {
+        ///              "type": "array",
+        ///              "items": true
+        ///            }
+        ///          }
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "denied"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "value": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/ScopeUnavailableReasonV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "outcome", content = "value")]
+        pub enum ScopeOutcomeForArrayOfAnyValue {
+            #[serde(rename = "exact")]
+            Exact(::std::vec::Vec<::serde_json::Value>),
+            #[serde(rename = "partial")]
+            Partial {
+                reason: ScopePartialReasonV1,
+                value: ::std::vec::Vec<::serde_json::Value>,
+            },
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "unavailable")]
+            Unavailable { reason: ScopeUnavailableReasonV1 },
+        }
+        impl ::std::convert::From<::std::vec::Vec<::serde_json::Value>>
+        for ScopeOutcomeForArrayOfAnyValue {
+            fn from(value: ::std::vec::Vec<::serde_json::Value>) -> Self {
+                Self::Exact(value)
+            }
+        }
+        /**Truthful outcome for one authorized root or an aggregate over roots.
+
+`Denied` and `Unavailable` carry no value and therefore cannot be confused
+with a successful empty result.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "exact"
+        ///        },
+        ///        "value": {
+        ///          "$ref": "#/definitions/RootGenerationV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        },
+        ///        "value": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason",
+        ///            "value"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/ScopePartialReasonV1"
+        ///            },
+        ///            "value": {
+        ///              "$ref": "#/definitions/RootGenerationV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "denied"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "value"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "value": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/ScopeUnavailableReasonV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "outcome", content = "value")]
+        pub enum ScopeOutcomeForRootGenerationV1 {
+            #[serde(rename = "exact")]
+            Exact(RootGenerationV1),
+            #[serde(rename = "partial")]
+            Partial { reason: ScopePartialReasonV1, value: RootGenerationV1 },
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "unavailable")]
+            Unavailable { reason: ScopeUnavailableReasonV1 },
+        }
+        impl ::std::convert::From<RootGenerationV1> for ScopeOutcomeForRootGenerationV1 {
+            fn from(value: RootGenerationV1) -> Self {
+                Self::Exact(value)
+            }
+        }
+        ///Typed explanation for a root that returned usable but incomplete data.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed explanation for a root that returned usable but incomplete data.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "incomplete",
+        ///    "stale",
+        ///    "budget_exceeded",
+        ///    "root_denied",
+        ///    "root_unavailable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        pub enum ScopePartialReasonV1 {
+            #[serde(rename = "incomplete")]
+            Incomplete,
+            #[serde(rename = "stale")]
+            Stale,
+            #[serde(rename = "budget_exceeded")]
+            BudgetExceeded,
+            #[serde(rename = "root_denied")]
+            RootDenied,
+            #[serde(rename = "root_unavailable")]
+            RootUnavailable,
+        }
+        impl ::std::fmt::Display for ScopePartialReasonV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Incomplete => f.write_str("incomplete"),
+                    Self::Stale => f.write_str("stale"),
+                    Self::BudgetExceeded => f.write_str("budget_exceeded"),
+                    Self::RootDenied => f.write_str("root_denied"),
+                    Self::RootUnavailable => f.write_str("root_unavailable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for ScopePartialReasonV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "incomplete" => Ok(Self::Incomplete),
+                    "stale" => Ok(Self::Stale),
+                    "budget_exceeded" => Ok(Self::BudgetExceeded),
+                    "root_denied" => Ok(Self::RootDenied),
+                    "root_unavailable" => Ok(Self::RootUnavailable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopePartialReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for ScopePartialReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for ScopePartialReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Stable identity of one authorized scope-set record.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Stable identity of one authorized scope-set record.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ScopeSetId(pub ::std::string::String);
+        impl ::std::ops::Deref for ScopeSetId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetId> for ::std::string::String {
+            fn from(value: ScopeSetId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ScopeSetId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic optimistic-concurrency revision of one scope set.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic optimistic-concurrency revision of one scope set.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 1.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct ScopeSetRevision(pub ::std::num::NonZeroU64);
+        impl ::std::ops::Deref for ScopeSetRevision {
+            type Target = ::std::num::NonZeroU64;
+            fn deref(&self) -> &::std::num::NonZeroU64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetRevision> for ::std::num::NonZeroU64 {
+            fn from(value: ScopeSetRevision) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::num::NonZeroU64> for ScopeSetRevision {
+            fn from(value: ::std::num::NonZeroU64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetRevision {
+            type Err = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetRevision {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Typed explanation for a root that could not return usable data.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed explanation for a root that could not return usable data.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "authority_unavailable",
+        ///    "root_missing",
+        ///    "store_unavailable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        pub enum ScopeUnavailableReasonV1 {
+            #[serde(rename = "authority_unavailable")]
+            AuthorityUnavailable,
+            #[serde(rename = "root_missing")]
+            RootMissing,
+            #[serde(rename = "store_unavailable")]
+            StoreUnavailable,
+        }
+        impl ::std::fmt::Display for ScopeUnavailableReasonV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::AuthorityUnavailable => f.write_str("authority_unavailable"),
+                    Self::RootMissing => f.write_str("root_missing"),
+                    Self::StoreUnavailable => f.write_str("store_unavailable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for ScopeUnavailableReasonV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "authority_unavailable" => Ok(Self::AuthorityUnavailable),
+                    "root_missing" => Ok(Self::RootMissing),
+                    "store_unavailable" => Ok(Self::StoreUnavailable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopeUnavailableReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String>
+        for ScopeUnavailableReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String>
+        for ScopeUnavailableReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+    }
+    pub type Request = request::MultiRootExecuteRequestV1;
+    pub type Result = result::MultiRootQueryPageV1ForAnyValue;
+}
+typed_operation!(
+    MultiRootExecute, multi_root_execute, "operation.multi_root.execute",
+    "/application/multi-root/execute", "binding.http.multi_root.execute",
+    "schema.multi_root.execute.result", 1
+);
+#[allow(clippy::all)]
+pub mod multi_root_scope_set_compare_and_swap {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        /**Canonical external selector for creating or updating an authorized scope
+set. Callers select registered projects only; filesystem roots, CWD hints,
+actor ids, and grants are resolved and minted by the daemon.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "MultiRootScopeSetCasRequestV1",
+        ///  "description": "Canonical external selector for creating or updating an authorized scope\nset. Callers select registered projects only; filesystem roots, CWD hints,\nactor ids, and grants are resolved and minted by the daemon.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "project_ids",
+        ///    "scope_set_id"
+        ///  ],
+        ///  "properties": {
+        ///    "expected_revision": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ScopeSetRevision"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "project_ids": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/ProjectId"
+        ///      }
+        ///    },
+        ///    "scope_set_id": {
+        ///      "$ref": "#/definitions/ScopeSetId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct MultiRootScopeSetCasRequestV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_revision: ::std::option::Option<ScopeSetRevision>,
+            pub project_ids: ::std::vec::Vec<ProjectId>,
+            pub scope_set_id: ScopeSetId,
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Stable identity of one authorized scope-set record.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Stable identity of one authorized scope-set record.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ScopeSetId(pub ::std::string::String);
+        impl ::std::ops::Deref for ScopeSetId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetId> for ::std::string::String {
+            fn from(value: ScopeSetId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ScopeSetId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic optimistic-concurrency revision of one scope set.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic optimistic-concurrency revision of one scope set.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 1.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct ScopeSetRevision(pub ::std::num::NonZeroU64);
+        impl ::std::ops::Deref for ScopeSetRevision {
+            type Target = ::std::num::NonZeroU64;
+            fn deref(&self) -> &::std::num::NonZeroU64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetRevision> for ::std::num::NonZeroU64 {
+            fn from(value: ScopeSetRevision) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::num::NonZeroU64> for ScopeSetRevision {
+            fn from(value: ::std::num::NonZeroU64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetRevision {
+            type Err = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetRevision {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Immutable canonical set of exact roots admitted by their existing request
+contexts. Paths and mutable aliases never participate in this authority.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable canonical set of exact roots admitted by their existing request\ncontexts. Paths and mutable aliases never participate in this authority.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "digest",
+        ///    "revision",
+        ///    "roots",
+        ///    "scope_set_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "revision": {
+        ///      "$ref": "#/definitions/ScopeSetRevision"
+        ///    },
+        ///    "roots": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/ResolvedScope"
+        ///      }
+        ///    },
+        ///    "scope_set_id": {
+        ///      "$ref": "#/definitions/ScopeSetId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct AuthorizedScopeSet {
+            pub actor_id: ActorId,
+            pub digest: ManifestDigest,
+            pub revision: ScopeSetRevision,
+            pub roots: ::std::vec::Vec<ResolvedScope>,
+            pub scope_set_id: ScopeSetId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`MultiRootScopeSetCasResultV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "MultiRootScopeSetCasResultV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "status"
+        ///  ],
+        ///  "properties": {
+        ///    "scope_set": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/AuthorizedScopeSet"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/MultiRootScopeSetCasStatusV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct MultiRootScopeSetCasResultV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub scope_set: ::std::option::Option<AuthorizedScopeSet>,
+            pub status: MultiRootScopeSetCasStatusV1,
+        }
+        ///`MultiRootScopeSetCasStatusV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "applied",
+        ///    "conflict"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        pub enum MultiRootScopeSetCasStatusV1 {
+            #[serde(rename = "applied")]
+            Applied,
+            #[serde(rename = "conflict")]
+            Conflict,
+        }
+        impl ::std::fmt::Display for MultiRootScopeSetCasStatusV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Applied => f.write_str("applied"),
+                    Self::Conflict => f.write_str("conflict"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for MultiRootScopeSetCasStatusV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "applied" => Ok(Self::Applied),
+                    "conflict" => Ok(Self::Conflict),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for MultiRootScopeSetCasStatusV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String>
+        for MultiRootScopeSetCasStatusV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String>
+        for MultiRootScopeSetCasStatusV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**The resolved PR11 scope is one exact project/repository/worktree root.
+
+Paths, CWDs, labels, and mutable branch spellings are deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The resolved PR11 scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "scope_digest",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "reference": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ResolvedScope {
+            pub project_id: ProjectId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub reference: ::std::option::Option<RefId>,
+            pub repository_id: RepositoryId,
+            pub scope_digest: ManifestDigest,
+            pub worktree_id: WorktreeId,
+        }
+        ///Stable identity of one authorized scope-set record.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Stable identity of one authorized scope-set record.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ScopeSetId(pub ::std::string::String);
+        impl ::std::ops::Deref for ScopeSetId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetId> for ::std::string::String {
+            fn from(value: ScopeSetId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ScopeSetId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic optimistic-concurrency revision of one scope set.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic optimistic-concurrency revision of one scope set.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 1.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct ScopeSetRevision(pub ::std::num::NonZeroU64);
+        impl ::std::ops::Deref for ScopeSetRevision {
+            type Target = ::std::num::NonZeroU64;
+            fn deref(&self) -> &::std::num::NonZeroU64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetRevision> for ::std::num::NonZeroU64 {
+            fn from(value: ScopeSetRevision) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::num::NonZeroU64> for ScopeSetRevision {
+            fn from(value: ::std::num::NonZeroU64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetRevision {
+            type Err = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetRevision {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::MultiRootScopeSetCasRequestV1;
+    pub type Result = result::MultiRootScopeSetCasResultV1;
+}
+typed_operation!(
+    MultiRootScopeSetCompareAndSwap, multi_root_scope_set_compare_and_swap,
+    "operation.multi_root.scope_set_compare_and_swap",
+    "/application/multi-root/scope-set/compare-and-swap",
+    "binding.http.multi_root.scope_set_compare_and_swap",
+    "schema.multi_root.scope_set_compare_and_swap.result", 1
+);
+#[allow(clippy::all)]
+pub mod multi_root_scope_set_read {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`MultiRootScopeSetReadRequestV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "MultiRootScopeSetReadRequestV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "scope_set_id"
+        ///  ],
+        ///  "properties": {
+        ///    "scope_set_id": {
+        ///      "$ref": "#/definitions/ScopeSetId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct MultiRootScopeSetReadRequestV1 {
+            pub scope_set_id: ScopeSetId,
+        }
+        ///Stable identity of one authorized scope-set record.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Stable identity of one authorized scope-set record.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ScopeSetId(pub ::std::string::String);
+        impl ::std::ops::Deref for ScopeSetId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetId> for ::std::string::String {
+            fn from(value: ScopeSetId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ScopeSetId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Immutable canonical set of exact roots admitted by their existing request
+contexts. Paths and mutable aliases never participate in this authority.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable canonical set of exact roots admitted by their existing request\ncontexts. Paths and mutable aliases never participate in this authority.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "actor_id",
+        ///    "digest",
+        ///    "revision",
+        ///    "roots",
+        ///    "scope_set_id"
+        ///  ],
+        ///  "properties": {
+        ///    "actor_id": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "revision": {
+        ///      "$ref": "#/definitions/ScopeSetRevision"
+        ///    },
+        ///    "roots": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/ResolvedScope"
+        ///      }
+        ///    },
+        ///    "scope_set_id": {
+        ///      "$ref": "#/definitions/ScopeSetId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct AuthorizedScopeSet {
+            pub actor_id: ActorId,
+            pub digest: ManifestDigest,
+            pub revision: ScopeSetRevision,
+            pub roots: ::std::vec::Vec<ResolvedScope>,
+            pub scope_set_id: ScopeSetId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`NullableAuthorizedScopeSet`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "Nullable_AuthorizedScopeSet",
+        ///  "anyOf": [
+        ///    {
+        ///      "$ref": "#/definitions/AuthorizedScopeSet"
+        ///    },
+        ///    {
+        ///      "type": "null"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct NullableAuthorizedScopeSet(
+            pub ::std::option::Option<AuthorizedScopeSet>,
+        );
+        impl ::std::ops::Deref for NullableAuthorizedScopeSet {
+            type Target = ::std::option::Option<AuthorizedScopeSet>;
+            fn deref(&self) -> &::std::option::Option<AuthorizedScopeSet> {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NullableAuthorizedScopeSet>
+        for ::std::option::Option<AuthorizedScopeSet> {
+            fn from(value: NullableAuthorizedScopeSet) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::option::Option<AuthorizedScopeSet>>
+        for NullableAuthorizedScopeSet {
+            fn from(value: ::std::option::Option<AuthorizedScopeSet>) -> Self {
+                Self(value)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**The resolved PR11 scope is one exact project/repository/worktree root.
+
+Paths, CWDs, labels, and mutable branch spellings are deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The resolved PR11 scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "scope_digest",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "reference": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ResolvedScope {
+            pub project_id: ProjectId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub reference: ::std::option::Option<RefId>,
+            pub repository_id: RepositoryId,
+            pub scope_digest: ManifestDigest,
+            pub worktree_id: WorktreeId,
+        }
+        ///Stable identity of one authorized scope-set record.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Stable identity of one authorized scope-set record.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct ScopeSetId(pub ::std::string::String);
+        impl ::std::ops::Deref for ScopeSetId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetId> for ::std::string::String {
+            fn from(value: ScopeSetId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ScopeSetId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic optimistic-concurrency revision of one scope set.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic optimistic-concurrency revision of one scope set.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 1.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct ScopeSetRevision(pub ::std::num::NonZeroU64);
+        impl ::std::ops::Deref for ScopeSetRevision {
+            type Target = ::std::num::NonZeroU64;
+            fn deref(&self) -> &::std::num::NonZeroU64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ScopeSetRevision> for ::std::num::NonZeroU64 {
+            fn from(value: ScopeSetRevision) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::num::NonZeroU64> for ScopeSetRevision {
+            fn from(value: ::std::num::NonZeroU64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ScopeSetRevision {
+            type Err = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for ScopeSetRevision {
+            type Error = <::std::num::NonZeroU64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for ScopeSetRevision {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::MultiRootScopeSetReadRequestV1;
+    pub type Result = result::NullableAuthorizedScopeSet;
+}
+typed_operation!(
+    MultiRootScopeSetRead, multi_root_scope_set_read,
+    "operation.multi_root.scope_set_read", "/application/multi-root/scope-set/read",
+    "binding.http.multi_root.scope_set_read", "schema.multi_root.scope_set_read.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod work_accept_proposal {
     pub mod request {
         /// Error types.

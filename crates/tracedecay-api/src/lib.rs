@@ -15,6 +15,7 @@ pub mod configuration;
 pub mod doctor;
 pub mod feedback;
 mod http;
+pub mod multi_root;
 pub mod read_model;
 pub mod remediation;
 pub mod remote;
@@ -35,6 +36,10 @@ pub use http::{
     HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
     application_problem_response, application_router, configuration_application_router,
     feedback_application_router, http_route_documents,
+};
+pub use multi_root::{
+    MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
+    MultiRootInvocationFuture, multi_root_application_router,
 };
 pub use sse::sse_response;
 pub use work::{
