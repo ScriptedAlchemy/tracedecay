@@ -63,7 +63,7 @@ pub(super) async fn handle_dashboard(
     >,
     feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     code_diagnostics_broker: Option<
-        Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+        Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
     application_invocation_executor: Option<
         Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,

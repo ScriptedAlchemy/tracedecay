@@ -35,9 +35,8 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, SessionRetrievalServicePort,
-    ToolCallRegistryOptions, ToolRegistryMode,
-    default_catalog_discovery_authority, explore_call_budget,
-    get_catalog_filtered_tool_definitions_with_budget,
+    ToolCallRegistryOptions, ToolRegistryMode, default_catalog_discovery_authority,
+    explore_call_budget, get_catalog_filtered_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
