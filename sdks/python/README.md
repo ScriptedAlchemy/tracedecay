@@ -33,3 +33,10 @@ the daemon. It starts that binary with an isolated profile, builds the wheel,
 installs it into an isolated virtualenv, and exercises it as an installed
 dependency. Do not treat the fast unit suite alone as publish-ready
 conformance.
+
+Actual releases run through the `SDK publish` GitHub Actions workflow
+(`.github/workflows/sdk-publish.yml`, dispatched with `sdk: python`), which
+builds the real daemon, runs this same conformance suite, builds the sdist and
+wheel, and publishes to PyPI via OIDC trusted publishing (no API token). See
+[`docs/RELEASE-AUTOMATION.md`](../../docs/RELEASE-AUTOMATION.md) for the
+trusted-publisher bootstrap.

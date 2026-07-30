@@ -47,3 +47,10 @@ a check that requires a prebuilt production `tracedecay` executable at
 binary with an isolated profile, packs the SDK, installs it into an isolated
 consumer project, and exercises it as an installed dependency. Do not treat
 the fast unit suite alone as publish-ready conformance.
+
+Actual releases run through the `SDK publish` GitHub Actions workflow
+(`.github/workflows/sdk-publish.yml`, dispatched with `sdk: typescript`), which
+builds the real daemon, runs this same conformance suite, and publishes to npm
+via OIDC trusted publishing (no `NPM_TOKEN`). See
+[`docs/RELEASE-AUTOMATION.md`](../../docs/RELEASE-AUTOMATION.md) for the
+trusted-publisher bootstrap.

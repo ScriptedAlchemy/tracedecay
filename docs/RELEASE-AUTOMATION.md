@@ -58,6 +58,67 @@ carry another change, apply the `release-extra-files-approved` label; tracked
 files that are also ignored remain forbidden because release-plz omits them
 when it creates its temporary repository copy.
 
+## npm and PyPI Setup (TypeScript and Python SDKs)
+
+`sdks/typescript` (`@tracedecay/sdk`) and `sdks/python` (`tracedecay-sdk`) are not
+managed by release-plz — their versions live in `package.json` and
+`pyproject.toml` and are bumped by hand in a normal PR. Publishing runs through
+the single `sdk-publish.yml` workflow, dispatched manually with an `sdk` input
+of `typescript` or `python`. Each job runs typecheck, the fast unit suite, and
+the real-daemon installed-package conformance suite (building the actual
+`tracedecay` binary and driving it end-to-end) before publishing; a green fast
+unit suite alone never authorizes a publish.
+
+Both jobs publish via OIDC trusted publishing — no long-lived `NPM_TOKEN` or
+PyPI API token is stored as a repository secret.
+
+### npm Trusted Publishing bootstrap
+
+npm cannot attach a trusted publisher to a package that has never been
+published, so a brand-new package name needs a one-time bootstrap:
+
+1. **Preferred — `npx setup-npm-trusted-publish`.** This publishes a placeholder
+   version from a temporary directory using your local npm auth and walks
+   through configuring the trusted publisher, so the working tree state does
+   not matter.
+2. **Fallback — manual bootstrap publish.** Generate a short-lived, scoped npm
+   access token, run `npm publish --access public` once from `sdks/typescript`
+   using that token, then revoke the token immediately.
+
+Either way, once `@tracedecay/sdk` exists on npm, configure its trusted
+publisher at `https://www.npmjs.com/package/@tracedecay/sdk/access` →
+**Trusted Publisher**: GitHub Actions, organization/user
+`ScriptedAlchemy`, repository `tracedecay`, workflow filename
+`sdk-publish.yml`, environment `npm-tracedecay-sdk`. The `sdk-publish.yml`
+workflow already sets `permissions: id-token: write` on the
+`publish-typescript` job and runs `npm publish --provenance` with no token, so
+publishes succeed the moment the trusted publisher exists.
+
+### PyPI Trusted Publishing bootstrap
+
+PyPI supports configuring a trusted publisher for a project name *before* it
+has ever been published ("pending publisher"). A maintainer with rights to
+claim `tracedecay-sdk` on PyPI adds a pending publisher at
+<https://pypi.org/manage/account/publishing/> with owner
+`ScriptedAlchemy`, repository `tracedecay`, workflow filename
+`sdk-publish.yml`, and environment `pypi-tracedecay-sdk`. The first dispatch of
+`sdk-publish.yml` with `sdk: python` then publishes via
+`pypa/gh-action-pypi-publish` (OIDC, `id-token: write`) with no PyPI API token
+required, and PyPI converts the pending publisher into a normal one after that
+first publish.
+
+If a pending publisher cannot be configured ahead of time, fall back to a
+one-time manual `twine upload` from `sdks/python/dist` using a short-lived,
+scoped PyPI API token, then configure the trusted publisher on the now-existing
+project for all subsequent releases.
+
+### Required GitHub environments
+
+Create the `npm-tracedecay-sdk` and `pypi-tracedecay-sdk` GitHub Actions
+environments (Settings → Environments) referenced by `sdk-publish.yml`.
+Protection rules (required reviewers) are optional but recommended, matching
+the existing `crates-io` environment used by `release-plz.yml`.
+
 ## Normal Release Flow
 
 1. Merge feature/fix PRs into `master`.
