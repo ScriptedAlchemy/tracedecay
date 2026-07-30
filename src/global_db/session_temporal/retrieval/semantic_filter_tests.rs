@@ -10,7 +10,7 @@ use tracedecay_domain::{
 };
 
 use super::observation_matches_filter;
-use crate::query::temporal::ports::{TemporalCandidateFilterV1, TemporalMessageTypeFilterV1};
+use tracedecay_temporal_query::ports::{TemporalCandidateFilterV1, TemporalMessageTypeFilterV1};
 
 fn receipt(payload: &Value) -> SanitizationReceiptV1 {
     SanitizationReceiptV1::new(
