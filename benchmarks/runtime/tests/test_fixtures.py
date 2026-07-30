@@ -334,6 +334,32 @@ class PreparationTests(unittest.TestCase):
                 os.stat(second.project / relative_source).st_ino,
             )
 
+    def test_clone_reuses_immutable_selected_binary_without_copying_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-fixtures-test-") as directory:
+            root = Path(directory)
+            baseline = write_prebuilt_binary(root)
+            treatment = root / "treatment"
+            treatment.write_text("#!/bin/sh\nexit 0\n# treatment\n", encoding="utf-8")
+            treatment.chmod(0o755)
+            prepared = fixtures.prepare_fixture_snapshot(
+                root / "prepared",
+                prebuilt_binary=baseline,
+            )
+
+            clone = fixtures.clone_prepared_profile(
+                prepared,
+                root / "treatment-clone",
+                prebuilt_binary=treatment,
+            )
+
+            self.assertEqual(clone.prebuilt_binary.read_bytes(), treatment.read_bytes())
+            self.assertEqual(
+                os.stat(clone.prebuilt_binary).st_ino,
+                os.stat(treatment).st_ino,
+            )
+
     def test_preparation_requires_an_executable_prebuilt_binary(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-fixtures-test-") as directory:
             root = Path(directory)

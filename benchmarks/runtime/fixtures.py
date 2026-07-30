@@ -210,15 +210,27 @@ def clone_prepared_profile(
     destination = Path(destination)
     if destination.exists():
         raise FixtureError(f"clone destination already exists: {destination}")
+    binary = (
+        Path(prebuilt_binary)
+        if prebuilt_binary is not None
+        else prepared.prebuilt_binary
+    )
+    _validate_prebuilt_binary(binary)
     shutil.copytree(
         prepared.snapshot_root,
         destination,
         copy_function=shutil.copy2,
+        ignore=lambda directory, names: (
+            {"bin"}
+            if Path(directory) == prepared.snapshot_root and "bin" in names
+            else set()
+        ),
     )
     copied_binary = destination / "bin" / "tracedecay"
-    if prebuilt_binary is not None:
-        binary = Path(prebuilt_binary)
-        _validate_prebuilt_binary(binary)
+    copied_binary.parent.mkdir()
+    try:
+        os.link(binary, copied_binary)
+    except OSError:
         shutil.copy2(binary, copied_binary)
         copied_binary.chmod(binary.stat().st_mode & 0o777)
     home = destination / "home"
