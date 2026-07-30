@@ -357,6 +357,25 @@ pub trait RemoteEnrollmentAuthorityPortV1: Send + Sync {
     ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1>;
 }
 
+pub trait RemoteEnrollmentCredentialLookupPortV1: Send + Sync {
+    fn enrollment_by_id(
+        &self,
+        enrollment_id: &EntityId,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1>;
+
+    fn authority_enrollment(
+        &self,
+        brain_id: &BrainId,
+        node_id: &BrainNodeId,
+        revision: u64,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1>;
+
+    fn enrollment_commit_receipt(
+        &self,
+        enrollment_id: &EntityId,
+    ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1>;
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RemoteEnrollmentServiceErrorV1 {
     #[error("remote enrollment request is invalid")]

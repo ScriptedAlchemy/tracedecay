@@ -5,8 +5,8 @@ use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_application::remote::auth::{
     EnrollmentIssueRequestV1, OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1,
-    RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentAuthorityPortV1, RemoteEnrollmentServiceV1,
-    issue_enrollment,
+    RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentAuthorityPortV1,
+    RemoteEnrollmentCredentialLookupPortV1, RemoteEnrollmentServiceV1, issue_enrollment,
 };
 use tracedecay_application::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
 use tracedecay_application::{
@@ -291,6 +291,23 @@ fn registered_enrollment_is_single_use_secret_free_and_survives_reopen() {
     assert_eq!(
         outcome.effect.payload.as_ref().unwrap().fingerprint,
         RemoteCredentialFingerprintV1::from_secret(&[b'e'; 32]).unwrap()
+    );
+    let persisted_enrollment = durable_authority
+        .enrollment_by_id(&EntityId::new("enrollment.remote").unwrap())
+        .unwrap();
+    assert_eq!(
+        &persisted_enrollment,
+        outcome.effect.payload.as_ref().unwrap()
+    );
+    assert_eq!(
+        durable_authority
+            .authority_enrollment(
+                &persisted_enrollment.brain_id,
+                &persisted_enrollment.node_id,
+                persisted_enrollment.revision,
+            )
+            .unwrap(),
+        persisted_enrollment
     );
     let committed = durable_authority
         .load_commit_receipt(&EntityId::new("enrollment.remote").unwrap())

@@ -20,8 +20,9 @@ use tracedecay_application::{
         RemoteWriterAuthorityV1,
     },
     remote::replay::{
-        RemoteReplayCommitReceiptV1, RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1,
-        RemoteReplayStateV1, RemoteReplayTransitionV1,
+        RemoteReplayCommitReceiptV1, RemoteReplayFrameLookupPortV1, RemoteReplayFrameV1,
+        RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
+        RemoteReplayTransitionV1,
     },
 };
 use tracedecay_domain::{
@@ -430,6 +431,26 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
         }
         self.append(&DurableSpoolRecordV2::Transition { transition })
             .map_err(map_persistence_error)
+    }
+}
+
+impl RemoteReplayFrameLookupPortV1 for RemoteCaptureSpool {
+    fn load_replay_frame(
+        &self,
+        event_id: &str,
+    ) -> Result<RemoteReplayFrameV1, RemoteCapturePersistenceErrorV1> {
+        let snapshot = self.snapshot().map_err(map_persistence_error)?;
+        let event = snapshot
+            .get(event_id)
+            .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
+        let frame = RemoteReplayFrameV1 {
+            event_id: event.capture.event_id.clone(),
+            capture: event.capture.admitted(),
+        };
+        frame
+            .validate()
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        Ok(frame)
     }
 }
 
@@ -970,6 +991,23 @@ mod tests {
         assert_eq!(
             reopened.pending().unwrap(),
             vec![(capture_receipt.event_id, capture)]
+        );
+    }
+
+    #[test]
+    fn replay_selector_hydrates_only_the_encrypted_canonical_frame() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let capture = command(1, None);
+        let receipt = capture_spool.capture_pending(&capture).unwrap();
+
+        let frame = capture_spool.load_replay_frame(&receipt.event_id).unwrap();
+        assert_eq!(frame.event_id, receipt.event_id);
+        assert_eq!(frame.capture, capture);
+        assert!(
+            capture_spool
+                .load_replay_frame("remote.event.sha256:missing000000000000000000000000000000000000000000000000000000000")
+                .is_err()
         );
     }
 

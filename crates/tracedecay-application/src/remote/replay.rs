@@ -7,12 +7,14 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    EnrollmentCredentialRecordV1, RemoteCapabilityV1, RemoteWriterFenceV1, UtcMicros,
+    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, RemoteCapabilityV1,
+    RemoteWriterFenceV1, UtcMicros,
 };
 
 use super::auth::{
     OpaqueRemoteCredential, RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
-    authenticate_remote_request,
+    RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentCommitReceiptV1,
+    RemoteEnrollmentCredentialLookupPortV1, authenticate_remote_request,
 };
 use super::capture::{
     AdmittedRemoteCaptureV1, RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
@@ -201,6 +203,139 @@ pub trait RemoteReplaySpoolPortV1: Send + Sync {
         &self,
         transition: RemoteReplayTransitionV1,
     ) -> Result<(), RemoteCapturePersistenceErrorV1>;
+}
+
+pub trait RemoteReplayFrameLookupPortV1: Send + Sync {
+    fn load_replay_frame(
+        &self,
+        event_id: &str,
+    ) -> Result<RemoteReplayFrameV1, RemoteCapturePersistenceErrorV1>;
+}
+
+pub trait RemoteReplayCurrentWriterPortV1: Send + Sync {
+    fn current_writer(
+        &self,
+        frame: &RemoteReplayFrameV1,
+    ) -> Result<RemoteReplayCurrentWriterV1, RemoteCapturePersistenceErrorV1>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteReplayCurrentWriterV1 {
+    pub writer: Option<RemoteWriterAuthorityV1>,
+    pub state: CurrentRemoteAuthorityStateV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteReplayServiceOutcomeV1 {
+    pub outcome: RemoteReplayOutcomeV1,
+    pub authority: CurrentRemoteAuthorityStateV1,
+    pub frame: RemoteReplayFrameV1,
+    pub caller_admission: RemoteEnrollmentCommitReceiptV1,
+}
+
+pub struct RemoteReplayServiceV1<'a> {
+    authentication: &'a dyn RemoteAuthorityAuthenticationPort,
+    credentials: &'a dyn RemoteEnrollmentCredentialLookupPortV1,
+    frames: &'a dyn RemoteReplayFrameLookupPortV1,
+    current_writer: &'a dyn RemoteReplayCurrentWriterPortV1,
+    policy: &'a dyn RemoteReplayPolicyPortV1,
+    transaction: &'a dyn RemoteReplayTransactionPortV1,
+    spool: &'a dyn RemoteReplaySpoolPortV1,
+}
+
+impl<'a> RemoteReplayServiceV1<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        authentication: &'a dyn RemoteAuthorityAuthenticationPort,
+        credentials: &'a dyn RemoteEnrollmentCredentialLookupPortV1,
+        frames: &'a dyn RemoteReplayFrameLookupPortV1,
+        current_writer: &'a dyn RemoteReplayCurrentWriterPortV1,
+        policy: &'a dyn RemoteReplayPolicyPortV1,
+        transaction: &'a dyn RemoteReplayTransactionPortV1,
+        spool: &'a dyn RemoteReplaySpoolPortV1,
+    ) -> Self {
+        Self {
+            authentication,
+            credentials,
+            frames,
+            current_writer,
+            policy,
+            transaction,
+            spool,
+        }
+    }
+
+    pub fn replay(
+        &self,
+        request: &RemoteReplayRequestV1,
+        presented_credential: &OpaqueRemoteCredential,
+        replay_attempt: u64,
+        observed_at: UtcMicros,
+    ) -> Result<RemoteReplayServiceOutcomeV1, RemoteReplayServiceErrorV1> {
+        request
+            .validate()
+            .map_err(|_| RemoteReplayServiceErrorV1::InvalidRequest)?;
+        let frame = self
+            .frames
+            .load_replay_frame(&request.event_id)
+            .map_err(RemoteReplayServiceErrorV1::Persistence)?;
+        let caller = self
+            .credentials
+            .enrollment_by_id(&frame.capture.enrollment_id)
+            .map_err(RemoteReplayServiceErrorV1::Credential)?;
+        let caller_admission = self
+            .credentials
+            .enrollment_commit_receipt(&frame.capture.enrollment_id)
+            .map_err(RemoteReplayServiceErrorV1::Credential)?;
+        let current = self
+            .current_writer
+            .current_writer(&frame)
+            .map_err(RemoteReplayServiceErrorV1::Persistence)?;
+        let writer = current.writer.as_ref().ok_or_else(|| {
+            RemoteReplayServiceErrorV1::AuthorityUnavailable(current.state.clone())
+        })?;
+        let authority_credential = self
+            .credentials
+            .authority_enrollment(
+                &writer.authority.fence.brain_id,
+                &writer.authority.fence.authority_node_id,
+                writer.authority.credential_revision,
+            )
+            .map_err(RemoteReplayServiceErrorV1::Credential)?;
+        let outcome = replay_remote_capture(
+            self.authentication,
+            self.policy,
+            self.transaction,
+            self.spool,
+            &authority_credential,
+            &caller,
+            presented_credential,
+            &frame,
+            writer,
+            replay_attempt,
+            observed_at,
+        )?;
+        Ok(RemoteReplayServiceOutcomeV1 {
+            outcome,
+            authority: current.state,
+            frame,
+            caller_admission,
+        })
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RemoteReplayServiceErrorV1 {
+    #[error("remote replay request is invalid")]
+    InvalidRequest,
+    #[error("remote replay credential authority failed")]
+    Credential(RemoteEnrollmentAuthorityErrorV1),
+    #[error("remote replay authority is unavailable")]
+    AuthorityUnavailable(CurrentRemoteAuthorityStateV1),
+    #[error(transparent)]
+    Persistence(RemoteCapturePersistenceErrorV1),
+    #[error(transparent)]
+    Replay(#[from] RemoteReplayApplicationErrorV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
