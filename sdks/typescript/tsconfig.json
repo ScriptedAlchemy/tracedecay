@@ -8,7 +8,7 @@
     "noUncheckedIndexedAccess": false,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": []
+    "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

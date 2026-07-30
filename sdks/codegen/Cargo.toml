@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "tracedecay-sdk-codegen"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "generate"
+path = "../../crates/tracedecay-sdk/src/bin/generate.rs"
+
+[dependencies]
+serde_json = "1"
+tracedecay-application = { path = "../../crates/tracedecay-application" }
+tracedecay-tool-catalog = { path = "../../crates/tracedecay-tool-catalog" }
