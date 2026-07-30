@@ -5,16 +5,16 @@ use tracedecay_tool_catalog::{
     CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError,
     CodecBindingKey, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
     ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableUnavailableDispositionV1, IdempotencyContract, LifecycleClass, OperationId,
-    PaginationContract, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1,
-    SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ServiceId,
-    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    IdempotencyContract, LifecycleClass, OperationId, PaginationContract, PrivacyClass, ProfileId,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension,
+    ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, ReplanDependenciesCommand, ReviewProposalCommand,
+    CreateWorkCommand, ReplanDependenciesCommand, ReviewProposalRequestV1,
     WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1,
     WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
     WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
@@ -23,6 +23,45 @@ use crate::{
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 9] = [
+    (
+        "snapshot",
+        "capability.work.snapshot",
+        "use-case.work.snapshot",
+    ),
+    ("delta", "capability.work.delta", "use-case.work.delta"),
+    ("create", "capability.work.create", "use-case.work.create"),
+    (
+        "replan_dependencies",
+        "capability.work.replan_dependencies",
+        "use-case.work.replan_dependencies",
+    ),
+    (
+        "review_proposal",
+        "capability.work.review_proposal",
+        "use-case.work.review_proposal",
+    ),
+    (
+        "accept_proposal",
+        "capability.work.accept_proposal",
+        "use-case.work.accept_proposal",
+    ),
+    (
+        "admit_execution",
+        "capability.work.admit_execution",
+        "use-case.work.admit_execution",
+    ),
+    (
+        "attach_runtime_evidence",
+        "capability.work.attach_runtime_evidence",
+        "use-case.work.attach_runtime_evidence",
+    ),
+    (
+        "accept_task",
+        "capability.work.accept_task",
+        "use-case.work.accept_task",
+    ),
+];
 pub const WORK_ATTEMPT_OPERATION_IDS_V1: [(&str, &str, &str); 8] = [
     (
         "attempt_acquire_lease",
@@ -66,138 +105,98 @@ pub const WORK_ATTEMPT_OPERATION_IDS_V1: [(&str, &str, &str); 8] = [
     ),
 ];
 
-pub fn work_executable_binding_registry(
-    application_routes_mounted: bool,
-    attempt_routes_mounted: bool,
-) -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
+pub fn work_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     let mut bindings = vec![
-        route_binding::<WorkProjectionSnapshotRequestV1, WorkProjectionSnapshotV1>(
-            application_routes_mounted,
+        available::<WorkProjectionSnapshotRequestV1, WorkProjectionSnapshotV1>(
             "snapshot",
             "/application/work/snapshot",
             EffectClass::Read,
         )?,
-        route_binding::<WorkProjectionDeltaRequestV1, WorkProjectionDeltaV1>(
-            application_routes_mounted,
+        available::<WorkProjectionDeltaRequestV1, WorkProjectionDeltaV1>(
             "delta",
             "/application/work/delta",
             EffectClass::Read,
         )?,
-        route_binding::<CreateWorkCommand, WorkProjection>(
-            application_routes_mounted,
+        available::<CreateWorkCommand, WorkProjection>(
             "create",
             "/application/work/create",
             EffectClass::Administrative,
         )?,
-        route_binding::<ReplanDependenciesCommand, WorkProjection>(
-            application_routes_mounted,
+        available::<ReplanDependenciesCommand, WorkProjection>(
             "replan_dependencies",
             "/application/work/replan-dependencies",
             EffectClass::Administrative,
         )?,
-        route_binding::<ReviewProposalCommand, WorkProjection>(
-            application_routes_mounted,
+        available::<ReviewProposalRequestV1, WorkProjection>(
             "review_proposal",
             "/application/work/review-proposal",
             EffectClass::Administrative,
         )?,
-        route_binding::<AcceptProposalCommand, WorkProjection>(
-            application_routes_mounted,
+        available::<AcceptProposalCommand, WorkProjection>(
             "accept_proposal",
             "/application/work/accept-proposal",
             EffectClass::Administrative,
         )?,
-        route_binding::<AdmitExecutionCommand, WorkProjection>(
-            application_routes_mounted,
+        available::<AdmitExecutionCommand, WorkProjection>(
             "admit_execution",
             "/application/work/admit-execution",
             EffectClass::Administrative,
         )?,
-        route_binding::<AttachRuntimeEvidenceCommand, WorkProjection>(
-            application_routes_mounted,
+        available::<AttachRuntimeEvidenceCommand, WorkProjection>(
             "attach_runtime_evidence",
             "/application/work/attach-runtime-evidence",
             EffectClass::Administrative,
         )?,
-        route_binding::<AcceptTaskCommand, WorkProjection>(
-            application_routes_mounted,
+        available::<AcceptTaskCommand, WorkProjection>(
             "accept_task",
             "/application/work/accept-task",
             EffectClass::Administrative,
         )?,
     ];
     bindings.extend([
-        route_binding::<WorkAttemptAcquireLeaseRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptAcquireLeaseRequestV1, WorkAttemptResponseV1>(
             "attempt_acquire_lease",
             "/application/work/attempt/acquire-lease",
             EffectClass::Administrative,
         )?,
-        route_binding::<WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1>(
             "attempt_renew_lease",
             "/application/work/attempt/renew-lease",
             EffectClass::Administrative,
         )?,
-        route_binding::<WorkAttemptStartRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptStartRequestV1, WorkAttemptResponseV1>(
             "attempt_start",
             "/application/work/attempt/start",
             EffectClass::Administrative,
         )?,
-        route_binding::<WorkAttemptPublishProgressRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptPublishProgressRequestV1, WorkAttemptResponseV1>(
             "attempt_publish_progress",
             "/application/work/attempt/publish-progress",
             EffectClass::Administrative,
         )?,
-        route_binding::<WorkAttemptPublishArtifactRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptPublishArtifactRequestV1, WorkAttemptResponseV1>(
             "attempt_publish_artifact",
             "/application/work/attempt/publish-artifact",
             EffectClass::Administrative,
         )?,
-        route_binding::<WorkAttemptCancelRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptCancelRequestV1, WorkAttemptResponseV1>(
             "attempt_cancel",
             "/application/work/attempt/cancel",
             EffectClass::Administrative,
         )?,
-        route_binding::<WorkAttemptRecoverRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptRecoverRequestV1, WorkAttemptResponseV1>(
             "attempt_recover",
             "/application/work/attempt/recover",
             EffectClass::Administrative,
         )?,
-        route_binding::<WorkAttemptTerminalizeRequestV1, WorkAttemptResponseV1>(
-            attempt_routes_mounted,
+        available::<WorkAttemptTerminalizeRequestV1, WorkAttemptResponseV1>(
             "attempt_terminalize",
             "/application/work/attempt/terminalize",
             EffectClass::Administrative,
         )?,
     ]);
     ExecutableBindingRegistryV1::new(bindings)
-}
-
-fn route_binding<Request, Output>(
-    mounted: bool,
-    operation: &str,
-    route_path: &str,
-    effect: EffectClass,
-) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError>
-where
-    Request: JsonSchema,
-    Output: JsonSchema,
-{
-    if mounted {
-        available::<Request, Output>(operation, route_path, effect)
-    } else {
-        Ok(ExecutableBindingAvailabilityV1::Unavailable {
-            operation_id: OperationId::new(format!("operation.work.{operation}"))
-                .expect("static Work operation ID is valid"),
-            disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
-        })
-    }
 }
 
 fn available<Request, Output>(
@@ -346,7 +345,7 @@ mod tests {
 
     #[test]
     fn work_registry_advertises_only_mounted_application_operations() {
-        let registry = work_executable_binding_registry(true, true).unwrap();
+        let registry = work_executable_binding_registry().unwrap();
         let advertised = registry
             .iter()
             .filter_map(|availability| availability.binding())
@@ -399,7 +398,7 @@ mod tests {
 
     #[test]
     fn runtime_attempt_operations_use_versioned_public_bindings() {
-        let registry = work_executable_binding_registry(false, true).unwrap();
+        let registry = work_executable_binding_registry().unwrap();
         for (operation, request_title) in [
             ("attempt_acquire_lease", "WorkAttemptAcquireLeaseRequestV1"),
             ("attempt_renew_lease", "WorkAttemptRenewLeaseRequestV1"),
@@ -430,26 +429,6 @@ mod tests {
                 RouteExposureV1::Public { route_path, .. }
                     if route_path.starts_with("/application/work/attempt/")
             ));
-        }
-    }
-
-    #[test]
-    fn runtime_attempt_operations_remain_unavailable_without_mounted_routes() {
-        let registry = work_executable_binding_registry(false, false).unwrap();
-        for operation in [
-            "attempt_acquire_lease",
-            "attempt_renew_lease",
-            "attempt_start",
-            "attempt_publish_progress",
-            "attempt_publish_artifact",
-            "attempt_cancel",
-            "attempt_recover",
-            "attempt_terminalize",
-        ] {
-            let operation =
-                tracedecay_tool_catalog::OperationId::new(format!("operation.work.{operation}"))
-                    .unwrap();
-            assert!(registry.get(&operation).unwrap().binding().is_none());
         }
     }
 }

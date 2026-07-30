@@ -382,11 +382,14 @@ fn public_executable_routes_are_served_by_the_production_daemon() {
     let mut observations = Vec::with_capacity(declared_routes.len());
     for (operation_id, (route_path, body)) in declared_routes {
         let external_url = fixture.external_url(&route_path);
+        let inner_path = route_path
+            .strip_prefix("/application")
+            .unwrap_or(route_path.as_str());
         observations.push(RouteObservation {
             outer_method_mismatch: get_probe(&agent, &external_url, &fixture),
             outer_request: post_probe(&agent, &external_url, &fixture, &body),
-            inner_method_mismatch: runtime.block_on(inner_probe(&inner, "GET", &route_path, None)),
-            inner_request: runtime.block_on(inner_probe(&inner, "POST", &route_path, Some(body))),
+            inner_method_mismatch: runtime.block_on(inner_probe(&inner, "GET", inner_path, None)),
+            inner_request: runtime.block_on(inner_probe(&inner, "POST", inner_path, Some(body))),
             operation_id,
             route_path,
             external_url,
