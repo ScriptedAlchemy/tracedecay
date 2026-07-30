@@ -5,9 +5,12 @@ use tracedecay_code_index::impact_join::{
 };
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_code_index::provider::{
+    CodeIndexAffectedTestsEvidenceV1 as AffectedTestsResult,
+    CodeIndexGraphImpactEvidenceV1 as GraphImpactResult,
+};
+use tracedecay_code_index::provider::{
     GenerationProviderContractErrorV1, GenerationProviderCoverageV1, GenerationProviderReadV1,
 };
-use tracedecay_application::retrieval::{AffectedTestsResult, GraphImpactResult};
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, ProviderEvaluationStateV1, SanitizedCodeFileV1,
     SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1,

@@ -31,9 +31,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::extraction::LanguageRegistry;
 use crate::sync;
 use crate::types::ExtractionResult;
+use tracedecay_code_extraction::LanguageRegistry;
 
 const TOKEN_LEN: usize = 32;
 const TOKEN_ENV_VAR: &str = "TRACEDECAY_WORKER_TOKEN";

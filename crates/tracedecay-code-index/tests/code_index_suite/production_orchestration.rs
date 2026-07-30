@@ -1,62 +1,77 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
-use tracedecay::{
-    application::code_index::open_production_code_index_owner_v1,
-    code_index::{
-        production::{
-            CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-            CodeIndexExecutionControlV1, CodeIndexInterruptionV1, CodeIndexProductionConfigV1,
-            CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-            CodeIndexPublishedGenerationV1,
-        },
-        projection::{
-            ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-            build_batch_receipt,
-        },
-        provider::GenerationTestAttributionJoinReadPort,
+use tracedecay_code_index::{
+    chunks::content_digest,
+    production::{
+        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
+        CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
+        CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
+        CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     },
+    projection::{
+        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
+        build_batch_receipt,
+    },
+    provider::GenerationTestAttributionJoinReadPort,
 };
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, FileOccurrenceId, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    ProviderEvaluationStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    TestAttributionEvidenceClassV1, UtcMicros,
+    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    StackNodeId, TestAttributionEvidenceClassV1, UtcMicros, WorktreeId,
 };
 
 use crate::support::{RUST_SOURCE, id};
 
 #[derive(Clone, Default)]
 struct SharedPublicationStore {
-    active: Arc<Mutex<Option<CodeIndexPublishedGenerationV1>>>,
+    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, CodeIndexPublishedGenerationV1>>>,
+}
+
+impl SharedPublicationStore {
+    fn scope_count(&self) -> usize {
+        self.active.lock().expect("publication lock").len()
+    }
+
+    fn shares_repository_store(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.active, &other.active)
+    }
 }
 
 impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
+        scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        Ok(self.active.lock().expect("publication lock").clone())
+        Ok(self
+            .active
+            .lock()
+            .expect("publication lock")
+            .get(scope)
+            .cloned())
     }
 
     fn publish_atomically(
         &mut self,
+        scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let mut active = self.active.lock().expect("publication lock");
         if active
-            .as_ref()
+            .get(scope)
             .map(|current| current.manifest().generation_id.clone())
             .as_ref()
             != expected_active_generation
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        *active = Some(generation);
+        active.insert(scope.clone(), generation);
         Ok(())
     }
 }
@@ -169,6 +184,20 @@ fn request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildRequestV1 {
     request_at_path(file_occurrence, "src/lib.rs", sealed_at)
 }
 
+fn request_in_scope(
+    file_occurrence: &str,
+    sealed_at: i64,
+    reference: &str,
+    worktree: Option<&str>,
+    source_revision: &str,
+) -> CodeIndexBuildRequestV1 {
+    let mut request = request(file_occurrence, sealed_at);
+    request.snapshot.reference = Some(id::<RefId>(reference));
+    request.snapshot.worktree = worktree.map(id::<WorktreeId>);
+    request.snapshot.source_revision = Some(id::<CommitId>(source_revision));
+    request
+}
+
 fn request_at_path(
     file_occurrence: &str,
     logical_path: &str,
@@ -179,7 +208,7 @@ fn request_at_path(
         file_occurrence_id: id::<FileOccurrenceId>(file_occurrence),
         logical_path: logical_path.to_owned(),
         language: Some(id::<LanguageId>("rust")),
-        content_digest: tracedecay::code_index::chunks::content_digest(source),
+        content_digest: content_digest(source),
         disposition: SnapshotFileDispositionV1::Present,
     };
     let snapshot = SanitizedCodeSnapshotV1 {
@@ -189,7 +218,7 @@ fn request_at_path(
         source_revision: None,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.production")],
-        content_identity: tracedecay::code_index::chunks::content_digest(source),
+        content_identity: content_digest(source),
         captured_at: UtcMicros(1_000_000),
         files: vec![file.clone()],
     };
@@ -211,7 +240,7 @@ fn request_at_path(
 #[test]
 fn published_generation_serves_current_conservative_test_attribution() {
     let store = SharedPublicationStore::default();
-    let mut owner = open_production_code_index_owner_v1(config(), store, ApplyingProjectionSink)
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
         .expect("production owner");
     let generation = owner
         .build_and_publish(
@@ -246,7 +275,7 @@ fn published_generation_serves_current_conservative_test_attribution() {
 fn production_owner_publishes_complete_generation_and_restores_it_after_restart() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        open_production_code_index_owner_v1(config(), store.clone(), ApplyingProjectionSink)
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
             .expect("production owner");
 
     let first = owner
@@ -267,10 +296,12 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
     );
 
     let mut restarted =
-        open_production_code_index_owner_v1(config(), store.clone(), ApplyingProjectionSink)
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
             .expect("restart owner");
     let restored = restarted
-        .active_generation()
+        .active_generation(&CodeIndexGenerationScopeV1::for_snapshot(
+            &request("file.production.scope", 1_100_000).snapshot,
+        ))
         .expect("active generation loads")
         .expect("published generation survives restart");
     assert_eq!(restored.manifest(), first.manifest());
@@ -301,10 +332,149 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
 }
 
 #[test]
+fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() {
+    let store = SharedPublicationStore::default();
+    let primary_store = store.clone();
+    let linked_store = store.clone();
+    assert!(primary_store.shares_repository_store(&linked_store));
+
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let primary_request = request_in_scope(
+        "file.primary.1",
+        1_100_000,
+        "refs/heads/main",
+        None,
+        "commit.main.1",
+    );
+    let primary_scope = CodeIndexGenerationScopeV1::for_snapshot(&primary_request.snapshot);
+    let primary = owner
+        .build_and_publish(primary_request, &ActiveControl)
+        .expect("primary generation publishes");
+
+    let linked_request = request_in_scope(
+        "file.linked.1",
+        1_200_000,
+        "refs/heads/feature",
+        Some("worktree.feature"),
+        "commit.feature.1",
+    );
+    let linked_scope = CodeIndexGenerationScopeV1::for_snapshot(&linked_request.snapshot);
+    let linked = owner
+        .build_and_publish(linked_request, &ActiveControl)
+        .expect("linked-worktree generation publishes");
+
+    assert_ne!(primary_scope, linked_scope);
+    assert_ne!(
+        primary.manifest().generation_id,
+        linked.manifest().generation_id
+    );
+    assert!(linked.manifest().parent_generation.is_none());
+    assert_eq!(store.scope_count(), 2);
+    assert_eq!(
+        store
+            .load_active(&primary_scope)
+            .expect("primary scope read")
+            .expect("primary remains active")
+            .manifest(),
+        primary.manifest()
+    );
+    assert_eq!(
+        store
+            .load_active(&linked_scope)
+            .expect("linked scope read")
+            .expect("linked remains active")
+            .manifest(),
+        linked.manifest()
+    );
+}
+
+#[test]
+fn linked_worktree_no_op_reuses_only_its_compatible_generation() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let first = owner
+        .build_and_publish(
+            request_in_scope(
+                "file.linked.1",
+                1_100_000,
+                "refs/heads/feature",
+                Some("worktree.feature"),
+                "commit.feature.1",
+            ),
+            &ActiveControl,
+        )
+        .expect("first linked-worktree generation");
+    let second = owner
+        .build_and_publish(
+            request_in_scope(
+                "file.linked.2",
+                1_200_000,
+                "refs/heads/feature",
+                Some("worktree.feature"),
+                "commit.feature.1",
+            ),
+            &ActiveControl,
+        )
+        .expect("no-op linked-worktree generation");
+
+    assert_eq!(
+        second.manifest().parent_generation,
+        Some(first.manifest().generation_id.clone())
+    );
+    assert!(
+        second
+            .projection()
+            .request()
+            .changes
+            .added_or_changed
+            .is_empty()
+    );
+    assert!(second.projection().request().changes.deleted.is_empty());
+    assert!(!second.projection().request().changes.reused.is_empty());
+    assert_eq!(store.scope_count(), 1);
+}
+
+#[test]
+fn branch_stack_nodes_and_snapshots_derive_the_same_path_free_scope() {
+    let request = request_in_scope(
+        "file.branch-stack.1",
+        1_100_000,
+        "refs/heads/feature",
+        Some("worktree.feature"),
+        "commit.feature.1",
+    );
+    let node = BranchStackNodeV1 {
+        node_id: id::<StackNodeId>("stack-node.feature"),
+        project_id: id("project.fixture"),
+        repository_id: request.snapshot.repository.clone(),
+        reference: request
+            .snapshot
+            .reference
+            .clone()
+            .expect("branch reference"),
+        tip: request
+            .snapshot
+            .source_revision
+            .clone()
+            .expect("branch tip"),
+        worktree_id: request.snapshot.worktree.clone(),
+    };
+
+    assert_eq!(
+        CodeIndexGenerationScopeV1::for_branch_stack_node(&node),
+        CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot)
+    );
+}
+
+#[test]
 fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        open_production_code_index_owner_v1(config(), store.clone(), ApplyingProjectionSink)
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
             .expect("production owner");
 
     let cancelled = owner
@@ -319,7 +489,9 @@ fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     ));
     assert!(
         store
-            .load_active()
+            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
+                &request("file.production.cancelled.scope", 1_100_000).snapshot,
+            ))
             .expect("read publication state")
             .is_none()
     );
@@ -336,7 +508,9 @@ fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     ));
     assert!(
         store
-            .load_active()
+            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
+                &request("file.production.expired.scope", 1_100_000).snapshot,
+            ))
             .expect("read publication state")
             .is_none()
     );
@@ -346,7 +520,7 @@ fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
 fn production_owner_never_activates_a_generation_after_projection_failure() {
     let store = SharedPublicationStore::default();
     let mut owner =
-        open_production_code_index_owner_v1(config(), store.clone(), RejectingProjectionSink)
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), RejectingProjectionSink)
             .expect("production owner");
 
     let error = owner
@@ -358,7 +532,9 @@ fn production_owner_never_activates_a_generation_after_projection_failure() {
     assert!(matches!(error, CodeIndexProductionErrorV1::Projection(_)));
     assert!(
         store
-            .load_active()
+            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
+                &request("file.production.rejected.scope", 1_100_000).snapshot,
+            ))
             .expect("read publication state")
             .is_none()
     );

@@ -6,15 +6,40 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::retrieval::{AffectedTestsResult, GraphImpactResult};
 use tracedecay_domain::{
-    CodeGenerationId, FileOccurrenceId, ProviderEvaluationStateV1, SymbolOccurrenceId,
+    CodeGenerationId, FileOccurrenceId, ProviderEvaluationStateV1, RetrievalAnchorId,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1,
 };
 
 use super::diagnostics::GenerationDiagnosticJoinV1;
 use super::git_join::{GenerationGitBlameJoinV1, GenerationGitHistoryJoinV1, GenerationGitJoinV1};
 use super::impact_join::GenerationImpactJoinV1;
 use super::test_attribution::GenerationTestJoinV1;
+
+/// Native graph-impact evidence consumed by generation-bound index joins.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexGraphImpactEvidenceV1 {
+    pub affected_files: Vec<FileOccurrenceId>,
+    pub affected_callers: Vec<SymbolOccurrenceId>,
+    pub evidence_anchors: Vec<RetrievalAnchorId>,
+}
+
+/// Native affected-test evidence consumed by generation-bound index joins.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexAffectedTestAttributionV1 {
+    pub test: SymbolOccurrenceId,
+    pub evidence_class: TestAttributionEvidenceClassV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexAffectedTestsEvidenceV1 {
+    pub tests: Vec<SymbolOccurrenceId>,
+    #[serde(default)]
+    pub attributions: Vec<CodeIndexAffectedTestAttributionV1>,
+}
 
 /// Coverage counters reported independently by one provider.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,13 +208,13 @@ pub trait GenerationImpactEvidenceReadPort {
         &self,
         generation: &CodeGenerationId,
         symbol: &SymbolOccurrenceId,
-    ) -> GenerationProviderReadV1<GraphImpactResult>;
+    ) -> GenerationProviderReadV1<CodeIndexGraphImpactEvidenceV1>;
 
     fn read_affected_tests(
         &self,
         generation: &CodeGenerationId,
         symbol: &SymbolOccurrenceId,
-    ) -> GenerationProviderReadV1<AffectedTestsResult>;
+    ) -> GenerationProviderReadV1<CodeIndexAffectedTestsEvidenceV1>;
 }
 
 /// Query-owner adapter over the validated graph/test composition.

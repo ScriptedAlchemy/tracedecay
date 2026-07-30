@@ -19,13 +19,16 @@ use tracedecay_code_index::production_joins::{
     ProductionGenerationGitJoinReaderV1, ProductionGenerationTestAttributionJoinReaderV1,
 };
 use tracedecay_code_index::provider::{
+    CodeIndexAffectedTestsEvidenceV1 as AffectedTestsResult,
+    CodeIndexGraphImpactEvidenceV1 as GraphImpactResult,
+};
+use tracedecay_code_index::provider::{
     GenerationDiagnosticJoinReadPort, GenerationGitJoinReadPort, GenerationProviderCoverageV1,
     GenerationProviderReadV1, GenerationTestAttributionJoinReadPort,
 };
 use tracedecay_code_index::test_attribution::{
     TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1, TestAttributionWatermarkV1,
 };
-use tracedecay_application::retrieval::{AffectedTestsResult, GraphImpactResult};
 use tracedecay_domain::{
     CodeGenerationManifestV1, ContentDigest, DiagnosticEvidenceClassV1, DiagnosticProducerKindV1,
     DiagnosticProvenanceV1, DiagnosticRecordStateV1, DiagnosticSeverityV1, FileOccurrenceId,

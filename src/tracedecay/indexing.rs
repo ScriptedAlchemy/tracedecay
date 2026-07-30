@@ -249,7 +249,7 @@ fn reindexed_symbol_scope(extractions: &[ExtractTuple]) -> (HashSet<String>, Has
 /// Run `extractor.extract()` inside `catch_unwind` so a panic (e.g. from a
 /// malformed file or an extractor bug) skips the file instead of aborting sync.
 pub(super) fn safe_extract(
-    extractor: &dyn crate::extraction::LanguageExtractor,
+    extractor: &dyn tracedecay_code_extraction::LanguageExtractor,
     file_path: &str,
     source: &str,
 ) -> Option<ExtractionResult> {
@@ -286,7 +286,7 @@ fn bounded_extraction_workers(available: usize, file_count: usize) -> usize {
 /// repeatedly crashed during extraction.
 fn extract_files_isolated(
     project_root: &Path,
-    registry: &crate::extraction::LanguageRegistry,
+    registry: &tracedecay_code_extraction::LanguageRegistry,
     files: Vec<String>,
 ) -> (Vec<ExtractTuple>, Vec<(String, String)>) {
     if files.is_empty() {
@@ -317,7 +317,7 @@ fn extract_files_isolated(
 
 fn extract_files_in_process(
     project_root: &Path,
-    registry: &crate::extraction::LanguageRegistry,
+    registry: &tracedecay_code_extraction::LanguageRegistry,
     files: &[String],
 ) -> Vec<ExtractTuple> {
     files
@@ -728,7 +728,7 @@ impl TraceDecay {
             store_layout: self.store_layout.clone(),
             active_graph_layout: self.active_graph_layout.clone(),
             open_options: self.open_options.clone(),
-            registry: crate::extraction::LanguageRegistry::new(),
+            registry: tracedecay_code_extraction::LanguageRegistry::new(),
             active_branch: self.active_branch.clone(),
             serving_branch: self.serving_branch.clone(),
             fallback_warning: self.fallback_warning.clone(),

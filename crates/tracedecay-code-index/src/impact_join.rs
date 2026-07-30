@@ -8,14 +8,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::retrieval::{AffectedTestsResult, GraphImpactResult};
 use tracedecay_domain::{
     CodeGenerationId, CodeGenerationManifestV1, ContentDigest, FileOccurrenceId, ManifestDigest,
     ProviderEvaluationStateV1, SymbolOccurrenceId, ValidatedCodeSnapshotV1,
 };
 
 use super::capabilities::expected_seal_digest;
-use super::provider::{GenerationProviderContractErrorV1, GenerationProviderReadV1};
+use super::provider::{
+    CodeIndexAffectedTestsEvidenceV1, CodeIndexGraphImpactEvidenceV1,
+    GenerationProviderContractErrorV1, GenerationProviderReadV1,
+};
 
 /// Exact generation-local symbol occurrence supplied by the canonical graph
 /// authority.
@@ -51,8 +53,8 @@ pub struct GenerationImpactJoinV1 {
     pub generation_id: CodeGenerationId,
     pub code_snapshot_digest: ManifestDigest,
     pub code_content_identity: ContentDigest,
-    pub graph_provider: GenerationProviderReadV1<GraphImpactResult>,
-    pub test_provider: GenerationProviderReadV1<AffectedTestsResult>,
+    pub graph_provider: GenerationProviderReadV1<CodeIndexGraphImpactEvidenceV1>,
+    pub test_provider: GenerationProviderReadV1<CodeIndexAffectedTestsEvidenceV1>,
     pub affected_callers: Vec<GenerationOccurrenceBindingV1>,
     pub affected_tests: Vec<GenerationOccurrenceBindingV1>,
     pub coverage: GenerationImpactJoinCoverageV1,
@@ -82,8 +84,8 @@ impl GenerationImpactJoinV1 {
     pub fn join(
         generation: &CodeGenerationManifestV1,
         snapshot: &ValidatedCodeSnapshotV1,
-        graph_provider: GenerationProviderReadV1<GraphImpactResult>,
-        test_provider: GenerationProviderReadV1<AffectedTestsResult>,
+        graph_provider: GenerationProviderReadV1<CodeIndexGraphImpactEvidenceV1>,
+        test_provider: GenerationProviderReadV1<CodeIndexAffectedTestsEvidenceV1>,
         occurrences: &[GenerationOccurrenceBindingV1],
     ) -> Result<Self, GenerationImpactJoinErrorV1> {
         validate_generation_snapshot(generation, snapshot)?;

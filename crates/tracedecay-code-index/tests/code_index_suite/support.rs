@@ -1,9 +1,7 @@
 use std::fmt::Debug;
 
 use tracedecay_code_index::chunks::content_digest;
-use tracedecay_code_index::intake::{
-    CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake,
-};
+use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_domain::{
     CodeGenerationId, FileOccurrenceId, LanguageDescriptorV1, LanguageId, ManifestDigest,
