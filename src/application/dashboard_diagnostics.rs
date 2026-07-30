@@ -14,13 +14,15 @@ use tokio::sync::Mutex;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use crate::db::Database;
-use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
-use crate::diagnostics::lsp::adapters::builtin_adapters;
-use crate::diagnostics::lsp::broker::{
+use crate::errors::{Result, TraceDecayError};
+use tracedecay_lsp::analyzer::activity::{active_languages_for_files, documents_for_adapter};
+use tracedecay_lsp::analyzer::adapters::builtin_adapters;
+use tracedecay_lsp::analyzer::broker::{
     DiagnosticBroker, DiagnosticsSnapshot, EngineState, NodeSpan,
 };
-use crate::diagnostics::lsp::settings::{CodeDiagnosticsSettings, IdleBackfillMode, save_settings};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_lsp::analyzer::settings::{
+    CodeDiagnosticsSettings, IdleBackfillMode, save_settings,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DashboardDiagnosticsErrorV1 {
@@ -75,7 +77,7 @@ pub(crate) async fn open_diagnostic_broker(
     // read or parsed. Falling back to the defaults there drops every
     // `custom_adapters` entry the user configured, and the broker has to say
     // so rather than report the fallback as the user's configuration.
-    match crate::diagnostics::lsp::settings::load_settings(dashboard_root).await {
+    match tracedecay_lsp::analyzer::settings::load_settings(dashboard_root).await {
         Ok(settings) => Arc::new(Mutex::new(diagnostic_broker(project_root, settings))),
         Err(error) => {
             tracing::warn!(
@@ -155,7 +157,9 @@ impl DashboardDiagnosticsAuthorityV1 {
                 });
             }
             patch(&mut settings);
-            save_settings(&self.inner.settings_root, &settings).await?;
+            save_settings(&self.inner.settings_root, &settings)
+                .await
+                .map_err(TraceDecayError::from)?;
             let mut adapters = builtin_adapters();
             adapters.extend(settings.custom_adapters.clone());
             broker.update_adapters(adapters);
@@ -209,7 +213,9 @@ impl DashboardDiagnosticsAuthorityV1 {
             });
         };
         let files = indexed_files(&self.inner.database).await?;
-        let documents = documents_for_adapter(&self.inner.project_root, &adapter, files).await?;
+        let documents = documents_for_adapter(&self.inner.project_root, &adapter, files)
+            .await
+            .map_err(TraceDecayError::from)?;
         let document_count = documents.len();
         self.inner.broker.lock().await.record_backfill_progress(
             language,
@@ -243,7 +249,9 @@ impl DashboardDiagnosticsAuthorityV1 {
                     let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
                     let refresh_result = {
                         let mut broker = authority.inner.broker.lock().await;
-                        let refresh_result = broker.finish_refresh(completed);
+                        let refresh_result = broker
+                            .finish_refresh(completed)
+                            .map_err(TraceDecayError::from);
                         if refresh_result.is_ok() {
                             let database = Arc::clone(&authority.inner.database);
                             broker
@@ -287,7 +295,7 @@ impl DashboardDiagnosticsAuthorityV1 {
                 }
                 .into());
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(TraceDecayError::from(error).into()),
         }
         Ok(())
     }
@@ -392,14 +400,14 @@ async fn indexed_files(database: &Database) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
-    use crate::diagnostics::lsp::adapters::{DiagnosticMode, LspAdapterDefinition};
     use tracedecay_domain::ProjectId;
+    use tracedecay_lsp::analyzer::adapters::{DiagnosticMode, LspAdapterDefinition};
 
     #[tokio::test]
     async fn unreadable_settings_mount_a_broker_that_reports_itself_degraded() {
         let dashboard_root = tempfile::tempdir().expect("dashboard root");
         tokio::fs::write(
-            crate::diagnostics::lsp::settings::settings_path(dashboard_root.path()),
+            tracedecay_lsp::analyzer::settings::settings_path(dashboard_root.path()),
             b"{ this is not settings json",
         )
         .await

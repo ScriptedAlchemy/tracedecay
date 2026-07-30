@@ -70,6 +70,14 @@ impl From<crate::db::engine::Error> for TraceDecayError {
     }
 }
 
+impl From<tracedecay_lsp::analyzer::AnalyzerRuntimeError> for TraceDecayError {
+    fn from(error: tracedecay_lsp::analyzer::AnalyzerRuntimeError) -> Self {
+        Self::Config {
+            message: error.message().to_string(),
+        }
+    }
+}
+
 /// Flatten an error and its [`std::error::Error::source`] chain into one
 /// message string.
 ///

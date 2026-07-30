@@ -13,12 +13,12 @@ use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::application::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
-use crate::diagnostics::lsp::adapters::builtin_adapters;
-use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
 use crate::display::{format_bytes, format_token_count};
 #[cfg(test)]
 use crate::storage::StoreLayout;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_lsp::analyzer::adapters::builtin_adapters;
+use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
 
 #[cfg(test)]
 pub(crate) struct DoctorTestRuntime {
@@ -1898,7 +1898,9 @@ async fn language_analyzer_settings(
     else {
         return Ok(CodeDiagnosticsSettings::default());
     };
-    crate::diagnostics::lsp::settings::load_settings(&layout.dashboard_root).await
+    tracedecay_lsp::analyzer::settings::load_settings(&layout.dashboard_root)
+        .await
+        .map_err(Into::into)
 }
 
 fn analyzer_warning(analyzer: &LanguageAnalyzerSpec, languages: &str, problem: &str) -> String {
