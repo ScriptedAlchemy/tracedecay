@@ -22,8 +22,8 @@ pub mod graph;
 pub mod hydrate;
 pub mod lexical;
 pub mod ports;
-pub mod prepared_query;
 pub mod pr9_authority;
+pub mod prepared_query;
 pub mod request;
 pub mod rerank;
 pub mod semantic;
@@ -32,13 +32,13 @@ pub mod unavailable;
 pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
 };
-pub use self::prepared_query::{
-    PreparedQueryBindingsV1, PreparedQueryCursorRoutingV1, PreparedQueryErrorV1,
-    PreparedQueryPageV1, PreparedQueryV1, inspect_prepared_query_cursor,
-};
 pub use self::pr9_authority::{
     AuthorizedPr9FallbackV1, PR9_CURSOR_TTL_MICROS_V1, PR9_RANKING_REVISION_V1,
     Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1,
+};
+pub use self::prepared_query::{
+    PreparedQueryBindingsV1, PreparedQueryCursorRoutingV1, PreparedQueryErrorV1,
+    PreparedQueryPageV1, PreparedQueryV1, inspect_prepared_query_cursor,
 };
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};

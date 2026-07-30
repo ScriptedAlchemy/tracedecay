@@ -16,8 +16,8 @@ use tracedecay_domain::{
 
 use super::fusion::QueryDigestAuthenticationError;
 use super::{
-    Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1, PR9_QUERY_NORMALIZATION_REVISION_V1,
-    PR9_QUERY_SANITIZER_REVISION_V1,
+    PR9_QUERY_NORMALIZATION_REVISION_V1, PR9_QUERY_SANITIZER_REVISION_V1, Pr9QueryAuthorityErrorV1,
+    Pr9QueryAuthorityV1,
 };
 
 const PREPARED_QUERY_CURSOR_PREFIX_V1: &str = "ccq1.";
@@ -252,10 +252,8 @@ fn cursor_authentication_view(
         canonical,
         tracedecay_domain::SanitizerRevision::new(PR9_QUERY_SANITIZER_REVISION_V1)
             .map_err(|_| PreparedQueryErrorV1::Unavailable)?,
-        tracedecay_domain::QueryNormalizationRevision::new(
-            PR9_QUERY_NORMALIZATION_REVISION_V1,
-        )
-        .map_err(|_| PreparedQueryErrorV1::Unavailable)?,
+        tracedecay_domain::QueryNormalizationRevision::new(PR9_QUERY_NORMALIZATION_REVISION_V1)
+            .map_err(|_| PreparedQueryErrorV1::Unavailable)?,
     )
     .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
@@ -320,8 +318,7 @@ mod tests {
                 revision: PREPARED_QUERY_CURSOR_REVISION_V1,
                 operation: "code_exact_occurrence".to_owned(),
                 scope_digest: digest("scope"),
-                generation: CodeGenerationId::new("generation.callable-page")
-                    .expect("generation"),
+                generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
                 query_binding_digest: digest("query"),
                 candidate_set_digest: digest("candidates"),
                 authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
@@ -362,10 +359,7 @@ mod tests {
 
         let mut tampered = encoded.clone();
         tampered.push('0');
-        assert_eq!(
-            decode_cursor(&tampered),
-            Err(PreparedQueryErrorV1::Invalid)
-        );
+        assert_eq!(decode_cursor(&tampered), Err(PreparedQueryErrorV1::Invalid));
 
         let uppercase = format!(
             "{PREPARED_QUERY_CURSOR_PREFIX_V1}{}",
