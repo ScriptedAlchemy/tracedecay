@@ -19,6 +19,7 @@ mod persistence;
 pub mod read_consistency;
 pub mod reader;
 pub mod remote_replay;
+pub mod remote_recovery;
 pub mod remote_spool;
 pub mod repository;
 pub mod runtime;
