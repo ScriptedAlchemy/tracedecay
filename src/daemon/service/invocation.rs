@@ -121,6 +121,7 @@ use crate::application::feedback::{
     Pr12FeedbackCycleLspInput, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
     open_pr12_feedback_cycle_runtime,
 };
+use super::project_runtime::ProjectRuntimeRegistryV1;
 use crate::application::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
     production_semantic_authorities,
@@ -330,10 +331,6 @@ impl WorkApplicationInvocationV1 {
             Self::AttachRuntimeEvidence(_) => "attach_runtime_evidence",
             Self::AcceptTask(_) => "accept_task",
         }
-    }
-
-    pub(crate) const fn is_read_only(&self) -> bool {
-        matches!(self, Self::Snapshot(_) | Self::Delta(_))
     }
 }
 
@@ -2225,20 +2222,16 @@ async fn execute_primitive(
         return concealed_application_problem(wire_request_id);
     };
     let dispatch = service
-        .primitive_runtimes
-        .lock()
-        .await
-        .get(project_root)
-        .map(Pr12PrimitiveProjectRuntime::dispatch);
+        .project_runtimes
+        .read(project_root, Pr12PrimitiveProjectRuntime::dispatch)
+        .await;
     let Some(dispatch) = dispatch else {
         return concealed_application_problem(wire_request_id);
     };
     let registered = service
-        .callable_code_runtimes
-        .lock()
-        .await
-        .get(project_root)
-        .cloned();
+        .project_runtimes
+        .get::<RegisteredCallableCodeRuntime>(project_root)
+        .await;
     let Some(registered) = registered else {
         return concealed_application_problem(wire_request_id);
     };
@@ -2338,11 +2331,9 @@ async fn execute_callable_code(
         return concealed_application_problem(wire_request_id);
     };
     let registered = service
-        .callable_code_runtimes
-        .lock()
-        .await
-        .get(project_root)
-        .cloned();
+        .project_runtimes
+        .get::<RegisteredCallableCodeRuntime>(project_root)
+        .await;
     let Some(registered) = registered else {
         return concealed_application_problem(wire_request_id);
     };
@@ -4292,7 +4283,7 @@ pub(crate) fn admit_registered_pr13_hook_orchestration(
     runtime.admit(request)
 }
 
-struct SwitchableFeedbackCycleRuntimeV1 {
+pub(super) struct SwitchableFeedbackCycleRuntimeV1 {
     current: RwLock<Arc<dyn FeedbackCycleRuntimePort>>,
 }
 
@@ -4328,13 +4319,13 @@ pub(in crate::daemon) fn observe_accepted_feedback_cycle_terminal(
     );
 }
 
-struct UnavailableFeedbackCycleRuntimeV1 {
+pub(super) struct UnavailableFeedbackCycleRuntimeV1 {
     project_id: ProjectId,
     observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
 impl UnavailableFeedbackCycleRuntimeV1 {
-    fn new(
+    pub(super) fn new(
         project_id: ProjectId,
         observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
     ) -> Self {
@@ -4371,7 +4362,10 @@ impl SwitchableFeedbackCycleRuntimeV1 {
         }
     }
 
-    fn replace(&self, current: Arc<dyn FeedbackCycleRuntimePort>) -> Result<(), LspRuntimeFailure> {
+    pub(super) fn replace(
+        &self,
+        current: Arc<dyn FeedbackCycleRuntimePort>,
+    ) -> Result<(), LspRuntimeFailure> {
         *self
             .current
             .write()
@@ -4396,7 +4390,7 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 
 /// Retained daemon state for the typed LSP invocation operations.
 #[derive(Clone)]
-struct RegisteredWorkRuntime {
+pub(super) struct RegisteredWorkRuntime {
     database: Arc<crate::global_db::RegisteredGlobalDb>,
     runtime: Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>>,
     actor: ActorId,
@@ -4406,27 +4400,25 @@ struct RegisteredWorkRuntime {
     configuration_digest: ManifestDigest,
 }
 
+impl RegisteredWorkRuntime {
+    /// Takes the provider runtime out for shutdown, dropping the rest of the
+    /// registration with it.
+    pub(super) fn into_runtime(
+        self,
+    ) -> Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>> {
+        self.runtime
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    callable_code_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredCallableCodeRuntime>>>,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
     context_scout_registries:
         Arc<Mutex<BTreeMap<ProjectId, Arc<ProjectContextScoutAddressRegistryV1>>>>,
-    feedback_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredFeedbackRuntime>>>,
-    feedback_cycles: Arc<Mutex<BTreeMap<PathBuf, Arc<Pr12FeedbackCycleRuntime>>>>,
-    feedback_cycle_inputs: Arc<Mutex<BTreeMap<PathBuf, Arc<SwitchableFeedbackCycleRuntimeV1>>>>,
-    primitive_runtimes: Arc<Mutex<BTreeMap<PathBuf, Pr12PrimitiveProjectRuntime>>>,
-    configuration_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredConfigurationRuntime>>>,
-    work_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredWorkRuntime>>>,
-    lsp_owners: Arc<Mutex<BTreeMap<PathBuf, DaemonLspInvocationOwner>>>,
-    advisory_runtimes: Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Any + Send + Sync>>>>,
-    advisory_cycle_invokers:
-        Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>>>,
-    advisory_hook_orchestrators:
-        Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Pr13HookOrchestrationPortV1>>>>,
-    semantic_runtimes:
-        Arc<Mutex<BTreeMap<PathBuf, crate::semantic_code::DaemonSemanticRuntimeHandleV1>>>,
+    /// Every per-project component, published together under one lock. See
+    /// [`ProjectRuntimeRegistryV1`] for why these are not twelve maps.
+    project_runtimes: ProjectRuntimeRegistryV1,
     operation_events: OperationEventAuthority,
 }
 
@@ -4444,20 +4436,9 @@ impl DaemonInvocationService {
     ) -> Self {
         Self {
             code_index_schedulers,
-            callable_code_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
-            feedback_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
-            feedback_cycles: Arc::new(Mutex::new(BTreeMap::new())),
-            feedback_cycle_inputs: Arc::new(Mutex::new(BTreeMap::new())),
-            primitive_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
-            configuration_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
-            work_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
-            lsp_owners: Arc::new(Mutex::new(BTreeMap::new())),
-            advisory_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
-            advisory_cycle_invokers: Arc::new(Mutex::new(BTreeMap::new())),
-            advisory_hook_orchestrators: Arc::new(Mutex::new(BTreeMap::new())),
-            semantic_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
+            project_runtimes: ProjectRuntimeRegistryV1::default(),
             operation_events: daemon_operation_event_authority(),
         }
     }
@@ -4515,13 +4496,25 @@ impl DaemonContextScoutRuntimeRegistrar {
     }
 }
 
-struct RegisteredFeedbackRuntime {
+pub(super) struct RegisteredFeedbackRuntime {
     project_id: ProjectId,
     runtime: Arc<Pr12FeedbackRuntime>,
 }
 
+impl RegisteredFeedbackRuntime {
+    pub(super) fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub(super) fn source_observation_port(
+        &self,
+    ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
+        self.runtime.source_observation_port()
+    }
+}
+
 #[derive(Clone)]
-struct RegisteredCallableCodeRuntime {
+pub(super) struct RegisteredCallableCodeRuntime {
     scope: ResolvedScope,
     authorization: DaemonCallableCodeAuthorizationSource,
 }
@@ -4768,7 +4761,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
 }
 
 #[derive(Clone)]
-struct RegisteredConfigurationRuntime {
+pub(super) struct RegisteredConfigurationRuntime {
     runtime: Arc<ProjectConfigurationRuntime>,
     scope: ResolvedScope,
     actor: ActorId,
@@ -4823,8 +4816,12 @@ impl DaemonFeedbackRuntimeRegistrar {
         access: ProjectSourceAccessSnapshot,
         configuration: Arc<ProjectConfigurationRuntime>,
     ) -> Result<ProjectFeedbackStore, DaemonFeedbackRuntimeRegistrationError> {
-        let mut runtimes = self.service.feedback_runtimes.lock().await;
-        if runtimes.contains_key(&project_root) {
+        if self
+            .service
+            .project_runtimes
+            .holds::<RegisteredFeedbackRuntime>(&project_root)
+            .await
+        {
             return Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered);
         }
         let project_id = scope.project_id.clone();
@@ -4837,36 +4834,43 @@ impl DaemonFeedbackRuntimeRegistrar {
             )
             .await?,
         );
-        self.service.callable_code_runtimes.lock().await.insert(
-            project_root.clone(),
-            RegisteredCallableCodeRuntime {
-                authorization: DaemonCallableCodeAuthorizationSource::production(
-                    project_root.clone(),
-                    scope.clone(),
-                    configuration,
-                ),
-                scope,
-            },
-        );
+        self.service
+            .project_runtimes
+            .publish(
+                project_root.clone(),
+                RegisteredCallableCodeRuntime {
+                    authorization: DaemonCallableCodeAuthorizationSource::production(
+                        project_root.clone(),
+                        scope.clone(),
+                        configuration,
+                    ),
+                    scope,
+                },
+            )
+            .await;
         let publications = runtime.publication_store();
         let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
             project_id.clone(),
             runtime.source_observation_port(),
         ));
-        runtimes.insert(
-            project_root.clone(),
-            RegisteredFeedbackRuntime {
-                project_id,
-                runtime,
-            },
-        );
-        drop(runtimes);
         self.service
-            .feedback_cycle_inputs
-            .lock()
-            .await
-            .entry(project_root)
-            .or_insert_with(|| Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle)));
+            .project_runtimes
+            .publish(
+                project_root.clone(),
+                RegisteredFeedbackRuntime {
+                    project_id,
+                    runtime,
+                },
+            )
+            .await;
+        let _ = self
+            .service
+            .project_runtimes
+            .register(
+                project_root,
+                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle)),
+            )
+            .await;
         Ok(publications)
     }
 
@@ -4953,26 +4957,26 @@ impl DaemonFeedbackRuntimeRegistrar {
         );
         let cycle_input = self
             .service
-            .feedback_cycle_inputs
-            .lock()
-            .await
-            .get(&project_root)
-            .cloned();
+            .project_runtimes
+            .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(&project_root)
+            .await;
         if let Some(cycle_input) = cycle_input {
             cycle_input
                 .replace(production_input)
                 .map_err(|_| DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
         } else {
-            self.service.feedback_cycle_inputs.lock().await.insert(
-                project_root.clone(),
-                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(production_input)),
-            );
+            self.service
+                .project_runtimes
+                .publish(
+                    project_root.clone(),
+                    Arc::new(SwitchableFeedbackCycleRuntimeV1::new(production_input)),
+                )
+                .await;
         }
         self.service
-            .feedback_cycles
-            .lock()
-            .await
-            .insert(project_root, runtime.clone());
+            .project_runtimes
+            .publish(project_root, runtime.clone())
+            .await;
         Ok(runtime)
     }
 
@@ -4983,11 +4987,9 @@ impl DaemonFeedbackRuntimeRegistrar {
     ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
         let router = self
             .service
-            .feedback_cycle_inputs
-            .lock()
+            .project_runtimes
+            .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project_root)
             .await
-            .get(project_root)
-            .cloned()
             .ok_or(DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
         router
             .replace(input)
@@ -5021,12 +5023,12 @@ impl DaemonPrimitiveRuntimeRegistrar {
         project_root: PathBuf,
         project_runtime: Pr12PrimitiveProjectRuntime,
     ) -> Result<Arc<dyn Pr12PrimitiveDispatch>, DaemonPrimitiveRuntimeRegistrationError> {
-        let mut runtimes = self.service.primitive_runtimes.lock().await;
-        if runtimes.contains_key(&project_root) {
-            return Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered);
-        }
         let dispatch = project_runtime.dispatch();
-        runtimes.insert(project_root, project_runtime);
+        self.service
+            .project_runtimes
+            .register(project_root, project_runtime)
+            .await
+            .map_err(|_| DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered)?;
         Ok(dispatch)
     }
 
@@ -5034,10 +5036,9 @@ impl DaemonPrimitiveRuntimeRegistrar {
     pub(crate) async fn unregister(&self, project_root: &Path) -> bool {
         let runtime = self
             .service
-            .primitive_runtimes
-            .lock()
-            .await
-            .remove(project_root);
+            .project_runtimes
+            .withdraw::<Pr12PrimitiveProjectRuntime>(project_root)
+            .await;
         runtime.is_some_and(|runtime| {
             runtime.teardown();
             true
@@ -5145,10 +5146,9 @@ impl DaemonConfigurationRuntimeRegistrar {
     ) -> Result<(), TraceDecayError> {
         if self
             .service
-            .configuration_runtimes
-            .lock()
+            .project_runtimes
+            .holds::<RegisteredConfigurationRuntime>(&project_root)
             .await
-            .contains_key(&project_root)
         {
             return Ok(());
         }
@@ -5205,16 +5205,19 @@ impl DaemonConfigurationRuntimeRegistrar {
                 grants.clone(),
             )),
         )?;
-        self.service.configuration_runtimes.lock().await.insert(
-            project_root,
-            RegisteredConfigurationRuntime {
-                runtime,
-                scope,
-                actor: grants.actor.clone(),
-                grants,
-                semantic_operation: Arc::new(OnceLock::new()),
-            },
-        );
+        self.service
+            .project_runtimes
+            .publish(
+                project_root,
+                RegisteredConfigurationRuntime {
+                    runtime,
+                    scope,
+                    actor: grants.actor.clone(),
+                    grants,
+                    semantic_operation: Arc::new(OnceLock::new()),
+                },
+            )
+            .await;
         Ok(())
     }
 
@@ -5223,19 +5226,20 @@ impl DaemonConfigurationRuntimeRegistrar {
         project_root: &Path,
         operation: Arc<ProductionSemanticConfigurationOperationV1>,
     ) -> Result<(), TraceDecayError> {
-        let runtimes = self.service.configuration_runtimes.lock().await;
-        let registered = runtimes
-            .get(project_root)
+        self.service
+            .project_runtimes
+            .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
+                registered.semantic_operation.set(operation).map_err(|_| {
+                    TraceDecayError::Config {
+                        message: "semantic configuration operation is already installed".to_owned(),
+                    }
+                })
+            })
+            .await
             .ok_or_else(|| TraceDecayError::Config {
                 message: "semantic configuration operation requires a registered Plan 20 runtime"
                     .to_owned(),
-            })?;
-        registered
-            .semantic_operation
-            .set(operation)
-            .map_err(|_| TraceDecayError::Config {
-                message: "semantic configuration operation is already installed".to_owned(),
-            })
+            })?
     }
 }
 
@@ -5276,37 +5280,44 @@ impl DaemonWorkRuntimeRegistrar {
             canonical_sha256(&authority).map_err(|error| TraceDecayError::Config {
                 message: format!("Work runtime authority digest failed: {error}"),
             })?;
-        let mut runtimes = self.service.work_runtimes.lock().await;
-        if let Some(registered) = runtimes.get_mut(&project_root) {
-            if registered.actor == actor
-                && registered.grant.digest == grant.digest
-                && registered.grant.scope == grant.scope
-                && registered.authority_digest == authority_digest
-                && registered.policy_digest == policy_digest
-                && registered.configuration_digest == configuration_digest
-            {
-                registered.grant = grant;
-                return Ok(());
-            }
-            return Err(TraceDecayError::Config {
-                message: "a different Work authority is already registered for this project"
-                    .to_owned(),
-            });
-        }
-        let runtime = database.work_runtime(authority, config, project_root.clone())?;
-        runtimes.insert(
-            project_root,
-            RegisteredWorkRuntime {
-                database,
-                runtime: Arc::new(runtime),
-                actor,
-                grant,
-                authority_digest,
-                policy_digest,
-                configuration_digest,
-            },
-        );
-        Ok(())
+        self.service
+            .project_runtimes
+            .register_or_reconcile(
+                project_root.clone(),
+                |registered: &mut RegisteredWorkRuntime| {
+                    if registered.actor == actor
+                        && registered.grant.digest == grant.digest
+                        && registered.grant.scope == grant.scope
+                        && registered.authority_digest == authority_digest
+                        && registered.policy_digest == policy_digest
+                        && registered.configuration_digest == configuration_digest
+                    {
+                        // The same authority re-registering only renews its grant.
+                        registered.grant = grant.clone();
+                        return Ok(());
+                    }
+                    Err(TraceDecayError::Config {
+                        message:
+                            "a different Work authority is already registered for this project"
+                                .to_owned(),
+                    })
+                },
+                || {
+                    // Opening the provider runtime is deferred until the slot is
+                    // known to be free so a refused registration never starts one.
+                    let runtime = database.work_runtime(authority, config, project_root.clone())?;
+                    Ok(RegisteredWorkRuntime {
+                        database,
+                        runtime: Arc::new(runtime),
+                        actor: actor.clone(),
+                        grant: grant.clone(),
+                        authority_digest: authority_digest.clone(),
+                        policy_digest: policy_digest.clone(),
+                        configuration_digest: configuration_digest.clone(),
+                    })
+                },
+            )
+            .await
     }
 
     pub(crate) async fn authority_matches(
@@ -5322,11 +5333,8 @@ impl DaemonWorkRuntimeRegistrar {
             return false;
         };
         self.service
-            .work_runtimes
-            .lock()
-            .await
-            .get(project_root)
-            .is_some_and(|registered| {
+            .project_runtimes
+            .read::<RegisteredWorkRuntime, _, _>(project_root, |registered| {
                 &registered.actor == actor
                     && registered.grant.digest == grant.digest
                     && registered.grant.scope == grant.scope
@@ -5334,6 +5342,8 @@ impl DaemonWorkRuntimeRegistrar {
                     && &registered.policy_digest == policy_digest
                     && &registered.configuration_digest == configuration_digest
             })
+            .await
+            .unwrap_or(false)
     }
 }
 
@@ -5482,16 +5492,21 @@ impl DaemonAdvisoryRuntimeRegistrar {
         let project_id = input.resolved_scope.project_id.clone();
         let feedback_registered = self
             .service
-            .feedback_runtimes
-            .lock()
+            .project_runtimes
+            .read::<RegisteredFeedbackRuntime, _, _>(&project_root, |runtime| {
+                runtime.project_id == project_id
+            })
             .await
-            .get(&project_root)
-            .is_some_and(|runtime| runtime.project_id == project_id);
+            .unwrap_or(false);
         if !feedback_registered {
             return Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable);
         }
-        let mut runtimes = self.service.advisory_runtimes.lock().await;
-        if runtimes.contains_key(&project_root) {
+        if self
+            .service
+            .project_runtimes
+            .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
+            .await
+        {
             return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
         }
         let registration = Arc::new(register_pr13_advisory_daemon_startup(
@@ -5501,8 +5516,12 @@ impl DaemonAdvisoryRuntimeRegistrar {
             hook_delivery_port,
         )?);
         let registered_root = project_root.clone();
-        runtimes.insert(project_root, registration.clone());
-        drop(runtimes);
+        let published: Arc<dyn Any + Send + Sync> = registration.clone();
+        self.service
+            .project_runtimes
+            .register(project_root, published)
+            .await
+            .map_err(|_| DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered)?;
         self.service
             .install_lsp_owner(
                 registered_root,
@@ -5545,19 +5564,17 @@ impl DaemonAdvisoryRuntimeRegistrar {
             || worktree_id == [0; 16]
             || !self
                 .service
-                .advisory_runtimes
-                .lock()
+                .project_runtimes
+                .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
                 .await
-                .contains_key(&project_root)
         {
             return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
         }
-        let mut runtimes = self.service.advisory_hook_orchestrators.lock().await;
-        if runtimes.contains_key(&project_root) {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
-        }
-        runtimes.insert(project_root.clone(), Arc::clone(&runtime));
-        drop(runtimes);
+        self.service
+            .project_runtimes
+            .register(project_root.clone(), Arc::clone(&runtime))
+            .await
+            .map_err(|_| DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered)?;
         let runtime_weak: Weak<dyn Pr13HookOrchestrationPortV1> = Arc::downgrade(&runtime);
         let registered = match pr13_hook_orchestration_registry().lock() {
             Ok(mut registry) => {
@@ -5580,10 +5597,9 @@ impl DaemonAdvisoryRuntimeRegistrar {
             Ok(())
         } else {
             self.service
-                .advisory_hook_orchestrators
-                .lock()
-                .await
-                .remove(&project_root);
+                .project_runtimes
+                .withdraw::<Arc<dyn Pr13HookOrchestrationPortV1>>(&project_root)
+                .await;
             Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
         }
     }
@@ -5595,19 +5611,17 @@ impl DaemonAdvisoryRuntimeRegistrar {
     ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
         if !self
             .service
-            .advisory_runtimes
-            .lock()
+            .project_runtimes
+            .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
             .await
-            .contains_key(&project_root)
         {
             return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
         }
-        let mut invokers = self.service.advisory_cycle_invokers.lock().await;
-        if invokers.contains_key(&project_root) {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
-        }
-        invokers.insert(project_root, invoker);
-        Ok(())
+        self.service
+            .project_runtimes
+            .register(project_root, invoker)
+            .await
+            .map_err(|_| DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered)
     }
 }
 
@@ -5638,16 +5652,25 @@ impl DaemonSemanticRuntimeRegistrar {
         project_root: PathBuf,
         handle: crate::semantic_code::DaemonSemanticRuntimeHandleV1,
     ) -> Result<(), DaemonSemanticRuntimeRegistrationError> {
-        let mut runtimes = self.service.semantic_runtimes.lock().await;
-        if runtimes.contains_key(&project_root) {
-            return Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered);
-        }
-        crate::application::semantic_runtime::register_project_semantic_runtime(
-            project_root.clone(),
-            handle.clone(),
-        );
-        runtimes.insert(project_root, handle);
-        Ok(())
+        self.service
+            .project_runtimes
+            .register_or_reconcile(
+                project_root.clone(),
+                |_: &mut crate::semantic_code::DaemonSemanticRuntimeHandleV1| {
+                    Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered)
+                },
+                || {
+                    // The process-wide table is only joined once the project slot
+                    // is known to be free, so a refused registration cannot
+                    // replace a live handle there.
+                    crate::application::semantic_runtime::register_project_semantic_runtime(
+                        project_root.clone(),
+                        handle.clone(),
+                    );
+                    Ok(handle)
+                },
+            )
+            .await
     }
 }
 
@@ -5660,11 +5683,9 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
     ) -> Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1> {
-        let runtimes = self.semantic_runtimes.lock().await;
         match project_root {
-            Some(root) => runtimes.get(root).cloned(),
-            None if runtimes.len() == 1 => runtimes.values().next().cloned(),
-            None => None,
+            Some(root) => self.project_runtimes.get(root).await,
+            None => self.project_runtimes.sole().await,
         }
     }
 }
@@ -7175,11 +7196,9 @@ impl DaemonInvocationService {
         observed_at: UtcMicros,
     ) -> Option<ApplicationResult<serde_json::Value>> {
         let dispatch = self
-            .primitive_runtimes
-            .lock()
-            .await
-            .get(project_root)
-            .map(Pr12PrimitiveProjectRuntime::dispatch)?;
+            .project_runtimes
+            .read(project_root, Pr12PrimitiveProjectRuntime::dispatch)
+            .await?;
         Some(dispatch.dispatch(invocation, context, observed_at).await)
     }
 
@@ -7187,85 +7206,71 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
     ) -> Option<DaemonFeedbackInvocationOwner> {
-        let project_root = project_root?;
-        let runtimes = self.feedback_runtimes.lock().await;
-        let registered = runtimes.get(project_root)?;
-        Some(DaemonFeedbackInvocationOwner::new(
-            registered.project_id.clone(),
-            registered.runtime.owner(),
-        ))
+        self.project_runtimes
+            .read::<RegisteredFeedbackRuntime, _, _>(project_root?, |registered| {
+                DaemonFeedbackInvocationOwner::new(
+                    registered.project_id.clone(),
+                    registered.runtime.owner(),
+                )
+            })
+            .await
     }
 
     pub(crate) async fn feedback_runtime(
         &self,
         project_root: Option<&Path>,
     ) -> Option<Arc<Pr12FeedbackRuntime>> {
-        let project_root = project_root?;
-        self.feedback_runtimes
-            .lock()
+        self.project_runtimes
+            .read::<RegisteredFeedbackRuntime, _, _>(project_root?, |registered| {
+                registered.runtime.clone()
+            })
             .await
-            .get(project_root)
-            .map(|registered| registered.runtime.clone())
     }
 
     async fn advisory_cycle_invoker(
         &self,
         project_root: Option<&Path>,
     ) -> Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>> {
-        let project_root = project_root?;
-        self.advisory_cycle_invokers
-            .lock()
-            .await
-            .get(project_root)
-            .cloned()
+        self.project_runtimes.get(project_root?).await
     }
 
     async fn configuration_runtime(
         &self,
         project_root: Option<&Path>,
     ) -> Option<RegisteredConfigurationRuntime> {
-        let project_root = project_root?;
-        self.configuration_runtimes
-            .lock()
-            .await
-            .get(project_root)
-            .cloned()
+        self.project_runtimes.get(project_root?).await
     }
 
     async fn work_runtime(&self, project_root: Option<&Path>) -> Option<RegisteredWorkRuntime> {
-        let project_root = project_root?;
-        self.work_runtimes.lock().await.get(project_root).cloned()
+        self.project_runtimes.get(project_root?).await
     }
 
     pub(crate) async fn semantic_configuration_operation(
         &self,
         project_root: &Path,
     ) -> Option<Arc<ProductionSemanticConfigurationOperationV1>> {
-        self.configuration_runtimes
-            .lock()
+        self.project_runtimes
+            .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
+                registered.semantic_operation.get().cloned()
+            })
             .await
-            .get(project_root)
-            .and_then(|registered| registered.semantic_operation.get().cloned())
+            .flatten()
     }
 
     pub(crate) async fn feedback_cycle(
         &self,
         project_root: Option<&Path>,
     ) -> Option<Arc<Pr12FeedbackCycleRuntime>> {
-        let project_root = project_root?;
-        self.feedback_cycles.lock().await.get(project_root).cloned()
+        self.project_runtimes.get(project_root?).await
     }
 
     async fn feedback_cycle_input(
         &self,
         project_root: Option<&Path>,
     ) -> Option<Arc<dyn FeedbackCycleRuntimePort>> {
-        let project_root = project_root?;
-        self.feedback_cycle_inputs
-            .lock()
+        self.project_runtimes
+            .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project_root?)
             .await
-            .get(project_root)
-            .cloned()
             .map(|input| -> Arc<dyn FeedbackCycleRuntimePort> { input })
     }
 
@@ -7273,16 +7278,16 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
     ) -> Option<ProjectFeedbackStore> {
-        let project_root = project_root?;
-        self.feedback_runtimes
-            .lock()
+        self.project_runtimes
+            .read::<RegisteredFeedbackRuntime, _, _>(project_root?, |registered| {
+                registered.runtime.publication_store()
+            })
             .await
-            .get(project_root)
-            .map(|registered| registered.runtime.publication_store())
     }
 
     async fn install_lsp_owner(&self, project_root: PathBuf, owner: DaemonLspInvocationOwner) {
-        self.lsp_owners.lock().await.insert(project_root, owner);
+        // Reinstalled on every project open by the same admission authority.
+        self.project_runtimes.publish(project_root, owner).await;
     }
 
     pub(crate) async fn lsp_owner(
@@ -7290,13 +7295,15 @@ impl DaemonInvocationService {
         project_root: Option<&Path>,
     ) -> Option<DaemonLspInvocationOwner> {
         let project_root = project_root?;
-        let canonical_root = project_root.canonicalize().ok();
-        let owners = self.lsp_owners.lock().await;
-        owners.get(project_root).cloned().or_else(|| {
-            canonical_root
-                .as_deref()
-                .and_then(|root| owners.get(root).cloned())
-        })
+        if let Some(owner) = self
+            .project_runtimes
+            .get::<DaemonLspInvocationOwner>(project_root)
+            .await
+        {
+            return Some(owner);
+        }
+        let canonical_root = project_root.canonicalize().ok()?;
+        self.project_runtimes.get(&canonical_root).await
     }
 
     async fn execute_semantic_evaluation(
@@ -7919,48 +7926,9 @@ impl DaemonInvocationService {
     }
 
     pub(crate) async fn expire_all(&self) {
-        self.callable_code_runtimes.lock().await.clear();
         self.lsp_sessions.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
-        let feedback_runtimes = std::mem::take(&mut *self.feedback_runtimes.lock().await);
-        let feedback_cycle_inputs = std::mem::take(&mut *self.feedback_cycle_inputs.lock().await);
-        // The production advisory input retains its LSP factory, whose
-        // feedback adapter retains this switchable router. Reset the router
-        // before dropping the registries so shutdown cannot leave that cycle
-        // retaining the project graph and database runtimes.
-        for (project_root, router) in &feedback_cycle_inputs {
-            if let Some(registered) = feedback_runtimes.get(project_root) {
-                let unavailable = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
-                    registered.project_id.clone(),
-                    registered.runtime.source_observation_port(),
-                ));
-                let _ = router.replace(unavailable);
-            }
-        }
-        drop(feedback_cycle_inputs);
-        drop(feedback_runtimes);
-        self.feedback_cycles.lock().await.clear();
-        self.primitive_runtimes.lock().await.clear();
-        self.configuration_runtimes.lock().await.clear();
-        // Work runtimes own live provider processes. Dropping the registry only
-        // detaches them, so every execution is stopped and joined before the
-        // runtime goes away.
-        let work_runtimes = std::mem::take(&mut *self.work_runtimes.lock().await);
-        for registered in work_runtimes.into_values() {
-            let runtime = Arc::clone(&registered.runtime);
-            let _ = tokio::task::spawn_blocking(move || runtime.shutdown()).await;
-        }
-        let semantic_runtimes = std::mem::take(&mut *self.semantic_runtimes.lock().await);
-        for (project_root, handle) in semantic_runtimes {
-            crate::application::semantic_runtime::unregister_project_semantic_runtime(
-                &project_root,
-            );
-            handle.cancel();
-        }
-        self.lsp_owners.lock().await.clear();
-        self.advisory_runtimes.lock().await.clear();
-        self.advisory_cycle_invokers.lock().await.clear();
-        self.advisory_hook_orchestrators.lock().await.clear();
+        self.project_runtimes.shut_down_all().await;
         if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
             registry.retain(|_, runtime| runtime.strong_count() > 0);
         }
@@ -11000,6 +10968,6 @@ mod tests {
             0,
             "daemon expiry must stop and join every provider execution"
         );
-        assert!(service.work_runtimes.lock().await.is_empty());
+        assert!(service.project_runtimes.is_empty().await);
     }
 }
