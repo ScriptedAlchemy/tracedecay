@@ -45,34 +45,6 @@ pub(crate) struct SnapshotCaptureOutcome {
     pub(crate) deferred_by_byte_cap: bool,
 }
 
-/// Thin adapter from the shared budget to the snapshot capture outcome.
-pub(crate) struct SnapshotByteBudget(IngestByteBudget);
-
-impl SnapshotByteBudget {
-    pub(crate) fn new(limit: Option<u64>) -> Self {
-        Self(match limit {
-            Some(limit) => IngestByteBudget::bounded_allowing_empty(limit),
-            None => IngestByteBudget::unbounded(),
-        })
-    }
-
-    pub(crate) fn try_consume(&mut self, bytes: u64) -> bool {
-        self.0.try_consume(bytes)
-    }
-
-    pub(crate) fn defer(&mut self) {
-        self.0.defer();
-    }
-
-    pub(crate) fn finish(self, stats: TranscriptIngestStats) -> SnapshotCaptureOutcome {
-        SnapshotCaptureOutcome {
-            stats,
-            bytes_consumed: self.0.consumed(),
-            deferred_by_byte_cap: self.0.deferred(),
-        }
-    }
-}
-
 /// Provider-specific record material needed by the shared snapshot admission loop.
 pub(crate) trait SnapshotAdmissionRecord {
     fn provider(&self) -> &'static str;
@@ -194,7 +166,7 @@ pub(crate) fn snapshot_cursor_after(
 
 /// Owns byte accounting and durable admission state for one snapshot-provider sweep.
 pub(crate) struct SnapshotAdmissionRunner {
-    budget: SnapshotByteBudget,
+    budget: IngestByteBudget,
     stats: TranscriptIngestStats,
     sessions: BTreeSet<String>,
 }
@@ -202,7 +174,10 @@ pub(crate) struct SnapshotAdmissionRunner {
 impl SnapshotAdmissionRunner {
     pub(crate) fn new(max_new_bytes: Option<u64>) -> Self {
         Self {
-            budget: SnapshotByteBudget::new(max_new_bytes),
+            budget: match max_new_bytes {
+                Some(limit) => IngestByteBudget::bounded_allowing_empty(limit),
+                None => IngestByteBudget::unbounded(),
+            },
             stats: TranscriptIngestStats::default(),
             sessions: BTreeSet::new(),
         }
@@ -343,7 +318,11 @@ impl SnapshotAdmissionRunner {
 
     pub(crate) fn finish(mut self) -> SnapshotCaptureOutcome {
         self.stats.sessions_upserted = self.sessions.len() as u64;
-        self.budget.finish(self.stats)
+        SnapshotCaptureOutcome {
+            stats: self.stats,
+            bytes_consumed: self.budget.consumed(),
+            deferred_by_byte_cap: self.budget.deferred(),
+        }
     }
 }
 
@@ -941,16 +920,13 @@ mod tests {
 
     #[test]
     fn snapshot_budget_is_aggregate_and_reports_deferral() {
-        let mut budget = SnapshotByteBudget::new(Some(5));
-        assert!(budget.try_consume(3));
-        assert!(!budget.try_consume(3));
-        assert!(budget.try_consume(2));
+        let mut runner = SnapshotAdmissionRunner::new(Some(5));
+        assert!(runner.budget.try_consume(3));
+        assert!(!runner.budget.try_consume(3));
+        assert!(runner.budget.try_consume(2));
+        runner.sessions.insert("session-1".to_owned());
 
-        let stats = TranscriptIngestStats {
-            sessions_upserted: 1,
-            ..TranscriptIngestStats::default()
-        };
-        let outcome = budget.finish(stats);
+        let outcome = runner.finish();
         assert_eq!(outcome.bytes_consumed, 5);
         assert!(outcome.deferred_by_byte_cap);
         assert_eq!(outcome.stats.sessions_upserted, 1);
@@ -976,10 +952,10 @@ mod tests {
 
     #[test]
     fn unbounded_snapshot_budget_still_reports_consumed_bytes() {
-        let mut budget = SnapshotByteBudget::new(None);
-        assert!(budget.try_consume(7));
-        assert!(budget.try_consume(11));
-        let outcome = budget.finish(TranscriptIngestStats::default());
+        let mut runner = SnapshotAdmissionRunner::new(None);
+        assert!(runner.budget.try_consume(7));
+        assert!(runner.budget.try_consume(11));
+        let outcome = runner.finish();
         assert_eq!(outcome.bytes_consumed, 18);
         assert!(!outcome.deferred_by_byte_cap);
     }
