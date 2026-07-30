@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "provider": "cline_family",
+  "sources": [
+    {
+      "kind": "pinned_official_protocol_document",
+      "url": "https://github.com/cline/cline/blob/8a6441fd/.clinerules/hooks/README.md",
+      "revision": "8a6441fd",
+      "sections": ["Available Hooks", "Hook Input/Output"],
+      "retrieved_at": "2026-07-21"
+    },
+    {
+      "kind": "pinned_official_sdk_plugin_reference",
+      "url": "https://github.com/cline/cline/blob/f2a895cf863c9adaddbf3cd2b9704fb1bbe13956/.agents/skills/cline-sdk/references/plugins/REFERENCE.md",
+      "revision": "f2a895cf863c9adaddbf3cd2b9704fb1bbe13956",
+      "blob_sha": "6bcc4bf1a77a0268b08cd36f39064db6a5f822b3",
+      "sections": ["Runtime Hooks", "afterRun Semantics", "Loading a Plugin", "Auto-Discovery (CLI)", "Explicit extensions in SDK Config"],
+      "retrieved_at": "2026-07-21"
+    },
+    {
+      "kind": "official_sdk_plugin_document",
+      "url": "https://docs.cline.bot/sdk/plugins",
+      "sections": ["File-Based Plugins", "Installing Plugins via CLI", "Hook Stages"],
+      "retrieved_at": "2026-07-21"
+    }
+  ],
+  "providers": [
+    {
+      "provider": "cline",
+      "host_hook_admission": "documented_unverified",
+      "source_revision": "f2a895cf863c9adaddbf3cd2b9704fb1bbe13956",
+      "local_capture_status": "unavailable",
+      "reason": "cline_sdk_runtime_not_installed"
+    },
+    {
+      "provider": "roo-code",
+      "host_hook_admission": "unavailable",
+      "reason": "no_official_roo_protocol_admitted_by_this_evidence_packet"
+    },
+    {
+      "provider": "kilo",
+      "host_hook_admission": "unavailable",
+      "reason": "no_official_kilo_protocol_admitted_by_this_evidence_packet"
+    }
+  ],
+  "capture_attempt": {
+    "checked_at": "2026-07-21",
+    "commands_checked": ["cline", "cline-sdk", "cline-agent"],
+    "cline_sdk_runtime": "unavailable",
+    "configuration_mutated": false,
+    "raw_payloads_captured": 0
+  },
+  "events": [
+    {
+      "identity": "saved_edit",
+      "provider": "cline",
+      "family": "saved_edit",
+      "support": "documented_unverified",
+      "documented_contract": {
+        "interface": "AgentPlugin",
+        "capability": "hooks",
+        "stage": "tool_call_after",
+        "handler": "afterTool",
+        "accept_only": "native tool result for write_to_file"
+      }
+    },
+    {
+      "identity": "task_complete",
+      "provider": "cline",
+      "family": "session_boundary",
+      "support": "documented_unverified",
+      "documented_contract": {
+        "interface": "AgentPlugin",
+        "capability": "hooks",
+        "stage": "run_end",
+        "handler": "afterRun",
+        "accept_only": "native run result whose status is completed"
+      }
+    }
+  ]
+}

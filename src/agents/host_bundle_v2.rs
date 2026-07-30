@@ -78,7 +78,7 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
 const CLINE_FAMILY_EVIDENCE_PACKET_PATH: &str =
     "crates/tracedecay-hooks/fixtures/host_events/cline-family.json";
 const CLINE_FAMILY_EVIDENCE_PACKET: &[u8] =
-    include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/cline-family.json");
+    include_bytes!("../../tests/fixtures/packaged_host_events/cline-family.json");
 const CLINE_FAMILY_TRANSCRIPT_MANIFEST_PATH: &str =
     "tests/fixtures/transcript_golden/cline_like/manifest.json";
 const CLINE_FAMILY_TRANSCRIPT_MANIFEST: &[u8] =
