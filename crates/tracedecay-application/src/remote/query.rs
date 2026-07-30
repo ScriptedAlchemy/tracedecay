@@ -62,7 +62,7 @@ impl RemoteQueryPageBoundsV1 {
 pub struct RemoteQueryRequestV1 {
     pub schema_revision: u16,
     pub scope: RemoteRepositoryScopeV1,
-    pub expected_shards: BTreeSet<ExpectedRemoteShardV1>,
+    pub expected_shards: Vec<ExpectedRemoteShardV1>,
     pub page: RemoteQueryPageBoundsV1,
 }
 
@@ -82,6 +82,8 @@ impl RemoteQueryRequestV1 {
                 field: "remote query expected shard inventory",
             });
         }
+        let mut inventory = BTreeSet::new();
+        let mut brain_id = None;
         for shard in &self.expected_shards {
             for (field, value) in [
                 ("remote query Brain identity", shard.brain_id.as_str()),
@@ -99,6 +101,16 @@ impl RemoteQueryRequestV1 {
                     return Err(ApplicationContractError::InvalidIdentifier { field });
                 }
             }
+            if brain_id
+                .as_ref()
+                .is_some_and(|expected: &String| expected != &shard.brain_id)
+                || !inventory.insert(shard.clone())
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "remote query expected shard inventory",
+                });
+            }
+            brain_id.get_or_insert_with(|| shard.brain_id.clone());
         }
         Ok(())
     }
