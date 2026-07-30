@@ -610,6 +610,29 @@ fn project_preview_error(
 mod tests {
     use super::*;
 
+    fn serialization_schema<T: JsonSchema>() -> Value {
+        let generator = schemars::generate::SchemaSettings::default()
+            .for_serialize()
+            .into_generator();
+        serde_json::to_value(generator.into_root_schema_for::<T>())
+            .expect("serialize settings patch schema")
+    }
+
+    #[test]
+    fn route_settings_patch_schemas_are_canonical() {
+        let project_route = serialization_schema::<ProjectSettingsPatch>();
+        let project_canonical =
+            serialization_schema::<tracedecay_api::configuration::ProjectSettingsPatch>();
+        assert_eq!(project_route, project_canonical);
+        assert_eq!(project_route["required"], json!(["expected_revision_id"]));
+
+        let user_route = serialization_schema::<UserSettingsPatch>();
+        let user_canonical =
+            serialization_schema::<tracedecay_api::configuration::UserSettingsPatch>();
+        assert_eq!(user_route, user_canonical);
+        assert_eq!(user_route["required"], json!(["expected_revision_id"]));
+    }
+
     #[test]
     fn automation_settings_payload_preserves_project_authority_failure() {
         let payload = automation_settings_payload(
