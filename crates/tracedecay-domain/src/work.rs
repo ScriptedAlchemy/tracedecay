@@ -47,6 +47,8 @@ pub enum WorkContractError {
     DuplicateRuntimeEvidence,
     #[error("work projection history does not match its version")]
     InvalidProjectionHistory,
+    #[error("work projection fold state was written at an unsupported version")]
+    UnsupportedProjectionState,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -342,95 +344,7 @@ pub struct WorkProjection {
 
 impl WorkProjection {
     pub fn rebuild(history: &[WorkEvent]) -> Result<Self, WorkContractError> {
-        let first = history.first().ok_or(WorkContractError::EmptyHistory)?;
-        let WorkEventKind::Created {
-            title,
-            dependencies,
-        } = first.event()
-        else {
-            return Err(WorkContractError::MissingCreation);
-        };
-        if first.version() != WorkVersion::initial() {
-            return Err(WorkContractError::NonContiguousVersion);
-        }
-
-        let mut projection = Self {
-            task_id: first.task_id().clone(),
-            version: first.version(),
-            authority: first.authority().clone(),
-            title: title.clone(),
-            dependencies: dependencies.clone(),
-            accepted_proposal: None,
-            execution_admitted: false,
-            runtime_evidence: Vec::new(),
-            task_accepted: false,
-            history_len: 0,
-        };
-        let mut expected_version = WorkVersion::initial();
-        let mut previous_time = first.occurred_at();
-        let mut commands = BTreeSet::new();
-        let mut runs = BTreeSet::new();
-
-        for event in history {
-            if event.task_id() != &projection.task_id || event.authority() != &projection.authority
-            {
-                return Err(WorkContractError::MixedAuthority);
-            }
-            if event.version() != expected_version {
-                return Err(WorkContractError::NonContiguousVersion);
-            }
-            if event.occurred_at() < previous_time {
-                return Err(WorkContractError::NonMonotonicTime);
-            }
-            if !commands.insert(event.command_id().clone()) {
-                return Err(WorkContractError::DuplicateCommand);
-            }
-            if projection.task_accepted && event.version() != WorkVersion::initial() {
-                return Err(WorkContractError::InvalidTransition);
-            }
-
-            match event.event() {
-                WorkEventKind::Created { .. } if event.version() != WorkVersion::initial() => {
-                    return Err(WorkContractError::InvalidTransition);
-                }
-                WorkEventKind::Created { .. } => {}
-                WorkEventKind::DependenciesReplanned { dependencies } => {
-                    projection.dependencies = dependencies.clone();
-                }
-                WorkEventKind::ProposalAccepted { proposal_id, .. } => {
-                    projection.accepted_proposal = Some(proposal_id.clone());
-                }
-                WorkEventKind::ProposalRejected { proposal_id, .. }
-                | WorkEventKind::ProposalSuperseded { proposal_id, .. } => {
-                    if projection.accepted_proposal.as_ref() == Some(proposal_id) {
-                        projection.accepted_proposal = None;
-                    }
-                }
-                WorkEventKind::ExecutionAdmitted => {
-                    if projection.accepted_proposal.is_none() {
-                        return Err(WorkContractError::InvalidTransition);
-                    }
-                    projection.execution_admitted = true;
-                }
-                WorkEventKind::RuntimeEvidenceAttached { evidence } => {
-                    if projection.runtime_evidence.len() == MAX_WORK_RUNTIME_EVIDENCE {
-                        return Err(WorkContractError::TooMuchRuntimeEvidence);
-                    }
-                    if !runs.insert(evidence.run_id().clone()) {
-                        return Err(WorkContractError::DuplicateRuntimeEvidence);
-                    }
-                    projection.runtime_evidence.push(evidence.clone());
-                }
-                WorkEventKind::TaskAccepted => projection.task_accepted = true,
-            }
-
-            projection.version = event.version();
-            projection.history_len += 1;
-            previous_time = event.occurred_at();
-            expected_version = event.version().next()?;
-        }
-
-        Ok(projection)
+        WorkProjectionStateV1::rebuild(history).map(WorkProjectionStateV1::into_projection)
     }
 
     pub fn task_id(&self) -> &TaskId {
@@ -544,3 +458,214 @@ impl<'de> Deserialize<'de> for WorkProjection {
         })
     }
 }
+
+/// Payload version of the persisted incremental fold state.
+///
+/// A reader that does not recognise the version refuses the payload as fold
+/// state; that task then rebuilds from history once and republishes at the
+/// current version.
+pub const WORK_PROJECTION_STATE_VERSION_V1: u16 = 1;
+
+/// A [`WorkProjection`] carried together with the smallest frontier that lets
+/// one more event be folded in without re-reading the task's history.
+///
+/// The frontier holds exactly the state the full rebuild kept in local
+/// variables: the command identities already admitted, the last admitted event
+/// time, and the next admissible version. Run identities are deliberately not
+/// stored because every admitted run identity is already present in the
+/// projection's own runtime evidence.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct WorkProjectionStateV1 {
+    state_version: u16,
+    projection: WorkProjection,
+    command_ids: BTreeSet<WorkCommandId>,
+    occurred_at: UtcMicros,
+    next_version: WorkVersion,
+}
+
+impl WorkProjectionStateV1 {
+    /// Folds a whole history. This is the only full-history path; it is the
+    /// same fold `apply` performs, so the two can never disagree.
+    pub fn rebuild(history: &[WorkEvent]) -> Result<Self, WorkContractError> {
+        let (first, rest) = history
+            .split_first()
+            .ok_or(WorkContractError::EmptyHistory)?;
+        let mut state = Self::seed(first)?;
+        for event in rest {
+            state = state.apply(event)?;
+        }
+        Ok(state)
+    }
+
+    /// Admits one event onto an already-validated state.
+    ///
+    /// Every rejection this returns is the rejection a full rebuild of the
+    /// same history would have returned at the same event.
+    pub fn apply(&self, event: &WorkEvent) -> Result<Self, WorkContractError> {
+        if event.task_id() != &self.projection.task_id
+            || event.authority() != &self.projection.authority
+        {
+            return Err(WorkContractError::MixedAuthority);
+        }
+        if event.version() != self.next_version {
+            return Err(WorkContractError::NonContiguousVersion);
+        }
+        if event.occurred_at() < self.occurred_at {
+            return Err(WorkContractError::NonMonotonicTime);
+        }
+        if self.command_ids.contains(event.command_id()) {
+            return Err(WorkContractError::DuplicateCommand);
+        }
+        if self.projection.task_accepted && event.version() != WorkVersion::initial() {
+            return Err(WorkContractError::InvalidTransition);
+        }
+
+        let mut next = self.clone();
+        match event.event() {
+            WorkEventKind::Created { .. } if event.version() != WorkVersion::initial() => {
+                return Err(WorkContractError::InvalidTransition);
+            }
+            WorkEventKind::Created { .. } => {}
+            WorkEventKind::DependenciesReplanned { dependencies } => {
+                next.projection.dependencies = dependencies.clone();
+            }
+            WorkEventKind::ProposalAccepted { proposal_id, .. } => {
+                next.projection.accepted_proposal = Some(proposal_id.clone());
+            }
+            WorkEventKind::ProposalRejected { proposal_id, .. }
+            | WorkEventKind::ProposalSuperseded { proposal_id, .. } => {
+                if next.projection.accepted_proposal.as_ref() == Some(proposal_id) {
+                    next.projection.accepted_proposal = None;
+                }
+            }
+            WorkEventKind::ExecutionAdmitted => {
+                if next.projection.accepted_proposal.is_none() {
+                    return Err(WorkContractError::InvalidTransition);
+                }
+                next.projection.execution_admitted = true;
+            }
+            WorkEventKind::RuntimeEvidenceAttached { evidence } => {
+                if next.projection.runtime_evidence.len() == MAX_WORK_RUNTIME_EVIDENCE {
+                    return Err(WorkContractError::TooMuchRuntimeEvidence);
+                }
+                if next
+                    .projection
+                    .runtime_evidence
+                    .iter()
+                    .any(|admitted| admitted.run_id() == evidence.run_id())
+                {
+                    return Err(WorkContractError::DuplicateRuntimeEvidence);
+                }
+                next.projection.runtime_evidence.push(evidence.clone());
+            }
+            WorkEventKind::TaskAccepted => next.projection.task_accepted = true,
+        }
+
+        next.command_ids.insert(event.command_id().clone());
+        next.projection.version = event.version();
+        next.projection.history_len += 1;
+        next.occurred_at = event.occurred_at();
+        next.next_version = event.version().next()?;
+        Ok(next)
+    }
+
+    fn seed(first: &WorkEvent) -> Result<Self, WorkContractError> {
+        let WorkEventKind::Created {
+            title,
+            dependencies,
+        } = first.event()
+        else {
+            return Err(WorkContractError::MissingCreation);
+        };
+        if first.version() != WorkVersion::initial() {
+            return Err(WorkContractError::NonContiguousVersion);
+        }
+        Ok(Self {
+            state_version: WORK_PROJECTION_STATE_VERSION_V1,
+            projection: WorkProjection {
+                task_id: first.task_id().clone(),
+                version: first.version(),
+                authority: first.authority().clone(),
+                title: title.clone(),
+                dependencies: dependencies.clone(),
+                accepted_proposal: None,
+                execution_admitted: false,
+                runtime_evidence: Vec::new(),
+                task_accepted: false,
+                history_len: 1,
+            },
+            command_ids: BTreeSet::from([first.command_id().clone()]),
+            occurred_at: first.occurred_at(),
+            next_version: first.version().next()?,
+        })
+    }
+
+    pub const fn state_version(&self) -> u16 {
+        self.state_version
+    }
+
+    pub const fn projection(&self) -> &WorkProjection {
+        &self.projection
+    }
+
+    pub fn into_projection(self) -> WorkProjection {
+        self.projection
+    }
+
+    pub const fn version(&self) -> WorkVersion {
+        self.projection.version
+    }
+
+    pub fn command_ids(&self) -> &BTreeSet<WorkCommandId> {
+        &self.command_ids
+    }
+
+    pub const fn occurred_at(&self) -> UtcMicros {
+        self.occurred_at
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkProjectionStateV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            state_version: u16,
+            projection: WorkProjection,
+            command_ids: BTreeSet<WorkCommandId>,
+            occurred_at: UtcMicros,
+            next_version: WorkVersion,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.state_version != WORK_PROJECTION_STATE_VERSION_V1 {
+            return Err(serde::de::Error::custom(
+                WorkContractError::UnsupportedProjectionState,
+            ));
+        }
+        if wire.command_ids.len() != wire.projection.history_len {
+            return Err(serde::de::Error::custom(
+                WorkContractError::InvalidProjectionHistory,
+            ));
+        }
+        if wire.next_version != wire.projection.version.next().map_err(serde::de::Error::custom)? {
+            return Err(serde::de::Error::custom(
+                WorkContractError::NonContiguousVersion,
+            ));
+        }
+        Ok(Self {
+            state_version: wire.state_version,
+            projection: wire.projection,
+            command_ids: wire.command_ids,
+            occurred_at: wire.occurred_at,
+            next_version: wire.next_version,
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "work/projection_fold_tests.rs"]
+mod projection_fold_tests;
