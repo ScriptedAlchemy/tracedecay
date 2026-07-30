@@ -13,6 +13,7 @@ members = [
     "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
     "crates/tracedecay-query",
+    "crates/tracedecay-sdk",
     "crates/tracedecay-sessions",
     "crates/tracedecay-temporal-query",
     "crates/tracedecay-rusqlite-parity",
