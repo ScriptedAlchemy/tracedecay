@@ -502,6 +502,11 @@ fn is_diagnostic_code(value: &str) -> bool {
             && value[4..]
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+        || (value.get(..2).is_some_and(|prefix| {
+            prefix.eq_ignore_ascii_case("ts") || prefix.eq_ignore_ascii_case("cs")
+        }) && value.get(2..).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+        }))
 }
 
 fn is_commit_identifier(value: &str) -> bool {

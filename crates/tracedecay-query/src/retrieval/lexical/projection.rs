@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use roaring::RoaringBitmap;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
@@ -17,11 +19,17 @@ use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
     RetrievalPortError,
 };
+
+mod postings;
+
+use postings::{ByteNgramBudget, ByteNgramPostings, FuzzyTermIndex};
+
 const BM25_K1_MILLIS: u64 = 1_200;
 const BM25_B_MILLIS: u64 = 750;
 const FUZZY_SCORE_MILLIS: u64 = 500;
 const PHRASE_SCORE_MILLIS: u64 = 2_000;
 const ECHO_SCORE_MILLIS: u64 = 750;
+const BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1: usize = 512 * 1024 * 1024;
 
 /// Generation and source metadata bound to one immutable lexical projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,22 +169,29 @@ impl ProjectedChunkV1 {
 pub struct CodeLexicalProjectionAdapterV1 {
     metadata: CodeLexicalProjectionMetadataV1,
     rows: Arc<Vec<ProjectedChunkV1>>,
-    statistics: Arc<LexicalCorpusStatisticsV1>,
+    postings: Arc<LexicalGenerationPostingsV1>,
 }
 
 #[derive(Clone, Debug)]
-struct LexicalCorpusStatisticsV1 {
-    vocabulary_by_character_count: BTreeMap<usize, Vec<String>>,
+struct LexicalGenerationPostingsV1 {
+    term_documents: BTreeMap<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>,
+    exact_documents: BTreeMap<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>,
+    normalized_text: Arc<ByteNgramPostings>,
+    raw_text: Arc<ByteNgramPostings>,
+    fuzzy_terms: FuzzyTermIndex,
     document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
     average_field_lengths: BTreeMap<LexicalFieldV1, usize>,
 }
 
-impl LexicalCorpusStatisticsV1 {
-    fn from_rows(rows: &[ProjectedChunkV1]) -> Self {
+impl LexicalGenerationPostingsV1 {
+    fn from_rows(rows: &[ProjectedChunkV1]) -> Result<Self, RetrievalPortError> {
         let mut vocabulary = BTreeSet::new();
+        let mut term_documents = BTreeMap::<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>::new();
+        let mut exact_documents = BTreeMap::<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>::new();
         let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
         let mut field_lengths = BTreeMap::<LexicalFieldV1, usize>::new();
-        for row in rows {
+        for (document, row) in rows.iter().enumerate() {
+            let document = document as u32;
             for (field, terms) in &row.fields {
                 *field_lengths.entry(*field).or_default() += terms.len();
                 let mut unique = BTreeSet::new();
@@ -184,6 +199,12 @@ impl LexicalCorpusStatisticsV1 {
                     if *field != LexicalFieldV1::Subtoken {
                         vocabulary.insert(term.clone());
                     }
+                    term_documents
+                        .entry(*field)
+                        .or_default()
+                        .entry(term.clone())
+                        .or_default()
+                        .insert(document);
                     unique.insert(term);
                 }
                 for term in unique {
@@ -194,24 +215,60 @@ impl LexicalCorpusStatisticsV1 {
                         .or_default() += 1;
                 }
             }
+            exact_documents
+                .entry(ExactFieldV1::Path)
+                .or_default()
+                .entry(row.logical_path.as_bytes().to_vec())
+                .or_default()
+                .insert(document);
+            for term in &row.chunk.exact_terms {
+                let canonical = canonical_projected_exact_term(term);
+                exact_documents
+                    .entry(exact_field_for_kind(term.kind()))
+                    .or_default()
+                    .entry(canonical.into_owned())
+                    .or_default()
+                    .insert(document);
+            }
         }
         let divisor = rows.len().max(1);
         let average_field_lengths = field_lengths
             .into_iter()
             .map(|(field, total)| (field, total.div_ceil(divisor).max(1)))
             .collect();
-        let mut vocabulary_by_character_count = BTreeMap::<usize, Vec<String>>::new();
-        for term in vocabulary {
-            vocabulary_by_character_count
-                .entry(term.chars().count())
-                .or_default()
-                .push(term);
-        }
-        Self {
-            vocabulary_by_character_count,
+        let mut ngram_budget = ByteNgramBudget::new(BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1);
+        let normalized_text = Arc::new(
+            ByteNgramPostings::from_documents(
+                rows.iter().map(|row| row.normalized_text.as_bytes()),
+                &mut ngram_budget,
+            )
+            .map_err(RetrievalPortError::Contract)?,
+        );
+        let raw_matches_normalized = rows.iter().all(|row| {
+            row.chunk.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes()
+        });
+        let raw_text = if raw_matches_normalized {
+            Arc::clone(&normalized_text)
+        } else {
+            Arc::new(
+                ByteNgramPostings::from_documents(
+                    rows.iter()
+                        .map(|row| row.chunk.sanitized_text.as_str().as_bytes()),
+                    &mut ngram_budget,
+                )
+                .map_err(RetrievalPortError::Contract)?,
+            )
+        };
+        Ok(Self {
+            term_documents,
+            exact_documents,
+            normalized_text,
+            raw_text,
+            fuzzy_terms: FuzzyTermIndex::from_terms(vocabulary)
+                .map_err(RetrievalPortError::Contract)?,
             document_frequencies,
             average_field_lengths,
-        }
+        })
     }
 
     fn document_frequency(&self, field: LexicalFieldV1, term: &str) -> usize {
@@ -224,6 +281,78 @@ impl LexicalCorpusStatisticsV1 {
 
     fn average_field_length(&self, field: LexicalFieldV1) -> usize {
         self.average_field_lengths.get(&field).copied().unwrap_or(1)
+    }
+
+    fn lexical_documents(
+        &self,
+        request: &LexicalLaneRequest<'_>,
+        fuzzy: &FuzzyExpansionsV1,
+    ) -> RoaringBitmap {
+        let mut documents = RoaringBitmap::new();
+        for term in &request.whole_terms {
+            self.union_whole_term(&normalize_lexical(term), &mut documents);
+            if let Some(expansions) = fuzzy.by_query.get(term) {
+                for expansion in expansions {
+                    self.union_whole_term(expansion, &mut documents);
+                }
+            }
+        }
+        if let Some(postings) = self.term_documents.get(&LexicalFieldV1::Subtoken) {
+            for subtoken in &request.subtokens {
+                if let Some(posting) = postings.get(&normalize_lexical(subtoken)) {
+                    documents |= posting;
+                }
+            }
+        }
+        for phrase in &request.phrases {
+            documents |= self
+                .normalized_text
+                .candidate_documents(normalize_lexical(phrase).as_bytes());
+        }
+        documents
+    }
+
+    fn exact_candidate_documents(&self, request: &ExactLaneRequest) -> RoaringBitmap {
+        let mut documents = RoaringBitmap::new();
+        for literal in &request.literals {
+            if matches!(
+                literal.field,
+                ExactFieldV1::QuotedPhrase
+                    | ExactFieldV1::DiagnosticText
+                    | ExactFieldV1::CompilerOrRuntimeError
+            ) {
+                documents |= self.raw_text.candidate_documents(&literal.original_bytes);
+            }
+            if let Some(posting) = self
+                .exact_documents
+                .get(&literal.field)
+                .and_then(|postings| postings.get(&literal.canonical_bytes))
+            {
+                documents |= posting;
+            }
+        }
+        documents
+    }
+
+    fn phrase_document_frequency(&self, rows: &[ProjectedChunkV1], phrase: &str) -> usize {
+        self.normalized_text
+            .candidate_documents(phrase.as_bytes())
+            .iter()
+            .filter(|document| {
+                substring_count(&rows[*document as usize].normalized_text, phrase) > 0
+            })
+            .count()
+    }
+
+    fn union_whole_term(&self, term: &str, documents: &mut RoaringBitmap) {
+        for (field, postings) in &self.term_documents {
+            if *field == LexicalFieldV1::Subtoken {
+                continue;
+            }
+            if let Some(posting) = postings.get(term) {
+                *documents |= posting;
+            }
+        }
     }
 }
 
@@ -258,6 +387,11 @@ impl CodeLexicalProjectionAdapterV1 {
         extraction_admitted: bool,
     ) -> Result<Self, RetrievalPortError> {
         metadata.validate()?;
+        if chunks.len() > u32::MAX as usize {
+            return Err(RetrievalPortError::Contract(
+                "lexical projection exceeds the posting document-id range".to_owned(),
+            ));
+        }
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(chunks.len());
         for chunk in chunks {
@@ -295,11 +429,11 @@ impl CodeLexicalProjectionAdapterV1 {
             rows.push(ProjectedChunkV1::new(chunk, logical_path));
         }
         rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
-        let statistics = Arc::new(LexicalCorpusStatisticsV1::from_rows(&rows));
+        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows)?);
         Ok(Self {
             metadata,
             rows: Arc::new(rows),
-            statistics,
+            postings,
         })
     }
 
@@ -329,23 +463,21 @@ impl CodeLexicalProjectionAdapterV1 {
         &self,
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
-        let fuzzy = self.fuzzy_expansions(request);
+        let fuzzy = self.fuzzy_expansions(request)?;
         let phrase_document_frequencies = request
             .phrases
             .iter()
             .map(|phrase| normalize_lexical(phrase))
             .map(|phrase| {
-                let frequency = self
-                    .rows
-                    .iter()
-                    .filter(|row| substring_count(&row.normalized_text, &phrase) > 0)
-                    .count();
+                let frequency = self.postings.phrase_document_frequency(&self.rows, &phrase);
                 (phrase, frequency)
             })
             .collect::<BTreeMap<_, _>>();
+        let documents = self.postings.lexical_documents(request, &fuzzy);
         let mut pairs = Vec::new();
-        let mut excluded = 0_u64;
-        for row in self.rows.iter() {
+        let mut excluded = self.rows.len() as u64 - documents.len();
+        for document in documents {
+            let row = &self.rows[document as usize];
             let score = self.score_row(row, request, &fuzzy, &phrase_document_frequencies);
             if score.field_scores.is_empty() {
                 excluded += 1;
@@ -395,44 +527,72 @@ impl CodeLexicalProjectionAdapterV1 {
         })
     }
 
-    fn fuzzy_expansions(&self, request: &LexicalLaneRequest<'_>) -> FuzzyExpansionsV1 {
+    fn fuzzy_expansions(
+        &self,
+        request: &LexicalLaneRequest<'_>,
+    ) -> Result<FuzzyExpansionsV1, RetrievalPortError> {
         if request.fuzzy_budget == 0 {
-            return FuzzyExpansionsV1::default();
+            return Ok(FuzzyExpansionsV1::default());
         }
-        let mut candidates = Vec::new();
-        let mut workspace = BoundedLevenshteinWorkspace::default();
+        let limit = request.fuzzy_budget.min(MAX_FUZZY_TERM_EXPANSIONS_V1) as usize;
+        let mut group_by_query = BTreeMap::<String, usize>::new();
+        let mut groups = Vec::<FuzzyQueryGroupV1>::new();
         for (query_ordinal, query) in request.whole_terms.iter().enumerate() {
             let normalized_query = normalize_lexical(query);
-            let normalized_query_characters = normalized_query.chars().collect::<Vec<_>>();
-            let query_character_count = normalized_query_characters.len();
+            let query_character_count = normalized_query.chars().count();
             let bound = fuzzy_distance_bound(query_character_count);
             if bound == 0 {
                 continue;
             }
-            for (_, terms) in self.statistics.vocabulary_by_character_count.range(
-                query_character_count.saturating_sub(bound)
-                    ..=query_character_count.saturating_add(bound),
-            ) {
-                for term in terms {
-                    if term == &normalized_query {
-                        continue;
-                    }
-                    if let Some(distance) =
-                        workspace.distance(&normalized_query_characters, term, bound)
-                    {
-                        candidates.push((distance, query_ordinal, query.clone(), term.clone()));
-                    }
+            if let Some(group) = group_by_query.get(&normalized_query).copied() {
+                groups[group].queries.insert(query.clone());
+                continue;
+            }
+            let group = groups.len();
+            group_by_query.insert(normalized_query.clone(), group);
+            groups.push(FuzzyQueryGroupV1 {
+                first_ordinal: query_ordinal,
+                normalized_query,
+                queries: BTreeSet::from([query.clone()]),
+                bound,
+                seen: BTreeSet::new(),
+            });
+        }
+        groups.sort_by_key(|group| group.first_ordinal);
+        let maximum_distance = groups.iter().map(|group| group.bound).max().unwrap_or(0);
+        let mut selected = Vec::<(usize, String)>::with_capacity(limit);
+        'distance: for distance in 1..=maximum_distance {
+            for (group_index, group) in groups.iter_mut().enumerate() {
+                if distance > group.bound {
+                    continue;
                 }
+                let remaining = limit.saturating_sub(selected.len());
+                if remaining == 0 {
+                    break 'distance;
+                }
+                let slice = self
+                    .postings
+                    .fuzzy_terms
+                    .terms_at_distance(
+                        &group.normalized_query,
+                        distance,
+                        remaining,
+                        &mut group.seen,
+                    )
+                    .map_err(RetrievalPortError::Contract)?;
+                selected.extend(slice.terms.into_iter().map(|term| (group_index, term)));
             }
         }
-        candidates.sort();
-        candidates.dedup_by(|left, right| left.2 == right.2 && left.3 == right.3);
-        candidates.truncate(request.fuzzy_budget.min(MAX_FUZZY_TERM_EXPANSIONS_V1) as usize);
         let mut by_query: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (_, _, query, term) in candidates {
-            by_query.entry(query).or_default().insert(term);
+        for (group_index, term) in selected {
+            for query in &groups[group_index].queries {
+                by_query
+                    .entry(query.clone())
+                    .or_default()
+                    .insert(term.clone());
+            }
         }
-        FuzzyExpansionsV1 { by_query }
+        Ok(FuzzyExpansionsV1 { by_query })
     }
 
     fn score_row(
@@ -547,9 +707,9 @@ impl CodeLexicalProjectionAdapterV1 {
         term_frequency: usize,
         row: &ProjectedChunkV1,
     ) -> u64 {
-        let document_frequency = self.statistics.document_frequency(field, term);
+        let document_frequency = self.postings.document_frequency(field, term);
         let document_length = row.fields.get(&field).map_or(0, Vec::len).max(1);
-        let average_length = self.statistics.average_field_length(field);
+        let average_length = self.postings.average_field_length(field);
         bm25_score_micros(
             self.rows.len(),
             document_frequency,
@@ -573,7 +733,7 @@ impl CodeLexicalProjectionAdapterV1 {
             document_frequency,
             term_frequency,
             document_length,
-            self.statistics.average_field_length(field),
+            self.postings.average_field_length(field),
             field_weight_millis(field),
         )
     }
@@ -675,9 +835,11 @@ where
         if let Some(outcome) = self.projection.stale_outcome() {
             return Ok(outcome);
         }
+        let documents = self.projection.postings.exact_candidate_documents(request);
         let mut pairs = Vec::new();
-        let mut excluded = 0_u64;
-        for row in self.projection.rows.iter() {
+        let mut excluded = self.projection.rows.len() as u64 - documents.len();
+        for document in documents {
+            let row = &self.projection.rows[document as usize];
             let (matched_literals, matched_kinds) = exact_matches(row, request);
             if matched_literals.is_empty() {
                 excluded += 1;
@@ -745,6 +907,14 @@ struct FuzzyExpansionsV1 {
     by_query: BTreeMap<String, BTreeSet<String>>,
 }
 
+struct FuzzyQueryGroupV1 {
+    first_ordinal: usize,
+    normalized_query: String,
+    queries: BTreeSet<String>,
+    bound: usize,
+    seen: BTreeSet<String>,
+}
+
 struct LexicalRowScoreV1 {
     field_scores: Vec<(LexicalFieldV1, u64)>,
     matched_whole_terms: Vec<String>,
@@ -785,7 +955,8 @@ fn exact_matches(
         }
         for term in &row.chunk.exact_terms {
             if exact_field_for_kind(term.kind()) == literal.field
-                && term.canonical_bytes() == literal.canonical_bytes.as_slice()
+                && canonical_projected_exact_term(term).as_ref()
+                    == literal.canonical_bytes.as_slice()
             {
                 matched = true;
                 matched_kinds.insert(term.kind());
@@ -811,6 +982,30 @@ fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
         ExactTechnicalTermKindV1::ToolName => ExactFieldV1::ToolName,
         ExactTechnicalTermKindV1::ConfigurationKey => ExactFieldV1::ConfigurationKey,
         ExactTechnicalTermKindV1::CommitIdentifier => ExactFieldV1::CommitIdentifier,
+    }
+}
+
+fn canonical_projected_exact_term(term: &ExactTechnicalTermV1) -> Cow<'_, [u8]> {
+    let bytes = term.canonical_bytes();
+    let Ok(value) = std::str::from_utf8(bytes) else {
+        return Cow::Borrowed(bytes);
+    };
+    let canonical = match term.kind() {
+        ExactTechnicalTermKindV1::CommitIdentifier => value
+            .strip_prefix("commit:")
+            .unwrap_or(value)
+            .to_ascii_lowercase(),
+        ExactTechnicalTermKindV1::CompilerErrorCode
+        | ExactTechnicalTermKindV1::RuntimeErrorCode => value.to_ascii_uppercase(),
+        ExactTechnicalTermKindV1::CliFlag
+        | ExactTechnicalTermKindV1::ToolName
+        | ExactTechnicalTermKindV1::ConfigurationKey => value.to_ascii_lowercase(),
+        _ => return Cow::Borrowed(bytes),
+    };
+    if canonical.as_bytes() == bytes {
+        Cow::Borrowed(bytes)
+    } else {
+        Cow::Owned(canonical.into_bytes())
     }
 }
 
@@ -948,44 +1143,5 @@ fn fuzzy_distance_bound(character_count: usize) -> usize {
         0..=4 => 0,
         5..=8 => 1,
         _ => 2,
-    }
-}
-
-#[derive(Default)]
-struct BoundedLevenshteinWorkspace {
-    right: Vec<char>,
-    previous: Vec<usize>,
-    current: Vec<usize>,
-}
-
-impl BoundedLevenshteinWorkspace {
-    fn distance(&mut self, left: &[char], right: &str, bound: usize) -> Option<usize> {
-        self.right.clear();
-        self.right.extend(right.chars());
-        if left.len().abs_diff(self.right.len()) > bound {
-            return None;
-        }
-        self.previous.clear();
-        self.previous.extend(0..=self.right.len());
-        for (left_index, left_char) in left.iter().enumerate() {
-            self.current.clear();
-            self.current.push(left_index + 1);
-            let mut row_minimum = left_index + 1;
-            for (right_index, right_char) in self.right.iter().enumerate() {
-                let substitution =
-                    self.previous[right_index] + usize::from(left_char != right_char);
-                let insertion = self.current[right_index] + 1;
-                let deletion = self.previous[right_index + 1] + 1;
-                let distance = substitution.min(insertion).min(deletion);
-                self.current.push(distance);
-                row_minimum = row_minimum.min(distance);
-            }
-            if row_minimum > bound {
-                return None;
-            }
-            std::mem::swap(&mut self.previous, &mut self.current);
-        }
-        let distance = self.previous[self.right.len()];
-        (distance <= bound).then_some(distance)
     }
 }

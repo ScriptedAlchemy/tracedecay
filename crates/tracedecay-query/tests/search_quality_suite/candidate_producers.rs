@@ -476,7 +476,54 @@ fn exact_projection_emits_only_authority_minted_proofs() {
         .validate_for_request(&request.base)
         .expect("proof remains request-bound");
     let evidence = &batch.evidence_by_occurrence[&candidate.source_occurrence_id];
-    assert!(evidence.matched_literals.len() >= 6);
+    assert_eq!(evidence.matched_literals.len(), 7);
+}
+
+#[test]
+fn exact_projection_matches_typescript_and_csharp_diagnostic_codes() {
+    let generation = id::<CodeGenerationId>("generation.1");
+    let source = chunk(
+        &generation,
+        1,
+        CodeSearchChunkGrainV1::SymbolBody,
+        "TS1234 CS5678",
+        &[
+            (ExactTechnicalTermKindV1::CompilerErrorCode, "TS1234"),
+            (ExactTechnicalTermKindV1::CompilerErrorCode, "CS5678"),
+        ],
+        &[],
+    );
+    let authority =
+        CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
+    let projection = CodeLexicalProjectionAdapterV1::new(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        vec![source],
+    )
+    .expect("projection builds");
+    let query = "ts1234 cs5678";
+    let base = base_request(query, 8);
+    let query_view = query_view(query);
+    let request = ExactLaneRequest {
+        literals: authority.parse_literals(&query_view, &base),
+        base,
+        query_view: &query_view,
+        generation,
+        budget: budget(8),
+    };
+
+    let batch = complete(
+        ExactLane::new(authority.clone(), projection.exact_adapter(authority))
+            .retrieve_exact(&request)
+            .expect("diagnostic retrieval succeeds"),
+    );
+
+    assert_eq!(batch.candidates.len(), 1);
+    assert_eq!(
+        batch.evidence_by_occurrence[&batch.candidates[0].source_occurrence_id]
+            .matched_literals
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -629,6 +676,61 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     let oversized_term = "x".repeat(MAX_LEXICAL_QUERY_TERM_BYTES_V1 + 1);
     let oversized = lexical_request(&oversized_term, &[oversized_term.as_str()], &[], &[], 1, 8);
     assert!(oversized.validate().is_err());
+}
+
+#[test]
+fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
+    let generation = id::<CodeGenerationId>("generation.1");
+    let chunks = vec![
+        admitted_rust_chunk(
+            &generation,
+            1,
+            "pub fn reserve() {}\n",
+            CodeSearchChunkGrainV1::SymbolSignature,
+            "reserve",
+        ),
+        admitted_rust_chunk(
+            &generation,
+            2,
+            "pub fn reserved() {}\n",
+            CodeSearchChunkGrainV1::SymbolSignature,
+            "reserved",
+        ),
+        admitted_rust_chunk(
+            &generation,
+            3,
+            "pub fn other() {}\n",
+            CodeSearchChunkGrainV1::SymbolSignature,
+            "other",
+        ),
+    ];
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        chunks,
+    )
+    .expect("projection builds");
+    let request = lexical_request(
+        "reservd reservd otherr",
+        &["reservd", "reservd", "otherr"],
+        &[],
+        &[],
+        3,
+        8,
+    );
+
+    let batch = complete(
+        LexicalLane::new(projection)
+            .retrieve_lexical(&request)
+            .expect("fuzzy retrieval succeeds"),
+    );
+
+    assert_eq!(batch.candidates.len(), 3);
+    assert!(
+        batch
+            .evidence_by_occurrence
+            .values()
+            .any(|evidence| { evidence.matched_whole_terms.contains(&"otherr".to_owned()) })
+    );
 }
 
 #[test]
