@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -130,7 +131,7 @@ where
     }
 
     /// Executions this process is running right now, for bound diagnostics.
-    pub(crate) fn in_flight(&self) -> Result<usize, WorkDispatchError> {
+    pub(crate) fn in_flight(&self) -> usize {
         self.queue.in_flight()
     }
 
@@ -231,7 +232,16 @@ where
             recovery,
             self.provider_route()?,
         )?;
-        self.queue.admit(&running).map_err(map_dispatch_error)?;
+        let queue = Arc::clone(&self.queue);
+        let admitted = running.clone();
+        tokio::task::spawn_blocking(move || queue.admit(&admitted))
+            .await
+            .map_err(|error| {
+                WorkProviderExecutionError::Unavailable(format!(
+                    "Codex Work admission task failed: {error}"
+                ))
+            })?
+            .map_err(map_dispatch_error)?;
         self.publish_activity("running").await;
         Ok(running)
     }
@@ -264,68 +274,73 @@ where
 
     /// Claims the queue settlement for an attempt and acknowledges it durably.
     ///
-    /// The settlement is claimed exactly once. When this process holds no
-    /// execution — after a restart, or after an earlier acknowledgement — the
-    /// durable terminal is replayed and never re-derived.
+    /// The durable cancellation intent, not the settlement variant, decides a
+    /// cancelled outcome: a provider that finished before it observed the stop
+    /// request must still terminate as cancelled, because that is the only
+    /// terminal the recorded state admits. When this process holds no execution
+    /// — after a restart, or after an earlier acknowledgement — the durable
+    /// terminal is replayed and never re-derived.
     pub(crate) async fn finish(
         &self,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         observed_at: UtcMicros,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let settlement = match self.settle(identity).await? {
-            Some(settlement) => settlement,
-            None => return self.replay_terminal(identity, lease),
+        let current = self.fenced_attempt(identity, lease)?;
+        if current.is_terminal() {
+            let _ = self.settle(identity, lease).await?;
+            return Ok(current);
+        }
+        let Some(settlement) = self.settle(identity, lease).await? else {
+            return Err(WorkProviderExecutionError::Unavailable(
+                "Codex Work execution is not owned by this process".to_owned(),
+            )
+            .into());
         };
-        let terminal = match settlement {
-            WorkProviderSettlementV1::Completed { evidence } => {
-                let digest = canonical_sha256(&evidence).map_err(|error| {
-                    WorkProviderExecutionError::Rejected(format!(
-                        "Codex Work artifact digest failed: {error}"
-                    ))
-                })?;
-                let artifact = WorkArtifactRefV1::new(
-                    artifact_id(identity.attempt_id())?,
-                    digest.clone(),
-                    u64::try_from(evidence.len()).map_err(|_| {
-                        WorkProviderExecutionError::Rejected(
-                            "Codex Work artifact length overflowed".to_owned(),
-                        )
-                    })?,
-                )?;
-                self.publish_artifact(identity, lease, artifact).await?;
-                self.publish_progress(identity, lease, WorkAttemptProgressV1::new(1, 1)?)
-                    .await?;
-                WorkTerminalEvidenceV1::succeeded(digest, observed_at)?
-            }
-            WorkProviderSettlementV1::Cancelled => {
-                let current = self
-                    .attempt(identity)?
-                    .ok_or(WorkExecutionError::NotFound)?;
-                let WorkCancellationStateV1::Requested(request) = current.cancellation() else {
+        let terminal = if let WorkCancellationStateV1::Requested(request) = current.cancellation() {
+            self.execution.acknowledge_cancellation(
+                &self.authority,
+                identity,
+                lease,
+                WorkCancellationAcknowledgementV1::new(request.clone(), observed_at)?,
+            )?;
+            self.publish_activity("cancellation_acknowledged").await;
+            WorkTerminalEvidenceV1::cancelled(
+                cancelled_evidence_digest(identity, observed_at)?,
+                observed_at,
+            )?
+        } else {
+            match settlement {
+                WorkProviderSettlementV1::Completed { evidence } => {
+                    let digest = canonical_sha256(&evidence).map_err(|error| {
+                        WorkProviderExecutionError::Rejected(format!(
+                            "Codex Work artifact digest failed: {error}"
+                        ))
+                    })?;
+                    let artifact = WorkArtifactRefV1::new(
+                        artifact_id(identity.attempt_id())?,
+                        digest.clone(),
+                        u64::try_from(evidence.len()).map_err(|_| {
+                            WorkProviderExecutionError::Rejected(
+                                "Codex Work artifact length overflowed".to_owned(),
+                            )
+                        })?,
+                    )?;
+                    self.publish_artifact(identity, lease, artifact).await?;
+                    self.publish_progress(identity, lease, WorkAttemptProgressV1::new(1, 1)?)
+                        .await?;
+                    WorkTerminalEvidenceV1::succeeded(digest, observed_at)?
+                }
+                // A stop the store never requested cannot become a cancelled
+                // terminal; the recorded state and the provider disagree.
+                WorkProviderSettlementV1::Cancelled => {
                     return Err(WorkExecutionError::TerminalConflict);
-                };
-                self.execution.acknowledge_cancellation(
-                    &self.authority,
-                    identity,
-                    lease,
-                    WorkCancellationAcknowledgementV1::new(request.clone(), observed_at)?,
-                )?;
-                self.publish_activity("cancellation_acknowledged").await;
-                WorkTerminalEvidenceV1::cancelled(
-                    evidence_digest("tracedecay.work.codex.cancelled.v1", identity, "", observed_at)?,
-                    observed_at,
-                )?
-            }
-            WorkProviderSettlementV1::Failed { message } => WorkTerminalEvidenceV1::failed(
-                evidence_digest(
-                    "tracedecay.work.codex.failed.v1",
-                    identity,
-                    &message,
+                }
+                WorkProviderSettlementV1::Failed { message } => WorkTerminalEvidenceV1::failed(
+                    failed_evidence_digest(identity, &message, observed_at)?,
                     observed_at,
                 )?,
-                observed_at,
-            )?,
+            }
         };
         let completed = self
             .execution
@@ -361,7 +376,7 @@ where
         self.execution
             .request_cancellation(&self.authority, identity, lease, request)?;
         self.publish_activity("cancellation_requested").await;
-        self.stop(identity)?;
+        self.stop(identity, lease)?;
         self.finish(identity, lease, acknowledged_at).await
     }
 
@@ -374,8 +389,8 @@ where
         let attempt = self
             .execution
             .require_recovery(&self.authority, identity, lease, reason)?;
-        self.stop(identity)?;
-        self.settle(identity).await?;
+        self.stop(identity, lease)?;
+        self.settle(identity, lease).await?;
         self.publish_activity("recovery_required").await;
         Ok(attempt)
     }
@@ -398,6 +413,11 @@ where
             .map_err(WorkExecutionError::Persistence)
     }
 
+    /// Records a caller-supplied terminal and releases the execution it ends.
+    ///
+    /// Declaring an attempt terminal is the exposed completion path, so it must
+    /// stop and join the provider: otherwise a completed attempt would hold its
+    /// execution slot forever and the bound would become a standing refusal.
     pub(crate) async fn terminalize(
         &self,
         identity: &WorkAttemptIdentityV1,
@@ -410,11 +430,27 @@ where
         let completed = self
             .execution
             .terminalize(&self.authority, identity, lease, terminal)?;
+        self.stop(identity, lease)?;
+        self.settle(identity, lease).await?;
         if !was_terminal {
             self.publish_activity(attempt_state_key(completed.state()))
                 .await;
         }
         Ok(completed)
+    }
+
+    fn fenced_attempt(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
+    ) -> Result<WorkAttemptV1, WorkExecutionError> {
+        let attempt = self
+            .attempt(identity)?
+            .ok_or(WorkExecutionError::NotFound)?;
+        if attempt.lease() != lease {
+            return Err(WorkExecutionError::StaleLease);
+        }
+        Ok(attempt)
     }
 
     fn binding(
@@ -435,8 +471,12 @@ where
     }
 
     /// Asks the queue to stop an execution, tolerating one this process lost.
-    fn stop(&self, identity: &WorkAttemptIdentityV1) -> Result<(), WorkExecutionError> {
-        match self.queue.cancel(identity) {
+    fn stop(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
+    ) -> Result<(), WorkExecutionError> {
+        match self.queue.cancel(identity, lease) {
             Ok(()) | Err(WorkDispatchError::Detached) => Ok(()),
             Err(error) => Err(map_dispatch_error(error)),
         }
@@ -446,10 +486,12 @@ where
     async fn settle(
         &self,
         identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
     ) -> Result<Option<WorkProviderSettlementV1>, WorkExecutionError> {
         let queue = Arc::clone(&self.queue);
         let identity = identity.clone();
-        let settled = tokio::task::spawn_blocking(move || queue.settle(&identity))
+        let lease = lease.clone();
+        let settled = tokio::task::spawn_blocking(move || queue.settle(&identity, &lease))
             .await
             .map_err(|error| {
                 WorkProviderExecutionError::Unavailable(format!(
@@ -461,26 +503,6 @@ where
             Err(WorkDispatchError::Detached) => Ok(None),
             Err(error) => Err(map_dispatch_error(error)),
         }
-    }
-
-    fn replay_terminal(
-        &self,
-        identity: &WorkAttemptIdentityV1,
-        lease: &WorkLeaseFenceV1,
-    ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self
-            .attempt(identity)?
-            .ok_or(WorkExecutionError::NotFound)?;
-        if current.lease() != lease {
-            return Err(WorkExecutionError::StaleLease);
-        }
-        if current.is_terminal() {
-            return Ok(current);
-        }
-        Err(WorkProviderExecutionError::Unavailable(
-            "Codex Work execution is not owned by this process".to_owned(),
-        )
-        .into())
     }
 
     async fn publish_activity(&self, detail: &str) {
@@ -519,20 +541,34 @@ const fn attempt_state_key(state: WorkAttemptStateV1) -> &'static str {
     }
 }
 
-fn evidence_digest(
-    kind: &str,
+fn cancelled_evidence_digest(
+    identity: &WorkAttemptIdentityV1,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_domain::ManifestDigest, WorkProviderExecutionError> {
+    canonical_sha256(&(
+        "tracedecay.work.codex.cancelled.v1",
+        identity,
+        observed_at,
+    ))
+    .map_err(map_evidence_error)
+}
+
+fn failed_evidence_digest(
     identity: &WorkAttemptIdentityV1,
     message: &str,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_domain::ManifestDigest, WorkProviderExecutionError> {
-    if message.is_empty() {
-        canonical_sha256(&(kind, identity, observed_at))
-    } else {
-        canonical_sha256(&(kind, identity, message, observed_at))
-    }
-    .map_err(|error| {
-        WorkProviderExecutionError::Rejected(format!("Codex Work terminal evidence failed: {error}"))
-    })
+    canonical_sha256(&(
+        "tracedecay.work.codex.failed.v1",
+        identity,
+        message,
+        observed_at,
+    ))
+    .map_err(map_evidence_error)
+}
+
+fn map_evidence_error(error: impl Display) -> WorkProviderExecutionError {
+    WorkProviderExecutionError::Rejected(format!("Codex Work terminal evidence failed: {error}"))
 }
 
 fn artifact_id(attempt_id: &AttemptId) -> Result<WorkArtifactId, WorkProviderExecutionError> {

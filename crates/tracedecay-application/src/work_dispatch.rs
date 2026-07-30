@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use tracedecay_domain::{
@@ -70,7 +70,6 @@ pub enum WorkDispatchError {
     StaleFence,
     /// This process holds no execution for the attempt; durable state decides.
     Detached,
-    Registry,
     Provider(WorkProviderExecutionError),
 }
 
@@ -93,7 +92,6 @@ impl Display for WorkDispatchError {
             Self::Detached => {
                 formatter.write_str("work attempt has no execution in this process")
             }
-            Self::Registry => formatter.write_str("work execution registry is unavailable"),
             Self::Provider(error) => Display::fmt(error, formatter),
         }
     }
@@ -151,16 +149,22 @@ where
         self.provider.route()
     }
 
-    pub fn in_flight(&self) -> Result<usize, WorkDispatchError> {
-        Ok(self
-            .in_flight
-            .lock()
-            .map_err(|_| WorkDispatchError::Registry)?
-            .len())
+    pub fn in_flight(&self) -> usize {
+        self.registry().len()
+    }
+
+    /// A panic inside a provider must not brick the queue: a poisoned registry
+    /// would make every live execution unstoppable and unclaimable.
+    fn registry(&self) -> MutexGuard<'_, BTreeMap<WorkAttemptIdentityV1, InFlightV1<P::Run>>> {
+        self.in_flight.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Starts the provider execution for an attempt whose running intent is
     /// already durable, or reports the bound that refused it.
+    ///
+    /// `prepare` runs under the admission lock so that the capacity reservation
+    /// and the execution record are published together. Callers on an async
+    /// runtime must therefore admit from a blocking task.
     pub fn admit(&self, attempt: &WorkAttemptV1) -> Result<(), WorkDispatchError> {
         if attempt.state() != WorkAttemptStateV1::Running {
             return Err(WorkDispatchError::NotAdmitted);
@@ -169,15 +173,17 @@ where
         if attempt.actual_route() != Some(&route) {
             return Err(WorkDispatchError::RouteNotMounted);
         }
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .map_err(|_| WorkDispatchError::Registry)?;
+        let mut in_flight = self.registry();
         if let Some(existing) = in_flight.get_mut(attempt.identity()) {
             if existing.lease.lease_id() != attempt.lease().lease_id()
                 || attempt.lease().epoch() < existing.lease.epoch()
             {
                 return Err(WorkDispatchError::StaleFence);
+            }
+            if existing.worker.is_none() {
+                // The settlement is already claimed; this attempt is finishing,
+                // not running, and must not be reported as admitted.
+                return Err(WorkDispatchError::Detached);
             }
             existing.lease = attempt.lease().clone();
             return Ok(());
@@ -211,64 +217,84 @@ where
         Ok(())
     }
 
-    /// Asks the provider execution for an attempt to stop.
-    pub fn cancel(&self, identity: &WorkAttemptIdentityV1) -> Result<(), WorkDispatchError> {
+    /// Asks the provider execution held under `lease` to stop.
+    pub fn cancel(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
+    ) -> Result<(), WorkDispatchError> {
         let run = {
-            let in_flight = self
-                .in_flight
-                .lock()
-                .map_err(|_| WorkDispatchError::Registry)?;
-            Arc::clone(
-                &in_flight
-                    .get(identity)
-                    .ok_or(WorkDispatchError::Detached)?
-                    .run,
-            )
+            let in_flight = self.registry();
+            let entry = in_flight.get(identity).ok_or(WorkDispatchError::Detached)?;
+            entry.fenced_by(lease)?;
+            Arc::clone(&entry.run)
         };
         run.cancel();
         Ok(())
     }
 
-    /// Claims the settlement for an attempt exactly once and frees its slot.
+    /// Claims the settlement for the execution held under `lease` exactly once
+    /// and frees its slot.
     pub fn settle(
         &self,
         identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
     ) -> Result<WorkProviderSettlementV1, WorkDispatchError> {
-        let worker = {
-            let mut in_flight = self
-                .in_flight
-                .lock()
-                .map_err(|_| WorkDispatchError::Registry)?;
-            in_flight
-                .get_mut(identity)
-                .ok_or(WorkDispatchError::Detached)?
-                .worker
-                .take()
-                .ok_or(WorkDispatchError::Detached)?
-        };
-        let settlement = worker.join().unwrap_or(WorkProviderSettlementV1::Failed {
-            message: "work execution worker panicked".to_owned(),
-        });
-        if let Ok(mut in_flight) = self.in_flight.lock() {
-            in_flight.remove(identity);
-        }
-        Ok(settlement)
+        let mut in_flight = self.registry();
+        let entry = in_flight
+            .get_mut(identity)
+            .ok_or(WorkDispatchError::Detached)?;
+        entry.fenced_by(lease)?;
+        drop(in_flight);
+        Ok(self.claim(identity))
     }
 
     /// Cancels and joins every execution this process still owns.
+    ///
+    /// Shutdown outranks the lease fence: an execution nobody can renew must
+    /// still be stopped rather than detached.
     pub fn reap(&self) -> usize {
-        let identities = match self.in_flight.lock() {
-            Ok(in_flight) => in_flight.keys().cloned().collect::<Vec<_>>(),
-            Err(_) => return 0,
-        };
+        let identities = self.registry().keys().cloned().collect::<Vec<_>>();
         let mut reaped = 0;
         for identity in identities {
-            let _ = self.cancel(&identity);
-            if self.settle(&identity).is_ok() {
-                reaped += 1;
+            if let Some(run) = self.registry().get(&identity).map(|entry| Arc::clone(&entry.run)) {
+                run.cancel();
             }
+            self.claim(&identity);
+            reaped += 1;
         }
         reaped
+    }
+
+    /// Joins the worker for an attempt and releases its slot unconditionally,
+    /// so a poisoned lock or a panicking provider can never strand capacity.
+    fn claim(&self, identity: &WorkAttemptIdentityV1) -> WorkProviderSettlementV1 {
+        let worker = self
+            .registry()
+            .get_mut(identity)
+            .and_then(|entry| entry.worker.take());
+        let settlement = match worker {
+            Some(worker) => worker.join().unwrap_or(WorkProviderSettlementV1::Failed {
+                message: "work execution worker panicked".to_owned(),
+            }),
+            None => WorkProviderSettlementV1::Failed {
+                message: "work execution worker was already claimed".to_owned(),
+            },
+        };
+        self.registry().remove(identity);
+        settlement
+    }
+}
+
+impl<R> InFlightV1<R> {
+    fn fenced_by(&self, lease: &WorkLeaseFenceV1) -> Result<(), WorkDispatchError> {
+        if self.lease.lease_id() != lease.lease_id() || lease.epoch() < self.lease.epoch() {
+            return Err(WorkDispatchError::StaleFence);
+        }
+        if self.worker.is_none() {
+            return Err(WorkDispatchError::Detached);
+        }
+        Ok(())
     }
 }
 
@@ -429,7 +455,7 @@ mod tests {
             queue.admit(&leased).unwrap_err(),
             WorkDispatchError::NotAdmitted
         );
-        assert_eq!(queue.in_flight().unwrap(), 0);
+        assert_eq!(queue.in_flight(), 0);
         assert_eq!(queue.provider().prepared.load(Ordering::SeqCst), 0);
     }
 
@@ -470,18 +496,18 @@ mod tests {
             queue.admit(&second).unwrap_err(),
             WorkDispatchError::Saturated { capacity: 1 }
         );
-        assert_eq!(queue.in_flight().unwrap(), 1);
+        assert_eq!(queue.in_flight(), 1);
 
         released.store(true, Ordering::SeqCst);
         assert_eq!(
-            queue.settle(first.identity()).unwrap(),
+            queue.settle(first.identity(), first.lease()).unwrap(),
             WorkProviderSettlementV1::Completed {
                 evidence: "released".to_owned()
             }
         );
-        assert_eq!(queue.in_flight().unwrap(), 0);
+        assert_eq!(queue.in_flight(), 0);
         queue.admit(&second).unwrap();
-        assert_eq!(queue.in_flight().unwrap(), 1);
+        assert_eq!(queue.in_flight(), 1);
         assert_eq!(queue.provider().prepared.load(Ordering::SeqCst), 2);
         queue.reap();
     }
@@ -496,7 +522,7 @@ mod tests {
         queue.admit(&first).unwrap();
         queue.admit(&first).unwrap();
         queue.admit(&renewed).unwrap();
-        assert_eq!(queue.in_flight().unwrap(), 1);
+        assert_eq!(queue.in_flight(), 1);
         assert_eq!(queue.provider().prepared.load(Ordering::SeqCst), 1);
 
         assert_eq!(
@@ -514,8 +540,23 @@ mod tests {
             WorkDispatchError::StaleFence
         );
 
+        assert_eq!(
+            queue
+                .settle(renewed.identity(), first.lease())
+                .unwrap_err(),
+            WorkDispatchError::StaleFence,
+            "an older fence must not claim the settlement the renewed lease owns"
+        );
+        assert_eq!(
+            queue.cancel(renewed.identity(), first.lease()).unwrap_err(),
+            WorkDispatchError::StaleFence,
+            "an older fence must not stop the execution the renewed lease owns"
+        );
+
         released.store(true, Ordering::SeqCst);
-        queue.settle(first.identity()).unwrap();
+        queue
+            .settle(renewed.identity(), renewed.lease())
+            .unwrap();
     }
 
     #[test]
@@ -527,20 +568,20 @@ mod tests {
         let attempt = running("attempt.work.cancel", 1);
 
         queue.admit(&attempt).unwrap();
-        queue.cancel(attempt.identity()).unwrap();
+        queue.cancel(attempt.identity(), attempt.lease()).unwrap();
         assert_eq!(
-            queue.settle(attempt.identity()).unwrap(),
+            queue.settle(attempt.identity(), attempt.lease()).unwrap(),
             WorkProviderSettlementV1::Cancelled
         );
         assert_eq!(
-            queue.settle(attempt.identity()).unwrap_err(),
+            queue.settle(attempt.identity(), attempt.lease()).unwrap_err(),
             WorkDispatchError::Detached
         );
         assert_eq!(
-            queue.cancel(attempt.identity()).unwrap_err(),
+            queue.cancel(attempt.identity(), attempt.lease()).unwrap_err(),
             WorkDispatchError::Detached
         );
-        assert_eq!(queue.in_flight().unwrap(), 0);
+        assert_eq!(queue.in_flight(), 0);
     }
 
     #[test]
@@ -558,10 +599,10 @@ mod tests {
             );
             queue.admit(&attempt).unwrap();
         }
-        assert_eq!(queue.in_flight().unwrap(), 3);
+        assert_eq!(queue.in_flight(), 3);
 
         assert_eq!(queue.reap(), 3);
-        assert_eq!(queue.in_flight().unwrap(), 0);
+        assert_eq!(queue.in_flight(), 0);
     }
 
     #[test]
@@ -599,7 +640,7 @@ mod tests {
 
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let settlement = queue.settle(attempt.identity()).unwrap();
+        let settlement = queue.settle(attempt.identity(), attempt.lease()).unwrap();
         std::panic::set_hook(previous);
 
         assert_eq!(
@@ -608,7 +649,7 @@ mod tests {
                 message: "work execution worker panicked".to_owned()
             }
         );
-        assert_eq!(queue.in_flight().unwrap(), 0);
+        assert_eq!(queue.in_flight(), 0);
     }
 
     #[test]
@@ -641,8 +682,8 @@ mod tests {
                 "provider is offline".to_owned()
             ))
         );
-        assert_eq!(queue.in_flight().unwrap(), 0);
+        assert_eq!(queue.in_flight(), 0);
         queue.admit(&attempt).unwrap_err();
-        assert_eq!(queue.in_flight().unwrap(), 0);
+        assert_eq!(queue.in_flight(), 0);
     }
 }
