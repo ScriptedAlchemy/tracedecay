@@ -1,11 +1,8 @@
-//! Native Rust facade over TraceDecay's canonical public contracts.
-//!
-//! This crate intentionally owns no transport, parsing, authentication,
-//! cursor, retry, streaming, or daemon behavior. Native consumers use the
-//! canonical API, application, domain, and operation metadata authorities
-//! directly through these stable namespaces.
+//! Native Rust lifecycle client and facade over TraceDecay's public contracts.
 
 #![forbid(unsafe_code)]
+
+pub mod client;
 
 /// Canonical HTTP/SSE presentation contracts.
 pub use tracedecay_api as api;
