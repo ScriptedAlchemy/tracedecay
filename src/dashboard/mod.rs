@@ -75,6 +75,7 @@ mod storage_findings_api;
 mod storage_telemetry_api;
 mod token_count;
 mod util;
+mod work_api;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -1030,13 +1031,17 @@ fn router_with_active_application(
         .fallback(get(assets::app_spa_fallback))
         .with_state(runtime);
     match application {
-        Some(application) => router
-            .nest("/api/application", application.http_router)
-            .nest("/api/feedback", application.dashboard_feedback_router)
-            .nest(
-                "/api/dashboard/application",
-                application.dashboard_configuration_router,
-            ),
+        Some(application) => {
+            let work_router = work_api::router(application.http_router.clone());
+            router
+                .nest("/api/application", application.http_router)
+                .nest("/api/work", work_router)
+                .nest("/api/feedback", application.dashboard_feedback_router)
+                .nest(
+                    "/api/dashboard/application",
+                    application.dashboard_configuration_router,
+                )
+        }
         None => router,
     }
 }
@@ -1866,7 +1871,13 @@ mod authority_tests {
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
         let application = ActiveProjectApplicationRoutes {
-            http_router: Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
+            http_router: Router::new()
+                .route("/probe", get(|| async { StatusCode::NO_CONTENT }))
+                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT }))
+                .route(
+                    "/work/attempt/start",
+                    post(|| async { StatusCode::ACCEPTED }),
+                ),
             dashboard_configuration_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
             dashboard_feedback_router: Router::new()
@@ -1910,6 +1921,34 @@ mod authority_tests {
             .await
             .expect("dashboard application response");
         assert_eq!(dashboard_configuration.status(), StatusCode::ACCEPTED);
+
+        let work = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/work/snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("dashboard Work request"),
+            )
+            .await
+            .expect("dashboard Work response");
+        assert_eq!(work.status(), StatusCode::NO_CONTENT);
+
+        let attempt = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/work/attempt/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("dashboard Work attempt request"),
+            )
+            .await
+            .expect("dashboard Work attempt response");
+        assert_eq!(attempt.status(), StatusCode::METHOD_NOT_ALLOWED);
 
         let selected = app
             .oneshot(

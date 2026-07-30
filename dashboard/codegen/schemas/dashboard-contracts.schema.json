@@ -1,8 +1,72 @@
 {
   "$defs": {
+    "AcceptProposalCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/ReviewProposalCommand"
+        }
+      },
+      "required": [
+        "review"
+      ],
+      "type": "object"
+    },
+    "AcceptTaskCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "expected_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "expected_version",
+        "command_id",
+        "occurred_at"
+      ],
+      "type": "object"
+    },
     "ActorId": {
       "description": "Strongly typed canonical identity: `ActorId`.",
       "type": "string"
+    },
+    "AdmitExecutionCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "expected_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "expected_version",
+        "command_id",
+        "occurred_at"
+      ],
+      "type": "object"
     },
     "AnalyticsOverviewPayloadV1": {
       "properties": {
@@ -103,6 +167,36 @@
         "message_count",
         "event_count",
         "by_category"
+      ],
+      "type": "object"
+    },
+    "AttachRuntimeEvidenceCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "evidence": {
+          "$ref": "#/$defs/RuntimeEvidenceRef"
+        },
+        "expected_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "evidence",
+        "expected_version",
+        "command_id",
+        "occurred_at"
       ],
       "type": "object"
     },
@@ -932,6 +1026,39 @@
       ],
       "type": "object"
     },
+    "CreateWorkCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "dependencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "title",
+        "dependencies",
+        "command_id",
+        "occurred_at"
+      ],
+      "type": "object"
+    },
     "CrossMergeModeV1": {
       "enum": [
         "disabled",
@@ -1212,12 +1339,10 @@
           "type": "array"
         },
         "payload": {
-          "$ref": "#/$defs/DashboardPayloadMarkerV1"
+          "x-generic-ref": "TPayload"
         },
         "schema_revision": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
+          "const": 1
         },
         "scope": {
           "$ref": "#/$defs/DashboardScopeV1"
@@ -1252,7 +1377,8 @@
         "legal_actions",
         "payload"
       ],
-      "type": "object"
+      "type": "object",
+      "x-generic": "TPayload"
     },
     "DashboardEnvelopeV12": {
       "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
@@ -1383,9 +1509,6 @@
         "operation"
       ],
       "type": "object"
-    },
-    "DashboardPayloadMarkerV1": {
-      "type": "null"
     },
     "DashboardScopeV1": {
       "description": "Exact scope the envelope was resolved for. A deep link/query never falls\nback to a title, path, or latest version to recover scope.",
@@ -2638,6 +2761,7 @@
     },
     "DoctorRemediationApplyRequestV1": {
       "additionalProperties": false,
+      "description": "Request DTO for a confirmed remediation apply. The executable supplies the\nowner-specific target type while the preview and idempotency contracts stay\ncanonical application values.",
       "properties": {
         "confirmed": {
           "type": "boolean"
@@ -2781,6 +2905,7 @@
       "type": "object"
     },
     "DoctorRemediationPayloadV1": {
+      "description": "Wire payload for one remediation response.",
       "oneOf": [
         {
           "properties": {
@@ -2818,6 +2943,7 @@
     },
     "DoctorRemediationPreviewRequestV1": {
       "additionalProperties": false,
+      "description": "Request DTO for a remediation preview. The executable supplies the\nowner-specific target type while this crate owns the stable outer shape.",
       "properties": {
         "operation": {
           "$ref": "#/$defs/DoctorOwningOperationRefV1"
@@ -7263,9 +7389,9 @@
     },
     "ProjectSettingsPatch": {
       "additionalProperties": false,
+      "description": "Project-scoped settings patch accepted by `PATCH /api/settings/project`.",
       "properties": {
         "exclude": {
-          "default": null,
           "items": {
             "type": "string"
           },
@@ -7278,21 +7404,18 @@
           "type": "string"
         },
         "extract_docstrings": {
-          "default": null,
           "type": [
             "boolean",
             "null"
           ]
         },
         "git_ignore": {
-          "default": null,
           "type": [
             "boolean",
             "null"
           ]
         },
         "include": {
-          "default": null,
           "items": {
             "type": "string"
           },
@@ -7302,7 +7425,6 @@
           ]
         },
         "max_file_size": {
-          "default": null,
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -7331,7 +7453,6 @@
           ]
         },
         "track_call_sites": {
-          "default": null,
           "type": [
             "boolean",
             "null"
@@ -7339,15 +7460,7 @@
         }
       },
       "required": [
-        "expected_revision_id",
-        "include",
-        "exclude",
-        "max_file_size",
-        "extract_docstrings",
-        "track_call_sites",
-        "git_ignore",
-        "telemetry",
-        "sync"
+        "expected_revision_id"
       ],
       "type": "object"
     },
@@ -7414,6 +7527,10 @@
         "artifacts"
       ],
       "type": "object"
+    },
+    "ProjectionGenerationId": {
+      "description": "Strongly typed canonical identity: `ProjectionGenerationId`.",
+      "type": "string"
     },
     "ProjectsPayloadV1": {
       "properties": {
@@ -7486,6 +7603,10 @@
         "project_tree"
       ],
       "type": "object"
+    },
+    "ProposalId": {
+      "description": "Strongly typed canonical identity: `ProposalId`.",
+      "type": "string"
     },
     "ProtectedChange": {
       "description": "The protected configuration operation set. Ordinary scalar mutations are\nintentionally absent; they activate directly after validation.",
@@ -7736,6 +7857,41 @@
       "description": "Strongly typed canonical identity: `RefId`.",
       "type": "string"
     },
+    "ReplanDependenciesCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "dependencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "expected_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "dependencies",
+        "expected_version",
+        "command_id",
+        "occurred_at"
+      ],
+      "type": "object"
+    },
     "RepositoryId": {
       "description": "Strongly typed canonical identity: `RepositoryId`.",
       "type": "string"
@@ -7844,6 +8000,64 @@
       "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
       "type": "string"
     },
+    "ReviewProposalCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "expected_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "proposal_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ProposalId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "proposal_id",
+        "proposal_digest",
+        "expected_version",
+        "command_id",
+        "occurred_at"
+      ],
+      "type": "object"
+    },
+    "ReviewProposalDispositionV1": {
+      "description": "A proposal review records a non-accepting disposition. Acceptance remains a\nseparate command so callers cannot accidentally collapse review into\napproval.",
+      "enum": [
+        "rejected",
+        "superseded"
+      ],
+      "type": "string"
+    },
+    "ReviewProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ReviewProposalDispositionV1"
+        },
+        "review": {
+          "$ref": "#/$defs/ReviewProposalCommand"
+        }
+      },
+      "required": [
+        "review",
+        "disposition"
+      ],
+      "type": "object"
+    },
     "ReviewRequirementV1": {
       "oneOf": [
         {
@@ -7926,6 +8140,30 @@
         "deny"
       ],
       "type": "string"
+    },
+    "RunId": {
+      "description": "Strongly typed canonical identity: `RunId`.",
+      "type": "string"
+    },
+    "RuntimeEvidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "run_id",
+        "evidence_digest",
+        "terminal"
+      ],
+      "type": "object"
     },
     "SavingsAccountingSummaryV1": {
       "properties": {
@@ -9960,16 +10198,15 @@
     },
     "SyncSettingsPatch": {
       "additionalProperties": false,
+      "description": "Nested synchronization settings patch.",
       "properties": {
         "auto_track_pr_branches": {
-          "default": null,
           "type": [
             "boolean",
             "null"
           ]
         },
         "auto_track_pr_poll_secs": {
-          "default": null,
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -9978,10 +10215,6 @@
           ]
         }
       },
-      "required": [
-        "auto_track_pr_branches",
-        "auto_track_pr_poll_secs"
-      ],
       "type": "object"
     },
     "SyncSettingsV1": {
@@ -10256,20 +10489,21 @@
       ],
       "type": "object"
     },
+    "TaskId": {
+      "description": "Strongly typed canonical identity: `TaskId`.",
+      "type": "string"
+    },
     "TelemetrySettingsPatch": {
       "additionalProperties": false,
+      "description": "Nested telemetry settings patch.",
       "properties": {
         "timings": {
-          "default": null,
           "type": [
             "boolean",
             "null"
           ]
         }
       },
-      "required": [
-        "timings"
-      ],
       "type": "object"
     },
     "TelemetrySettingsV1": {
@@ -10530,12 +10764,12 @@
     },
     "UserSettingsPatch": {
       "additionalProperties": false,
+      "description": "Profile-scoped settings patch accepted by `PATCH /api/settings/user`.",
       "properties": {
         "expected_revision_id": {
           "type": "string"
         },
         "extraction_timeout_secs": {
-          "default": null,
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -10544,14 +10778,12 @@
           ]
         },
         "upload_enabled": {
-          "default": null,
           "type": [
             "boolean",
             "null"
           ]
         },
         "watcher_debounce": {
-          "default": null,
           "type": [
             "string",
             "null"
@@ -10559,10 +10791,7 @@
         }
       },
       "required": [
-        "expected_revision_id",
-        "upload_enabled",
-        "watcher_debounce",
-        "extraction_timeout_secs"
+        "expected_revision_id"
       ],
       "type": "object"
     },
@@ -10626,6 +10855,334 @@
         "version",
         "channel",
         "cached_latest_version"
+      ],
+      "type": "object"
+    },
+    "WorkAuthority": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "repository_id": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "worktree_id": {
+          "$ref": "#/$defs/WorktreeId"
+        }
+      },
+      "required": [
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "actor_id",
+        "policy_digest"
+      ],
+      "type": "object"
+    },
+    "WorkCommandId": {
+      "description": "Strongly typed canonical identity: `WorkCommandId`.",
+      "type": "string"
+    },
+    "WorkProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "authority": {
+          "$ref": "#/$defs/WorkAuthority"
+        },
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "execution_admitted": {
+          "type": "boolean"
+        },
+        "history_len": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtime_evidence": {
+          "items": {
+            "$ref": "#/$defs/RuntimeEvidenceRef"
+          },
+          "type": "array"
+        },
+        "task_accepted": {
+          "type": "boolean"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "task_id",
+        "version",
+        "authority",
+        "title",
+        "dependencies",
+        "accepted_proposal",
+        "execution_admitted",
+        "runtime_evidence",
+        "task_accepted",
+        "history_len"
+      ],
+      "type": "object"
+    },
+    "WorkProjectionCoverageV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "returned": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "const": "complete",
+              "type": "string"
+            },
+            "total": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "returned",
+            "total"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cursor": {
+              "$ref": "#/$defs/WorkProjectionResumeCursorV1"
+            },
+            "range": {
+              "$ref": "#/$defs/WorkProjectionSequenceRangeV1"
+            },
+            "returned": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "total": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "returned",
+            "total",
+            "range",
+            "cursor"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cap": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "cursor": {
+              "$ref": "#/$defs/WorkProjectionResumeCursorV1"
+            },
+            "range": {
+              "$ref": "#/$defs/WorkProjectionSequenceRangeV1"
+            },
+            "returned": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "const": "capped",
+              "type": "string"
+            },
+            "total": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "returned",
+            "total",
+            "cap",
+            "range",
+            "cursor"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkProjectionDeltaRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/WorkProjectionResumeCursorV1"
+        },
+        "page_size": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cursor",
+        "page_size"
+      ],
+      "type": "object"
+    },
+    "WorkProjectionDeltaV1": {
+      "properties": {
+        "changed": {
+          "items": {
+            "$ref": "#/$defs/WorkProjection"
+          },
+          "type": "array"
+        },
+        "coverage": {
+          "$ref": "#/$defs/WorkProjectionCoverageV1"
+        },
+        "from_sequence": {
+          "$ref": "#/$defs/WorkProjectionSequenceV1"
+        },
+        "generation_id": {
+          "$ref": "#/$defs/ProjectionGenerationId"
+        },
+        "removed": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "to_sequence": {
+          "$ref": "#/$defs/WorkProjectionSequenceV1"
+        }
+      },
+      "required": [
+        "generation_id",
+        "from_sequence",
+        "to_sequence",
+        "changed",
+        "removed",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "WorkProjectionResumeCursorV1": {
+      "properties": {
+        "generation_id": {
+          "$ref": "#/$defs/ProjectionGenerationId"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation_id",
+        "token"
+      ],
+      "type": "object"
+    },
+    "WorkProjectionSequenceRangeV1": {
+      "properties": {
+        "end_inclusive": {
+          "$ref": "#/$defs/WorkProjectionSequenceV1"
+        },
+        "start_exclusive": {
+          "$ref": "#/$defs/WorkProjectionSequenceV1"
+        }
+      },
+      "required": [
+        "start_exclusive",
+        "end_inclusive"
+      ],
+      "type": "object"
+    },
+    "WorkProjectionSequenceV1": {
+      "format": "uint64",
+      "minimum": 0,
+      "title": "WorkProjectionSequenceV1",
+      "type": "integer"
+    },
+    "WorkProjectionSnapshotRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "page_size": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_size"
+      ],
+      "type": "object"
+    },
+    "WorkProjectionSnapshotV1": {
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/WorkProjectionCoverageV1"
+        },
+        "generation_id": {
+          "$ref": "#/$defs/ProjectionGenerationId"
+        },
+        "projections": {
+          "items": {
+            "$ref": "#/$defs/WorkProjection"
+          },
+          "type": "array"
+        },
+        "sequence": {
+          "$ref": "#/$defs/WorkProjectionSequenceV1"
+        }
+      },
+      "required": [
+        "generation_id",
+        "sequence",
+        "projections",
+        "coverage"
       ],
       "type": "object"
     },
@@ -10964,6 +11521,45 @@
     },
     "storage_telemetry": {
       "$ref": "#/$defs/StorageTelemetryPayloadV1"
+    },
+    "work_accept_proposal_command": {
+      "$ref": "#/$defs/AcceptProposalCommand"
+    },
+    "work_accept_task_command": {
+      "$ref": "#/$defs/AcceptTaskCommand"
+    },
+    "work_admit_execution_command": {
+      "$ref": "#/$defs/AdmitExecutionCommand"
+    },
+    "work_attach_runtime_evidence_command": {
+      "$ref": "#/$defs/AttachRuntimeEvidenceCommand"
+    },
+    "work_create_command": {
+      "$ref": "#/$defs/CreateWorkCommand"
+    },
+    "work_projection": {
+      "$ref": "#/$defs/WorkProjection"
+    },
+    "work_projection_delta": {
+      "$ref": "#/$defs/WorkProjectionDeltaV1"
+    },
+    "work_projection_delta_request": {
+      "$ref": "#/$defs/WorkProjectionDeltaRequestV1"
+    },
+    "work_projection_snapshot": {
+      "$ref": "#/$defs/WorkProjectionSnapshotV1"
+    },
+    "work_projection_snapshot_request": {
+      "$ref": "#/$defs/WorkProjectionSnapshotRequestV1"
+    },
+    "work_replan_dependencies_command": {
+      "$ref": "#/$defs/ReplanDependenciesCommand"
+    },
+    "work_review_proposal_command": {
+      "$ref": "#/$defs/ReviewProposalCommand"
+    },
+    "work_review_proposal_request": {
+      "$ref": "#/$defs/ReviewProposalRequestV1"
     }
   },
   "required": [
@@ -11007,6 +11603,19 @@
     "graph_fact_matches",
     "graph_test_map",
     "graph_node_sessions",
+    "work_projection_snapshot_request",
+    "work_projection_snapshot",
+    "work_projection_delta_request",
+    "work_projection_delta",
+    "work_create_command",
+    "work_replan_dependencies_command",
+    "work_review_proposal_request",
+    "work_review_proposal_command",
+    "work_accept_proposal_command",
+    "work_admit_execution_command",
+    "work_attach_runtime_evidence_command",
+    "work_accept_task_command",
+    "work_projection",
     "automation_scheduler_status"
   ],
   "schemaRevision": 1,
