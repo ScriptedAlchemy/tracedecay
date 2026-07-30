@@ -2,10 +2,10 @@ import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import {
   assertNever,
-  StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
   type DoctorReportEntry,
   type StorageFindingKindStatus,
+  type StorageFindingsPayload,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
   type TableGrowthDimension,
@@ -13,6 +13,7 @@ import {
   type WireCoverage,
 } from '../../contracts/wire.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { CapacityBar } from '../../ui/ActivityColumns.tsx';
 import { EnvelopeTruth, ReadModelState } from '../../ui/EnvelopeTruth.tsx';
@@ -45,15 +46,9 @@ export function ObservatoryPage() {
       fetchEnvelope(scopedUrl(scope, '/api/storage/telemetry'), StorageTelemetryPayloadSchema),
     refetchInterval: 30_000,
   });
-  const findings = useQuery({
-    queryKey: ['storage', 'findings', scopeKey(scope)],
-    queryFn: () =>
-      fetchEnvelope(
-        scopedUrl(scope, '/api/storage/findings'),
-        StorageFindingsPayloadSchema,
-      ),
-    refetchInterval: 30_000,
-  });
+  // Shared with the nav rail's Doctor dot, through the module that owns the
+  // key, the route, and the poll: one entry, one period, one contract.
+  const findings = useStorageFindings();
 
   return (
     <div className="flex h-full flex-col overflow-auto">
@@ -171,7 +166,7 @@ function FindingsReadModel({
   refreshing,
   onRefresh,
 }: {
-  result: EnvelopeResult<ReturnType<typeof StorageFindingsPayloadSchema.parse>>;
+  result: EnvelopeResult<StorageFindingsPayload>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {

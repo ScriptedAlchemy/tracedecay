@@ -15,13 +15,8 @@ import {
   Workflow,
 } from 'lucide-react';
 import { NavLink } from 'react-router';
-import { useQuery } from '@tanstack/react-query';
-import {
-  StorageFindingsPayloadSchema,
-  type StorageFindingKindStatus,
-} from '../../contracts/wire.ts';
-import { fetchEnvelope } from '../../data/query/envelope.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
+import type { StorageFindingKindStatus } from '../../contracts/wire.ts';
+import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { cn } from '../../ui/cn';
 import { CHANNELS, channelNumber } from '../channels.ts';
 
@@ -193,24 +188,13 @@ function DoctorDot({ health }: { health: DoctorHealth }) {
  * back with nothing to read is `unknown`; only a resolved report whose every
  * producer looked and found nothing is `healthy`.
  *
- * Parsed with the generated `StorageFindingsPayloadSchema`, which is what
- * `storage_findings_api.rs` actually serves. Observatory used to hold a
- * hand-written copy of this shape and this dot validated against that instead;
- * the copy extended the wrong payload and pinned the producer count at exactly
- * five, so a sixth storage finding kind in Rust would have failed the parse on
- * every real response and left the app-wide indicator stuck on `unknown`.
+ * Read through {@link useStorageFindings}, which owns the key, the route, the
+ * generated contract, and the poll. Observatory reads the same entry; when this
+ * file named its own period the two disagreed, and the shared entry took the
+ * shorter one regardless of what was written here.
  */
 function useDoctorHealth(): DoctorHealth {
-  const scope = useScope((s) => s.scope);
-  const findings = useQuery({
-    queryKey: ['storage', 'findings', scopeKey(scope)],
-    queryFn: () =>
-      fetchEnvelope(
-        scopedUrl(scope, '/api/storage/findings'),
-        StorageFindingsPayloadSchema,
-      ),
-    refetchInterval: 60_000,
-  });
+  const findings = useStorageFindings();
   const result = findings.data;
   if (!result || result.outcome === 'transport') return 'unknown';
   const statuses = result.envelope.payload.kind_statuses;
