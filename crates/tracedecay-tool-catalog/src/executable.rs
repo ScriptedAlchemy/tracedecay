@@ -258,7 +258,7 @@ pub enum ExecutableUnavailableDispositionV1 {
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum ExecutableBindingAvailabilityV1 {
     Available {
-        binding: ExecutableBindingV1,
+        binding: Box<ExecutableBindingV1>,
     },
     Unavailable {
         operation_id: OperationId,
@@ -267,6 +267,12 @@ pub enum ExecutableBindingAvailabilityV1 {
 }
 
 impl ExecutableBindingAvailabilityV1 {
+    pub fn available(binding: ExecutableBindingV1) -> Self {
+        Self::Available {
+            binding: Box::new(binding),
+        }
+    }
+
     pub fn operation_id(&self) -> &OperationId {
         match self {
             Self::Available { binding } => binding.operation_id(),
