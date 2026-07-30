@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import random
-import statistics
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -21,6 +20,13 @@ NORMALIZATION_DIMENSIONS = (
     "temperature",
 )
 RETENTION_KINDS = frozenset({"runtime_sample", "junit_retention"})
+
+
+def _mean(values: Iterable[float | int]) -> float:
+    items = list(values)
+    if not items:
+        raise ValueError("mean requires at least one sample")
+    return float(sum(items) / len(items))
 
 
 def _finite_values(values: Iterable[float | int]) -> list[float | int]:
@@ -78,7 +84,7 @@ def summarize_distribution(values: Iterable[float | int]) -> dict[str, Any]:
         "p95": nearest_rank(samples, 0.95),
         "p99": nearest_rank(samples, 0.99),
         "max": max(samples),
-        "mean": statistics.fmean(samples),
+        "mean": _mean(samples),
         "percentile_method": "nearest_rank",
     }
 
@@ -184,7 +190,7 @@ def bootstrap_confidence_interval(
     generator = random.Random(seed)
     sample_count = len(samples)
     means = [
-        statistics.fmean(
+        _mean(
             samples[generator.randrange(sample_count)] for _ in range(sample_count)
         )
         for _ in range(resamples)

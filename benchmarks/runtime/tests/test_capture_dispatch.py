@@ -69,6 +69,10 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
                 }}, sort_keys=True))
                 raise SystemExit(0)
 
+            if sys.argv[1:2] == ["hook-cursor-after-shell"]:
+                sys.stdin.buffer.read()
+                raise SystemExit(0)
+
             raise SystemExit("unexpected command")
             """
         ),
@@ -241,6 +245,15 @@ class CaptureDispatchTest(unittest.TestCase):
                     "minimum_samples": 40,
                 },
             )
+            self.assertEqual(report["comparison"]["paired"]["pair_count"], 2)
+            self.assertEqual(
+                len(
+                    report["comparison"]["paired"][
+                        "log_ratio_confidence_interval"
+                    ]
+                ),
+                2,
+            )
 
     def test_prepare_creates_complete_immutable_fixture_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
@@ -261,6 +274,43 @@ class CaptureDispatchTest(unittest.TestCase):
             self.assertTrue((prepared / "evidence" / "prepared.json").is_file())
             self.assertTrue((prepared / "home" / "workspace" / "runtime-fixture").is_dir())
             self.assertTrue((prepared / "bin" / "tracedecay").is_file())
+
+    def test_missing_daemon_incident_driver_records_typed_unavailability(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "fake-tracedecay"
+            make_fake_binary(binary)
+            output = root / "missing-daemon.json"
+
+            result = run_runner(
+                "incident",
+                "--binary",
+                binary,
+                "--workload",
+                "missing-daemon-after-shell",
+                "--samples",
+                "2",
+                "--output",
+                output,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            samples = read_jsonl(output.with_suffix(".samples.jsonl"))
+            self.assertEqual(len(samples), 2)
+            self.assertTrue(
+                all(sample["availability"]["state"] == "unavailable"
+                    for sample in samples)
+            )
+            self.assertTrue(
+                all(sample["lifecycle"]["daemon_survived"] is None
+                    for sample in samples)
+            )
+            self.assertTrue(
+                all(sample["observations"]["process_tree_reaped"]
+                    for sample in samples)
+            )
 
 
 if __name__ == "__main__":

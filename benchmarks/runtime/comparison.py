@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from benchmarks.runtime.schema import RUNTIME_STATES, SURFACES, TEMPERATURES
@@ -32,6 +31,13 @@ COMPARISON_IDENTITY_FIELDS = (
     "concurrency",
 )
 _PR_STAGE_RE = re.compile(r"(?:^|[-_. ])pr[-_. ]?\d+(?:$|[-_. ])", re.IGNORECASE)
+
+
+def _mean(values: Iterable[float]) -> float:
+    items = list(values)
+    if not items:
+        raise ValueError("mean requires at least one sample")
+    return float(sum(items) / len(items))
 
 
 def _finite_number(value: Any, name: str) -> float:
@@ -251,15 +257,15 @@ def compare_abba(
     comparison_identity = _comparison_identity(identity)
     pairs = pair_abba_rounds(rounds)
     log_ratios = paired_log_ratios(pairs)
-    baseline_mean = statistics.fmean(pair[0] for pair in pairs)
-    treatment_mean = statistics.fmean(pair[1] for pair in pairs)
+    baseline_mean = _mean(pair[0] for pair in pairs)
+    treatment_mean = _mean(pair[1] for pair in pairs)
     change = classify_change(
         baseline_mean,
         treatment_mean,
         relative_threshold=relative_threshold,
         practical_floor=practical_floor,
     )
-    mean_log_ratio = statistics.fmean(log_ratios)
+    mean_log_ratio = _mean(log_ratios)
     interval = bootstrap_confidence_interval(
         log_ratios,
         seed=seed,
