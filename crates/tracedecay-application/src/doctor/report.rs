@@ -18,10 +18,10 @@ use crate::error::ApplicationContractError;
 use super::sources::{
     AdvisoryFeedbackDoctorPort, CodeIndexMountDoctorPort, ConfigurationAuthorityDoctorPort,
     DoctorStorageFamilyReadV1, HostIntegrationDoctorPort, LanguageServerDoctorPort,
-    ObservabilityDoctorPort, RuntimeHealthDoctorPort, StorageDoctorPort,
-    advisory_feedback_findings, code_index_finding, configuration_finding,
+    ObservabilityDoctorPort, OperationalAuditDoctorPort, RuntimeHealthDoctorPort,
+    StorageDoctorPort, advisory_feedback_findings, code_index_finding, configuration_finding,
     host_integration_finding, language_server_finding, observability_finding,
-    runtime_health_finding,
+    operational_audit_findings, runtime_health_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -267,6 +267,7 @@ impl DoctorReportV1 {
 pub struct DoctorReportComposerV1<'a> {
     configuration: Option<&'a dyn ConfigurationAuthorityDoctorPort>,
     runtime: Option<&'a dyn RuntimeHealthDoctorPort>,
+    operational_audit: Option<&'a dyn OperationalAuditDoctorPort>,
     host: Option<&'a dyn HostIntegrationDoctorPort>,
     advisory_feedback: Option<&'a dyn AdvisoryFeedbackDoctorPort>,
     language_server: Option<&'a dyn LanguageServerDoctorPort>,
@@ -294,6 +295,13 @@ impl<'a> DoctorReportComposerV1<'a> {
     #[must_use]
     pub fn with_runtime(mut self, port: &'a dyn RuntimeHealthDoctorPort) -> Self {
         self.runtime = Some(port);
+        self
+    }
+
+    /// Wire Remote HTTPS and exact registered-profile operational authority.
+    #[must_use]
+    pub fn with_operational_audit(mut self, port: &'a dyn OperationalAuditDoctorPort) -> Self {
+        self.operational_audit = Some(port);
         self
     }
 
@@ -399,20 +407,51 @@ impl<'a> DoctorReportComposerV1<'a> {
         context: &RequestContext,
     ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
     {
-        let Some(port) = self.runtime else {
+        if self.runtime.is_none() && self.operational_audit.is_none() {
             return unwired_family(DoctorFindingFamilyV1::StorageRuntime);
-        };
-        let read = port.runtime_health(context).await;
-        use super::sources::RuntimeHealthReadV1 as Read;
-        let consultation = match read {
-            Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
-            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
-            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
-            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
-        };
-        let finding = runtime_health_finding(&read)?;
-        Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
+        }
+        let mut entries = Vec::new();
+        let mut consultations = Vec::new();
+        if let Some(port) = self.runtime {
+            let read = port.runtime_health(context).await;
+            use super::sources::RuntimeHealthReadV1 as Read;
+            consultations.push(match read {
+                Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+                Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
+                Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+                Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+                Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+            });
+            entries.push(DoctorReportEntryV1::new(
+                runtime_health_finding(&read)?,
+                None,
+            )?);
+        }
+        if let Some(port) = self.operational_audit {
+            let read = port.operational_audit(context).await;
+            use super::sources::{
+                ProfileAuthorityReadV1 as Profile, RemoteOperationalReadV1 as Remote,
+            };
+            consultations.push(match (&read.remote, &read.profile_authority) {
+                (Remote::Observed { .. }, _) | (_, Profile::Observed { .. }) => {
+                    DoctorFamilyConsultationV1::Consulted
+                }
+                (Remote::Denied, _) | (_, Profile::Denied) => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Denied)
+                }
+                (Remote::Unsupported, _) => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+                }
+                (Remote::Unconfigured, _) => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+                (Remote::Unavailable, Profile::Unavailable) => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
+                }
+            });
+            for finding in operational_audit_findings(&read)? {
+                entries.push(DoctorReportEntryV1::new(finding, None)?);
+            }
+        }
+        Ok((entries, strongest_consultation(consultations)))
     }
 
     async fn compose_host(
@@ -599,6 +638,38 @@ impl<'a> DoctorReportComposerV1<'a> {
 /// A consultation record for an unavailable family.
 const fn unavailable(reason: DoctorFamilyUnavailableReasonV1) -> DoctorFamilyConsultationV1 {
     DoctorFamilyConsultationV1::Unavailable { reason }
+}
+
+fn strongest_consultation(
+    consultations: Vec<DoctorFamilyConsultationV1>,
+) -> DoctorFamilyConsultationV1 {
+    consultations
+        .iter()
+        .copied()
+        .find(|consultation| consultation.is_consulted())
+        .unwrap_or_else(|| {
+            consultations
+                .into_iter()
+                .max_by_key(|consultation| match consultation {
+                    DoctorFamilyConsultationV1::Consulted => 5,
+                    DoctorFamilyConsultationV1::Unavailable {
+                        reason: DoctorFamilyUnavailableReasonV1::Unknown,
+                    } => 4,
+                    DoctorFamilyConsultationV1::Unavailable {
+                        reason: DoctorFamilyUnavailableReasonV1::Denied,
+                    } => 3,
+                    DoctorFamilyConsultationV1::Unavailable {
+                        reason: DoctorFamilyUnavailableReasonV1::Absent,
+                    } => 2,
+                    DoctorFamilyConsultationV1::Unavailable {
+                        reason: DoctorFamilyUnavailableReasonV1::Unsupported,
+                    } => 1,
+                    DoctorFamilyConsultationV1::Unavailable {
+                        reason: DoctorFamilyUnavailableReasonV1::Unwired,
+                    } => 0,
+                })
+                .expect("a composed family has at least one source")
+        })
 }
 
 /// Synthesize the single placeholder entry for a family with no wired source.
