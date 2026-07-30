@@ -17,6 +17,7 @@ pub mod feedback;
 mod http;
 pub mod read_model;
 pub mod remediation;
+pub mod remote;
 mod sse;
 
 use serde::Serialize;

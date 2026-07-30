@@ -4,9 +4,12 @@
 //! those canonical contracts directly; it does not define a second frame DTO.
 
 use std::collections::BTreeMap;
+use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use ring::rand::SecureRandom;
+use ring::{aead, rand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::{
@@ -29,11 +32,91 @@ use tracedecay_domain::{
 const FRAME_MAGIC: &[u8; 8] = b"TDRSPL02";
 const FRAME_VERSION: u16 = 2;
 const FRAME_HEADER_BYTES: usize = 8 + 2 + 8 + 32;
+const ENCRYPTION_VERSION: u8 = 1;
+const AES_GCM_NONCE_BYTES: usize = 12;
+const REMOTE_SPOOL_AAD: &[u8] = b"tracedecay.remote-spool.aes-256-gcm.v1";
 
 pub trait RemoteSpoolEncryption: Send + Sync {
     fn is_available(&self) -> bool;
     fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, RemoteSpoolEncryptionError>;
     fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, RemoteSpoolEncryptionError>;
+}
+
+pub struct Aes256GcmRemoteSpoolEncryption {
+    key: aead::LessSafeKey,
+    random: rand::SystemRandom,
+}
+
+impl Aes256GcmRemoteSpoolEncryption {
+    pub fn new(mut key_bytes: [u8; 32]) -> Result<Self, RemoteSpoolEncryptionError> {
+        if key_bytes == [0; 32] {
+            return Err(RemoteSpoolEncryptionError { operation: "key" });
+        }
+        let key = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes)
+            .map(aead::LessSafeKey::new)
+            .map_err(|_| RemoteSpoolEncryptionError { operation: "key" });
+        key_bytes.fill(0);
+        black_box(&key_bytes);
+        Ok(Self {
+            key: key?,
+            random: rand::SystemRandom::new(),
+        })
+    }
+}
+
+impl std::fmt::Debug for Aes256GcmRemoteSpoolEncryption {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Aes256GcmRemoteSpoolEncryption([REDACTED])")
+    }
+}
+
+impl RemoteSpoolEncryption for Aes256GcmRemoteSpoolEncryption {
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, RemoteSpoolEncryptionError> {
+        let mut nonce_bytes = [0_u8; AES_GCM_NONCE_BYTES];
+        self.random
+            .fill(&mut nonce_bytes)
+            .map_err(|_| RemoteSpoolEncryptionError { operation: "seal" })?;
+        let mut ciphertext = plaintext.to_vec();
+        self.key
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(nonce_bytes),
+                aead::Aad::from(REMOTE_SPOOL_AAD),
+                &mut ciphertext,
+            )
+            .map_err(|_| RemoteSpoolEncryptionError { operation: "seal" })?;
+        let mut sealed = Vec::with_capacity(1 + AES_GCM_NONCE_BYTES + ciphertext.len());
+        sealed.push(ENCRYPTION_VERSION);
+        sealed.extend_from_slice(&nonce_bytes);
+        sealed.extend_from_slice(&ciphertext);
+        Ok(sealed)
+    }
+
+    fn open(&self, ciphertext: &[u8]) -> Result<Vec<u8>, RemoteSpoolEncryptionError> {
+        if ciphertext.len() < 1 + AES_GCM_NONCE_BYTES + aead::AES_256_GCM.tag_len()
+            || ciphertext[0] != ENCRYPTION_VERSION
+        {
+            return Err(RemoteSpoolEncryptionError { operation: "open" });
+        }
+        let nonce_bytes: [u8; AES_GCM_NONCE_BYTES] = ciphertext[1..1 + AES_GCM_NONCE_BYTES]
+            .try_into()
+            .map_err(|_| RemoteSpoolEncryptionError { operation: "open" })?;
+        let mut plaintext = ciphertext[1 + AES_GCM_NONCE_BYTES..].to_vec();
+        let opened = self
+            .key
+            .open_in_place(
+                aead::Nonce::assume_unique_for_key(nonce_bytes),
+                aead::Aad::from(REMOTE_SPOOL_AAD),
+                &mut plaintext,
+            )
+            .map_err(|_| RemoteSpoolEncryptionError { operation: "open" })?;
+        let length = opened.len();
+        plaintext.truncate(length);
+        Ok(plaintext)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -535,8 +618,13 @@ mod tests {
         RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, WorktreeId,
     };
+    use tracedecay_store::{RepositoryWritePayloadV1, StoreRuntimeBindingV1};
 
     use super::*;
+    use crate::remote_replay::{
+        CanonicalRemoteReplayRequestFactoryV1, RemoteReplayRequestFactoryV1,
+    };
+    use tracedecay_application::remote::replay::RemoteReplayFrameV1;
 
     struct XorEncryption(u8);
 
@@ -745,6 +833,90 @@ mod tests {
             !String::from_utf8_lossy(&bytes).contains("sanitized-1"),
             "canonical observation leaked outside encryption"
         );
+    }
+
+    #[test]
+    fn production_encryption_hides_plaintext_and_rejects_tampering() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("remote.spool");
+        let spool = RemoteCaptureSpool::open(
+            path.clone(),
+            config(),
+            Box::new(Aes256GcmRemoteSpoolEncryption::new([7; 32]).unwrap()),
+            Box::new(Offline),
+        )
+        .unwrap();
+        let capture = command(1, None);
+        let first = spool.capture_pending(&capture).unwrap();
+        let duplicate = spool.capture_pending(&capture).unwrap();
+        assert_eq!(
+            duplicate.disposition,
+            RemoteCaptureDispositionV1::AlreadyPending
+        );
+        assert_eq!(duplicate.event_id, first.event_id);
+        let mut bytes = fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("sanitized-1"));
+        assert_eq!(
+            RemoteCaptureSpool::open(
+                path.clone(),
+                config(),
+                Box::new(Aes256GcmRemoteSpoolEncryption::new([7; 32]).unwrap()),
+                Box::new(Offline),
+            )
+            .unwrap()
+            .pending()
+            .unwrap()
+            .len(),
+            1
+        );
+
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            RemoteCaptureSpool::open(
+                path,
+                config(),
+                Box::new(Aes256GcmRemoteSpoolEncryption::new([7; 32]).unwrap()),
+                Box::new(Offline),
+            ),
+            Err(RemoteSpoolError::Encryption(_) | RemoteSpoolError::Corruption)
+        ));
+    }
+
+    #[test]
+    fn canonical_replay_request_preserves_binding_observation_and_idempotency() {
+        let root = TempDir::new().unwrap();
+        let capture = command(1, None);
+        let receipt = spool(&root).capture_pending(&capture).unwrap();
+        let frame = RemoteReplayFrameV1 {
+            event_id: receipt.event_id,
+            capture,
+        };
+        let binding: StoreRuntimeBindingV1 = serde_json::from_value(json!({
+            "shard_id": {
+                "brain_id": "brain.remote-test",
+                "profile_id": "profile.remote-test",
+                "scope": { "kind": "project_sessions", "project_id": "project.remote-test" }
+            },
+            "incarnation": 1,
+            "authority_epoch": 1
+        }))
+        .unwrap();
+        let mut factory = CanonicalRemoteReplayRequestFactoryV1;
+
+        let first = factory.build_request(&frame, &binding).unwrap();
+        let duplicate = factory.build_request(&frame, &binding).unwrap();
+        assert_eq!(first, duplicate);
+        assert_eq!(first.binding(), &binding);
+        assert_eq!(
+            first.envelope().metadata.idempotency.key.as_str(),
+            frame.event_id
+        );
+        assert!(matches!(
+            &first.envelope().payload,
+            RepositoryWritePayloadV1::Observation(write)
+                if write.observation() == &frame.capture.observation
+        ));
     }
 
     #[test]
