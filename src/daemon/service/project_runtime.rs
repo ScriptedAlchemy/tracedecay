@@ -227,21 +227,39 @@ impl ProjectRuntimeRegistryV1 {
             return ProjectRequestRuntimesV1::default();
         };
         let runtimes = self.runtimes.lock().await;
-        let Some(runtime) = runtimes.get(project_root) else {
-            return ProjectRequestRuntimesV1::default();
-        };
-        let feedback = runtime.feedback.as_ref();
+        let runtime = runtimes.get(project_root);
+        let feedback = runtime.and_then(|runtime| runtime.feedback.as_ref());
         ProjectRequestRuntimesV1 {
             feedback: feedback.map(|registered| registered.runtime()),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
-            advisory_cycle_invoker: runtime.advisory_cycle_invoker.clone(),
-            configuration: runtime.configuration.clone(),
-            lsp_owner: runtime.lsp_owner.clone().or_else(|| {
+            advisory_cycle_invoker: runtime
+                .and_then(|runtime| runtime.advisory_cycle_invoker.clone()),
+            configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
+            lsp_owner: Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(
+                &runtimes,
+                project_root,
+                canonical_root,
+            ),
+        }
+    }
+
+    fn component_with_canonical_fallback<C>(
+        runtimes: &BTreeMap<PathBuf, ProjectRuntime>,
+        project_root: &Path,
+        canonical_root: Option<&Path>,
+    ) -> Option<C>
+    where
+        C: ProjectRuntimeComponent + Clone,
+    {
+        runtimes
+            .get(project_root)
+            .and_then(C::peek)
+            .or_else(|| {
                 canonical_root
                     .and_then(|root| runtimes.get(root))
-                    .and_then(|runtime| runtime.lsp_owner.clone())
-            }),
-        }
+                    .and_then(C::peek)
+            })
+            .cloned()
     }
 
     pub(crate) async fn holds<C>(&self, project_root: &Path) -> bool
