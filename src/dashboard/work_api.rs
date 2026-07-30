@@ -1,21 +1,22 @@
+//! The dashboard's public Work contract.
+//!
+//! The routes themselves are built by
+//! [`crate::application_surface::dashboard_work_application_router_with_executor`]
+//! from the canonical [`WorkOperation`] descriptor — this module only restates
+//! that descriptor as the route document the dashboard contract schema
+//! publishes. There is no second route table and no forwarding hop: a dashboard
+//! Work request enters the same handler, owner, and dispatch as an application
+//! Work request, one segment of path apart.
+
 use std::borrow::Cow;
 
-use axum::Router;
-use axum::body::Body;
-use axum::extract::{OriginalUri, State};
-use axum::http::{Request, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use schemars::JsonSchema;
-use tower::ServiceExt;
-use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, ReplanDependenciesCommand, ReviewProposalRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-};
-use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
+use tracedecay_api::WorkOperation;
 
+/// `operation_id` and `application_path` are the identity the contract test
+/// checks this document against; schema generation itself needs only the
+/// method, path, and schema names.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct RegisteredWorkRouteContractV1 {
     pub method: &'static str,
     pub operation_id: &'static str,
@@ -25,147 +26,45 @@ pub(super) struct RegisteredWorkRouteContractV1 {
     pub response_schema_name: fn() -> Cow<'static, str>,
 }
 
-fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
-    T::schema_name()
-}
-
-macro_rules! core_work_routes {
-    (
-        $(
-            (
-                $operation_id:literal,
-                $relative_path:literal,
-                $application_path:literal,
-                $request:ty,
-                $response:ty
-            )
-        ),+ $(,)?
-    ) => {
+/// Names the dashboard-exposed operations; every column of the document is read
+/// off the descriptor. A test holds this list to `WorkOperation::CORE`.
+macro_rules! dashboard_work_routes {
+    ($($variant:ident),+ $(,)?) => {
         static REGISTERED_ROUTE_CONTRACTS: &[RegisteredWorkRouteContractV1] = &[
             $(
                 RegisteredWorkRouteContractV1 {
                     method: "POST",
-                    operation_id: $operation_id,
-                    path: concat!("/api/work", $relative_path),
-                    application_path: $application_path,
-                    request_schema_name: schema_name::<$request>,
-                    response_schema_name: schema_name::<$response>,
+                    operation_id: WorkOperation::$variant.operation_id_str(),
+                    path: match WorkOperation::$variant.dashboard_route_path() {
+                        Some(path) => path,
+                        None => panic!("a dashboard Work route must have a public path"),
+                    },
+                    application_path: WorkOperation::$variant.application_route_path(),
+                    request_schema_name: || WorkOperation::$variant.request_schema_name(),
+                    response_schema_name: || WorkOperation::$variant.result_schema_name(),
                 },
             )+
         ];
 
-        pub(super) fn router(application_router: Router) -> Router {
-            let router = Router::new();
-            $(
-                let router = router.route($relative_path, post(forward_to_application_router));
-            )+
-            router.with_state(WorkApplicationRouter { application_router })
-        }
+        #[cfg(test)]
+        static DOCUMENTED_OPERATIONS: &[WorkOperation] = &[$(WorkOperation::$variant),+];
     };
 }
 
-core_work_routes!(
-    (
-        "operation.work.snapshot",
-        "/snapshot",
-        "/application/work/snapshot",
-        WorkProjectionSnapshotRequestV1,
-        WorkProjectionSnapshotV1
-    ),
-    (
-        "operation.work.delta",
-        "/delta",
-        "/application/work/delta",
-        WorkProjectionDeltaRequestV1,
-        WorkProjectionDeltaV1
-    ),
-    (
-        "operation.work.create",
-        "/create",
-        "/application/work/create",
-        CreateWorkCommand,
-        WorkProjection
-    ),
-    (
-        "operation.work.replan_dependencies",
-        "/replan-dependencies",
-        "/application/work/replan-dependencies",
-        ReplanDependenciesCommand,
-        WorkProjection
-    ),
-    (
-        "operation.work.review_proposal",
-        "/review-proposal",
-        "/application/work/review-proposal",
-        ReviewProposalRequestV1,
-        WorkProjection
-    ),
-    (
-        "operation.work.accept_proposal",
-        "/accept-proposal",
-        "/application/work/accept-proposal",
-        AcceptProposalCommand,
-        WorkProjection
-    ),
-    (
-        "operation.work.admit_execution",
-        "/admit-execution",
-        "/application/work/admit-execution",
-        AdmitExecutionCommand,
-        WorkProjection
-    ),
-    (
-        "operation.work.attach_runtime_evidence",
-        "/attach-runtime-evidence",
-        "/application/work/attach-runtime-evidence",
-        AttachRuntimeEvidenceCommand,
-        WorkProjection
-    ),
-    (
-        "operation.work.accept_task",
-        "/accept-task",
-        "/application/work/accept-task",
-        AcceptTaskCommand,
-        WorkProjection
-    ),
+dashboard_work_routes!(
+    Snapshot,
+    Delta,
+    Create,
+    ReplanDependencies,
+    ReviewProposal,
+    AcceptProposal,
+    AdmitExecution,
+    AttachRuntimeEvidence,
+    AcceptTask,
 );
 
 pub(super) fn registered_route_contracts() -> &'static [RegisteredWorkRouteContractV1] {
     REGISTERED_ROUTE_CONTRACTS
-}
-
-#[derive(Clone)]
-struct WorkApplicationRouter {
-    application_router: Router,
-}
-
-async fn forward_to_application_router(
-    State(state): State<WorkApplicationRouter>,
-    OriginalUri(original_uri): OriginalUri,
-    mut request: Request<Body>,
-) -> Response {
-    let Some(route) = registered_route_contracts()
-        .iter()
-        .find(|route| route.path == original_uri.path())
-    else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let application_path = route
-        .application_path
-        .strip_prefix("/application")
-        .expect("canonical Work application routes use the application prefix");
-    let path_and_query = match original_uri.query() {
-        Some(query) => format!("{application_path}?{query}"),
-        None => application_path.to_owned(),
-    };
-    let Ok(uri) = path_and_query.parse::<Uri>() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    *request.uri_mut() = uri;
-    match state.application_router.clone().oneshot(request).await {
-        Ok(response) => response,
-        Err(error) => match error {},
-    }
 }
 
 #[cfg(test)]
@@ -173,16 +72,15 @@ mod tests {
     use std::sync::Arc;
 
     use axum::Router;
-    use axum::body::{Body, to_bytes};
+    use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
-    use axum::response::Response;
-    use axum::routing::post;
     use tower::ServiceExt;
+    use tracedecay_api::WorkOperation;
     use tracedecay_application::{
         ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
         ApplicationResponse, InvocationError,
     };
-    use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros};
+    use tracedecay_domain::{ManifestDigest, UtcMicros};
 
     use crate::daemon_client::{
         DaemonInvocationError, DaemonInvocationExecutor, DaemonInvocationExecutorFuture,
@@ -224,102 +122,62 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn dashboard_work_routes_forward_to_the_production_application_router() {
+    fn dashboard_router() -> Router {
         let executor: Arc<dyn DaemonInvocationExecutor> = Arc::new(UnavailableExecutor);
-        let application = crate::application_surface::http_application_router_with_executor(
-            executor,
-            crate::daemon::daemon_operation_event_authority(),
-            ProjectId::new("project.dashboard-work-routes").expect("project id"),
+        Router::new().nest(
+            "/api/work",
+            crate::application_surface::dashboard_work_application_router_with_executor(executor)
+                .expect("production dashboard Work router"),
         )
-        .expect("production application router");
-        let router = Router::new().nest("/api/work", super::router(application));
-
-        for route in super::registered_route_contracts() {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri(route.path)
-                        .header("content-type", "application/json")
-                        .body(Body::from("{}"))
-                        .expect("dashboard Work request"),
-                )
-                .await
-                .expect("dashboard Work response");
-            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{}", route.path);
-            assert_ne!(
-                response.status(),
-                StatusCode::METHOD_NOT_ALLOWED,
-                "{}",
-                route.path
-            );
-        }
     }
 
-    #[tokio::test]
-    async fn dashboard_work_forwarding_preserves_the_http_exchange() {
-        let application = Router::new().route(
-            "/work/snapshot",
-            post(|request: Request<Body>| async move {
-                assert_eq!(
-                    request.uri().path_and_query().map(|value| value.as_str()),
-                    Some("/work/snapshot?page_size=7")
-                );
-                assert_eq!(
-                    request
-                        .headers()
-                        .get("x-tracedecay-test")
-                        .and_then(|value| value.to_str().ok()),
-                    Some("preserved")
-                );
-                assert_eq!(
-                    to_bytes(request.into_body(), 1024)
-                        .await
-                        .expect("forwarded body"),
-                    r#"{"cursor":"work:7"}"#
-                );
-                Response::builder()
-                    .status(StatusCode::CONFLICT)
-                    .header("x-tracedecay-response", "preserved")
-                    .body(Body::from(r#"{"kind":"problem"}"#))
-                    .expect("upstream response")
-            }),
-        );
-        let router = Router::new().nest("/api/work", super::router(application));
-
-        let response = router
+    async fn post(router: &Router, uri: &str) -> StatusCode {
+        router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/work/snapshot?page_size=7")
+                    .uri(uri)
                     .header("content-type", "application/json")
-                    .header("x-tracedecay-test", "preserved")
-                    .body(Body::from(r#"{"cursor":"work:7"}"#))
+                    .body(Body::from("{}"))
                     .expect("dashboard Work request"),
             )
             .await
-            .expect("dashboard Work response");
+            .expect("dashboard Work response")
+            .status()
+    }
 
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+    #[tokio::test]
+    async fn every_core_route_is_mounted_and_no_attempt_route_is_reachable() {
+        let router = dashboard_router();
+
+        for route in super::registered_route_contracts() {
+            let status = post(&router, route.path).await;
+            assert_ne!(status, StatusCode::NOT_FOUND, "{}", route.path);
+            assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "{}", route.path);
+        }
+
+        for operation in WorkOperation::ATTEMPT {
+            let uri = format!("/api{}", operation.route_path());
+            assert_eq!(
+                post(&router, &uri).await,
+                StatusCode::NOT_FOUND,
+                "the dashboard must not reach {uri}"
+            );
+        }
         assert_eq!(
-            response
-                .headers()
-                .get("x-tracedecay-response")
-                .and_then(|value| value.to_str().ok()),
-            Some("preserved")
-        );
-        assert_eq!(
-            to_bytes(response.into_body(), 1024)
-                .await
-                .expect("dashboard response body"),
-            r#"{"kind":"problem"}"#
+            post(&router, "/api/work/not-an-operation").await,
+            StatusCode::NOT_FOUND
         );
     }
 
     #[test]
-    fn dashboard_public_routes_cover_every_canonical_core_work_binding() {
+    fn the_route_document_is_exactly_the_descriptor_core_family() {
+        assert_eq!(super::DOCUMENTED_OPERATIONS, WorkOperation::CORE.as_slice());
+    }
+
+    #[test]
+    fn the_route_document_covers_every_canonical_core_work_binding() {
         use std::collections::BTreeSet;
 
         let registry = tracedecay_application::work_executable_binding_registry()
@@ -357,6 +215,7 @@ mod tests {
         );
 
         for route in routes {
+            assert!(!route.path.is_empty(), "{}", route.operation_id);
             let binding = registry
                 .get(
                     &tracedecay_tool_catalog::OperationId::new(route.operation_id)
@@ -370,6 +229,18 @@ mod tests {
                 panic!("canonical Work binding must be public");
             };
             assert_eq!(route.application_path, route_path);
+            assert_eq!(
+                (route.request_schema_name)(),
+                binding.request_schema().body()["title"]
+                    .as_str()
+                    .expect("a titled request schema")
+            );
+            assert_eq!(
+                (route.response_schema_name)(),
+                binding.result_schema().body()["title"]
+                    .as_str()
+                    .expect("a titled result schema")
+            );
             assert!(!route.path.contains("/attempt/"));
             assert!(!route.application_path.contains("/attempt/"));
         }

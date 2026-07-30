@@ -95,7 +95,8 @@ use tower::ServiceExt;
 
 use crate::application_surface::{
     dashboard_configuration_application_router_with_executor,
-    dashboard_feedback_application_router_with_executor, http_application_router_with_executor,
+    dashboard_feedback_application_router_with_executor,
+    dashboard_work_application_router_with_executor, http_application_router_with_executor,
 };
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
@@ -885,6 +886,7 @@ struct ActiveProjectApplicationRoutes {
     http_router: Router,
     dashboard_configuration_router: Router,
     dashboard_feedback_router: Router,
+    dashboard_work_router: Router,
     executor: Option<Arc<dyn DaemonInvocationExecutor>>,
 }
 
@@ -932,10 +934,17 @@ impl ActiveProjectApplicationRoutes {
         .map_err(|error| TraceDecayError::Config {
             message: format!("could not mount dashboard feedback routes: {error}"),
         })?;
+        let dashboard_work_router = dashboard_work_application_router_with_executor(Arc::clone(
+            &executor,
+        ))
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not mount dashboard Work routes: {error}"),
+        })?;
         Ok(Self {
             http_router,
             dashboard_configuration_router,
             dashboard_feedback_router,
+            dashboard_work_router,
             executor: Some(executor),
         })
     }
@@ -1031,17 +1040,14 @@ fn router_with_active_application(
         .fallback(get(assets::app_spa_fallback))
         .with_state(runtime);
     match application {
-        Some(application) => {
-            let work_router = work_api::router(application.http_router.clone());
-            router
-                .nest("/api/application", application.http_router)
-                .nest("/api/work", work_router)
-                .nest("/api/feedback", application.dashboard_feedback_router)
-                .nest(
-                    "/api/dashboard/application",
-                    application.dashboard_configuration_router,
-                )
-        }
+        Some(application) => router
+            .nest("/api/application", application.http_router)
+            .nest("/api/work", application.dashboard_work_router)
+            .nest("/api/feedback", application.dashboard_feedback_router)
+            .nest(
+                "/api/dashboard/application",
+                application.dashboard_configuration_router,
+            ),
         None => router,
     }
 }
@@ -1882,6 +1888,8 @@ mod authority_tests {
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
             dashboard_feedback_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::OK })),
+            dashboard_work_router: Router::new()
+                .route("/snapshot", post(|| async { StatusCode::NO_CONTENT })),
             executor: None,
         };
         let app = router_with_active_application(state, Some(application));

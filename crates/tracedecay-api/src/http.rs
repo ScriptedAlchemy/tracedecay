@@ -21,7 +21,7 @@ use tracedecay_tool_catalog::{
 
 use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
 
-const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -588,7 +588,7 @@ pub(crate) fn invalid_request_problem(
     )
 }
 
-fn adapter_problem(
+pub(crate) fn adapter_problem(
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> ApplicationProblemEnvelope {
@@ -602,7 +602,7 @@ fn adapter_problem(
         .with_owning_layer(ProblemOwningLayer::Adapter)
 }
 
-fn invalid_request_response(
+pub(crate) fn invalid_request_response(
     request_id: RequestId,
     code: &'static str,
     message: &'static str,

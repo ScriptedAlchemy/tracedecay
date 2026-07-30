@@ -19,6 +19,7 @@ pub mod read_model;
 pub mod remediation;
 pub mod remote;
 mod sse;
+pub mod work;
 
 use serde::Serialize;
 use thiserror::Error;
@@ -36,6 +37,10 @@ pub use http::{
     feedback_application_router, http_route_documents,
 };
 pub use sse::sse_response;
+pub use work::{
+    WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
+    WorkOperationFamily, work_application_router, work_core_router, work_invalid_request_response,
+};
 
 /// A resolved canonical invocation result ready for HTTP presentation.
 pub struct CanonicalInvocationResult<T> {

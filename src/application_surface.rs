@@ -23,7 +23,7 @@ use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
-    HttpApplicationRequest, application_problem_response, sse_response,
+    HttpApplicationRequest, WorkOperation, application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -1126,166 +1126,191 @@ pub fn http_application_invoker(
 fn work_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    validate_work_catalog_bindings()?;
+    Ok(tracedecay_api::work_application_router(WorkExecutorOwner {
+        executor,
+    }))
+}
+
+/// Refuse to mount Work unless the catalog advertises every descriptor
+/// operation at exactly the path this build answers on.
+///
+/// The descriptor and the catalog are two statements of the same surface, and a
+/// mount that disagreed with the catalog would advertise routes nobody serves.
+pub(crate) fn validate_work_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
     let registry = tracedecay_application::work_executable_binding_registry()
         .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
-    for operation in [
-        "snapshot",
-        "delta",
-        "create",
-        "replan_dependencies",
-        "review_proposal",
-        "accept_proposal",
-        "admit_execution",
-        "attach_runtime_evidence",
-        "accept_task",
-        "attempt_acquire_lease",
-        "attempt_renew_lease",
-        "attempt_start",
-        "attempt_publish_progress",
-        "attempt_publish_artifact",
-        "attempt_cancel",
-        "attempt_recover",
-        "attempt_terminalize",
-    ] {
-        let operation_id =
-            tracedecay_tool_catalog::OperationId::new(format!("operation.work.{operation}"))
-                .map_err(ApplicationSurfaceAdapterError::Identifier)?;
-        if registry
+    for operation in WorkOperation::ALL {
+        let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
+            .map_err(ApplicationSurfaceAdapterError::Identifier)?;
+        let Some(binding) = registry
             .get(&operation_id)
             .and_then(|availability| availability.binding())
-            .is_none()
-        {
+        else {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        };
+        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        };
+        if route_path != operation.application_route_path() {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }
     }
-    Ok(axum::Router::new()
-        .route("/work/snapshot", post(work_snapshot))
-        .route("/work/delta", post(work_delta))
-        .route("/work/create", post(work_create))
-        .route("/work/replan-dependencies", post(work_replan_dependencies))
-        .route("/work/review-proposal", post(work_review_proposal))
-        .route("/work/accept-proposal", post(work_accept_proposal))
-        .route("/work/admit-execution", post(work_admit_execution))
-        .route(
-            "/work/attach-runtime-evidence",
-            post(work_attach_runtime_evidence),
-        )
-        .route("/work/accept-task", post(work_accept_task))
-        .route(
-            "/work/attempt/acquire-lease",
-            post(work_attempt_acquire_lease),
-        )
-        .route("/work/attempt/renew-lease", post(work_attempt_renew_lease))
-        .route("/work/attempt/start", post(work_attempt_start))
-        .route(
-            "/work/attempt/publish-progress",
-            post(work_attempt_publish_progress),
-        )
-        .route(
-            "/work/attempt/publish-artifact",
-            post(work_attempt_publish_artifact),
-        )
-        .route("/work/attempt/cancel", post(work_attempt_cancel))
-        .route("/work/attempt/recover", post(work_attempt_recover))
-        .route("/work/attempt/terminalize", post(work_attempt_terminalize))
-        .with_state(executor))
+    Ok(())
 }
 
-macro_rules! work_application_http_handler {
-    ($name:ident, $request:ty, $request_variant:ident, $outcome_variant:ident, $output:ty) => {
-        async fn $name(
-            State(executor): State<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
-            Extension(request_id): Extension<RequestId>,
-            Extension(controls): Extension<HttpApplicationControls>,
-            Json(request): Json<$request>,
-        ) -> Response {
-            invoke_work_application_http::<$output>(
+/// The Work application owner: canonical dispatch behind every Work route,
+/// whichever router mounted it.
+#[derive(Clone)]
+pub(crate) struct WorkExecutorOwner {
+    pub(crate) executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+}
+
+impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
+    fn invoke_work(
+        &self,
+        request: tracedecay_api::WorkHttpRequest,
+    ) -> tracedecay_api::WorkInvocationFuture {
+        Box::pin(invoke_work_operation(Arc::clone(&self.executor), request))
+    }
+}
+
+async fn invoke_work_operation(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    request: tracedecay_api::WorkHttpRequest,
+) -> Response {
+    let tracedecay_api::WorkHttpRequest {
+        operation,
+        request_id,
+        controls,
+        body,
+    } = request;
+
+    macro_rules! core {
+        ($request_ty:ty, $variant:ident, $output:ty) => {{
+            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
+                return tracedecay_api::work_invalid_request_response(request_id);
+            };
+            let invocation = crate::daemon::DaemonInvocationRequest::work_application(
+                request_id.as_str(),
+                WorkApplicationInvocationV1::$variant(decoded),
+                crate::daemon_client::invocation_now_micros(),
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            invoke_work_http::<$output>(
                 executor,
+                operation,
                 request_id,
                 controls,
-                WorkApplicationInvocationV1::$request_variant(request),
+                invocation,
                 |outcome| match outcome {
-                    WorkApplicationOutcomeV1::$outcome_variant(outcome) => Some(outcome),
+                    crate::daemon::DaemonInvocationOutcome::WorkApplication { scope, outcome } => {
+                        match outcome {
+                            WorkApplicationOutcomeV1::$variant(outcome) => Some((scope, outcome)),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 },
             )
             .await
+        }};
+    }
+
+    macro_rules! attempt {
+        ($request_ty:ty, $variant:ident) => {{
+            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
+                return tracedecay_api::work_invalid_request_response(request_id);
+            };
+            let invocation = crate::daemon::DaemonInvocationRequest::work_attempt(
+                request_id.as_str(),
+                WorkAttemptInvocationV1::$variant(decoded),
+                crate::daemon_client::invocation_now_micros(),
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            invoke_work_http::<WorkAttemptResponseV1>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                invocation,
+                |outcome| match outcome {
+                    crate::daemon::DaemonInvocationOutcome::WorkAttempt { scope, outcome } => {
+                        Some((scope, outcome))
+                    }
+                    _ => None,
+                },
+            )
+            .await
+        }};
+    }
+
+    match operation {
+        WorkOperation::Snapshot => core!(
+            WorkProjectionSnapshotRequestV1,
+            Snapshot,
+            WorkProjectionSnapshotV1
+        ),
+        WorkOperation::Delta => core!(WorkProjectionDeltaRequestV1, Delta, WorkProjectionDeltaV1),
+        WorkOperation::Create => core!(CreateWorkCommand, Create, WorkProjection),
+        WorkOperation::ReplanDependencies => {
+            core!(
+                ReplanDependenciesCommand,
+                ReplanDependencies,
+                WorkProjection
+            )
         }
-    };
+        WorkOperation::ReviewProposal => {
+            core!(ReviewProposalRequestV1, ReviewProposal, WorkProjection)
+        }
+        WorkOperation::AcceptProposal => {
+            core!(AcceptProposalCommand, AcceptProposal, WorkProjection)
+        }
+        WorkOperation::AdmitExecution => {
+            core!(AdmitExecutionCommand, AdmitExecution, WorkProjection)
+        }
+        WorkOperation::AttachRuntimeEvidence => core!(
+            AttachRuntimeEvidenceCommand,
+            AttachRuntimeEvidence,
+            WorkProjection
+        ),
+        WorkOperation::AcceptTask => core!(AcceptTaskCommand, AcceptTask, WorkProjection),
+        WorkOperation::AttemptAcquireLease => {
+            attempt!(WorkAttemptAcquireLeaseRequestV1, AcquireLease)
+        }
+        WorkOperation::AttemptRenewLease => attempt!(WorkAttemptRenewLeaseRequestV1, RenewLease),
+        WorkOperation::AttemptStart => attempt!(WorkAttemptStartRequestV1, Start),
+        WorkOperation::AttemptPublishProgress => {
+            attempt!(WorkAttemptPublishProgressRequestV1, PublishProgress)
+        }
+        WorkOperation::AttemptPublishArtifact => {
+            attempt!(WorkAttemptPublishArtifactRequestV1, PublishArtifact)
+        }
+        WorkOperation::AttemptCancel => attempt!(WorkAttemptCancelRequestV1, Cancel),
+        WorkOperation::AttemptRecover => attempt!(WorkAttemptRecoverRequestV1, Recover),
+        WorkOperation::AttemptTerminalize => attempt!(WorkAttemptTerminalizeRequestV1, Terminalize),
+    }
 }
 
-work_application_http_handler!(
-    work_snapshot,
-    WorkProjectionSnapshotRequestV1,
-    Snapshot,
-    Snapshot,
-    WorkProjectionSnapshotV1
-);
-work_application_http_handler!(
-    work_delta,
-    WorkProjectionDeltaRequestV1,
-    Delta,
-    Delta,
-    WorkProjectionDeltaV1
-);
-work_application_http_handler!(
-    work_create,
-    CreateWorkCommand,
-    Create,
-    Create,
-    WorkProjection
-);
-work_application_http_handler!(
-    work_replan_dependencies,
-    ReplanDependenciesCommand,
-    ReplanDependencies,
-    ReplanDependencies,
-    WorkProjection
-);
-work_application_http_handler!(
-    work_review_proposal,
-    ReviewProposalRequestV1,
-    ReviewProposal,
-    ReviewProposal,
-    WorkProjection
-);
-work_application_http_handler!(
-    work_accept_proposal,
-    AcceptProposalCommand,
-    AcceptProposal,
-    AcceptProposal,
-    WorkProjection
-);
-work_application_http_handler!(
-    work_admit_execution,
-    AdmitExecutionCommand,
-    AdmitExecution,
-    AdmitExecution,
-    WorkProjection
-);
-work_application_http_handler!(
-    work_attach_runtime_evidence,
-    AttachRuntimeEvidenceCommand,
-    AttachRuntimeEvidence,
-    AttachRuntimeEvidence,
-    WorkProjection
-);
-work_application_http_handler!(
-    work_accept_task,
-    AcceptTaskCommand,
-    AcceptTask,
-    AcceptTask,
-    WorkProjection
-);
-
-async fn invoke_work_application_http<T>(
+/// Dispatch one Work operation and encode its canonical result.
+///
+/// Core and attempt operations differ only in which daemon payload carries them
+/// and which outcome they answer with, so both arrive here: one binding lookup,
+/// one cancellation policy, one problem taxonomy.
+async fn invoke_work_http<T>(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    operation: WorkOperation,
     request_id: RequestId,
     controls: HttpApplicationControls,
-    request: WorkApplicationInvocationV1,
+    invocation: crate::daemon::DaemonInvocationRequest,
     select_outcome: fn(
-        WorkApplicationOutcomeV1,
-    ) -> Option<tracedecay_application::ApplicationOutcome<T>>,
+        crate::daemon::DaemonInvocationOutcome,
+    ) -> Option<(
+        tracedecay_application::ResolvedScope,
+        tracedecay_application::ApplicationOutcome<T>,
+    )>,
 ) -> Response
 where
     T: Serialize,
@@ -1294,10 +1319,7 @@ where
         Ok(registry) => registry,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let operation_key = request.operation_key();
-    let operation_id = match tracedecay_tool_catalog::OperationId::new(format!(
-        "operation.work.{operation_key}"
-    )) {
+    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
         Ok(operation_id) => operation_id,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
@@ -1318,61 +1340,18 @@ where
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
     let binding_id = binding_id.clone();
-    let observed_at = crate::daemon_client::invocation_now_micros();
-    let policy = if request.is_read_only() {
+    let policy = if operation.is_read_only() {
         InvocationCancellationPolicy::ReadOnly
     } else {
         InvocationCancellationPolicy::AuthoritativeEffect
     };
-    let invocation = crate::daemon::DaemonInvocationRequest::work_application(
-        request_id.as_str(),
-        request,
-        observed_at,
-        controls.deadline.clone(),
-        controls.cancellation.context(),
-    );
     let response = executor
         .invoke_controlled(invocation, controls.deadline, controls.cancellation, policy)
         .await;
-    match response {
-        Ok(crate::daemon::DaemonInvocationResponse {
-            outcome: crate::daemon::DaemonInvocationOutcome::WorkApplication { scope, outcome },
-            ..
-        }) => match select_outcome(outcome) {
-            Some(outcome) => CanonicalInvocationResult::new(
-                binding_id,
-                Ok(ApplicationEnvelope {
-                    contract: result_contract,
-                    request_id,
-                    scope,
-                    outcome,
-                }),
-            )
-            .into_http_response(),
-            None => work_application_problem_response::<T>(
-                binding_id,
-                result_contract,
-                request_id,
-                ApplicationProblem::unavailable(SafeDiagnostic {
-                    code: "work.protocol_unavailable".to_owned(),
-                    message: "The Work application protocol is unavailable".to_owned(),
-                }),
-            ),
-        },
-        Ok(crate::daemon::DaemonInvocationResponse {
-            outcome: crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem },
-            ..
-        }) => {
-            work_application_problem_response::<T>(binding_id, result_contract, request_id, problem)
-        }
-        Ok(crate::daemon::DaemonInvocationResponse {
-            outcome: crate::daemon::DaemonInvocationOutcome::Problem { problem },
-            ..
-        }) => work_application_problem_response::<T>(
-            binding_id,
-            result_contract,
-            request_id,
-            match problem {
+    let problem = match response {
+        Ok(crate::daemon::DaemonInvocationResponse { outcome, .. }) => match outcome {
+            crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem } => problem,
+            crate::daemon::DaemonInvocationOutcome::Problem { problem } => match problem {
                 crate::daemon::DaemonInvocationProblem::InvalidRequest
                 | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
                     ApplicationProblem::InvalidRequest {
@@ -1394,252 +1373,44 @@ where
                     })
                 }
             },
-        ),
-        Ok(_) => work_application_problem_response::<T>(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "work.protocol_unavailable".to_owned(),
-                message: "The Work application protocol is unavailable".to_owned(),
-            }),
-        ),
-        Err(DaemonInvocationError::Cancelled { .. }) => work_application_problem_response::<T>(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::cancelled_before_admission(),
-        ),
-        Err(DaemonInvocationError::TimedOut { .. }) => work_application_problem_response::<T>(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::timed_out_before_admission(),
-        ),
+            outcome => match select_outcome(outcome) {
+                Some((scope, outcome)) => {
+                    return CanonicalInvocationResult::new(
+                        binding_id,
+                        Ok(ApplicationEnvelope {
+                            contract: result_contract,
+                            request_id,
+                            scope,
+                            outcome,
+                        }),
+                    )
+                    .into_http_response();
+                }
+                None => ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "work.protocol_unavailable".to_owned(),
+                    message: "The Work application protocol is unavailable".to_owned(),
+                }),
+            },
+        },
+        Err(DaemonInvocationError::Cancelled { .. }) => {
+            ApplicationProblem::cancelled_before_admission()
+        }
+        Err(DaemonInvocationError::TimedOut { .. }) => {
+            ApplicationProblem::timed_out_before_admission()
+        }
         Err(
             DaemonInvocationError::Saturated { .. }
             | DaemonInvocationError::Backpressured { .. }
             | DaemonInvocationError::Unavailable,
-        ) => work_application_problem_response::<T>(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "work.transport_unavailable".to_owned(),
-                message: "The Work application transport is unavailable".to_owned(),
-            }),
-        ),
-    }
-}
-
-fn work_application_problem_response<T>(
-    binding_id: tracedecay_tool_catalog::BindingId,
-    contract: ResultContractRef,
-    request_id: RequestId,
-    problem: ApplicationProblem,
-) -> Response
-where
-    T: Serialize,
-{
+        ) => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "work.transport_unavailable".to_owned(),
+            message: "The Work application transport is unavailable".to_owned(),
+        }),
+    };
     CanonicalInvocationResult::<T>::new(
         binding_id,
         Err(
-            ApplicationProblemEnvelope::new(contract, request_id, problem)
-                .with_owning_layer(ProblemOwningLayer::Runtime),
-        ),
-    )
-    .into_http_response()
-}
-
-macro_rules! work_attempt_http_handler {
-    ($name:ident, $request:ty, $variant:ident) => {
-        async fn $name(
-            State(executor): State<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
-            Extension(request_id): Extension<RequestId>,
-            Extension(controls): Extension<HttpApplicationControls>,
-            Json(request): Json<$request>,
-        ) -> Response {
-            invoke_work_attempt_http(
-                executor,
-                request_id,
-                controls,
-                WorkAttemptInvocationV1::$variant(request),
-            )
-            .await
-        }
-    };
-}
-
-work_attempt_http_handler!(
-    work_attempt_acquire_lease,
-    WorkAttemptAcquireLeaseRequestV1,
-    AcquireLease
-);
-work_attempt_http_handler!(
-    work_attempt_renew_lease,
-    WorkAttemptRenewLeaseRequestV1,
-    RenewLease
-);
-work_attempt_http_handler!(work_attempt_start, WorkAttemptStartRequestV1, Start);
-work_attempt_http_handler!(
-    work_attempt_publish_progress,
-    WorkAttemptPublishProgressRequestV1,
-    PublishProgress
-);
-work_attempt_http_handler!(
-    work_attempt_publish_artifact,
-    WorkAttemptPublishArtifactRequestV1,
-    PublishArtifact
-);
-work_attempt_http_handler!(work_attempt_cancel, WorkAttemptCancelRequestV1, Cancel);
-work_attempt_http_handler!(work_attempt_recover, WorkAttemptRecoverRequestV1, Recover);
-work_attempt_http_handler!(
-    work_attempt_terminalize,
-    WorkAttemptTerminalizeRequestV1,
-    Terminalize
-);
-
-async fn invoke_work_attempt_http(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-    request_id: RequestId,
-    controls: HttpApplicationControls,
-    request: WorkAttemptInvocationV1,
-) -> Response {
-    let registry = match tracedecay_application::work_executable_binding_registry() {
-        Ok(registry) => registry,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let operation_id = match tracedecay_tool_catalog::OperationId::new(format!(
-        "operation.work.{}",
-        request.operation_key()
-    )) {
-        Ok(operation_id) => operation_id,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let Some(binding) = registry
-        .get(&operation_id)
-        .and_then(|availability| availability.binding())
-    else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let result_contract = match ResultContractRef::new(
-        binding.result_schema().schema_ref().schema_id().clone(),
-        binding.result_schema().schema_ref().revision(),
-    ) {
-        Ok(contract) => contract,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    let binding_id = binding_id.clone();
-    let observed_at = crate::daemon_client::invocation_now_micros();
-    let invocation = crate::daemon::DaemonInvocationRequest::work_attempt(
-        request_id.as_str(),
-        request,
-        observed_at,
-        controls.deadline.clone(),
-        controls.cancellation.context(),
-    );
-    let response = executor
-        .invoke_controlled(
-            invocation,
-            controls.deadline,
-            controls.cancellation,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-        )
-        .await;
-    match response {
-        Ok(crate::daemon::DaemonInvocationResponse {
-            outcome: crate::daemon::DaemonInvocationOutcome::WorkAttempt { scope, outcome },
-            ..
-        }) => CanonicalInvocationResult::new(
-            binding_id,
-            Ok(ApplicationEnvelope {
-                contract: result_contract,
-                request_id,
-                scope,
-                outcome,
-            }),
-        )
-        .into_http_response(),
-        Ok(crate::daemon::DaemonInvocationResponse {
-            outcome: crate::daemon::DaemonInvocationOutcome::Problem { problem },
-            ..
-        }) => work_attempt_problem_response(
-            binding_id,
-            result_contract,
-            request_id,
-            match problem {
-                crate::daemon::DaemonInvocationProblem::InvalidRequest
-                | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
-                    ApplicationProblem::InvalidRequest {
-                        diagnostic: SafeDiagnostic {
-                            code: "work.invalid_request".to_owned(),
-                            message: "The Work attempt request is invalid".to_owned(),
-                        },
-                        retry: RetryDirective::Never,
-                        legal_actions: vec![LegalAction::CorrectRequest],
-                    }
-                }
-                crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-                }
-                crate::daemon::DaemonInvocationProblem::Unavailable => {
-                    ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "work.unavailable".to_owned(),
-                        message: "The Work attempt runtime is unavailable".to_owned(),
-                    })
-                }
-            },
-        ),
-        Ok(_) => work_attempt_problem_response(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "work.protocol_unavailable".to_owned(),
-                message: "The Work attempt protocol is unavailable".to_owned(),
-            }),
-        ),
-        Err(DaemonInvocationError::Cancelled { .. }) => work_attempt_problem_response(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::cancelled_before_admission(),
-        ),
-        Err(DaemonInvocationError::TimedOut { .. }) => work_attempt_problem_response(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::timed_out_before_admission(),
-        ),
-        Err(
-            DaemonInvocationError::Saturated { .. }
-            | DaemonInvocationError::Backpressured { .. }
-            | DaemonInvocationError::Unavailable,
-        ) => work_attempt_problem_response(
-            binding_id,
-            result_contract,
-            request_id,
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "work.transport_unavailable".to_owned(),
-                message: "The Work attempt transport is unavailable".to_owned(),
-            }),
-        ),
-    }
-}
-
-fn work_attempt_problem_response(
-    binding_id: tracedecay_tool_catalog::BindingId,
-    contract: ResultContractRef,
-    request_id: RequestId,
-    problem: ApplicationProblem,
-) -> Response {
-    CanonicalInvocationResult::<WorkAttemptResponseV1>::new(
-        binding_id,
-        Err(
-            ApplicationProblemEnvelope::new(contract, request_id, problem)
+            ApplicationProblemEnvelope::new(result_contract, request_id, problem)
                 .with_owning_layer(ProblemOwningLayer::Runtime),
         ),
     )
@@ -1714,6 +1485,24 @@ pub fn http_application_router_with_executor(
             cancellations,
             Some(event_executor),
         )),
+    )
+}
+
+/// Build the dashboard's public Work mount.
+///
+/// It is the core route subset of the application Work router: the same
+/// descriptor, the same owner, the same dispatch and problem taxonomy. The
+/// attempt-runtime routes are simply not registered here, so the lease protocol
+/// is unreachable from the dashboard rather than merely undocumented.
+pub fn dashboard_work_application_router_with_executor(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    validate_work_catalog_bindings()?;
+    let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
+    Ok(
+        tracedecay_api::work_core_router(WorkExecutorOwner { executor }).layer(
+            axum::middleware::from_fn_with_state(cancellations, application_http_context),
+        ),
     )
 }
 
