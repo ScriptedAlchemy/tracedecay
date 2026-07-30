@@ -37,12 +37,36 @@ export type WorkWireState =
    * lie about a contract that had already landed. */
   | { readonly kind: 'landed'; readonly surface: WithheldSurface; readonly contract: string };
 
-/** Matched by prefix so `WorkProjectionSnapshot`, `WorkProjectionSnapshotV1` and
- * `WorkProjectionSnapshotV1Schema` all count as the same arrival. */
+/**
+ * What codegen is allowed to add to a watched name and still mean the same type.
+ *
+ * Exactly the revision suffix and the zod const: `WorkProjectionSnapshot`,
+ * `WorkProjectionSnapshotV1`, `WorkProjectionSnapshotSchema` and
+ * `WorkProjectionSnapshotV1Schema` are one arrival.
+ */
+const CONTRACT_SUFFIX = /^(V\d+)?(Schema)?$/;
+
+/**
+ * Whether one generated export is the watched contract, anchored rather than a
+ * bare prefix.
+ *
+ * A bare prefix lets a different type stand in for the row that needs it. The
+ * domain mints `WorkCommandId`, `WorkCancellationRequestId` and
+ * `WorkProviderRouteId` as schemars string-id newtypes beside the payloads that
+ * carry them, so any Work read model embedding one would generate the
+ * *identifier* schema — and an unanchored match would read that as the
+ * *payload* arriving and have this page announce a contract that had not
+ * landed. Fabricating an arrival is the same failure as denying one, just in
+ * the other direction.
+ */
+function isContract(name: string, watched: string): boolean {
+  return name.startsWith(watched) && CONTRACT_SUFFIX.test(name.slice(watched.length));
+}
+
 function contractFor(surface: WithheldSurface, exports: ReadonlySet<string>): string | undefined {
   for (const watched of surface.watches) {
     for (const name of exports) {
-      if (name.startsWith(watched)) return name;
+      if (isContract(name, watched)) return name;
     }
   }
   return undefined;
