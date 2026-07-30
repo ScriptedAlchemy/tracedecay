@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::mcp::ToolResult;
+use tracedecay_sessions::WorkflowIndexReadPort;
 
 struct PreparedToolCall {
     tool_name: String,
