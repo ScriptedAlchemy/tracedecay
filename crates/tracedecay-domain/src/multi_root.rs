@@ -258,6 +258,7 @@ pub enum ScopeUnavailableReasonV1 {
 /// with a successful empty result.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "outcome", content = "value", rename_all = "snake_case")]
+#[schemars(rename = "ScopeOutcome_for_{T}")]
 pub enum ScopeOutcome<T> {
     Exact(T),
     Partial {
@@ -303,6 +304,7 @@ impl<T> ScopeOutcome<T> {
 /// One typed outcome pinned to the digest of an exact resolved root.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "RootScopeOutcomeV1_for_{T}")]
 pub struct RootScopeOutcomeV1<T> {
     pub scope_digest: ManifestDigest,
     pub outcome: ScopeOutcome<T>,
