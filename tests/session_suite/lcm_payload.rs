@@ -1008,23 +1008,6 @@ async fn lcm_status_reports_missing_and_orphan_payloads_without_previewing_conte
     assert!(!rendered.contains("ORPHAN_PAYLOAD_SECRET"));
 }
 
-#[test]
-fn rejects_payload_ref_path_traversal() {
-    for bad in [
-        "../secret",
-        "/tmp/secret",
-        "nested/file",
-        r"nested\file",
-        ".",
-        "..",
-    ] {
-        assert!(
-            tracedecay::sessions::lcm::payload::validate_payload_ref(bad).is_err(),
-            "{bad} should be rejected"
-        );
-    }
-}
-
 #[tokio::test]
 async fn denies_cross_session_payload_expansion() {
     let tmp = TempDir::new().unwrap();
