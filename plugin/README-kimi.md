@@ -1,18 +1,35 @@
 # TraceDecay Kimi Code Plugin
 
-This bundle is installed by:
+Stage this bundle for host-native installation by running:
 
 ```bash
 tracedecay install --agent kimi
 ```
 
-The installer writes a real plugin directory (not a symlink) to
-`$KIMI_CODE_HOME/plugins/managed/tracedecay/`, where `KIMI_CODE_HOME` resolves
-to the `$KIMI_CODE_HOME` environment variable when set and `~/.kimi-code`
-otherwise. The MCP server command is rewritten to the resolved absolute
-`tracedecay` executable path so Kimi Code does not depend on shell `PATH`.
+TraceDecay writes a complete plugin tree to
+`~/.tracedecay/host-bundle-stage/kimi/tracedecay` and prints the exact deferred
+remediation. Kimi Code owns its plugin registry, so TraceDecay does not edit
+`$KIMI_CODE_HOME/plugins/installed.json` or the current managed plugin tree.
+For install and update, open Kimi Code and run:
 
-Run `/reload` or start a new session after installing or replacing the plugin:
+```text
+/plugins install <staged-path>
+```
+
+Replace `<staged-path>` with the exact path printed by TraceDecay. For
+uninstall, run this in Kimi Code:
+
+```text
+/plugins remove tracedecay
+```
+
+Then re-run TraceDecay repair or doctor to verify the host-native registration.
+`KIMI_CODE_HOME` resolves to the environment variable when set and
+`~/.kimi-code` otherwise. The staged manifest rewrites the MCP server command
+to the resolved absolute `tracedecay` executable path so Kimi Code does not
+depend on shell `PATH`.
+
+Run `/reload` or start a new session after installing, updating, or removing the plugin:
 Kimi Code picks up manifest, skill, and command changes only on reload. The
 `/plugins` manager lists the installed TraceDecay plugin and its state.
 
@@ -50,11 +67,12 @@ after the command replaces `$ARGUMENTS` in the command body.
 
 ## Local development
 
-For checkout dogfooding, install the generated Kimi projection after edits:
+For checkout dogfooding, stage the generated Kimi projection after edits:
 
 ```bash
 tracedecay install --agent kimi
 ```
 
-The install path rewrites the MCP command to the absolute binary path. Run
-`/reload` (or start a new session) after reinstalling.
+Complete the printed `/plugins install <staged-path>` action in Kimi Code. The
+staged manifest rewrites the MCP command to the absolute binary path. Run
+`/reload` (or start a new session) after replacing the plugin.
