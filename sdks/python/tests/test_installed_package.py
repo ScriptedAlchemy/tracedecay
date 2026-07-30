@@ -217,7 +217,7 @@ token = os.environ["TRACEDECAY_SDK_TOKEN"]
 
 for mode in ("local",):
     client = TraceDecayClient.local(base_url, project_id=project_id, token=token)
-    if len(SERVER_OPERATIONS) != 81 or len(UNAVAILABLE_OPERATIONS) != 64:
+    if len(SERVER_OPERATIONS) != 82 or len(UNAVAILABLE_OPERATIONS) != 64:
         raise AssertionError("installed operation availability inventory drifted")
     if any(value != "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values()):
         raise AssertionError("base routes must remain typed schema-unavailable")
