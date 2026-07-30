@@ -70,56 +70,56 @@ pub fn dashboard_configuration_write_route(
 }
 
 /// Project-scoped settings patch accepted by `PATCH /api/settings/project`.
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSettingsPatch {
     pub expected_revision_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_file_size: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extract_docstrings: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_call_sites: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ignore: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetrySettingsPatch>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncSettingsPatch>,
 }
 
 /// Nested synchronization settings patch.
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SyncSettingsPatch {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_track_pr_branches: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_track_pr_poll_secs: Option<u64>,
 }
 
 /// Nested telemetry settings patch.
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetrySettingsPatch {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timings: Option<bool>,
 }
 
 /// Profile-scoped settings patch accepted by `PATCH /api/settings/user`.
-#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UserSettingsPatch {
     pub expected_revision_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_enabled: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_debounce: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_timeout_secs: Option<u64>,
 }
 
@@ -258,4 +258,31 @@ fn serde_error_field(message: &str) -> Option<String> {
             let end = rest.find('`')?;
             Some(rest[..end].to_owned())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProjectSettingsPatch, UserSettingsPatch};
+    use serde_json::json;
+
+    #[test]
+    fn settings_patches_omit_absent_edits_when_serialized() {
+        let project = ProjectSettingsPatch {
+            expected_revision_id: "project-revision".to_owned(),
+            ..ProjectSettingsPatch::default()
+        };
+        assert_eq!(
+            serde_json::to_value(project).expect("serialize project settings patch"),
+            json!({ "expected_revision_id": "project-revision" })
+        );
+
+        let user = UserSettingsPatch {
+            expected_revision_id: "user-revision".to_owned(),
+            ..UserSettingsPatch::default()
+        };
+        assert_eq!(
+            serde_json::to_value(user).expect("serialize user settings patch"),
+            json!({ "expected_revision_id": "user-revision" })
+        );
+    }
 }
