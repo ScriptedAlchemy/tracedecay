@@ -8720,14 +8720,25 @@ mod tests {
             order: tracedecay_application::RetrievalOrder::Relevance,
             cursor: None,
         };
+        #[derive(Clone, Copy)]
+        enum RequestCase {
+            ExactOccurrence,
+            PhraseSearch,
+            Callees,
+            Facets,
+            Timeline,
+            Declaration,
+            Definition,
+            TypeDefinition,
+            References,
+        }
         let navigation = |node_id: &str| crate::application_surface::CodeNavigationSurfaceRequest {
             node_id: node_id.to_owned(),
             scope: scope.clone(),
             meta: meta.clone(),
         };
-        let cases = [
-            (
-                crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+        let request = |case| match case {
+            RequestCase::ExactOccurrence => {
                 crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(
                     crate::application_surface::CodeExactOccurrenceSurfaceRequest {
                         literal: "CallableCode".to_owned(),
@@ -8735,10 +8746,9 @@ mod tests {
                         scope: scope.clone(),
                         meta: meta.clone(),
                     },
-                ),
-            ),
-            (
-                crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+                )
+            }
+            RequestCase::PhraseSearch => {
                 crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(
                     crate::application_surface::CodePhraseSearchSurfaceRequest {
                         query: "callable code".to_owned(),
@@ -8748,10 +8758,9 @@ mod tests {
                         scope: scope.clone(),
                         meta: meta.clone(),
                     },
-                ),
-            ),
-            (
-                crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+                )
+            }
+            RequestCase::Callees => {
                 crate::application_surface::CallableCodeSurfaceRequest::Callees(
                     crate::application_surface::CodeCalleesSurfaceRequest {
                         node_id: "node.callable-code".to_owned(),
@@ -8760,50 +8769,80 @@ mod tests {
                         scope: scope.clone(),
                         meta: meta.clone(),
                     },
-                ),
+                )
+            }
+            RequestCase::Facets => crate::application_surface::CallableCodeSurfaceRequest::Facets(
+                crate::application_surface::CodeFacetSurfaceRequest {
+                    dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
+                    scope: scope.clone(),
+                    meta: meta.clone(),
+                },
             ),
-            (
-                crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
-                crate::application_surface::CallableCodeSurfaceRequest::Facets(
-                    crate::application_surface::CodeFacetSurfaceRequest {
-                        dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
-                        scope: scope.clone(),
-                        meta: meta.clone(),
-                    },
-                ),
-            ),
-            (
-                crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+            RequestCase::Timeline => {
                 crate::application_surface::CallableCodeSurfaceRequest::Timeline(
                     crate::application_surface::CodeTimelineSurfaceRequest {
                         scope: scope.clone(),
                         meta: meta.clone(),
                     },
-                ),
+                )
+            }
+            RequestCase::Declaration => {
+                crate::application_surface::CallableCodeSurfaceRequest::Declaration(navigation(
+                    "node.declaration",
+                ))
+            }
+            RequestCase::Definition => {
+                crate::application_surface::CallableCodeSurfaceRequest::Definition(navigation(
+                    "node.definition",
+                ))
+            }
+            RequestCase::TypeDefinition => {
+                crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(navigation(
+                    "node.type-definition",
+                ))
+            }
+            RequestCase::References => {
+                crate::application_surface::CallableCodeSurfaceRequest::References(navigation(
+                    "node.references",
+                ))
+            }
+        };
+        let cases = [
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+                RequestCase::ExactOccurrence,
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+                RequestCase::PhraseSearch,
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+                RequestCase::Callees,
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+                RequestCase::Facets,
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+                RequestCase::Timeline,
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
-                crate::application_surface::CallableCodeSurfaceRequest::Declaration(navigation(
-                    "node.declaration",
-                )),
+                RequestCase::Declaration,
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
-                crate::application_surface::CallableCodeSurfaceRequest::Definition(navigation(
-                    "node.definition",
-                )),
+                RequestCase::Definition,
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
-                crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(navigation(
-                    "node.type-definition",
-                )),
+                RequestCase::TypeDefinition,
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
-                crate::application_surface::CallableCodeSurfaceRequest::References(navigation(
-                    "node.references",
-                )),
+                RequestCase::References,
             ),
         ];
         let page = tracedecay_application::PageRequest::first(16).expect("page");
@@ -8811,7 +8850,7 @@ mod tests {
         let cancellation =
             CancellationContext::active("cancel.callable-code.matrix").expect("cancellation");
 
-        for (request_index, (_, request)) in cases.iter().enumerate() {
+        for (request_index, (_, request_case)) in cases.iter().enumerate() {
             for (operation_index, (operation, _)) in cases.iter().enumerate() {
                 let invocation = DaemonInvocationRequest {
                     protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -8822,7 +8861,7 @@ mod tests {
                     delivery_route: None,
                     payload: DaemonInvocationPayload::CallableCode {
                         surface_operation: *operation,
-                        request: request.clone(),
+                        request: request(*request_case),
                         page: page.clone(),
                         observed_at: UtcMicros(30),
                         deadline: deadline.clone(),
