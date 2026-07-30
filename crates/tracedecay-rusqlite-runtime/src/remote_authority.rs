@@ -18,12 +18,14 @@ use tracedecay_application::remote::capture::{
     RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
 use tracedecay_application::remote::replay::{
-    RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1, RemoteReplayFrameV1,
+    RemoteReplayApplicationErrorV1, RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1,
+    RemoteReplayFrameV1, RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
+    RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1,
 };
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1,
     EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EnrollmentGrantV1, EntityId,
-    RemoteAuthorityUnavailableReasonV1, UtcMicros,
+    RemoteAuthorityUnavailableReasonV1, RemoteRepositoryScopeV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_store::{AuthorityCasV1, ShardWatermarkV1, StoreRuntimeBindingV1};
 
@@ -75,6 +77,14 @@ CREATE TABLE IF NOT EXISTS remote_enrollment_credentials_v1 (
     credential_revision INTEGER NOT NULL CHECK (credential_revision > 0),
     enrollment_json TEXT NOT NULL,
     commit_receipt_json TEXT
+) STRICT;
+"#;
+
+const REMOTE_REPLAY_POLICY_SCHEMA_V1: &str = r#"
+CREATE TABLE IF NOT EXISTS remote_replay_policy_v1 (
+    scope_digest TEXT PRIMARY KEY,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+    evidence_json TEXT NOT NULL
 ) STRICT;
 "#;
 
@@ -487,6 +497,127 @@ impl RegisteredRemoteEnrollmentAuthorityV1 {
                 Ok(enrollment)
             })
             .collect()
+    }
+}
+
+#[derive(Clone)]
+pub struct RegisteredRemoteReplayPolicyAuthorityV1 {
+    handle: MigrationSqlHandle,
+}
+
+impl RegisteredRemoteReplayPolicyAuthorityV1 {
+    pub fn from_registered(
+        handle: MigrationSqlHandle,
+    ) -> Result<Self, RemoteReplayApplicationErrorV1> {
+        handle
+            .execute_batch(REMOTE_REPLAY_POLICY_SCHEMA_V1.to_owned())
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyUnavailable)?;
+        Ok(Self { handle })
+    }
+
+    pub fn provision(
+        &self,
+        evidence: &RemoteReplayPolicyEvidenceV1,
+    ) -> Result<(), RemoteReplayApplicationErrorV1> {
+        evidence.validate()?;
+        let scope_digest = canonical_sha256(&(
+            "tracedecay.remote-replay-policy-scope.v1",
+            &evidence.repository_scope,
+        ))
+        .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        let revision = i64::try_from(evidence.policy_revision)
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        let encoded = serde_json::to_string(evidence)
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        self.handle
+            .execute(
+                enrollment_statement(
+                    "INSERT INTO remote_replay_policy_v1 (
+                            scope_digest, policy_revision, evidence_json
+                         ) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(scope_digest) DO UPDATE SET
+                            policy_revision = excluded.policy_revision,
+                            evidence_json = excluded.evidence_json
+                         WHERE excluded.policy_revision > remote_replay_policy_v1.policy_revision
+                            OR (
+                                excluded.policy_revision = remote_replay_policy_v1.policy_revision
+                                AND excluded.evidence_json = remote_replay_policy_v1.evidence_json
+                            )",
+                    vec![
+                        MigrationSqlValue::Text(scope_digest.as_str().to_owned()),
+                        MigrationSqlValue::Integer(revision),
+                        MigrationSqlValue::Text(encoded.clone()),
+                    ],
+                )
+                .map_err(|_| RemoteReplayApplicationErrorV1::PolicyUnavailable)?,
+            )
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyUnavailable)?;
+        let persisted = self.load(&evidence.repository_scope)?;
+        if persisted != *evidence {
+            return Err(RemoteReplayApplicationErrorV1::PolicyMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn policy_for_scope(
+        &self,
+        scope: &RemoteRepositoryScopeV1,
+    ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
+        self.load(scope)
+    }
+
+    fn load(
+        &self,
+        scope: &RemoteRepositoryScopeV1,
+    ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
+        let scope_digest = canonical_sha256(&("tracedecay.remote-replay-policy-scope.v1", scope))
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        let rows = self
+            .handle
+            .query(
+                enrollment_statement(
+                    "SELECT evidence_json FROM remote_replay_policy_v1 WHERE scope_digest = ?1",
+                    vec![MigrationSqlValue::Text(scope_digest.as_str().to_owned())],
+                )
+                .map_err(|_| RemoteReplayApplicationErrorV1::PolicyUnavailable)?,
+                Duration::from_secs(5),
+            )
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyUnavailable)?;
+        let encoded = rows
+            .rows
+            .first()
+            .and_then(|row| enrollment_text(&row.values, 0))
+            .ok_or(RemoteReplayApplicationErrorV1::PolicyUnavailable)?;
+        let evidence: RemoteReplayPolicyEvidenceV1 = serde_json::from_str(encoded)
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        evidence.validate()?;
+        Ok(evidence)
+    }
+}
+
+impl RemoteReplayPolicyPortV1 for RegisteredRemoteReplayPolicyAuthorityV1 {
+    fn authorize_current_policy(
+        &self,
+        frame: &RemoteReplayFrameV1,
+        observed_at: UtcMicros,
+    ) -> Result<RemoteReplayPolicyDecisionV1, RemoteReplayApplicationErrorV1> {
+        let evidence = self.load(&frame.capture.writer.scope)?;
+        evidence.validate_for(frame)?;
+        if evidence.revalidated_at > observed_at {
+            return Err(RemoteReplayApplicationErrorV1::PolicyMismatch);
+        }
+        Ok(evidence.decision)
+    }
+}
+
+impl RemoteReplayPolicyEvidencePortV1 for RegisteredRemoteReplayPolicyAuthorityV1 {
+    fn current_policy_evidence(
+        &self,
+        frame: &RemoteReplayFrameV1,
+    ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
+        let evidence = self.load(&frame.capture.writer.scope)?;
+        evidence.validate_for(frame)?;
+        Ok(evidence)
     }
 }
 

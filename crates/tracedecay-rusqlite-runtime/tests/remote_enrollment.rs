@@ -9,6 +9,9 @@ use tracedecay_application::remote::auth::{
     RemoteEnrollmentCredentialLookupPortV1, RemoteEnrollmentServiceV1, issue_enrollment,
 };
 use tracedecay_application::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use tracedecay_application::remote::replay::{
+    RemoteReplayApplicationErrorV1, RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidenceV1,
+};
 use tracedecay_application::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef, RequestId,
     ResolvedScope,
@@ -21,7 +24,9 @@ use tracedecay_domain::{
 };
 use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
-use tracedecay_rusqlite_runtime::remote_authority::RegisteredRemoteEnrollmentAuthorityV1;
+use tracedecay_rusqlite_runtime::remote_authority::{
+    RegisteredRemoteEnrollmentAuthorityV1, RegisteredRemoteReplayPolicyAuthorityV1,
+};
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
 };
@@ -256,6 +261,58 @@ fn registered_enrollment_rejects_deadline_at_exact_commit_boundary() {
         Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict)
     );
     assert!(authority.load_grant(&grant.grant_id).is_ok());
+}
+
+#[test]
+fn registered_replay_policy_is_cas_guarded_and_survives_reopen() {
+    let store = RegisteredStore::start();
+    let repository_scope = scope();
+    let grant = EnrollmentGrantV1 {
+        grant_id: EntityId::new("grant.replay-policy").unwrap(),
+        brain_id: BrainId::new("brain.remote").unwrap(),
+        node_id: BrainNodeId::new("node.remote").unwrap(),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(&[b'g'; 32]).unwrap(),
+        revision: 1,
+        issued_at: UtcMicros(1),
+        expires_at: UtcMicros(100),
+        revoked_at: None,
+        capabilities: BTreeSet::from([RemoteCapabilityV1::Replay]),
+        scope: repository_scope.clone(),
+    };
+    let admission = admission(&grant);
+    let evidence = RemoteReplayPolicyEvidenceV1 {
+        scope: admission.scope().clone(),
+        repository_scope: repository_scope.clone(),
+        policy_revision: admission.authority().policy.revision,
+        decision: RemoteReplayPolicyDecisionV1::Quarantine,
+        policy: admission.authority().policy.clone(),
+        configuration_digest: admission.configuration_digest().clone(),
+        catalog_digest: admission.catalog_digest().clone(),
+        privacy_digest: admission.privacy_digest().clone(),
+        revalidated_at: UtcMicros(11),
+    };
+    let authority =
+        RegisteredRemoteReplayPolicyAuthorityV1::from_registered(store.handle.clone()).unwrap();
+    authority.provision(&evidence).unwrap();
+    assert_eq!(
+        authority.policy_for_scope(&repository_scope).unwrap(),
+        evidence
+    );
+
+    let mut conflicting = evidence.clone();
+    conflicting.decision = RemoteReplayPolicyDecisionV1::Admit;
+    assert_eq!(
+        authority.provision(&conflicting),
+        Err(RemoteReplayApplicationErrorV1::PolicyMismatch)
+    );
+    drop(authority);
+
+    let reopened =
+        RegisteredRemoteReplayPolicyAuthorityV1::from_registered(store.handle.clone()).unwrap();
+    assert_eq!(
+        reopened.policy_for_scope(&repository_scope).unwrap(),
+        evidence
+    );
 }
 
 #[test]
