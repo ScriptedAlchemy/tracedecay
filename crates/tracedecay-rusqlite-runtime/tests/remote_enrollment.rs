@@ -3,16 +3,20 @@ use std::path::PathBuf;
 
 use rusqlite::Savepoint;
 use tempfile::TempDir;
-use tracedecay_application::RequestId;
 use tracedecay_application::remote::auth::{
-    OpaqueRemoteCredential, RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentAuthorityPortV1,
-    RemoteEnrollmentServiceV1,
+    OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
+    RemoteEnrollmentAuthorityPortV1, RemoteEnrollmentServiceV1,
 };
 use tracedecay_application::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use tracedecay_application::{
+    AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, EffectId, IdempotencyKey,
+    OperationBudgetUsage, PolicyDecisionRef, RequestId, ResolvedScope, ResultContractRef,
+};
 use tracedecay_domain::{
-    BrainId, BrainNodeId, EnrollmentGrantV1, EntityId, LocatorDigest, ProjectId, RefId,
-    RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1, RepositoryId,
-    RepositoryStateSnapshotId, UtcMicros, WorktreeId,
+    ActorId, BrainId, BrainNodeId, ComponentVersion, EnrollmentGrantV1, EntityId, LocatorDigest,
+    ManifestDigest, ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
+    RemoteRepositoryScopeV1, RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
@@ -24,6 +28,7 @@ use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     StorageRuntimeErrorV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
+use tracedecay_tool_catalog::{EffectClass, SchemaId, UseCaseId};
 
 struct NoTypedWrites;
 
@@ -163,6 +168,47 @@ fn enrollment_request() -> RemoteProtocolRequestV1<EnrollmentRequestV1> {
     .unwrap()
 }
 
+fn admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
+    let scope = ResolvedScope::new(
+        grant.scope.project_id.clone(),
+        grant.scope.repository_id.clone(),
+        grant.scope.worktree_id.clone(),
+        grant.scope.reference.clone(),
+    )
+    .unwrap();
+    let grant_digest = canonical_sha256(grant).unwrap();
+    RemoteEnrollmentAdmissionEvidenceV1 {
+        result_contract: ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1)
+            .unwrap(),
+        scope: scope.clone(),
+        authority: AuthorityReceipt {
+            grant_id: CapabilityGrantId::new(grant.grant_id.as_str()).unwrap(),
+            grant_revision: grant.revision,
+            grant_digest: grant_digest.clone(),
+            authorized_scope_digest: scope.scope_digest,
+            disclosure: DisclosureClass::Evidence,
+            policy: PolicyDecisionRef::new(
+                "policy.remote.enrollment",
+                1,
+                grant_digest,
+                ComponentVersion::new("policy.remote.enrollment.v1").unwrap(),
+            )
+            .unwrap(),
+            revalidated_at: UtcMicros(10),
+        },
+        actor: ActorId::new("actor.remote.node").unwrap(),
+        operation: UseCaseId::new("use-case.remote.enrollment").unwrap(),
+        effect_id: EffectId::new("effect.remote.enrollment").unwrap(),
+        effect_class: EffectClass::Administrative,
+        idempotency_key: IdempotencyKey::new("grant.remote").unwrap(),
+        configuration_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        catalog_digest: ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+        privacy_digest: ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+        effective_deadline: Deadline::new(UtcMicros(100)).unwrap(),
+        budget: OperationBudgetUsage::default(),
+    }
+}
+
 #[test]
 fn registered_enrollment_is_single_use_secret_free_and_survives_reopen() {
     let store = RegisteredStore::start();
@@ -182,9 +228,11 @@ fn registered_enrollment_is_single_use_secret_free_and_survives_reopen() {
         capabilities: BTreeSet::from([RemoteCapabilityV1::Query]),
         scope: scope(),
     };
-    authority.provision_grant(&grant).unwrap();
+    let admission = admission(&grant);
+    authority.provision_grant(&grant, &admission).unwrap();
+    let durable_authority = authority.clone();
     let service = RemoteEnrollmentServiceV1::new(authority);
-    let record = service
+    let outcome = service
         .enroll(
             enrollment_request(),
             &grant_credential,
@@ -192,8 +240,16 @@ fn registered_enrollment_is_single_use_secret_free_and_survives_reopen() {
         )
         .unwrap();
     assert_eq!(
-        record.fingerprint,
+        outcome.effect.payload.as_ref().unwrap().fingerprint,
         RemoteCredentialFingerprintV1::from_secret(&[b'e'; 32]).unwrap()
+    );
+    let committed = durable_authority
+        .load_commit_receipt(&EntityId::new("enrollment.remote").unwrap())
+        .unwrap();
+    assert_eq!(committed.admission, admission);
+    assert_eq!(
+        committed.committed_state_digest,
+        canonical_sha256(outcome.effect.payload.as_ref().unwrap()).unwrap()
     );
     assert_eq!(
         service.enroll(
@@ -224,5 +280,11 @@ fn registered_enrollment_is_single_use_secret_free_and_survives_reopen() {
     assert_eq!(
         reopened.load_grant(&grant.grant_id),
         Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed)
+    );
+    assert_eq!(
+        reopened
+            .load_commit_receipt(&EntityId::new("enrollment.remote").unwrap())
+            .unwrap(),
+        committed
     );
 }

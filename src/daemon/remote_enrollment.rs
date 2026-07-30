@@ -1,6 +1,13 @@
 //! Daemon-owned trusted provisioning boundary for Remote enrollment grants.
 
-use tracedecay_application::remote::auth::RemoteEnrollmentAuthorityErrorV1;
+use std::sync::Arc;
+
+use tracedecay_application::ResultContractRef;
+use tracedecay_application::remote::auth::{
+    RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
+    RemoteEnrollmentProtocolAdapterV1, RemoteEnrollmentServiceErrorV1,
+};
+use tracedecay_application::remote::protocol::RemoteEnrollmentProtocolPortV1;
 use tracedecay_domain::EnrollmentGrantV1;
 use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
 use tracedecay_rusqlite_runtime::remote_authority::RegisteredRemoteEnrollmentAuthorityV1;
@@ -25,11 +32,18 @@ impl DaemonRemoteEnrollmentProvisionerV1 {
     pub(crate) fn provision_grant(
         &self,
         grant: &EnrollmentGrantV1,
+        admission: &RemoteEnrollmentAdmissionEvidenceV1,
     ) -> Result<(), RemoteEnrollmentAuthorityErrorV1> {
-        self.authority.provision_grant(grant)
+        self.authority.provision_grant(grant, admission)
     }
 
-    pub(crate) fn authority(&self) -> RegisteredRemoteEnrollmentAuthorityV1 {
-        self.authority.clone()
+    pub(crate) fn protocol_port(
+        &self,
+        result_contract: ResultContractRef,
+    ) -> Result<Arc<dyn RemoteEnrollmentProtocolPortV1>, RemoteEnrollmentServiceErrorV1> {
+        Ok(Arc::new(RemoteEnrollmentProtocolAdapterV1::new(
+            self.authority.clone(),
+            result_contract,
+        )?))
     }
 }
