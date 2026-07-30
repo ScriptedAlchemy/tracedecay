@@ -274,16 +274,6 @@ where
     ) -> Result<WorkProjection, ApplicationProblem> {
         admit(context, command.occurred_at)?;
         let authority = work_authority(context)?;
-        if self.would_create_dependency_cycle(
-            &authority,
-            &command.task_id,
-            &command.dependencies,
-        )? {
-            return Err(invalid_problem(
-                "application.work.dependency-cycle",
-                "Work dependencies must remain acyclic.",
-            ));
-        }
         let input_digest = work_input_digest(&(
             WORK_INPUT_DIGEST_DOMAIN,
             "replan_dependencies",
@@ -532,6 +522,14 @@ where
             return Err(conflict_problem(
                 "application.work.version-conflict",
                 "Work changed after this command was prepared.",
+            ));
+        }
+        if let WorkEventKind::DependenciesReplanned { dependencies } = &event_kind
+            && self.would_create_dependency_cycle(&authority, &task_id, dependencies)?
+        {
+            return Err(invalid_problem(
+                "application.work.dependency-cycle",
+                "Work dependencies must remain acyclic.",
             ));
         }
         let event = WorkEvent::new(
