@@ -8,7 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use ring::rand::SecureRandom;
 use ring::{aead, rand};
@@ -554,8 +554,7 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
             to: transition.to,
             pre_state_digest,
             terminal_state_digest,
-            committed_at: current_utc_micros()
-                .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?,
+            committed_at: transition.observed_at,
             budget: OperationBudgetUsage {
                 units_consumed: 1,
                 bytes_consumed: u64::try_from(transition_bytes.len())
@@ -692,14 +691,6 @@ fn replay_state_digest(event: &PersistedSpoolEventV2) -> Result<ManifestDigest, 
         event.last_attempt,
     ))
     .map_err(|_| RemoteSpoolError::Encoding)
-}
-
-fn current_utc_micros() -> Result<UtcMicros, ()> {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ())?
-        .as_micros();
-    i64::try_from(micros).map(UtcMicros).map_err(|_| ())
 }
 
 fn derive_persisted_event_id(
@@ -856,18 +847,32 @@ impl std::error::Error for RemoteSpoolError {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
     use serde_json::json;
     use tempfile::TempDir;
+    use tracedecay_application::remote::auth::{
+        OpaqueRemoteCredential, RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
+    };
+    use tracedecay_application::remote::replay::{
+        RemoteReplayApplicationErrorV1, RemoteReplayClockPortV1, RemoteReplayFindingV1,
+        RemoteReplayOutcomeV1, RemoteReplayPolicyDecisionV1, RemoteReplayPolicyPortV1,
+        RemoteReplayTransactionErrorV1, RemoteReplayTransactionOutcomeV1,
+        RemoteReplayTransactionPortV1, replay_remote_capture,
+    };
     use tracedecay_domain::{
-        AuthorityEpoch, BrainId, ComponentVersion, ObservationId, ObservationIdentityMaterialV1,
+        AuthorityEpoch, BrainId, ComponentVersion, CurrentRemoteAuthorityV1,
+        EnrollmentCredentialRecordV1, ObservationId, ObservationIdentityMaterialV1,
         ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
         ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
         ProjectionGenerationId, ProviderId, RefId, RemoteAuthorityUnavailableReasonV1,
-        RemotePlacementRevisionV1, RepositoryId, RepositoryStateSnapshotId, RetentionClass,
-        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-        SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, WorktreeId,
+        RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemotePlacementRevisionV1, RepositoryId,
+        RepositoryStateSnapshotId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, ShardId,
+        WorktreeId,
     };
     use tracedecay_store::{RepositoryWritePayloadV1, StoreRuntimeBindingV1};
 
@@ -920,6 +925,144 @@ mod tests {
                 reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
                 observed_at: UtcMicros(1),
             })
+        }
+    }
+
+    struct AcceptAuthority;
+
+    impl RemoteAuthorityAuthenticationPort for AcceptAuthority {
+        fn authenticate_connected_authority(
+            &self,
+            _expected_authority: &CurrentRemoteAuthorityV1,
+            _expected_credential: &EnrollmentCredentialRecordV1,
+            _observed_at: UtcMicros,
+        ) -> Result<(), RemoteAuthenticationError> {
+            Ok(())
+        }
+    }
+
+    struct TestPolicy(AtomicBool);
+
+    struct TestClock(AtomicI64);
+
+    impl RemoteReplayClockPortV1 for TestClock {
+        fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1> {
+            Ok(UtcMicros(self.0.fetch_add(1, Ordering::SeqCst)))
+        }
+    }
+
+    impl TestPolicy {
+        fn unavailable() -> Self {
+            Self(AtomicBool::new(true))
+        }
+
+        fn admit(&self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    impl RemoteReplayPolicyPortV1 for TestPolicy {
+        fn authorize_current_policy(
+            &self,
+            _frame: &RemoteReplayFrameV1,
+            _observed_at: UtcMicros,
+        ) -> Result<RemoteReplayPolicyDecisionV1, RemoteReplayApplicationErrorV1> {
+            if self.0.load(Ordering::SeqCst) {
+                Err(RemoteReplayApplicationErrorV1::PolicyUnavailable)
+            } else {
+                Ok(RemoteReplayPolicyDecisionV1::Admit)
+            }
+        }
+    }
+
+    struct TestTransaction {
+        unavailable: AtomicBool,
+        calls: AtomicUsize,
+        committed_effects: AtomicUsize,
+        receipt: Mutex<Option<RemoteReplayCommitReceiptV1>>,
+    }
+
+    impl TestTransaction {
+        fn available() -> Self {
+            Self {
+                unavailable: AtomicBool::new(false),
+                calls: AtomicUsize::new(0),
+                committed_effects: AtomicUsize::new(0),
+                receipt: Mutex::new(None),
+            }
+        }
+    }
+
+    impl RemoteReplayTransactionPortV1 for TestTransaction {
+        fn commit(
+            &self,
+            frame: &RemoteReplayFrameV1,
+            current_writer: &RemoteWriterAuthorityV1,
+        ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.unavailable.load(Ordering::SeqCst) {
+                return Err(RemoteReplayTransactionErrorV1::Unavailable);
+            }
+            let mut durable = self.receipt.lock().unwrap();
+            if let Some(receipt) = durable.clone() {
+                return Ok(RemoteReplayTransactionOutcomeV1::Duplicate(receipt));
+            }
+            let receipt = RemoteReplayCommitReceiptV1 {
+                event_id: frame.event_id.clone(),
+                writer_fence: current_writer.authority.fence.clone(),
+                commit_sequence: 7,
+                committed_at: UtcMicros(19),
+                budget: OperationBudgetUsage {
+                    units_consumed: 1,
+                    bytes_consumed: 1,
+                    elapsed_micros: 1,
+                },
+            };
+            *durable = Some(receipt.clone());
+            self.committed_effects.fetch_add(1, Ordering::SeqCst);
+            Ok(RemoteReplayTransactionOutcomeV1::Admitted(receipt))
+        }
+    }
+
+    struct FailFirstAcknowledgement<'a> {
+        spool: &'a RemoteCaptureSpool,
+        fail: AtomicBool,
+    }
+
+    impl RemoteReplaySpoolPortV1 for FailFirstAcknowledgement<'_> {
+        fn state(
+            &self,
+            event_id: &str,
+        ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
+            self.spool.state(event_id)
+        }
+
+        fn transition(
+            &self,
+            transition: RemoteReplayTransitionV1,
+        ) -> Result<RemoteReplayTransitionReceiptV1, RemoteCapturePersistenceErrorV1> {
+            if transition.to == RemoteReplayStateV1::Acknowledged
+                && self.fail.swap(false, Ordering::SeqCst)
+            {
+                return Err(RemoteCapturePersistenceErrorV1::Unavailable);
+            }
+            self.spool.transition(transition)
+        }
+
+        fn begin_replay_attempt(
+            &self,
+            event_id: &str,
+            observed_at: UtcMicros,
+        ) -> Result<u64, RemoteCapturePersistenceErrorV1> {
+            self.spool.begin_replay_attempt(event_id, observed_at)
+        }
+
+        fn abandon_replay_attempt(
+            &self,
+            event_id: &str,
+            replay_attempt: u64,
+        ) -> Result<(), RemoteCapturePersistenceErrorV1> {
+            self.spool.abandon_replay_attempt(event_id, replay_attempt)
         }
     }
 
@@ -1018,6 +1161,57 @@ mod tests {
             observation: observation(sequence),
             captured_at: UtcMicros(i64::try_from(sequence).unwrap()),
         }
+    }
+
+    fn credential(
+        enrollment_id: &str,
+        secret: &[u8; 32],
+        capability: RemoteCapabilityV1,
+    ) -> EnrollmentCredentialRecordV1 {
+        EnrollmentCredentialRecordV1 {
+            enrollment_id: EntityId::new(enrollment_id).unwrap(),
+            brain_id: BrainId::new("brain.remote-test").unwrap(),
+            node_id: BrainNodeId::new("node.remote-test").unwrap(),
+            fingerprint: RemoteCredentialFingerprintV1::from_secret(secret).unwrap(),
+            revision: 1,
+            issued_at: UtcMicros(1),
+            expires_at: UtcMicros(100),
+            revoked_at: None,
+            capabilities: BTreeSet::from([capability]),
+            scope: writer().scope,
+        }
+    }
+
+    fn replay(
+        spool: &dyn RemoteReplaySpoolPortV1,
+        policy: &dyn RemoteReplayPolicyPortV1,
+        transaction: &dyn RemoteReplayTransactionPortV1,
+        frame: &RemoteReplayFrameV1,
+        presented: &[u8; 32],
+        observed_at: UtcMicros,
+    ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
+        let authority_secret = [0xA1; 32];
+        let caller_secret = [0xC1; 32];
+        replay_remote_capture(
+            &AcceptAuthority,
+            policy,
+            transaction,
+            spool,
+            &credential(
+                "enrollment.remote-authority",
+                &authority_secret,
+                RemoteCapabilityV1::ServeAuthority,
+            ),
+            &credential(
+                "enrollment.remote-test",
+                &caller_secret,
+                RemoteCapabilityV1::Replay,
+            ),
+            &OpaqueRemoteCredential::new(presented.as_slice()).unwrap(),
+            frame,
+            &writer(),
+            &TestClock(AtomicI64::new(observed_at.0)),
+        )
     }
 
     #[test]
@@ -1232,6 +1426,86 @@ mod tests {
     }
 
     #[test]
+    fn reopening_rejects_corrupted_transition_receipt() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("remote.spool");
+        let capture_spool = spool(&root);
+        let capture = command(1, None);
+        let captured = capture_spool.capture_pending(&capture).unwrap();
+        let attempt = capture_spool
+            .begin_replay_attempt(&captured.event_id, UtcMicros(20))
+            .unwrap();
+        capture_spool
+            .transition(RemoteReplayTransitionV1 {
+                event_id: captured.event_id,
+                from: RemoteReplayStateV1::Pending,
+                to: RemoteReplayStateV1::Rejected,
+                replay_attempt: attempt,
+                observed_at: UtcMicros(20),
+                finding: Some(RemoteReplayFindingV1::PolicyChanged),
+                receipt: None,
+            })
+            .unwrap();
+        let mut records = capture_spool.read_records().unwrap();
+        let DurableSpoolRecordV2::Transition { receipt, .. } = records.last_mut().unwrap() else {
+            panic!("last durable record must be the replay transition");
+        };
+        receipt.terminal_state_digest =
+            ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap();
+        drop(capture_spool);
+
+        let encryption = XorEncryption(0xA5);
+        let mut encoded = Vec::new();
+        for record in records {
+            let plaintext = serde_json::to_vec(&record).unwrap();
+            let ciphertext = encryption.seal(&plaintext).unwrap();
+            encoded.extend_from_slice(FRAME_MAGIC);
+            encoded.extend_from_slice(&FRAME_VERSION.to_be_bytes());
+            encoded.extend_from_slice(&(ciphertext.len() as u64).to_be_bytes());
+            encoded.extend_from_slice(&Sha256::digest(&ciphertext));
+            encoded.extend_from_slice(&ciphertext);
+        }
+        fs::write(&path, encoded).unwrap();
+        assert!(matches!(
+            RemoteCaptureSpool::open(
+                path,
+                config(),
+                Box::new(XorEncryption(0xA5)),
+                Box::new(Offline)
+            ),
+            Err(RemoteSpoolError::Corruption)
+        ));
+    }
+
+    #[test]
+    fn authoritative_future_transition_time_round_trips_without_wall_clock_clamp() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let captured = capture_spool.capture_pending(&command(1, None)).unwrap();
+        let observed_at = UtcMicros(i64::MAX - 1);
+        let attempt = capture_spool
+            .begin_replay_attempt(&captured.event_id, observed_at)
+            .unwrap();
+        let receipt = capture_spool
+            .transition(RemoteReplayTransitionV1 {
+                event_id: captured.event_id.clone(),
+                from: RemoteReplayStateV1::Pending,
+                to: RemoteReplayStateV1::Rejected,
+                replay_attempt: attempt,
+                observed_at,
+                finding: Some(RemoteReplayFindingV1::PolicyChanged),
+                receipt: None,
+            })
+            .unwrap();
+        assert_eq!(receipt.committed_at, observed_at);
+        drop(capture_spool);
+        assert_eq!(
+            spool(&root).state(&captured.event_id).unwrap().state,
+            RemoteReplayStateV1::Rejected
+        );
+    }
+
+    #[test]
     fn replay_selector_hydrates_only_the_encrypted_canonical_frame() {
         let root = TempDir::new().unwrap();
         let capture_spool = spool(&root);
@@ -1306,6 +1580,238 @@ mod tests {
             capture_spool.state(&receipt.event_id).unwrap().last_attempt,
             2
         );
+    }
+
+    #[test]
+    fn actual_replay_invalid_credential_abandons_for_same_process_retry() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let captured = capture_spool.capture_pending(&command(1, None)).unwrap();
+        let frame = capture_spool.load_replay_frame(&captured.event_id).unwrap();
+        let policy = TestPolicy(AtomicBool::new(false));
+        let transaction = TestTransaction::available();
+
+        assert_eq!(
+            replay(
+                &capture_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC2; 32],
+                UtcMicros(20),
+            ),
+            Err(RemoteReplayApplicationErrorV1::Authentication(
+                RemoteAuthenticationError::InvalidCredential
+            ))
+        );
+        assert_eq!(
+            capture_spool.state(&frame.event_id).unwrap().last_attempt,
+            1
+        );
+        assert!(matches!(
+            replay(
+                &capture_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC1; 32],
+                UtcMicros(21),
+            ),
+            Ok(RemoteReplayOutcomeV1::Acknowledged { .. })
+        ));
+        assert_eq!(
+            capture_spool.state(&frame.event_id).unwrap().last_attempt,
+            2
+        );
+        assert_eq!(transaction.committed_effects.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn actual_replay_policy_unavailable_abandons_for_same_process_retry() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let captured = capture_spool.capture_pending(&command(1, None)).unwrap();
+        let frame = capture_spool.load_replay_frame(&captured.event_id).unwrap();
+        let policy = TestPolicy::unavailable();
+        let transaction = TestTransaction::available();
+
+        assert_eq!(
+            replay(
+                &capture_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC1; 32],
+                UtcMicros(20),
+            ),
+            Err(RemoteReplayApplicationErrorV1::PolicyUnavailable)
+        );
+        assert_eq!(
+            capture_spool.state(&frame.event_id).unwrap().last_attempt,
+            1
+        );
+        policy.admit();
+        assert!(
+            replay(
+                &capture_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC1; 32],
+                UtcMicros(21),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            capture_spool.state(&frame.event_id).unwrap().last_attempt,
+            2
+        );
+        assert_eq!(transaction.committed_effects.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn actual_replay_transaction_unavailable_abandons_for_same_process_retry() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let captured = capture_spool.capture_pending(&command(1, None)).unwrap();
+        let frame = capture_spool.load_replay_frame(&captured.event_id).unwrap();
+        let policy = TestPolicy(AtomicBool::new(false));
+        let transaction = TestTransaction::available();
+        transaction.unavailable.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            replay(
+                &capture_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC1; 32],
+                UtcMicros(20),
+            ),
+            Err(RemoteReplayApplicationErrorV1::Transaction(
+                RemoteReplayTransactionErrorV1::Unavailable
+            ))
+        );
+        assert_eq!(
+            capture_spool.state(&frame.event_id).unwrap().last_attempt,
+            1
+        );
+        transaction.unavailable.store(false, Ordering::SeqCst);
+        assert!(
+            replay(
+                &capture_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC1; 32],
+                UtcMicros(21),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            capture_spool.state(&frame.event_id).unwrap().last_attempt,
+            2
+        );
+        assert_eq!(transaction.committed_effects.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn actual_lost_ack_retry_reuses_original_durable_effect() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let captured = capture_spool.capture_pending(&command(1, None)).unwrap();
+        let frame = capture_spool.load_replay_frame(&captured.event_id).unwrap();
+        let policy = TestPolicy(AtomicBool::new(false));
+        let transaction = TestTransaction::available();
+        let failing_spool = FailFirstAcknowledgement {
+            spool: &capture_spool,
+            fail: AtomicBool::new(true),
+        };
+
+        assert_eq!(
+            replay(
+                &failing_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC1; 32],
+                UtcMicros(20),
+            ),
+            Err(RemoteReplayApplicationErrorV1::Persistence(
+                RemoteCapturePersistenceErrorV1::Unavailable
+            ))
+        );
+        let after_loss = capture_spool.state(&frame.event_id).unwrap();
+        assert_eq!(after_loss.state, RemoteReplayStateV1::Admitted);
+        assert_eq!(after_loss.last_attempt, 1);
+        let original = after_loss.receipt.unwrap();
+
+        let retry = replay(
+            &failing_spool,
+            &policy,
+            &transaction,
+            &frame,
+            &[0xC1; 32],
+            UtcMicros(21),
+        )
+        .unwrap();
+        assert!(matches!(
+            retry,
+            RemoteReplayOutcomeV1::Acknowledged {
+                ref receipt,
+                ..
+            } if receipt == &original
+        ));
+        assert_eq!(
+            capture_spool.state(&frame.event_id).unwrap().last_attempt,
+            2
+        );
+        assert_eq!(transaction.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(transaction.committed_effects.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn inverted_authoritative_time_fails_without_clamp_and_retries_duplicate() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let captured = capture_spool.capture_pending(&command(1, None)).unwrap();
+        let frame = capture_spool.load_replay_frame(&captured.event_id).unwrap();
+        let policy = TestPolicy(AtomicBool::new(false));
+        let transaction = TestTransaction::available();
+
+        assert_eq!(
+            replay(
+                &capture_spool,
+                &policy,
+                &transaction,
+                &frame,
+                &[0xC1; 32],
+                UtcMicros(10),
+            ),
+            Err(RemoteReplayApplicationErrorV1::ReceiptMismatch)
+        );
+        let failed = capture_spool.state(&frame.event_id).unwrap();
+        assert_eq!(failed.state, RemoteReplayStateV1::Pending);
+        assert_eq!(failed.last_attempt, 1);
+        assert_eq!(transaction.committed_effects.load(Ordering::SeqCst), 1);
+
+        let retry = replay(
+            &capture_spool,
+            &policy,
+            &transaction,
+            &frame,
+            &[0xC1; 32],
+            UtcMicros(20),
+        )
+        .unwrap();
+        assert!(matches!(
+            retry,
+            RemoteReplayOutcomeV1::Acknowledged {
+                disposition: RemoteReplayStateV1::Duplicate,
+                ..
+            }
+        ));
+        assert_eq!(transaction.committed_effects.load(Ordering::SeqCst), 1);
     }
 
     #[test]
