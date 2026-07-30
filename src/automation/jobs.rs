@@ -239,7 +239,10 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
     if job.prompt.trim().is_empty() {
         return job_error("job prompt must not be empty");
     }
-    let schedule = parse_schedule(job.schedule.as_deref())?;
+    let schedule =
+        parse_schedule(job.schedule.as_deref()).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
     if schedule == AutomationSchedule::ConfiguredInterval && job.interval_secs.is_none() {
         return job_error("job interval_secs is required when schedule is interval");
     }
