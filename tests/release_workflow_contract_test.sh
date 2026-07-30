@@ -49,6 +49,7 @@ for path in sys.argv[1:]:
 PY
 
 python3 - "$release_workflow" "$release_beta" <<'PY'
+import re
 import sys
 
 stable = open(sys.argv[1], encoding="utf-8").read()
@@ -60,6 +61,32 @@ for name, text in [("stable", stable), ("beta", beta)]:
     expected = "github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name"
     if expected not in text:
         raise SystemExit(f"{name} release identity must normalize to the release tag")
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    ]:
+        if target not in text:
+            raise SystemExit(f"{name} release must preserve package coverage for {target}")
+    for forbidden in [
+        r"cargo build[^\n]*--all-features",
+        r"cargo install[^\n]*--all-features",
+        r'std_cargo_args, "--all-features"',
+    ]:
+        if re.search(forbidden, text):
+            raise SystemExit(
+                f"{name} release artifact must not enable test features: {forbidden!r}"
+            )
+    for required in [
+        "Build production release binary",
+        "--no-default-features --features production",
+        "Check production feature profile",
+        "Verify production Cargo install",
+    ]:
+        if required not in text:
+            raise SystemExit(
+                f"{name} release must preserve production packaging guard {required!r}"
+            )
 
 if "  validate-stable-release:" not in stable:
     raise SystemExit("stable manual rebuild must have a validation job")

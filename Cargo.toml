@@ -113,50 +113,15 @@ include = [
 ]
 
 [features]
-# Keep every production feature in the shipped default set. Test-only seams
-# such as `test-transport` remain explicit opt-ins.
-default = [
+# Default and explicitly selected production artifacts resolve through the
+# same feature. Release packaging must use `--no-default-features --features
+# production`; `--all-features` is test-only because it includes
+# `test-transport`.
+default = ["production"]
+production = [
     "token-counting",
     "lite",
-    "medium",
     "full",
-    "lang-dart",
-    "lang-pascal",
-    "lang-php",
-    "lang-ruby",
-    "lang-bash",
-    "lang-protobuf",
-    "lang-powershell",
-    "lang-nix",
-    "lang-vbnet",
-    "lang-lua",
-    "lang-zig",
-    "lang-objc",
-    "lang-perl",
-    "lang-batch",
-    "lang-fortran",
-    "lang-cobol",
-    "lang-msbasic2",
-    "lang-gwbasic",
-    "lang-qbasic",
-    "lang-dockerfile",
-    "lang-glsl",
-    "lang-wgsl",
-    "lang-hlsl",
-    "lang-metal",
-    "lang-markdown",
-    "lang-r",
-    "lang-sql",
-    "lang-julia",
-    "lang-haskell",
-    "lang-ocaml",
-    "lang-clojure",
-    "lang-erlang",
-    "lang-elixir",
-    "lang-fsharp",
-    "lang-quint",
-    "lang-toml",
-    "lang-lean",
     "semantic-fastembed",
 ]
 
