@@ -7,16 +7,14 @@
 //! Typed workflow models cross the boundary; MCP serializes them only while
 //! building the response payload.
 
-pub(crate) use tracedecay_sessions::{
-    WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState as WorkflowIndexUnavailableReason,
-    WorkflowRunDetail as WorkflowRunDetailView, WorkflowRunDetailFuture, WorkflowRunDetailOutcome,
-    WorkflowRunDetailRequest as WorkflowRunDetailCommand, WorkflowRunListFuture,
-    WorkflowRunListOutcome, WorkflowRunListRequest as WorkflowRunListCommand, WorkflowRunScope,
+use tracedecay_sessions::{
+    WorkflowIndexReadPort, WorkflowIndexState, WorkflowReadError, WorkflowRunDetailOutcome,
+    WorkflowRunDetailRequest, WorkflowRunListOutcome, WorkflowRunListRequest,
 };
 
 use crate::errors::{Result, TraceDecayError};
 
-fn workflow_read_error(error: tracedecay_sessions::WorkflowReadError) -> TraceDecayError {
+fn workflow_read_error(error: WorkflowReadError) -> TraceDecayError {
     TraceDecayError::Config {
         message: error.to_string(),
     }
@@ -26,12 +24,12 @@ fn workflow_read_error(error: tracedecay_sessions::WorkflowReadError) -> TraceDe
 /// port is mounted.
 pub(crate) async fn list_workflow_runs(
     port: Option<&dyn WorkflowIndexReadPort>,
-    command: WorkflowRunListCommand,
+    command: WorkflowRunListRequest,
 ) -> Result<WorkflowRunListOutcome> {
     match port {
         Some(port) => port.runs(command).await.map_err(workflow_read_error),
         None => Ok(WorkflowRunListOutcome::Unavailable(
-            WorkflowIndexUnavailableReason::AuthorityNotRetained,
+            WorkflowIndexState::AuthorityNotRetained,
         )),
     }
 }
@@ -40,12 +38,12 @@ pub(crate) async fn list_workflow_runs(
 /// state when no port is mounted.
 pub(crate) async fn read_workflow_run(
     port: Option<&dyn WorkflowIndexReadPort>,
-    command: WorkflowRunDetailCommand,
+    command: WorkflowRunDetailRequest,
 ) -> Result<WorkflowRunDetailOutcome> {
     match port {
         Some(port) => port.run(command).await.map_err(workflow_read_error),
         None => Ok(WorkflowRunDetailOutcome::Unavailable(
-            WorkflowIndexUnavailableReason::AuthorityNotRetained,
+            WorkflowIndexState::AuthorityNotRetained,
         )),
     }
 }
@@ -55,37 +53,52 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use tracedecay_sessions::{
+        WorkflowGitScope, WorkflowRunDetailFuture, WorkflowRunListFuture, WorkflowRunScope,
+    };
 
     /// Answers every read with the unavailable state while recording the
     /// command, so a test can assert what MCP asked for without a store.
     #[derive(Default)]
     struct RecordingPort {
-        lists: Mutex<Vec<WorkflowRunListCommand>>,
-        details: Mutex<Vec<WorkflowRunDetailCommand>>,
+        lists: Mutex<Vec<WorkflowRunListRequest>>,
+        details: Mutex<Vec<WorkflowRunDetailRequest>>,
     }
 
     impl WorkflowIndexReadPort for RecordingPort {
-        fn runs(&self, command: WorkflowRunListCommand) -> WorkflowRunListFuture<'_> {
+        fn runs(&self, command: WorkflowRunListRequest) -> WorkflowRunListFuture<'_> {
             self.lists.lock().expect("lists").push(command);
             Box::pin(async {
                 Ok(WorkflowRunListOutcome::Unavailable(
-                    WorkflowIndexUnavailableReason::IndexNotBuilt,
+                    WorkflowIndexState::IndexNotBuilt,
                 ))
             })
         }
 
-        fn run(&self, command: WorkflowRunDetailCommand) -> WorkflowRunDetailFuture<'_> {
+        fn run(&self, command: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_> {
             self.details.lock().expect("details").push(command);
             Box::pin(async {
                 Ok(WorkflowRunDetailOutcome::Unavailable(
-                    WorkflowIndexUnavailableReason::IndexNotBuilt,
+                    WorkflowIndexState::IndexNotBuilt,
                 ))
             })
         }
     }
 
-    fn list_command() -> WorkflowRunListCommand {
-        WorkflowRunListCommand {
+    struct EmptyBuiltPort;
+
+    impl WorkflowIndexReadPort for EmptyBuiltPort {
+        fn runs(&self, _command: WorkflowRunListRequest) -> WorkflowRunListFuture<'_> {
+            Box::pin(async { Ok(WorkflowRunListOutcome::Runs(Vec::new())) })
+        }
+
+        fn run(&self, _command: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_> {
+            Box::pin(async { Ok(WorkflowRunDetailOutcome::NotFound) })
+        }
+    }
+
+    fn list_command() -> WorkflowRunListRequest {
+        WorkflowRunListRequest {
             scope: WorkflowRunScope::GitScope(WorkflowGitScope {
                 branch: Some("main".to_string()),
                 worktree: None,
@@ -95,8 +108,8 @@ mod tests {
         }
     }
 
-    fn detail_command() -> WorkflowRunDetailCommand {
-        WorkflowRunDetailCommand {
+    fn detail_command() -> WorkflowRunDetailRequest {
+        WorkflowRunDetailRequest {
             run_id: "wf_alpha".to_string(),
             limit: 7,
         }
@@ -112,9 +125,7 @@ mod tests {
             .expect("list");
         assert!(matches!(
             outcome,
-            WorkflowRunListOutcome::Unavailable(
-                WorkflowIndexUnavailableReason::AuthorityNotRetained
-            )
+            WorkflowRunListOutcome::Unavailable(WorkflowIndexState::AuthorityNotRetained)
         ));
 
         let outcome = read_workflow_run(None, detail_command())
@@ -122,10 +133,23 @@ mod tests {
             .expect("detail");
         assert!(matches!(
             outcome,
-            WorkflowRunDetailOutcome::Unavailable(
-                WorkflowIndexUnavailableReason::AuthorityNotRetained
-            )
+            WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::AuthorityNotRetained)
         ));
+    }
+
+    #[tokio::test]
+    async fn mounted_port_preserves_empty_and_not_found_outcomes() {
+        let port = EmptyBuiltPort;
+
+        let list = list_workflow_runs(Some(&port), list_command())
+            .await
+            .expect("list");
+        assert!(matches!(list, WorkflowRunListOutcome::Runs(runs) if runs.is_empty()));
+
+        let detail = read_workflow_run(Some(&port), detail_command())
+            .await
+            .expect("detail");
+        assert!(matches!(detail, WorkflowRunDetailOutcome::NotFound));
     }
 
     /// The two unavailable states stay distinguishable on the wire. A caller
@@ -134,16 +158,16 @@ mod tests {
     #[test]
     fn unavailable_reasons_are_distinct_on_the_wire() {
         let reasons = [
-            WorkflowIndexUnavailableReason::AuthorityNotRetained,
-            WorkflowIndexUnavailableReason::IndexNotBuilt,
+            WorkflowIndexState::AuthorityNotRetained,
+            WorkflowIndexState::IndexNotBuilt,
         ];
-        let wire = reasons.map(WorkflowIndexUnavailableReason::as_str);
+        let wire = reasons.map(WorkflowIndexState::as_str);
         assert_eq!(wire, ["authority_not_retained", "workflow_index_not_built"]);
-        assert!(!WorkflowIndexUnavailableReason::AuthorityNotRetained.is_retryable());
-        assert!(WorkflowIndexUnavailableReason::IndexNotBuilt.is_retryable());
+        assert!(!WorkflowIndexState::AuthorityNotRetained.is_retryable());
+        assert!(WorkflowIndexState::IndexNotBuilt.is_retryable());
         assert_ne!(
-            WorkflowIndexUnavailableReason::AuthorityNotRetained.message(),
-            WorkflowIndexUnavailableReason::IndexNotBuilt.message()
+            WorkflowIndexState::AuthorityNotRetained.message(),
+            WorkflowIndexState::IndexNotBuilt.message()
         );
     }
 

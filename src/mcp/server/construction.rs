@@ -61,7 +61,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_feedback_status_reader:
         Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
-        Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
+        Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
@@ -409,7 +409,9 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_diagnostics_lsp(
         mut self,
-        diagnostics_lsp: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+        diagnostics_lsp: Arc<
+            tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>,
+        >,
     ) -> Self {
         self.diagnostics_lsp = Some(diagnostics_lsp);
         self
