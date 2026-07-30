@@ -19,7 +19,7 @@ use crate::automation::config::{AutomationConfig, effective_config, load_project
 use crate::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record,
-    read_run_artifact_payload,
+    read_published_artifact_manifest, read_run_artifact_payload,
 };
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
 use crate::tracedecay::current_timestamp;
@@ -191,12 +191,24 @@ pub(crate) async fn artifact_list(
     match find_run_record(&state.dashboard_root, &run_id).await {
         Ok(Some(record)) => {
             let count = record.artifacts.len();
+            let integrity =
+                read_published_artifact_manifest(&state.dashboard_root, &run_id, None).await;
+            let (integrity_status, integrity_verified) = match integrity {
+                Ok(Some(published)) if published == record.artifacts => ("verified", true),
+                Ok(Some(_)) => ("ledger_manifest_mismatch", false),
+                Ok(None) => ("manifest_unavailable", false),
+                Err(_) => ("verification_failed", false),
+            };
             (
                 StatusCode::OK,
                 Json(json!({
                     "run_id": run_id,
                     "artifacts": record.artifacts,
-                    "artifact_chain": artifact_chain_summary(&record.artifacts),
+                    "artifact_chain": artifact_chain_summary(
+                        &record.artifacts,
+                        integrity_status,
+                        integrity_verified,
+                    ),
                     "count": count,
                     "error": "",
                 })),
@@ -257,7 +269,11 @@ fn find_artifact<'a>(
     artifacts.iter().find(|artifact| artifact.kind == kind)
 }
 
-fn artifact_chain_summary(artifacts: &[AutomationRunArtifact]) -> Value {
+fn artifact_chain_summary(
+    artifacts: &[AutomationRunArtifact],
+    integrity_status: &str,
+    integrity_verified: bool,
+) -> Value {
     let expected_kinds = expected_artifact_chain_kinds();
     let present_kinds = artifacts
         .iter()
@@ -269,7 +285,9 @@ fn artifact_chain_summary(artifacts: &[AutomationRunArtifact]) -> Value {
     json!({
         "expected_kinds": expected_kinds,
         "present_kinds": present_kinds,
-        "complete": complete,
+        "metadata_complete": complete,
+        "complete": complete && integrity_verified,
+        "integrity_status": integrity_status,
     })
 }
 
@@ -281,6 +299,7 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
         AutomationRunArtifactKind::ValidationGate.as_str(),
         AutomationRunArtifactKind::OptimizerDiagnosis.as_str(),
         AutomationRunArtifactKind::CodexHandoff.as_str(),
+        AutomationRunArtifactKind::Manifest.as_str(),
     ]
 }
 

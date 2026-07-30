@@ -14,10 +14,10 @@ use super::backend::{
 };
 use super::outcomes::load_outcomes_snapshot;
 use super::run_ledger::{
-    AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, write_run_artifact,
+    AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
+    prepare_run_artifact, publish_run_artifact_chain, read_published_artifact_manifest,
 };
 use crate::errors::Result;
-use crate::tracedecay::current_timestamp;
 
 pub(crate) use super::artifact_refs::{sha256_bytes, sha256_json};
 
@@ -26,6 +26,7 @@ struct ImprovementArtifactWriter<'a> {
     run_id: &'a str,
     created_at: &'a str,
     artifacts: Vec<AutomationRunArtifact>,
+    pending: Vec<(AutomationRunArtifact, Vec<u8>)>,
 }
 
 impl<'a> ImprovementArtifactWriter<'a> {
@@ -35,6 +36,7 @@ impl<'a> ImprovementArtifactWriter<'a> {
             run_id,
             created_at,
             artifacts: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -44,22 +46,32 @@ impl<'a> ImprovementArtifactWriter<'a> {
         payload: &Value,
         summary: Option<String>,
     ) -> Result<Value> {
-        let artifact = write_run_artifact(
-            self.dashboard_root,
-            self.run_id,
-            kind,
-            payload,
-            summary,
-            self.created_at,
-        )
-        .await?;
+        let (artifact, bytes) =
+            prepare_run_artifact(self.run_id, kind, payload, summary, self.created_at)?;
         let artifact_ref = artifact_ref(&artifact);
-        self.artifacts.push(artifact);
+        self.artifacts.push(artifact.clone());
+        self.pending.push((artifact, bytes));
         Ok(artifact_ref)
     }
 
-    fn finish(self) -> Vec<AutomationRunArtifact> {
-        self.artifacts
+    async fn finish(mut self, identity: &Value) -> Result<Vec<AutomationRunArtifact>> {
+        let manifest_payload = serde_json::json!({
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "identity": identity,
+            "artifacts": self.artifacts.clone(),
+        });
+        let (manifest, bytes) = prepare_run_artifact(
+            self.run_id,
+            AutomationRunArtifactKind::Manifest,
+            &manifest_payload,
+            Some("canonical atomic artifact manifest".to_string()),
+            self.created_at,
+        )?;
+        self.artifacts.push(manifest.clone());
+        self.pending.push((manifest, bytes));
+        publish_run_artifact_chain(self.dashboard_root, self.run_id, self.pending).await?;
+        Ok(self.artifacts)
     }
 }
 
@@ -71,8 +83,8 @@ pub(crate) async fn write_improvement_artifacts(
     response: &AgentTaskResponse,
     record: &AutomationRunLedgerRecord,
 ) -> Result<Vec<AutomationRunArtifact>> {
-    let created_at = current_timestamp().to_string();
     let task_key = task_key(task);
+    let created_at = record.completed_at.clone();
     let prompt_version = prompt_version(task);
     let policy = artifact_policy(task);
     // A missing or unreadable outcomes snapshot must never block the run's
@@ -80,6 +92,27 @@ pub(crate) async fn write_improvement_artifacts(
     let outcomes = load_outcomes_snapshot(dashboard_root)
         .await
         .unwrap_or_default();
+    let manifest_identity = serde_json::json!({
+        "sha256": sha256_json(&serde_json::json!({
+            "task": task_key,
+            "prompt_version": prompt_version,
+            "policy": {
+                "optimizer_action": policy.optimizer_action,
+                "next_actions": policy.next_actions(record),
+                "handoff_tests": policy.handoff_tests(),
+                "eval_replay_commands": policy.eval_replay_commands(),
+            },
+            "request": request,
+            "response": response,
+            "record": record,
+            "outcomes": outcomes,
+        })),
+    });
+    if let Some(artifacts) =
+        read_published_artifact_manifest(dashboard_root, run_id, Some(&manifest_identity)).await?
+    {
+        return Ok(artifacts);
+    }
     let ctx = ArtifactPayloadContext {
         run_id,
         task,
@@ -173,5 +206,5 @@ pub(crate) async fn write_improvement_artifacts(
         )
         .await?;
 
-    Ok(writer.finish())
+    writer.finish(&manifest_identity).await
 }

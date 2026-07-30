@@ -13,6 +13,8 @@ use super::backend::{
     prompt_version, run_agent_task_with_retry_report, task_key,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+#[cfg(test)]
+use super::run_ledger::load_run_records;
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     load_run_records_for_task_key,
