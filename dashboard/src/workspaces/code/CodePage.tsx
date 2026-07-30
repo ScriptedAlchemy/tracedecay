@@ -127,18 +127,16 @@ export function CodePage() {
           />
           <LegacyBoundary title="Graph" pending={overview.isPending} result={overview.data}>
             {(data) => {
-              if (
-                data.totals.nodes === 0 ||
-                data.totals.edges === 0 ||
-                data.totals.files === 0
-              ) {
-                return (
-                  <CenteredState
-                    title="Graph totals are unverified — the legacy response cannot distinguish zero data from a query failure"
-                    kind="partial"
-                  />
-                );
-              }
+              // Every total here is measured. `LegacyBoundary` runs this only
+              // for `outcome: 'ok'` — a 2xx whose body satisfied the schema —
+              // and every other reading, including the 500 this route raises
+              // when the query fails, is rendered by the boundary as the
+              // failure it was. So the old guard was wrong twice: it claimed
+              // the response "cannot distinguish zero data from a query
+              // failure" when the boundary above had already distinguished
+              // them, and being an `||` it withheld all three figures whenever
+              // any one of them was zero. A freshly indexed project with
+              // symbols but no resolved edges saw its node count suppressed.
               const kinds = (data.nodes_by_kind ?? [])
                 .slice(0, 12)
                 .map((k) => ({ label: k.kind, value: k.count, hint: 'nodes' }));
@@ -233,10 +231,14 @@ export function CodePage() {
               >
                 {(payload) => {
                   if (payload.nodes.length === 0) {
+                    // An answered read that returned no symbols, said as the
+                    // measurement it is. The slice route reports its own
+                    // failures with a non-2xx the boundary renders instead of
+                    // this, so reaching here means the graph holds nothing.
                     return (
                       <CenteredState
-                        title="Graph slice is unverified — the legacy response cannot distinguish an empty slice from query failure"
-                        kind="partial"
+                        title="No symbols are indexed for this project"
+                        kind="complete_zero_findings"
                       />
                     );
                   }
@@ -299,8 +301,8 @@ export function CodePage() {
                     if (rows.length === 0)
                       return (
                         <CenteredState
-                          title="Search result is unverified — the legacy response cannot distinguish no matches from query failure"
-                          kind="partial"
+                          title={`No symbol matches ${submitted}`}
+                          kind="complete_zero_findings"
                         />
                       );
                     const capped = data.total != null && data.total > rows.length;
@@ -479,8 +481,8 @@ function TopConnectedList({
         if (hubs.length === 0)
           return (
             <CenteredState
-              title="Connected-symbol ranking is unverified — the legacy response returned no rows without read health"
-              kind="partial"
+              title="No connected symbols are indexed for this project"
+              kind="complete_zero_findings"
             />
           );
         return (
