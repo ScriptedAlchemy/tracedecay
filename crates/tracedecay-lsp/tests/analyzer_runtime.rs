@@ -29,6 +29,7 @@ const FAKE_LSP_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from
 // while other test binaries are starting. Keep that harness-only startup
 // allowance independent from the deliberately short diagnostics quiet window.
 const FAKE_LSP_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const FAKE_LSP_PHASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 const HANGING_WRITE_LINE_COUNT: usize = 64_000;
 
@@ -75,10 +76,18 @@ def tracedecay_maybe_phase(name):
     }
 
     async fn wait_for(&self, expected: &str) -> ReachedFakeLspPhase {
-        let (stream, _) = self.listener.accept().await.unwrap();
+        let deadline = tokio::time::Instant::now() + FAKE_LSP_PHASE_TIMEOUT;
+        let (stream, _) = tokio::time::timeout_at(deadline, self.listener.accept())
+            .await
+            .unwrap_or_else(|_| panic!("fake LSP did not reach phase {expected:?} before deadline"))
+            .unwrap();
         let mut reader = BufReader::new(stream);
         let mut actual = String::new();
-        reader.read_line(&mut actual).await.unwrap();
+        let bytes_read = tokio::time::timeout_at(deadline, reader.read_line(&mut actual))
+            .await
+            .unwrap_or_else(|_| panic!("fake LSP did not name phase {expected:?} before deadline"))
+            .unwrap();
+        assert_ne!(bytes_read, 0, "fake LSP closed before naming a phase");
         assert_eq!(actual.trim_end(), expected);
         ReachedFakeLspPhase {
             stream: reader.into_inner(),
@@ -88,7 +97,10 @@ def tracedecay_maybe_phase(name):
 
 impl ReachedFakeLspPhase {
     async fn release(mut self) {
-        self.stream.write_all(b"1").await.unwrap();
+        tokio::time::timeout(FAKE_LSP_PHASE_TIMEOUT, self.stream.write_all(b"1"))
+            .await
+            .expect("fake LSP phase release exceeded protocol deadline")
+            .unwrap();
     }
 }
 
@@ -1091,6 +1103,8 @@ async fn broker_keys_warm_lsp_clients_by_workspace_root() {
     std::fs::create_dir_all(temp.path().join("workspace-b/src")).unwrap();
     std::fs::write(temp.path().join("workspace-a/fake-root"), "").unwrap();
     std::fs::write(temp.path().join("workspace-b/fake-root"), "").unwrap();
+    std::fs::write(temp.path().join("workspace-a/src/lib.fake"), "let nope").unwrap();
+    std::fs::write(temp.path().join("workspace-b/src/lib.fake"), "let nope").unwrap();
     let mut broker = lsp::broker::DiagnosticBroker::new_for_test(
         temp.path(),
         vec![fake_adapter_with_root_marker(
