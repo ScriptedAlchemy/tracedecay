@@ -183,20 +183,27 @@ describe("dashboard SSE wire bridge", () => {
         "project.alpha",
         { files: 7 },
       ),
+      // Work task mutations. Listed last because it is the newest family, and
+      // the one whose subscription this asserts: drop it from the opt-in names
+      // and the frame below is silently discarded rather than failing loudly.
+      activity("task_activity", "task_activity:project.alpha", "task_activity", "project.alpha", {
+        tasks: 3,
+      }),
     ];
     for (const { eventName, frame } of frames) source.emit(eventName, frame);
 
     // Each named event must be subscribed, or the burst never reaches the UI.
-    expect(connection.activityRevision()).toBe(4);
+    expect(connection.activityRevision()).toBe(5);
     expect(connection.activity()).toMatchObject([
       { projectId: "project.alpha", family: "hook_activity" },
       { projectId: "project.beta", family: "tool_call_activity" },
       { projectId: "project.gamma", family: "session_ingest_activity" },
       { projectId: "project.alpha", family: "code_index_activity" },
+      { projectId: "project.alpha", family: "task_activity" },
     ]);
     // Per-project streams keep their own revision sequence, so two projects
     // both at revision 1 are two accepted events, not a duplicate.
-    expect(connection.reducer.takeBatch().events).toHaveLength(4);
+    expect(connection.reducer.takeBatch().events).toHaveLength(5);
     connection.close();
   });
 
