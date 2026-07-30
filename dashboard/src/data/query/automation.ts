@@ -18,6 +18,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { fetchLegacyWrite, type LegacyWriteResult } from './legacy.ts';
+import { legacyQueryKey } from './useLegacy.ts';
 import {
   scopeKey,
   scopeWritable,
@@ -97,12 +98,19 @@ interface SchedulerDispatch {
 export function useSchedulerControl() {
   const scope = useScope((s) => s.scope);
   const client = useQueryClient();
-  const statusKey = [...automationSchedulerKey, scopeKey(scope)];
+  // The status read's own key, from the authority that builds it, not a second
+  // construction of it. `scopeKey(scope)` was the second construction and it
+  // disagreed with the read under the all-projects default — see
+  // {@link legacyQueryKey}.
+  const statusKey = legacyQueryKey(scope, automationSchedulerKey, schedulerStatusUrl);
   // The control's own reading of the scope authority, so what disables the
   // button and what would refuse a dispatch are one value rather than two
   // that can drift.
   const writability = scopeWritable(scope);
   const mutation = useMutation<SchedulerControlResult, Error, boolean, SchedulerDispatch>({
+    // Distinguishes concurrent dispatches by the scope each was sent under, so
+    // two projects' controls are two mutations rather than one shared entry.
+    mutationKey: [...automationSchedulerKey, scopeKey(scope)],
     // Runs immediately before `mutationFn`, from the same options snapshot, so
     // this is the scope the request is actually about to be sent under.
     onMutate: () => ({ statusKey }),
@@ -121,8 +129,12 @@ export function useSchedulerControl() {
     },
     onSuccess: (result, _paused, dispatch) => {
       // The dispatch's own key, never the key of whatever scope is on screen
-      // by the time the daemon answers.
-      const target = dispatch?.statusKey ?? statusKey;
+      // by the time the daemon answers. Read without a fallback on purpose:
+      // `?? statusKey` reinstated exactly the race this context exists to
+      // close, because the closed-over key belongs to the render that settled
+      // rather than to the render that dispatched. `onMutate` establishes this
+      // before `mutationFn` runs, so a settled success always has one.
+      const target = dispatch.statusKey;
       // Only a genuine reading may replace the cached one. A transport failure
       // or an unparseable body is reported by the caller from this same result
       // and must leave the last real reading in place.

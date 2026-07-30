@@ -1,7 +1,33 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchLegacy, type LegacyResult } from './legacy.ts';
 import type { WireSchema } from './wireSchema.ts';
-import { requestScopeKey, scopedUrl, useScope } from '../scope/store.ts';
+import { requestScopeKey, scopedUrl, useScope, type DashboardScope } from '../scope/store.ts';
+
+/**
+ * The cache entry a legacy read occupies, as one exported authority.
+ *
+ * Not an implementation detail of {@link useLegacy}: a mutation that writes the
+ * server's re-read into a read's entry has to address the same key, and while
+ * this construction was private the two drifted. The scheduler control built
+ * its target as `[...key, scopeKey(scope)]` while the read it was writing into
+ * was keyed `[...key, requestScopeKey(scope, url)]` — identical under a
+ * selected project, and different under the all-projects default, where the
+ * request is not rewritten and the token is `unscoped` rather than `all`. So a
+ * pause that the daemon accepted was written to an entry nothing read, and the
+ * panel went on showing the pre-click state.
+ *
+ * Exported so the writer derives the key rather than reconstructing it.
+ */
+export function legacyQueryKey(
+  scope: DashboardScope,
+  key: readonly unknown[],
+  url: string,
+): readonly unknown[] {
+  // Keyed by what the REQUEST carries, not by the scope it was made under.
+  // `/api/projects` and `/api/dashboard` are never rewritten, so they are one
+  // entry shared across scopes rather than a fresh copy per project.
+  return [...key, requestScopeKey(scope, url)];
+}
 
 export function useLegacy<T>(
   key: readonly unknown[],
@@ -12,10 +38,7 @@ export function useLegacy<T>(
   const scope = useScope((s) => s.scope);
   const target = scopedUrl(scope, url);
   return useQuery<LegacyResult<T>>({
-    // Keyed by what the REQUEST carries, not by the scope it was made under.
-    // `/api/projects` and `/api/dashboard` are never rewritten, so they are one
-    // entry shared across scopes rather than a fresh copy per project.
-    queryKey: [...key, requestScopeKey(scope, url)],
+    queryKey: [...legacyQueryKey(scope, key, url)],
     // React Query's signal, threaded through so a read this dashboard has
     // stopped waiting for actually stops. Two callers abandon reads: a scope
     // change (a scoped read's key carries its project, so every one of them is

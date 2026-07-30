@@ -19,8 +19,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { automationSchedulerKey, useSchedulerControl } from './automation.ts';
-import { scopeKey, useScope, type DashboardScope } from '../scope/store.ts';
+import { automationSchedulerKey, schedulerStatusUrl, useSchedulerControl } from './automation.ts';
+import { legacyQueryKey, useLegacy } from './useLegacy.ts';
+import { useScope, type DashboardScope } from '../scope/store.ts';
+import { AutomationSchedulerStatusV1Schema } from '../../contracts/generated.ts';
 
 function activeProject(projectId: string, label: string): DashboardScope {
   return { kind: 'project', projectId, label, activation: 'active' };
@@ -28,9 +30,20 @@ function activeProject(projectId: string, label: string): DashboardScope {
 
 const PROJECT_A = activeProject('proj_a', 'Project A');
 const PROJECT_B = activeProject('proj_b', 'Project B');
+const ALL_PROJECTS: DashboardScope = { kind: 'all' };
 
+/**
+ * The entry the page's own status read occupies, from the authority that builds
+ * it rather than from a second construction of it.
+ *
+ * Restating the key here as `[...automationSchedulerKey, scopeKey(scope)]` is
+ * what let this suite pass while the surface was broken: it repeated the
+ * writer's mistake, and both fixtures were selected projects, where
+ * `scopeKey` and `requestScopeKey` return the same token. The disagreement
+ * only exists under the all-projects default, which nothing here reached.
+ */
 function statusKeyFor(scope: DashboardScope): unknown[] {
-  return [...automationSchedulerKey, scopeKey(scope)];
+  return [...legacyQueryKey(scope, automationSchedulerKey, schedulerStatusUrl)];
 }
 
 /** A scheduler body the contract accepts, distinguishable per project. */
@@ -156,5 +169,53 @@ describe('a scheduler control answered after the reader changed project', () => 
     expect(client.getQueryCache().find({ queryKey: statusKeyFor(PROJECT_B) })?.isStale()).toBe(
       false,
     );
+  });
+});
+
+/**
+ * The default scope, which is where the two key constructions differed.
+ *
+ * Under `all` nothing rewrites `/api/automation/scheduler/status`, so the read
+ * is keyed by the unscoped token while the writer keyed by `all` — and the
+ * daemon's post-change reading was written into an entry with no reader. The
+ * badge and the tiles kept showing the pre-click state after a pause the
+ * scheduler had accepted.
+ *
+ * Asserted through the read hook rather than against a key literal: what has to
+ * hold is that the writer and the page's own read address the same entry, and a
+ * test that names the key itself can agree with a writer that is wrong.
+ */
+describe('a scheduler control under the all-projects default', () => {
+  it("writes into the entry the page's own status read occupies", async () => {
+    useScope.setState({ scope: ALL_PROJECTS });
+    stubHeldControl(() => jsonResponse(200, schedulerBody(true)));
+
+    const { result } = renderHook(
+      () => ({
+        control: useSchedulerControl(),
+        read: useLegacy(
+          automationSchedulerKey,
+          schedulerStatusUrl,
+          AutomationSchedulerStatusV1Schema,
+        ),
+      }),
+      { wrapper },
+    );
+
+    act(() => result.current.control.mutate(true));
+    await waitFor(() => expect(release).not.toBeNull());
+    act(() => release?.());
+    await waitFor(() => expect(result.current.control.isPending).toBe(false));
+
+    // The reading the daemon took after the change, visible to the read that
+    // renders the badge.
+    await waitFor(() => {
+      const read = result.current.read.data;
+      expect(read?.outcome).toBe('ok');
+      expect(read?.outcome === 'ok' ? read.data.paused : null).toBe(true);
+    });
+    // And no orphan: the writer did not also populate a second entry keyed by
+    // the scope token, which is what the defect produced.
+    expect(client.getQueryData([...automationSchedulerKey, 'all'])).toBeUndefined();
   });
 });
