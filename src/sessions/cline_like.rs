@@ -1057,7 +1057,7 @@ mod observation_tests {
 
             let cancelled = ObservationCancellation::default();
             cancelled.cancel();
-            let revoked = capture_cline_like_snapshot_observations(
+            let cancelled_outcome = capture_cline_like_snapshot_observations(
                 &facade,
                 &source,
                 &project,
@@ -1066,16 +1066,16 @@ mod observation_tests {
                 &cancelled,
             )
             .await
-            .expect_err("revoked capture must stop before persistence");
+            .expect_err("cancelled capture must stop before persistence");
             assert!(
                 matches!(
-                    revoked,
+                    cancelled_outcome,
                     TranscriptIngestError::NonDurableRecord {
                         reason: "admission_cancelled",
                         ..
                     }
                 ),
-                "{provider}: {revoked:?}"
+                "{provider}: {cancelled_outcome:?}"
             );
             drop(facade);
             drop(runtime);
