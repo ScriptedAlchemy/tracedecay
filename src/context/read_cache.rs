@@ -15,6 +15,7 @@
 //! by the v8 schema's `sweep` helper after `MAX_AGE_SECS` of inactivity.
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_json_value;
 
 use crate::db::Database;
 use crate::db::engine::{QueryExecutor, params};
@@ -39,34 +40,13 @@ pub struct CachedRead {
 /// Computes a stable hash of the per-call arguments that affect output. Used
 /// as the `args_hash` cache-key component so two calls with different `lines`
 /// or `limit` values map to distinct rows.
-pub fn args_hash(args: &serde_json::Value) -> String {
-    let canonical = canonicalize(args);
+pub fn args_hash(args: &serde_json::Value) -> Result<String> {
+    let canonical = canonical_json_value(args).map_err(|error| TraceDecayError::Config {
+        message: format!("cannot canonicalize read cache arguments: {error}"),
+    })?;
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Sorts JSON object keys recursively so two semantically-equal arg objects
-/// hash identically regardless of key insertion order.
-fn canonicalize(v: &serde_json::Value) -> String {
-    use serde_json::Value;
-    match v {
-        Value::Object(map) => {
-            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
-            entries.sort_by_key(|(k, _)| k.as_str());
-            let inner = entries
-                .into_iter()
-                .map(|(k, v)| format!("\"{k}\":{}", canonicalize(v)))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{inner}}}")
-        }
-        Value::Array(items) => {
-            let inner = items.iter().map(canonicalize).collect::<Vec<_>>().join(",");
-            format!("[{inner}]")
-        }
-        other => other.to_string(),
-    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// SHA-256 of arbitrary bytes, hex-encoded. Used as the body digest so callers
@@ -273,4 +253,40 @@ pub fn file_mtime_ns(path: &std::path::Path) -> std::io::Result<i64> {
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "mtime before epoch"))?;
     let nanos = i128::from(dur.as_secs()) * 1_000_000_000 + i128::from(dur.subsec_nanos());
     Ok(nanos.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn args_hash_uses_domain_canonical_encoding_for_escaped_object_keys() {
+        let args = json!({
+            "quoted\"key": {
+                "slash\\key": "control:\u{0001}",
+            },
+        });
+        let canonical =
+            tracedecay_domain::canonical_json_value(&args).expect("domain canonical JSON");
+
+        assert_eq!(
+            args_hash(&args).expect("cache argument hash"),
+            digest_bytes(canonical.as_bytes())
+        );
+    }
+
+    #[test]
+    fn args_hash_preserves_legacy_production_key() {
+        let args = json!({
+            "lines": "1:2",
+            "last_sync_at": "revision",
+        });
+
+        assert_eq!(
+            args_hash(&args).expect("cache argument hash"),
+            "60181422b29f04d5ba1d28641de87fcd4e2afadd25d5be878ced4905927c0507"
+        );
+    }
 }
