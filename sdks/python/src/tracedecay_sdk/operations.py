@@ -2001,7 +2001,7 @@ class OperationInvoker(Protocol):
     ) -> OperationResponse[ResultT]: ...
 
 class WorkOperations:
-    """The 17 operations admitted by canonical schema-body authority."""
+    """The 18 operations admitted by canonical schema-body authority."""
 
     def __init__(self, invoke: OperationInvoker) -> None:
         self._invoke = invoke
