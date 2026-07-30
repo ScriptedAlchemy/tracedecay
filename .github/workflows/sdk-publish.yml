@@ -1,0 +1,128 @@
+# Manual, one-SDK-at-a-time release. There is no changesets/release-plz style
+# version bot for sdks/typescript or sdks/python: a maintainer bumps the
+# version in package.json or pyproject.toml via a normal PR first, merges it,
+# then dispatches this workflow to publish exactly that version. Both jobs
+# require the real-daemon installed-package conformance suite to pass before
+# publishing; the fast mock-server unit suite alone is never sufficient.
+name: SDK publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdk:
+        description: "Which SDK to publish"
+        required: true
+        type: choice
+        options:
+          - typescript
+          - python
+
+permissions:
+  contents: read
+
+jobs:
+  publish-typescript:
+    if: inputs.sdk == 'typescript'
+    name: Publish @tracedecay/sdk to npm
+    runs-on: ubuntu-latest
+    environment: npm-tracedecay-sdk
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+
+      - name: Install npm 11.5.1+ for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: sdks/typescript
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: sdks/typescript
+
+      - name: Fast unit suite
+        run: npm test
+        working-directory: sdks/typescript
+
+      - name: Build the real production daemon for installed-package conformance
+        run: cargo build --bin tracedecay
+
+      - name: Real-daemon installed-package conformance
+        run: npm run test:installed
+        working-directory: sdks/typescript
+
+      - name: Publish (OIDC trusted publishing)
+        run: npm publish --provenance
+        working-directory: sdks/typescript
+
+  publish-python:
+    if: inputs.sdk == 'python'
+    name: Publish tracedecay-sdk to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi-tracedecay-sdk
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependency
+        run: python -m pip install --upgrade pip build
+
+      - name: Typecheck
+        run: npx --yes pyright@latest
+        working-directory: sdks/python
+
+      - name: Build wheel for fast unit suite
+        run: python -m pip wheel --no-deps --wheel-dir /tmp/tracedecay-sdk-wheel .
+        working-directory: sdks/python
+
+      - name: Install wheel
+        run: |
+          set -euo pipefail
+          wheel="$(find /tmp/tracedecay-sdk-wheel -name 'tracedecay_sdk-*.whl')"
+          test -n "$wheel"
+          python -m pip install "$wheel"
+
+      - name: Fast unit suite (against the installed wheel)
+        run: python -m unittest discover -s tests -p "test_client.py"
+        working-directory: sdks/python
+
+      - name: Build the real production daemon for installed-package conformance
+        run: cargo build --bin tracedecay
+
+      - name: Real-daemon installed-package conformance
+        run: python -m unittest tests/test_installed_package.py
+        working-directory: sdks/python
+
+      - name: Build sdist and wheel for publication
+        run: python -m build --outdir dist
+        working-directory: sdks/python
+
+      - name: Publish (OIDC trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist
