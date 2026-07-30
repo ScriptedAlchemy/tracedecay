@@ -42,6 +42,8 @@ const SPOOL_META_VERSION: u16 = 1;
 const FRAME_LENGTH_BYTES: usize = 4;
 const FRAME_HEADER_BYTES: usize = 4 + 2 + 8 + 8 + 32 + 4;
 const FRAME_CHECKSUM_BYTES: usize = framed_log::CHECKSUM_BYTES;
+const CONTROL_RECORD_RESERVE: u32 = 1;
+const CONTROL_FRAME_RESERVE_BYTES: u64 = 4 * 1024;
 // Acknowledgements can arrive out of global sequence order because replay is
 // fair across sessions. Reserve room for one bounded marker per live record.
 const MAX_META_BYTES: usize = 1024 * 1024;
@@ -478,7 +480,7 @@ impl HookSpoolV1 {
         let sequence = self.meta.next_sequence;
         let frame = encode_frame(sequence, now, envelope.protected_session_id, &encoded)?;
         let frame_len = u64::try_from(frame.len()).map_err(|_| HookSpoolError::SpoolFull)?;
-        self.ensure_append_capacity(envelope.protected_session_id, frame_len)?;
+        self.ensure_append_capacity(&envelope, frame_len)?;
         if self.physical_len.saturating_add(frame_len) > self.config.limits.max_host_bytes {
             self.compact_pending()?;
         }
@@ -632,25 +634,61 @@ impl HookSpoolV1 {
 
     fn ensure_append_capacity(
         &self,
-        session: [u8; 32],
+        envelope: &HookEventEnvelopeV2,
         frame_len: u64,
     ) -> Result<(), HookSpoolError> {
+        let control = matches!(
+            envelope.event.family(),
+            crate::HookEventFamily::SessionBoundary | crate::HookEventFamily::PromptBoundary
+        );
+        let host_record_limit = if control {
+            self.config.limits.max_host_records
+        } else {
+            self.config
+                .limits
+                .max_host_records
+                .saturating_sub(CONTROL_RECORD_RESERVE)
+        };
+        let host_byte_limit = if control {
+            self.config.limits.max_host_bytes
+        } else {
+            self.config
+                .limits
+                .max_host_bytes
+                .saturating_sub(CONTROL_FRAME_RESERVE_BYTES)
+        };
         let host_records = u32::try_from(self.pending.len())
             .map_err(|_| HookSpoolError::SpoolFull)?
             .checked_add(1)
             .ok_or(HookSpoolError::SpoolFull)?;
-        if host_records > self.config.limits.max_host_records
-            || self.pending_bytes().saturating_add(frame_len) > self.config.limits.max_host_bytes
+        if host_records > host_record_limit
+            || self.pending_bytes().saturating_add(frame_len) > host_byte_limit
         {
             return Err(HookSpoolError::SpoolFull);
         }
         let (records, bytes) = self
             .pending_by_session
-            .get(&session)
+            .get(&envelope.protected_session_id)
             .copied()
             .unwrap_or_default();
-        if records.saturating_add(1) > self.config.limits.max_session_records
-            || bytes.saturating_add(frame_len) > self.config.limits.max_session_bytes
+        let session_record_limit = if control {
+            self.config.limits.max_session_records
+        } else {
+            self.config
+                .limits
+                .max_session_records
+                .saturating_sub(CONTROL_RECORD_RESERVE)
+        };
+        let session_byte_limit = if control {
+            self.config.limits.max_session_bytes
+        } else {
+            self.config
+                .limits
+                .max_session_bytes
+                .saturating_sub(CONTROL_FRAME_RESERVE_BYTES)
+        };
+        if records.saturating_add(1) > session_record_limit
+            || bytes.saturating_add(frame_len) > session_byte_limit
         {
             return Err(HookSpoolError::SpoolFull);
         }
@@ -1349,10 +1387,16 @@ mod tests {
             worktree_id: [3; 16],
             worktree_epoch: 4,
             binding_token: [7; 32],
-            capabilities: vec![HookCapabilityV1 {
-                family: HookEventFamily::SessionBoundary,
-                support: HookEventSupportV1::Native,
-            }],
+            capabilities: vec![
+                HookCapabilityV1 {
+                    family: HookEventFamily::SessionBoundary,
+                    support: HookEventSupportV1::Native,
+                },
+                HookCapabilityV1 {
+                    family: HookEventFamily::SavedEdit,
+                    support: HookEventSupportV1::Native,
+                },
+            ],
         }
     }
 
@@ -1372,6 +1416,16 @@ mod tests {
             event: HookEventV2::SessionBoundary {
                 boundary: crate::HookBoundaryV1::Start,
             },
+        }
+    }
+
+    fn regular_envelope(event: u8, session: u8) -> HookEventEnvelopeV2 {
+        HookEventEnvelopeV2 {
+            event: HookEventV2::SavedEdit {
+                file_id: [event; 16],
+                changed_range_count: 1,
+            },
+            ..envelope(event, session)
         }
     }
 
@@ -1469,6 +1523,39 @@ mod tests {
         );
         assert_eq!(spool.pending.len(), 1);
         assert_eq!(spool.meta.next_sequence, 2);
+    }
+
+    #[test]
+    fn control_event_capacity_survives_regular_event_saturation() {
+        let root = TestDir::new("control-capacity");
+        let mut config = config();
+        config.limits.max_host_records = 3;
+        config.limits.max_session_records = 3;
+        let control = envelope(4, 9);
+        let control_payload = canonical_json_bytes(&control).unwrap();
+        let control_frame = encode_frame(3, UtcMicros(10), [9; 32], &control_payload).unwrap();
+        assert!(
+            control_frame.len() as u64 <= CONTROL_FRAME_RESERVE_BYTES,
+            "reserved bytes must cover the checked-in control envelope"
+        );
+        let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+
+        spool
+            .append(regular_envelope(1, 9), &binding(), UtcMicros(10))
+            .unwrap();
+        spool
+            .append(regular_envelope(2, 9), &binding(), UtcMicros(10))
+            .unwrap();
+        assert_eq!(
+            spool
+                .append(regular_envelope(3, 9), &binding(), UtcMicros(10))
+                .unwrap_err(),
+            HookSpoolError::SpoolFull
+        );
+        spool
+            .append(control, &binding(), UtcMicros(10))
+            .expect("reserved capacity admits a session control event");
+        assert_eq!(spool.pending.len(), 3);
     }
 
     #[test]
