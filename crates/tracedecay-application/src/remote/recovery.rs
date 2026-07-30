@@ -4,8 +4,11 @@
 //! may present these records but cannot infer confirmation or promotion.
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::UtcMicros;
 
 use crate::error::ApplicationContractError;
+
+use super::protocol::RemoteProtocolBodyV1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +60,15 @@ impl BackupRequestV1 {
             });
         }
         Ok(())
+    }
+}
+
+impl RemoteProtocolBodyV1 for BackupRequestV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate(sent_at.0)
     }
 }
 
@@ -129,6 +141,15 @@ impl StagedRestoreConfirmationV1 {
             });
         }
         Ok(())
+    }
+}
+
+impl RemoteProtocolBodyV1 for StagedRestoreConfirmationV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        _sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate()
     }
 }
 
@@ -211,6 +232,15 @@ impl PromotionConfirmationV1 {
             });
         }
         Ok(())
+    }
+}
+
+impl RemoteProtocolBodyV1 for PromotionConfirmationV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        _sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate()
     }
 }
 

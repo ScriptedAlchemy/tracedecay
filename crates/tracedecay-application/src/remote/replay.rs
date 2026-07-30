@@ -17,6 +17,8 @@ use super::auth::{
 use super::capture::{
     AdmittedRemoteCaptureV1, RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
+use super::protocol::RemoteProtocolBodyV1;
+use crate::ApplicationContractError;
 
 /// Secret-free replay selector. The authority loads the canonical admitted
 /// capture from its encrypted spool; callers cannot resubmit or alter payload.
@@ -27,15 +29,26 @@ pub struct RemoteReplayRequestV1 {
 }
 
 impl RemoteReplayRequestV1 {
-    pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.event_id.len() < 16
             || self.event_id.len() > 160
             || self.event_id.trim() != self.event_id
             || self.event_id.chars().any(char::is_control)
         {
-            return Err(RemoteReplayApplicationErrorV1::InvalidFrame);
+            return Err(ApplicationContractError::InvalidIdentifier {
+                field: "remote replay event id",
+            });
         }
         Ok(())
+    }
+}
+
+impl RemoteProtocolBodyV1 for RemoteReplayRequestV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        _sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate()
     }
 }
 
