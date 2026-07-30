@@ -156,26 +156,6 @@ pub enum WorkReadiness {
     Accepted,
 }
 
-/// Authoritative full read at one Work version.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkSnapshotV1 {
-    pub projection: WorkProjection,
-    pub history: Vec<WorkEvent>,
-}
-
-/// Bounded-by-history delta after an optional version. An empty `events` list
-/// truthfully means the caller is already current at `through_version`.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkDeltaV1 {
-    pub task_id: TaskId,
-    pub authority: WorkAuthority,
-    pub after_version: Option<WorkVersion>,
-    pub through_version: WorkVersion,
-    pub events: Vec<WorkEvent>,
-}
-
 pub struct WorkService<P> {
     storage: P,
 }
@@ -195,42 +175,6 @@ where
     ) -> Result<WorkProjection, ApplicationProblem> {
         let authority = work_authority(context)?;
         rebuild(self.load_history(&authority, task_id)?)
-    }
-
-    pub fn snapshot(
-        &self,
-        context: &RequestContext,
-        task_id: &TaskId,
-    ) -> Result<WorkSnapshotV1, ApplicationProblem> {
-        let authority = work_authority(context)?;
-        let history = self.load_history(&authority, task_id)?;
-        let projection = rebuild(history.clone())?;
-        Ok(WorkSnapshotV1 {
-            projection,
-            history,
-        })
-    }
-
-    pub fn delta(
-        &self,
-        context: &RequestContext,
-        task_id: &TaskId,
-        after_version: Option<WorkVersion>,
-    ) -> Result<WorkDeltaV1, ApplicationProblem> {
-        let snapshot = self.snapshot(context, task_id)?;
-        let events = snapshot
-            .history
-            .iter()
-            .filter(|event| after_version.is_none_or(|version| event.version() > version))
-            .cloned()
-            .collect();
-        Ok(WorkDeltaV1 {
-            task_id: snapshot.projection.task_id().clone(),
-            authority: snapshot.projection.authority().clone(),
-            after_version,
-            through_version: snapshot.projection.version(),
-            events,
-        })
     }
 
     pub fn create(
@@ -614,7 +558,9 @@ impl ProposalDisposition {
     }
 }
 
-fn work_authority(context: &RequestContext) -> Result<WorkAuthority, ApplicationProblem> {
+pub(crate) fn work_authority(
+    context: &RequestContext,
+) -> Result<WorkAuthority, ApplicationProblem> {
     WorkAuthority::new(
         context.scope().project_id.clone(),
         context.scope().repository_id.clone(),

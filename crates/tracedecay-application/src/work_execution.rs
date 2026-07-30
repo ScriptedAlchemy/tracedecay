@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use tracedecay_domain::{
     WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAttemptProgressV1,
-    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
+    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
     WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestV1,
     WorkCancellationStateV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1, WorkProviderRouteV1,
     WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1,
@@ -30,13 +30,19 @@ impl std::error::Error for WorkExecutionPersistenceError {}
 pub trait WorkAttemptPersistencePort: Send + Sync {
     fn load(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<Option<WorkAttemptV1>, WorkExecutionPersistenceError>;
 
-    fn insert(&self, attempt: &WorkAttemptV1) -> Result<(), WorkExecutionPersistenceError>;
+    fn insert(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptV1,
+    ) -> Result<(), WorkExecutionPersistenceError>;
 
     fn compare_and_swap(
         &self,
+        authority: &WorkAuthority,
         expected: &WorkAttemptV1,
         replacement: &WorkAttemptV1,
     ) -> Result<(), WorkExecutionPersistenceError>;
@@ -140,6 +146,7 @@ where
 
     pub fn acquire_lease(
         &self,
+        authority: &WorkAuthority,
         snapshot: &WorkProjectionSnapshotV1,
         identity: WorkAttemptIdentityV1,
         projection_binding: WorkAttemptProjectionBindingV1,
@@ -160,12 +167,12 @@ where
             None,
         )?;
         attempt.validate_snapshot(snapshot)?;
-        match self.persistence.insert(&attempt) {
+        match self.persistence.insert(authority, &attempt) {
             Ok(()) => Ok(attempt),
             Err(WorkExecutionPersistenceError::Conflict) => {
                 let existing = self
                     .persistence
-                    .load(attempt.identity())?
+                    .load(authority, attempt.identity())?
                     .ok_or(WorkExecutionError::AlreadyExists)?;
                 if existing == attempt {
                     Ok(existing)
@@ -179,29 +186,33 @@ where
 
     pub fn renew_lease(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         expected: &WorkLeaseFenceV1,
         replacement: WorkLeaseFenceV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, expected)?;
+        let current = self.load_with_fence(authority, identity, expected)?;
         if replacement.lease_id() != expected.lease_id() || replacement.epoch() <= expected.epoch()
         {
             return Err(WorkExecutionError::StaleLease);
         }
         let next = rebuild_attempt(&current, replacement)?;
-        self.persistence.compare_and_swap(&current, &next)?;
+        self.persistence
+            .compare_and_swap(authority, &current, &next)?;
         Ok(next)
     }
 
     pub fn start(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         recovery: WorkRecoveryStateV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         let actual_route = self.provider.start(&current)?;
         self.transition(
+            authority,
             current,
             WorkAttemptStateV1::Running,
             None,
@@ -216,11 +227,12 @@ where
 
     pub fn publish_progress(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         progress: WorkAttemptProgressV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         if current.progress().is_some_and(|previous| {
             previous.total() != progress.total() || previous.completed() > progress.completed()
         }) {
@@ -229,6 +241,7 @@ where
         let artifacts = current.artifacts().to_vec();
         let recovery = current.recovery().clone();
         self.transition(
+            authority,
             current,
             WorkAttemptStateV1::Running,
             Some(progress),
@@ -243,17 +256,19 @@ where
 
     pub fn publish_artifact(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         artifact: WorkArtifactRefV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         let mut artifacts = current.artifacts().to_vec();
         let recovery = current.recovery().clone();
         if !artifacts.contains(&artifact) {
             artifacts.push(artifact);
         }
         self.transition(
+            authority,
             current,
             WorkAttemptStateV1::Running,
             None,
@@ -268,15 +283,17 @@ where
 
     pub fn request_cancellation(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         request: WorkCancellationRequestV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         self.provider.request_cancellation(&current, &request)?;
         let artifacts = current.artifacts().to_vec();
         let recovery = current.recovery().clone();
         self.transition(
+            authority,
             current,
             WorkAttemptStateV1::CancellationRequested,
             None,
@@ -291,14 +308,16 @@ where
 
     pub fn acknowledge_cancellation(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         acknowledgement: WorkCancellationAcknowledgementV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         let artifacts = current.artifacts().to_vec();
         let recovery = current.recovery().clone();
         self.transition(
+            authority,
             current,
             WorkAttemptStateV1::CancellationAcknowledged,
             None,
@@ -313,14 +332,16 @@ where
 
     pub fn escalate_cancellation(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         escalation: WorkCancellationEscalationV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         let artifacts = current.artifacts().to_vec();
         let recovery = current.recovery().clone();
         self.transition(
+            authority,
             current,
             WorkAttemptStateV1::CancellationEscalated,
             None,
@@ -335,17 +356,19 @@ where
 
     pub fn require_recovery(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         reason: WorkRestartReasonV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         let artifacts = current.artifacts().to_vec();
         let recovery = WorkRecoveryStateV1::RecoveryRequired {
             source_attempt_id: current.identity().attempt_id().clone(),
             reason,
         };
         self.transition(
+            authority,
             current,
             WorkAttemptStateV1::RecoveryRequired,
             None,
@@ -360,11 +383,12 @@ where
 
     pub fn terminalize(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         terminal: WorkTerminalEvidenceV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let current = self.load_with_fence(identity, lease)?;
+        let current = self.load_with_fence(authority, identity, lease)?;
         if current.is_terminal() {
             return if current.terminal() == Some(&terminal) {
                 Ok(current)
@@ -381,6 +405,7 @@ where
         let cancellation = current.cancellation().clone();
         let recovery = current.recovery().clone();
         self.transition(
+            authority,
             current,
             state,
             None,
@@ -395,12 +420,13 @@ where
 
     fn load_with_fence(
         &self,
+        authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let attempt = self
             .persistence
-            .load(identity)?
+            .load(authority, identity)?
             .ok_or(WorkExecutionError::NotFound)?;
         if attempt.lease() != lease {
             return Err(WorkExecutionError::StaleLease);
@@ -411,6 +437,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn transition(
         &self,
+        authority: &WorkAuthority,
         current: WorkAttemptV1,
         state: WorkAttemptStateV1,
         progress: Option<WorkAttemptProgressV1>,
@@ -449,7 +476,8 @@ where
                 lease,
             )?
         };
-        self.persistence.compare_and_swap(&current, &next)?;
+        self.persistence
+            .compare_and_swap(authority, &current, &next)?;
         Ok(next)
     }
 }
@@ -478,9 +506,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use tracedecay_domain::{
-        AttemptId, ManifestDigest, ProjectionGenerationId, ProviderId, RunId, TaskId, UtcMicros,
-        WorkArtifactId, WorkFenceEpochV1, WorkLeaseId, WorkProjectionSequenceV1,
-        WorkProviderRouteId, WorkVersion,
+        ActorId, AttemptId, ManifestDigest, ProjectId, ProjectionGenerationId, ProviderId,
+        RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkFenceEpochV1, WorkLeaseId,
+        WorkProjectionSequenceV1, WorkProviderRouteId, WorkVersion, WorktreeId,
     };
 
     use super::*;
@@ -495,6 +523,17 @@ mod tests {
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    fn authority() -> WorkAuthority {
+        WorkAuthority::new(
+            id::<ProjectId>("project.work.execution"),
+            id::<RepositoryId>("repository.work.execution"),
+            id::<WorktreeId>("worktree.work.execution"),
+            id::<ActorId>("actor.work.execution"),
+            digest('f'),
+        )
+        .unwrap()
     }
 
     fn identity(value: &str) -> WorkAttemptIdentityV1 {
@@ -562,6 +601,7 @@ mod tests {
     impl WorkAttemptPersistencePort for FakePersistence {
         fn load(
             &self,
+            _authority: &WorkAuthority,
             identity: &WorkAttemptIdentityV1,
         ) -> Result<Option<WorkAttemptV1>, WorkExecutionPersistenceError> {
             Ok(self
@@ -573,7 +613,11 @@ mod tests {
                 .cloned())
         }
 
-        fn insert(&self, attempt: &WorkAttemptV1) -> Result<(), WorkExecutionPersistenceError> {
+        fn insert(
+            &self,
+            _authority: &WorkAuthority,
+            attempt: &WorkAttemptV1,
+        ) -> Result<(), WorkExecutionPersistenceError> {
             let mut stored = self.attempt.lock().unwrap();
             if stored.is_some() {
                 return Err(WorkExecutionPersistenceError::Conflict);
@@ -584,6 +628,7 @@ mod tests {
 
         fn compare_and_swap(
             &self,
+            _authority: &WorkAuthority,
             expected: &WorkAttemptV1,
             replacement: &WorkAttemptV1,
         ) -> Result<(), WorkExecutionPersistenceError> {
@@ -626,10 +671,16 @@ mod tests {
         let service = WorkExecutionService::new(FakePersistence::seeded(attempt), FakeProvider);
 
         service
-            .start(&identity, &lease(1), WorkRecoveryStateV1::Fresh)
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRecoveryStateV1::Fresh,
+            )
             .unwrap();
         service
             .publish_progress(
+                &authority(),
                 &identity,
                 &lease(1),
                 WorkAttemptProgressV1::new(1, 2).unwrap(),
@@ -642,14 +693,16 @@ mod tests {
         )
         .unwrap();
         service
-            .publish_artifact(&identity, &lease(1), artifact.clone())
+            .publish_artifact(&authority(), &identity, &lease(1), artifact.clone())
             .unwrap();
 
         let terminal = WorkTerminalEvidenceV1::succeeded(digest('b'), UtcMicros(20)).unwrap();
         let completed = service
-            .terminalize(&identity, &lease(1), terminal.clone())
+            .terminalize(&authority(), &identity, &lease(1), terminal.clone())
             .unwrap();
-        let replayed = service.terminalize(&identity, &lease(1), terminal).unwrap();
+        let replayed = service
+            .terminalize(&authority(), &identity, &lease(1), terminal)
+            .unwrap();
         assert_eq!(completed, replayed);
         assert_eq!(completed.progress().unwrap().completed(), 1);
         assert_eq!(completed.artifacts(), &[artifact]);
@@ -666,7 +719,12 @@ mod tests {
 
         assert_eq!(
             service
-                .start(&identity, &lease(1), WorkRecoveryStateV1::Fresh)
+                .start(
+                    &authority(),
+                    &identity,
+                    &lease(1),
+                    WorkRecoveryStateV1::Fresh,
+                )
                 .unwrap_err(),
             WorkExecutionError::Persistence(WorkExecutionPersistenceError::Conflict)
         );
@@ -683,7 +741,7 @@ mod tests {
         };
 
         let running = service
-            .start(&identity, &lease(1), recovery.clone())
+            .start(&authority(), &identity, &lease(1), recovery.clone())
             .unwrap();
         assert_eq!(running.recovery(), &recovery);
         assert_eq!(running.state(), WorkAttemptStateV1::Running);
