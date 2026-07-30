@@ -12,13 +12,6 @@
 mod factory;
 mod runtime_adapters;
 
-pub use tracedecay_lsp::{
-    AdmittedRoot, CanonicalDiagnosticRefreshRequest, ClientCapabilities, DaemonLspProtocolSession,
-    DiagnosticSource, DiagnosticTrigger, FeedbackCyclePort, FeedbackCycleRequest,
-    FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities, LspRuntimeFailure,
-    LspRuntimeFuture, SemanticProviderPort, UnavailableDiagnosticSnapshotProvider,
-    UpstreamCapabilities, negotiate_capabilities,
-};
 pub use factory::DaemonLspSessionFactory;
 pub use runtime_adapters::{
     BrokerDiagnosticSnapshotAuthority, DaemonSemanticProviderAdapter, LspDiagnosticDocumentPort,

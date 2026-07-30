@@ -1205,7 +1205,11 @@ mod git_transactions;
 mod git_watch;
 mod github_credential_lifecycle;
 mod http_application;
-pub mod lsp_gateway;
+mod lsp_gateway;
+pub(crate) use lsp_gateway::{
+    BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
+    LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
+};
 #[cfg(unix)]
 mod memory_repair_scheduler;
 mod pr9_mcp_admission;

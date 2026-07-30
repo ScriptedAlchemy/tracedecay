@@ -6,19 +6,24 @@ use lsp_types::PrepareRenameResponse;
 use serde_json::{Value, json};
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
+use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
+use tracedecay_lsp::analyzer::client::{
+    LspRefreshTimeouts, LspSemanticRequest, encode_semantic_request,
+};
 use tracedecay_lsp::analyzer::{LanguageSemanticRoute, PolyglotSemanticProvider};
-
-use crate::application::context::CancellationToken;
-use crate::daemon::lsp_gateway::{
-    AdmittedRoot, LspAnalyzerCancellationAuthority, LspPosition, LspRequestId, LspRuntimeFuture,
-    LspSemanticOperationOutcome, LspSemanticRequestAuthority, Pr12SemanticProviderAdapter,
+use tracedecay_lsp::{
+    AdmittedRoot, LspAnalyzerCancellationAuthority, LspPosition, LspRange, LspRequestId,
+    LspRuntimeFuture, LspSemanticOperationOutcome,
+    LspSemanticRequestAuthority as ProtocolSemanticRequestAuthority, PositionError,
     RenameCandidate, RenameCandidateResult, RenameCandidateUnavailableReason, SemanticCapability,
     SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
     byte_offset_to_utf16_position, utf16_position_to_byte_offset,
 };
+use url::Url;
+
+use crate::application::context::CancellationToken;
+use crate::application::lsp_runtime::{DaemonSemanticProviderAdapter, LspSemanticRequestAuthority};
 use crate::db::Database;
-use crate::diagnostics::lsp::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
-use crate::diagnostics::lsp::client::{LspRefreshTimeouts, LspSemanticRequest};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::{Edge, EdgeKind, Node, NodeKind};
 
@@ -141,7 +146,7 @@ pub fn semantic_authorities_from_parts(
 ) -> ProductionSemanticAuthorities {
     let analyzer_available = upstream.is_some();
     let rename = upstream.as_ref().map(|upstream| {
-        Pr12SemanticProviderAdapter::shared(
+        DaemonSemanticProviderAdapter::shared(
             runtime.clone(),
             Arc::new(RenameCandidateMergeAuthority {
                 analyzer: upstream.clone(),
@@ -149,9 +154,9 @@ pub fn semantic_authorities_from_parts(
             }),
         )
     });
-    let upstream =
-        upstream.map(|upstream| Pr12SemanticProviderAdapter::shared(runtime.clone(), upstream));
-    let graph = Pr12SemanticProviderAdapter::shared(runtime, graph);
+    let upstream = upstream
+        .map(|upstream| DaemonSemanticProviderAdapter::shared_protocol(runtime.clone(), upstream));
+    let graph = DaemonSemanticProviderAdapter::shared(runtime, graph);
     let provider = Arc::new(StdioGraphSemanticProvider {
         upstream: upstream.clone(),
         graph: graph.clone(),
@@ -178,15 +183,11 @@ pub fn semantic_authorities_from_parts(
     }
 }
 
-pub use ProductionSemanticAuthorities as Pr12ProductionSemanticAuthorities;
-pub use production_semantic_authorities as pr12_production_semantic_authorities;
-pub use semantic_authorities_from_parts as pr12_semantic_authorities_from_parts;
-
 struct SemanticCancellationGroup {
     provider: Arc<StdioGraphSemanticProvider>,
-    upstream: Option<Arc<Pr12SemanticProviderAdapter>>,
-    graph: Arc<Pr12SemanticProviderAdapter>,
-    rename: Option<Arc<Pr12SemanticProviderAdapter>>,
+    upstream: Option<Arc<DaemonSemanticProviderAdapter>>,
+    graph: Arc<DaemonSemanticProviderAdapter>,
+    rename: Option<Arc<DaemonSemanticProviderAdapter>>,
 }
 
 impl LspAnalyzerCancellationAuthority for SemanticCancellationGroup {
@@ -220,9 +221,24 @@ impl LspSemanticRequestAuthority for RenameCandidateMergeAuthority {
             return Box::pin(async { LspSemanticOperationOutcome::Unavailable });
         };
         let document_uri = params.text_document.uri.to_string();
-        let analyzer = self
-            .analyzer
-            .start(root.clone(), request_id.clone(), request.clone());
+        let analyzer_request = match encode_semantic_request(request.clone()) {
+            Ok(request) => request,
+            Err(_) => {
+                return Box::pin(async {
+                    LspSemanticOperationOutcome::Partial {
+                        value: Value::Null,
+                        coverage: "semantic-request-invalid".to_owned(),
+                        detail: None,
+                    }
+                });
+            }
+        };
+        let analyzer = ProtocolSemanticRequestAuthority::start(
+            self.analyzer.as_ref(),
+            root.clone(),
+            request_id.clone(),
+            analyzer_request,
+        );
         let graph = self.graph.start(root, request_id, request);
         Box::pin(async move {
             let (analyzer, graph) = tokio::join!(analyzer, graph);
@@ -235,13 +251,14 @@ impl LspSemanticRequestAuthority for RenameCandidateMergeAuthority {
     }
 
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        self.analyzer.cancel_request(root, request_id) | self.graph.cancel_request(root, request_id)
+        ProtocolSemanticRequestAuthority::cancel_request(self.analyzer.as_ref(), root, request_id)
+            | self.graph.cancel_request(root, request_id)
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct RawRenameCandidate {
-    range: crate::daemon::lsp_gateway::LspRange,
+    range: LspRange,
     placeholder: Option<String>,
 }
 
@@ -331,7 +348,7 @@ fn parse_raw_rename_candidate(
             return Err(RenameCandidateUnavailableReason::AmbiguousEvidence);
         }
     };
-    let range = crate::daemon::lsp_gateway::LspRange {
+    let range = LspRange {
         start: LspPosition {
             line: range.start.line,
             character: range.start.character,
@@ -351,9 +368,9 @@ struct ProviderRequestKey {
 }
 
 struct StdioGraphSemanticProvider {
-    upstream: Option<Arc<Pr12SemanticProviderAdapter>>,
-    graph: Arc<Pr12SemanticProviderAdapter>,
-    rename: Option<Arc<Pr12SemanticProviderAdapter>>,
+    upstream: Option<Arc<DaemonSemanticProviderAdapter>>,
+    graph: Arc<DaemonSemanticProviderAdapter>,
+    rename: Option<Arc<DaemonSemanticProviderAdapter>>,
     graph_requests: SyncMutex<BTreeSet<ProviderRequestKey>>,
 }
 
@@ -991,13 +1008,13 @@ fn select_node_at_lsp_position(
     nodes: Vec<Node>,
     text: &str,
     position: LspPosition,
-) -> std::result::Result<Option<Node>, crate::daemon::lsp_gateway::PositionError> {
+) -> std::result::Result<Option<Node>, PositionError> {
     let offset = utf16_position_to_byte_offset(text, position)?;
     let line_start = text[..offset]
         .rfind('\n')
         .map_or(0, |newline| newline.saturating_add(1));
     let byte_column = u32::try_from(offset.saturating_sub(line_start))
-        .map_err(|_| crate::daemon::lsp_gateway::PositionError::ByteOutOfBounds)?;
+        .map_err(|_| PositionError::ByteOutOfBounds)?;
     Ok(nodes
         .into_iter()
         .filter(|node| node.kind != NodeKind::File)
@@ -1009,10 +1026,7 @@ fn select_node_at_lsp_position(
         }))
 }
 
-fn node_identifier_range(
-    project_root: &Path,
-    node: &Node,
-) -> Result<Option<crate::daemon::lsp_gateway::LspRange>> {
+fn node_identifier_range(project_root: &Path, node: &Node) -> Result<Option<LspRange>> {
     let document_path = scoped_document_path(project_root, &node.file_path)?;
     let text =
         crate::sync::read_source_file(&document_path).map_err(|error| TraceDecayError::Config {
@@ -1052,7 +1066,7 @@ fn node_identifier_range(
     let Some((start, end)) = identifier else {
         return Ok(None);
     };
-    Ok(Some(crate::daemon::lsp_gateway::LspRange {
+    Ok(Some(LspRange {
         start: byte_offset_to_utf16_position(&text, start).map_err(|error| {
             TraceDecayError::Config {
                 message: format!("invalid graph rename start position: {error:?}"),
@@ -1532,10 +1546,7 @@ mod tests {
             },
         )
         .expect_err("a partial surrogate pair is not a negotiated position");
-        assert_eq!(
-            error,
-            crate::daemon::lsp_gateway::PositionError::InsideSurrogatePair
-        );
+        assert_eq!(error, PositionError::InsideSurrogatePair);
     }
 
     #[test]
@@ -1568,7 +1579,7 @@ mod tests {
             .expect("identifier");
         assert_eq!(
             range,
-            crate::daemon::lsp_gateway::LspRange {
+            LspRange {
                 start: LspPosition {
                     line: 0,
                     character: 3,

@@ -37,6 +37,21 @@ use tracedecay_domain::{
 use tracedecay_lsp::analyzer::adapters::{LspAdapterDefinition, builtin_adapters};
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspDocument;
+use tracedecay_lsp::{
+    AdmittedRoot, CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
+    ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
+    ContextExpansionScope, ContextFreshness, ContextProducerState, ContextProjectionChange,
+    ContextProjectionEnvelope, ContextProjectionIdentity, ContextProjectionItem,
+    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionRegistration,
+    ContextProjectionRequest, DiagnosticSeverity, DiagnosticSource, DiagnosticTrigger,
+    FeedbackCycleRequest, FeedbackCycleRuntimePort, GatewayCapabilities, GatewayDiagnostic,
+    GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
+    GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspAnalyzerCancellationAuthority,
+    LspRange, LspRequestId, LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
+    MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES, ManagedDiagnosticSnapshot,
+    ManagedDiagnosticSnapshotPort, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
+    UpstreamCapabilities, byte_offset_to_utf16_position,
+};
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
 use tracedecay_store::DiagnosticStore as _;
 use url::Url;
@@ -52,22 +67,9 @@ use crate::application::operation_stream::{
     ManagedTestRunSnapshot, ManagedTestRunStaleReason, ManagedTestRunUnavailableReason,
     operation_event_authority,
 };
-use crate::daemon::lsp_gateway::LspAnalyzerCancellationAuthority;
-use crate::daemon::lsp_gateway::{
-    AdmittedRoot, BrokerDiagnosticSnapshotAuthority, CanonicalContextProjectionAuthority,
-    CanonicalDiagnosticRefreshRequest, ContextCoverage, ContextExpansionEnvelope,
-    ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope, ContextFreshness,
-    ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
-    ContextProjectionIdentity, ContextProjectionItem, ContextProjectionKind,
-    ContextProjectionOutcome, ContextProjectionRegistration, ContextProjectionRequest,
-    DiagnosticSeverity, DiagnosticSource, DiagnosticTrigger, FeedbackCycleRequest,
-    FeedbackCycleRuntimePort, GatewayCapabilities, GatewayDiagnostic, GatewayDiagnosticCoverage,
-    GatewayDiagnosticData, GatewayDiagnosticIdentity, GatewayDiagnosticLifecycle,
-    GatewayDiagnosticProviderState, LspDiagnosticDocumentPort, LspRuntimeFailure, LspRuntimeFuture,
-    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
-    ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort, Pr12LspSessionFactory,
-    SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION, UpstreamCapabilities,
-    byte_offset_to_utf16_position,
+pub(crate) use crate::daemon::{
+    BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
+    LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
 };
 use crate::db::Database;
 use crate::diagnostics_store::DiagnosticsStore;
@@ -75,6 +77,7 @@ use crate::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+pub(crate) use crate::{graph_semantic_capabilities, production_semantic_authorities};
 
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
@@ -759,7 +762,7 @@ where
                         .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
                     diagnostics.push(GatewayDiagnostic {
                         uri: document_uri.clone(),
-                        range: crate::daemon::lsp_gateway::LspRange { start, end },
+                        range: LspRange { start, end },
                         severity: Some(gateway_severity(projection.severity)),
                         code: Some(projection.code.clone()),
                         code_description_uri: projection.code_description_uri.clone(),
@@ -809,7 +812,7 @@ where
                     gateway_diagnostic_data(finding, anchor, &scope, coverage, &expansion_handles);
                 diagnostics.push(GatewayDiagnostic {
                     uri: document_uri.clone(),
-                    range: crate::daemon::lsp_gateway::LspRange { start, end },
+                    range: LspRange { start, end },
                     severity: Some(gateway_severity(record.severity)),
                     code: Some(record.code),
                     code_description_uri: None,
@@ -1366,7 +1369,7 @@ impl OperationEventTestRunProjection {
 }
 
 /// Shared feedback source mounted as both `FeedbackCyclePort` and the managed
-/// diagnostics/context authority in [`Pr12LspRuntimeAdapters`].
+/// diagnostics/context authority in the daemon LSP runtime adapters.
 #[derive(Clone)]
 pub struct ConcretePr12FeedbackLspSource {
     runtime: Arc<Pr12FeedbackRuntime>,
@@ -1862,7 +1865,7 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
     fn snapshot(
         &self,
         root: AdmittedRoot,
-        _request_id: crate::daemon::lsp_gateway::LspRequestId,
+        _request_id: LspRequestId,
         request: ContextProjectionRequest,
     ) -> LspRuntimeFuture<ContextProjectionOutcome> {
         if request.kind == ContextProjectionKind::test_run_results() {
@@ -2030,7 +2033,7 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
     fn expand(
         &self,
         root: AdmittedRoot,
-        _request_id: crate::daemon::lsp_gateway::LspRequestId,
+        _request_id: LspRequestId,
         request: ContextExpansionRequest,
     ) -> LspRuntimeFuture<ContextExpansionOutcome> {
         let source = self.clone();
@@ -2212,7 +2215,7 @@ pub fn lsp_session_factory<F>(
     cancellation: Arc<dyn LspAnalyzerCancellationAuthority>,
     gateway_capabilities: GatewayCapabilities,
     upstream_capabilities: UpstreamCapabilities,
-) -> Result<Pr12LspSessionFactory, LspRuntimeFailure>
+) -> Result<DaemonLspSessionFactory, LspRuntimeFailure>
 where
     F: FnOnce(ProjectFeedbackStore) -> Arc<dyn FeedbackCycleRuntimePort>,
 {
@@ -2238,7 +2241,7 @@ where
         feedback.clone(),
         diagnostics_quiet_window,
     ));
-    Ok(Pr12LspSessionFactory::new(
+    Ok(DaemonLspSessionFactory::new(
         runtime,
         feedback.clone(),
         semantics,
@@ -2249,8 +2252,6 @@ where
         upstream_capabilities,
     ))
 }
-
-pub use lsp_session_factory as pr12_lsp_session_factory;
 
 fn test_run_projection(
     root: AdmittedRoot,
@@ -2923,10 +2924,8 @@ mod context_expansion_tests {
         valid_context_expansion_record,
     };
     use crate::application::feedback::owner::FeedbackReadOperationV1;
-    use crate::daemon::lsp_gateway::{
-        AdmittedRoot, ContextProjectionIdentity, ContextProjectionKind,
-    };
     use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest, UtcMicros};
+    use tracedecay_lsp::{AdmittedRoot, ContextProjectionIdentity, ContextProjectionKind};
 
     fn record() -> StoredLspContextExpansionV1 {
         StoredLspContextExpansionV1 {
@@ -3025,17 +3024,17 @@ mod projection_tests {
     use crate::application::operation_stream::{
         ManagedTestRunResult, ManagedTestRunSnapshot, OperationId,
     };
-    use crate::daemon::lsp_gateway::{
-        AdmittedRoot, ContextCoverage, ContextFreshness, ContextProducerState,
-        ContextProjectionChange, ContextProjectionKind, ContextProjectionOutcome,
-        ContextProjectionRegistration, MAX_CONTEXT_PROJECTION_ITEMS, TRACEDECAY_CONTEXT_REVISION,
-    };
     use tracedecay_application::{Deadline, OperationTermination, RequestId};
     use tracedecay_domain::feedback::{
         FeedbackContentIdentityV1, FeedbackDiagnosticClassificationV1, FeedbackFindingId,
         FeedbackFindingLifecycleV1, FeedbackFindingV1, ProviderEvaluationStateV1,
     };
     use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest, UtcMicros};
+    use tracedecay_lsp::{
+        AdmittedRoot, ContextCoverage, ContextFreshness, ContextProducerState,
+        ContextProjectionChange, ContextProjectionKind, ContextProjectionOutcome,
+        ContextProjectionRegistration, MAX_CONTEXT_PROJECTION_ITEMS, TRACEDECAY_CONTEXT_REVISION,
+    };
 
     fn finding(lifecycle: FeedbackFindingLifecycleV1) -> FeedbackFindingV1 {
         FeedbackFindingV1 {

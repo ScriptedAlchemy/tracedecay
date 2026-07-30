@@ -73,6 +73,9 @@ mod dependency_imports;
 pub mod derive_table;
 pub mod diagnose;
 pub mod diagnostics;
+pub(crate) use diagnostics::lsp::semantic::{
+    graph_semantic_capabilities, production_semantic_authorities,
+};
 pub mod diagnostics_publication;
 pub mod diagnostics_query;
 pub mod diagnostics_store;
