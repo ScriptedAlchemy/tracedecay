@@ -203,6 +203,7 @@ from urllib.parse import urlsplit
 
 from tracedecay_sdk import (
     PageOptions,
+    SERVER_OPERATIONS,
     StreamOptions,
     StreamResume,
     TraceDecayClient,
@@ -223,6 +224,25 @@ for mode in ("local", "remote"):
             base_url, project_id=project_id, token=token, origin=origin
         )
     )
+    if "work_attempt_start" in SERVER_OPERATIONS:
+        try:
+            client.call(
+                "work_attempt_start",
+                {
+                    "identity": {
+                        "task_id": "task.sdk-conformance",
+                        "run_id": "run.sdk-conformance",
+                        "attempt_id": "attempt.sdk-conformance",
+                    },
+                    "lease": {
+                        "lease_id": "lease.sdk-conformance",
+                        "epoch": 1,
+                    },
+                    "recovery": {"state": "fresh"},
+                },
+            )
+        except TraceDecayProblemError:
+            pass
     try:
         response = client.call("test_results", {}, page=PageOptions(size=1))
         request_id = response["request_id"]
