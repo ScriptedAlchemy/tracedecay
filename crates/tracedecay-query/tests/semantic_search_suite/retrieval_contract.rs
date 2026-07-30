@@ -8,7 +8,7 @@ use tracedecay_domain::{
 use tracedecay_query::retrieval::RetrievalPortError;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, SemanticAbstentionV1,
-    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryModeV1,
+    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryDecisionV1,
     SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
 };
 
@@ -83,7 +83,7 @@ fn semantic_warmup_preserves_foreground_fallback_bytes() {
         let outcome = service
             .execute(
                 SemanticLaneReadinessV1::Unavailable(state),
-                SemanticQueryModeV1::FallbackAllowed,
+                SemanticQueryDecisionV1::UseFallback,
                 Arc::clone(&fallback),
             )
             .expect("foreground retrieval remains available");
@@ -98,7 +98,7 @@ fn semantic_warmup_preserves_foreground_fallback_bytes() {
         assert!(matches!(
             service.execute(
                 SemanticLaneReadinessV1::Unavailable(state),
-                SemanticQueryModeV1::StrictSemantic,
+                SemanticQueryDecisionV1::RejectUnavailable,
                 Arc::clone(&fallback),
             ),
             Err(SemanticQueryServiceError::StrictUnavailable(ref reason)) if reason == &expected

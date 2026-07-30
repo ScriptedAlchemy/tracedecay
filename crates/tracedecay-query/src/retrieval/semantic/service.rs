@@ -13,9 +13,6 @@ use tracedecay_domain::{
     RetrieverBatch, RetrieverKind, RetrieverOutcome, SemanticSearchIndexKeyV1,
     VectorGenerationIdV1, canonical_sha256,
 };
-use tracedecay_policy::retrieval_selection::{
-    RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
-};
 
 use super::{
     CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticLaneRetriever,
@@ -27,6 +24,35 @@ use crate::retrieval::fusion::CompositionLaneInput;
 pub enum SemanticQueryModeV1 {
     FallbackAllowed,
     StrictSemantic,
+}
+
+/// Policy-owned decision injected into semantic query execution.
+///
+/// Policy/application decides whether semantic execution is admitted and what
+/// to do if an admitted lane later abstains. The query crate validates and
+/// executes this decision but never evaluates retrieval policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticQueryDecisionV1 {
+    ExecuteSemantic {
+        on_abstention: SemanticAbstentionDispositionV1,
+    },
+    UseFallback,
+    RejectUnavailable,
+}
+
+impl SemanticQueryDecisionV1 {
+    pub const EXECUTE_WITH_FALLBACK: Self = Self::ExecuteSemantic {
+        on_abstention: SemanticAbstentionDispositionV1::UseFallback,
+    };
+    pub const EXECUTE_STRICT: Self = Self::ExecuteSemantic {
+        on_abstention: SemanticAbstentionDispositionV1::RejectUnavailable,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticAbstentionDispositionV1 {
+    UseFallback,
+    RejectUnavailable,
 }
 
 /// Non-ready asynchronous index states. None of these states may start query
@@ -199,6 +225,8 @@ pub enum SemanticQueryServiceError {
     InvalidFallback,
     #[error("the authenticated semantic continuation is invalid or stale")]
     InvalidCursor,
+    #[error("the injected semantic policy decision contradicts the immutable readiness facts")]
+    InvalidPolicyDecision,
 }
 
 pub struct CalibratedSemanticQueryService<'a, L> {
@@ -216,88 +244,105 @@ where
     pub fn execute(
         &self,
         readiness: SemanticLaneReadinessV1<'_>,
-        mode: SemanticQueryModeV1,
+        decision: SemanticQueryDecisionV1,
         fallback: Arc<Pr9FallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError> {
         if fallback.validate().is_err() {
             return Err(SemanticQueryServiceError::InvalidFallback);
         }
-        let requirement = match mode {
-            SemanticQueryModeV1::FallbackAllowed => RetrievalRequirementV1::FallbackAllowed,
-            SemanticQueryModeV1::StrictSemantic => RetrievalRequirementV1::StrictSemantic,
-        };
-        let availability = match &readiness {
-            SemanticLaneReadinessV1::Ready { .. } => RetrievalAvailabilityV1::Ready,
-            SemanticLaneReadinessV1::Unavailable(state) => policy_availability(*state),
-        };
-        let selection = select_retrieval(availability, requirement);
-        let (request, generation, calibration) = match (selection, readiness) {
+        let (request, generation, calibration, on_abstention) = match (decision, readiness) {
             (
-                RetrievalSelectionV1::Semantic,
+                SemanticQueryDecisionV1::ExecuteSemantic { on_abstention },
                 SemanticLaneReadinessV1::Ready {
                     request,
                     generation,
                     calibration,
                 },
-            ) => (request, generation, calibration),
-            (RetrievalSelectionV1::FrozenFallback, SemanticLaneReadinessV1::Unavailable(state)) => {
+            ) => (request, generation, calibration, on_abstention),
+            (SemanticQueryDecisionV1::UseFallback, SemanticLaneReadinessV1::Unavailable(state)) => {
                 return Ok(SemanticQueryServiceOutcomeV1::Fallback {
                     abstention: index_abstention(state),
                     fallback,
                 });
             }
-            (RetrievalSelectionV1::Unavailable, SemanticLaneReadinessV1::Unavailable(state)) => {
+            (
+                SemanticQueryDecisionV1::RejectUnavailable,
+                SemanticLaneReadinessV1::Unavailable(state),
+            ) => {
                 return Err(SemanticQueryServiceError::StrictUnavailable(
                     index_abstention(state),
                 ));
             }
-            (RetrievalSelectionV1::Semantic, SemanticLaneReadinessV1::Unavailable(_))
+            (
+                SemanticQueryDecisionV1::ExecuteSemantic { .. },
+                SemanticLaneReadinessV1::Unavailable(_),
+            )
             | (
-                RetrievalSelectionV1::FrozenFallback | RetrievalSelectionV1::Unavailable,
+                SemanticQueryDecisionV1::UseFallback | SemanticQueryDecisionV1::RejectUnavailable,
                 SemanticLaneReadinessV1::Ready { .. },
-            ) => unreachable!("retrieval selection must match the immutable readiness facts"),
+            ) => return Err(SemanticQueryServiceError::InvalidPolicyDecision),
         };
         if !generation.matches(request) {
-            return self.abstain(mode, SemanticAbstentionV1::IndexIncompatible, fallback);
+            return self.abstain(
+                on_abstention,
+                SemanticAbstentionV1::IndexIncompatible,
+                fallback,
+            );
         }
         let Some(calibration) = calibration else {
-            return self.abstain(mode, SemanticAbstentionV1::CalibrationUnavailable, fallback);
+            return self.abstain(
+                on_abstention,
+                SemanticAbstentionV1::CalibrationUnavailable,
+                fallback,
+            );
         };
         if let Err(abstention) = preflight_calibration(request, calibration) {
-            return self.abstain(mode, abstention, fallback);
+            return self.abstain(on_abstention, abstention, fallback);
         }
         let Ok(outcome) = self.lane.retrieve_semantic(request) else {
-            return self.abstain(mode, SemanticAbstentionV1::LaneFailure, fallback);
+            return self.abstain(on_abstention, SemanticAbstentionV1::LaneFailure, fallback);
         };
         let batch = match outcome {
             RetrieverOutcome::Complete(batch) => batch,
             RetrieverOutcome::Partial { .. } => {
-                return self.abstain(mode, SemanticAbstentionV1::PartialCoverage, fallback);
+                return self.abstain(
+                    on_abstention,
+                    SemanticAbstentionV1::PartialCoverage,
+                    fallback,
+                );
             }
             RetrieverOutcome::Unavailable(_) => {
-                return self.abstain(mode, SemanticAbstentionV1::SemanticUnavailable, fallback);
+                return self.abstain(
+                    on_abstention,
+                    SemanticAbstentionV1::SemanticUnavailable,
+                    fallback,
+                );
             }
             RetrieverOutcome::Denied => {
-                return self.abstain(mode, SemanticAbstentionV1::Denied, fallback);
+                return self.abstain(on_abstention, SemanticAbstentionV1::Denied, fallback);
             }
             RetrieverOutcome::Stale(_) => {
-                return self.abstain(mode, SemanticAbstentionV1::Stale, fallback);
+                return self.abstain(on_abstention, SemanticAbstentionV1::Stale, fallback);
             }
             RetrieverOutcome::BudgetExceeded(_) => {
-                return self.abstain(mode, SemanticAbstentionV1::BudgetExceeded, fallback);
+                return self.abstain(
+                    on_abstention,
+                    SemanticAbstentionV1::BudgetExceeded,
+                    fallback,
+                );
             }
             RetrieverOutcome::Cancelled => {
-                return self.abstain(mode, SemanticAbstentionV1::Cancelled, fallback);
+                return self.abstain(on_abstention, SemanticAbstentionV1::Cancelled, fallback);
             }
         };
         let evidence = match evaluate_calibration(request, &batch, calibration) {
             Ok(evidence) => evidence,
-            Err(abstention) => return self.abstain(mode, abstention, fallback),
+            Err(abstention) => return self.abstain(on_abstention, abstention, fallback),
         };
         let Ok(semantic_lane) =
             CompositionLaneInput::new(RetrieverKind::Semantic, RetrieverOutcome::Complete(batch))
         else {
-            return self.abstain(mode, SemanticAbstentionV1::LaneFailure, fallback);
+            return self.abstain(on_abstention, SemanticAbstentionV1::LaneFailure, fallback);
         };
         Ok(SemanticQueryServiceOutcomeV1::Augmented {
             semantic_lane,
@@ -308,16 +353,18 @@ where
 
     fn abstain(
         &self,
-        mode: SemanticQueryModeV1,
+        disposition: SemanticAbstentionDispositionV1,
         abstention: SemanticAbstentionV1,
         fallback: Arc<Pr9FallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError> {
-        match mode {
-            SemanticQueryModeV1::FallbackAllowed => Ok(SemanticQueryServiceOutcomeV1::Fallback {
-                abstention,
-                fallback,
-            }),
-            SemanticQueryModeV1::StrictSemantic => {
+        match disposition {
+            SemanticAbstentionDispositionV1::UseFallback => {
+                Ok(SemanticQueryServiceOutcomeV1::Fallback {
+                    abstention,
+                    fallback,
+                })
+            }
+            SemanticAbstentionDispositionV1::RejectUnavailable => {
                 Err(SemanticQueryServiceError::StrictUnavailable(abstention))
             }
         }
@@ -332,17 +379,6 @@ fn index_abstention(state: SemanticIndexStateV1) -> SemanticAbstentionV1 {
         SemanticIndexStateV1::Failed => SemanticAbstentionV1::IndexFailed,
         SemanticIndexStateV1::Stale => SemanticAbstentionV1::IndexStale,
         SemanticIndexStateV1::Incompatible => SemanticAbstentionV1::IndexIncompatible,
-    }
-}
-
-const fn policy_availability(state: SemanticIndexStateV1) -> RetrievalAvailabilityV1 {
-    match state {
-        SemanticIndexStateV1::Unavailable => RetrievalAvailabilityV1::Unavailable,
-        SemanticIndexStateV1::Indexing => RetrievalAvailabilityV1::Indexing,
-        SemanticIndexStateV1::Degraded => RetrievalAvailabilityV1::Degraded,
-        SemanticIndexStateV1::Failed => RetrievalAvailabilityV1::Failed,
-        SemanticIndexStateV1::Stale => RetrievalAvailabilityV1::Stale,
-        SemanticIndexStateV1::Incompatible => RetrievalAvailabilityV1::Incompatible,
     }
 }
 
