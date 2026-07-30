@@ -668,9 +668,6 @@ pub struct WorkTopologyPolicyV1 {
 #[serde(transparent)]
 pub struct TopologyPolicyDigestV1(pub ManifestDigest);
 
-/// Compatibility spelling for the policy's canonical digest type.
-pub type TopologyPolicyDigest = TopologyPolicyDigestV1;
-
 impl WorkTopologyPolicyV1 {
     pub const SCHEMA_VERSION: u16 = 1;
 
