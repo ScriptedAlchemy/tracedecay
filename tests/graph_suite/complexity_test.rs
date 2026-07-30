@@ -1,11 +1,11 @@
-use tracedecay::extraction::complexity::{RUST_COMPLEXITY, count_complexity};
+use tracedecay_code_extraction::complexity::{RUST_COMPLEXITY, count_complexity};
 
 /// Helper: parse Rust source, find the first `function_item` node, and return its complexity.
-fn rust_fn_complexity(source: &str) -> tracedecay::extraction::complexity::ComplexityMetrics {
+fn rust_fn_complexity(source: &str) -> tracedecay_code_extraction::complexity::ComplexityMetrics {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(
-            &tracedecay::extraction::ts_provider::language("rust")
+            &tracedecay_code_extraction::ts_provider::language("rust")
                 .expect("failed to load Rust grammar"),
         )
         .expect("failed to load Rust grammar");

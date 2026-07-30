@@ -6,7 +6,7 @@ mod annotations;
 use annotations::{
     AnnotationEmitterState, emit_annotation_usage, scan_children_for_annotation_kinds,
 };
-use tracedecay::extraction::{JavaExtractor, KotlinExtractor, LanguageExtractor, ts_provider};
+use tracedecay_code_extraction::{JavaExtractor, KotlinExtractor, LanguageExtractor, ts_provider};
 use tracedecay::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef};
 use tree_sitter::{Node as TsNode, Parser};
 
