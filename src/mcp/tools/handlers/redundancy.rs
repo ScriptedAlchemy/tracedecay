@@ -621,7 +621,7 @@ where
     Load: FnOnce(Vec<String>) -> LoadFuture,
     LoadFuture: Future<Output = Result<Vec<crate::db::StoredFingerprint>>>,
 {
-    let registry = crate::extraction::LanguageRegistry::new();
+    let registry = tracedecay_code_extraction::LanguageRegistry::new();
     let node_ids = candidates.iter().map(|node| node.id.clone()).collect();
     let mut cached_by_id: HashMap<String, Fingerprint> = load_cached(node_ids)
         .await?
@@ -676,7 +676,7 @@ where
 
         // At least one node in this file needs a fresh fingerprint —
         // parse once and compute for every miss.
-        let Ok(language) = crate::extraction::ts_provider::language(lang_key) else {
+        let Ok(language) = tracedecay_code_extraction::ts_provider::language(lang_key) else {
             continue;
         };
         let Some(tree) = parse_file(&source, &language) else {
@@ -1349,7 +1349,7 @@ mod tests {
 
     #[tokio::test]
     async fn cold_and_warm_cache_paths_each_issue_one_bulk_read_with_identical_results() {
-        if crate::extraction::ts_provider::language("rust").is_err() {
+        if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
