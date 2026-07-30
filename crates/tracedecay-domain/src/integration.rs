@@ -1,7 +1,9 @@
 //! Host-neutral integration catalog contracts.
 //!
-//! This module records only the PR6 capability model and fixture-backed host
-//! availability. Host artifact rendering, lifecycle operations, remote
+//! Production host-surface capability authority is the stock
+//! [`HostCapabilityStateV1`] matrix. Observation-host fixture admission
+//! taxonomies live beside host-event fixtures and are not a second catalog
+//! admission authority. Host artifact rendering, lifecycle operations, remote
 //! transport, and host-local durable state belong to later delivery slices.
 
 mod descriptor;
@@ -337,7 +339,10 @@ impl IntegrationDaemonRequirementV1 {
     }
 }
 
-/// Bounded reasons proven by the PR6 native host-event fixtures.
+/// Bounded reasons proven by native host-event fixture admission cases.
+///
+/// This taxonomy deserializes fixture `admission.status` / `reason_code`
+/// values in tests. It is not part of the production host-capability catalog.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -346,6 +351,7 @@ pub enum HostCapabilityReasonV1 {
     ProjectAuthorityUnbound,
 }
 
+/// Fixture-only observation admission taxonomy (not catalog authority).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(
     tag = "status",
@@ -360,33 +366,21 @@ pub enum HostCapabilityAvailabilityV1 {
     Unavailable(HostCapabilityReasonV1),
 }
 
-impl HostCapabilityAvailabilityV1 {
-    /// Legal outcomes proven by every PR6 native host-event fixture.
-    pub const FIXTURE_BACKED_STATES: [Self; 3] = [
-        Self::Supported,
-        Self::Degraded(HostCapabilityReasonV1::SpoolRecordTooLarge),
-        Self::Unavailable(HostCapabilityReasonV1::ProjectAuthorityUnbound),
-    ];
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCapabilityViewV1 {
     integration_id: HostIntegrationIdV1,
     profile_binding: TraceDecayProfileBindingV1,
-    availability_states: Vec<HostCapabilityAvailabilityV1>,
 }
 
 impl HostCapabilityViewV1 {
     pub fn new(
         integration_id: HostIntegrationIdV1,
         profile_binding: TraceDecayProfileBindingV1,
-        availability_states: Vec<HostCapabilityAvailabilityV1>,
     ) -> Self {
         Self {
             integration_id,
             profile_binding,
-            availability_states,
         }
     }
 
@@ -396,10 +390,6 @@ impl HostCapabilityViewV1 {
 
     pub const fn profile_binding(&self) -> TraceDecayProfileBindingV1 {
         self.profile_binding
-    }
-
-    pub fn availability_states(&self) -> &[HostCapabilityAvailabilityV1] {
-        &self.availability_states
     }
 }
 
@@ -478,8 +468,8 @@ impl HostIntegrationCatalogV1 {
             .collect()
     }
 
-    /// Canonical bytes for the complete catalog authority: the bounded PR6
-    /// observation fixture matrix plus every stock host surface capability.
+    /// Canonical bytes for the complete catalog authority: the observation-host
+    /// matrix plus every stock host surface capability row.
     pub fn canonical_authority_bytes(&self) -> Result<Vec<u8>, DomainError> {
         canonical_json_bytes(&HostIntegrationCatalogAuthorityPayloadV1 {
             observation_catalog: self,
@@ -511,9 +501,6 @@ impl HostIntegrationCatalogV1 {
             return Err(IntegrationCatalogError::EmptyCatalog);
         }
 
-        let required_states = HostCapabilityAvailabilityV1::FIXTURE_BACKED_STATES
-            .into_iter()
-            .collect::<BTreeSet<_>>();
         let required_hosts = HostIntegrationIdV1::ALL
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -541,31 +528,6 @@ impl HostIntegrationCatalogV1 {
                     return Err(IntegrationCatalogError::DuplicateHostIntegration {
                         capability_id: capability.capability_id.as_str().to_owned(),
                         integration_id: host.integration_id,
-                    });
-                }
-
-                let mut availability_states = BTreeSet::new();
-                for state in &host.availability_states {
-                    if !availability_states.insert(*state) {
-                        return Err(IntegrationCatalogError::DuplicateHostAvailabilityState {
-                            capability_id: capability.capability_id.as_str().to_owned(),
-                            integration_id: host.integration_id,
-                            state: *state,
-                        });
-                    }
-                }
-                if availability_states != required_states {
-                    return Err(IntegrationCatalogError::InvalidHostAvailabilityStates {
-                        capability_id: capability.capability_id.as_str().to_owned(),
-                        integration_id: host.integration_id,
-                        missing: required_states
-                            .difference(&availability_states)
-                            .copied()
-                            .collect(),
-                        unexpected: availability_states
-                            .difference(&required_states)
-                            .copied()
-                            .collect(),
                     });
                 }
             }
@@ -631,34 +593,13 @@ pub enum IntegrationCatalogError {
         capability_id: String,
         missing: Vec<HostIntegrationIdV1>,
     },
-    #[error(
-        "capability `{capability_id}` repeats availability state {state:?} for host integration `{integration_id:?}`"
-    )]
-    DuplicateHostAvailabilityState {
-        capability_id: String,
-        integration_id: HostIntegrationIdV1,
-        state: HostCapabilityAvailabilityV1,
-    },
-    #[error(
-        "capability `{capability_id}` has invalid availability states for host integration `{integration_id:?}` (missing {missing:?}, unexpected {unexpected:?})"
-    )]
-    InvalidHostAvailabilityStates {
-        capability_id: String,
-        integration_id: HostIntegrationIdV1,
-        missing: Vec<HostCapabilityAvailabilityV1>,
-        unexpected: Vec<HostCapabilityAvailabilityV1>,
-    },
 }
 
 pub fn host_integration_catalog_v1() -> HostIntegrationCatalogV1 {
     let hosts = HostIntegrationIdV1::ALL
         .into_iter()
         .map(|integration_id| {
-            HostCapabilityViewV1::new(
-                integration_id,
-                TraceDecayProfileBindingV1::User,
-                HostCapabilityAvailabilityV1::FIXTURE_BACKED_STATES.to_vec(),
-            )
+            HostCapabilityViewV1::new(integration_id, TraceDecayProfileBindingV1::User)
         })
         .collect();
     let capability = IntegrationCapabilityV1 {
