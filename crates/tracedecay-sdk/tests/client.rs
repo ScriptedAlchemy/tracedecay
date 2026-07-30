@@ -5,7 +5,8 @@ use std::thread;
 use serde_json::json;
 use tracedecay_sdk::api::HttpApplicationOperation;
 use tracedecay_sdk::client::{
-    Client, ConnectionMode, PageOptions, RequestOptions, StreamOptions, StreamResume,
+    CancellationStatus, Client, ConnectionMode, PageOptions, RequestOptions, StreamOptions,
+    StreamResume,
 };
 
 fn request(stream: &mut TcpStream) -> String {
@@ -152,7 +153,7 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
             .cancel_operation("request.operation", None)
             .unwrap()
             .status,
-        "requested"
+        CancellationStatus::Requested
     );
     let events = client
         .stream_operation(

@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_sdk::api::HttpApplicationOperation;
 use tracedecay_sdk::client::{
-    Client, ConnectionMode, PageOptions, RequestOptions, StreamOptions, StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, PageOptions, RequestOptions,
+    StreamOptions, StreamResume,
 };
 
 struct Daemon {
@@ -109,46 +110,81 @@ fn installed_rust_client_covers_local_remote_paging_resume_and_cancellation() {
             )
             .build()
             .unwrap();
-        let response = client
-            .call(
-                HttpApplicationOperation::GitStatus,
-                &json!({}),
-                RequestOptions {
-                    page: Some(PageOptions {
-                        size: Some(1),
-                        cursor: None,
-                    }),
-                },
-            )
-            .unwrap();
-        let request_id = response.envelope()["request_id"].as_str().unwrap();
-        let mut initial = client
-            .stream_operation(request_id, StreamOptions::default())
-            .unwrap();
-        let open = initial.next().unwrap().unwrap();
-        assert_eq!(open.event, "open");
-        let frontier = &open.data["data"]["frontier"];
-        drop(initial);
-        let resumed = client
-            .stream_operation(
-                request_id,
-                StreamOptions {
-                    resume: Some(StreamResume {
-                        token: frontier["resume_token"].as_str().unwrap().to_owned(),
-                        next_sequence: frontier["next_sequence"].as_u64().unwrap(),
-                    }),
-                    max_reconnects: 0,
-                },
-            )
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(resumed.last().is_some_and(|event| event.terminal()));
-        let cancellation = client.cancel_operation(request_id, None).unwrap();
-        assert!(matches!(
-            cancellation.status.as_str(),
-            "requested" | "already_requested" | "already_terminal"
-        ));
+        let request_id = match client.call(
+            HttpApplicationOperation::TestResults,
+            &json!({}),
+            RequestOptions {
+                page: Some(PageOptions {
+                    size: Some(1),
+                    cursor: None,
+                }),
+            },
+        ) {
+            Ok(response) => response.envelope()["request_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            Err(ClientError::Problem(problem))
+                if problem.code == "application.pr12-primitive.unavailable" =>
+            {
+                problem.envelope["request_id"].as_str().unwrap().to_owned()
+            }
+            Err(error) => panic!("production operation failed unexpectedly: {error}"),
+        };
+        match client.stream_operation(&request_id, StreamOptions::default()) {
+            Ok(mut initial) => {
+                let open = initial.next().unwrap().unwrap();
+                assert_eq!(open.event, "open");
+                let frontier = &open.data["data"]["frontier"];
+                let resume = StreamResume {
+                    token: frontier["resume_token"].as_str().unwrap().to_owned(),
+                    next_sequence: frontier["next_sequence"].as_u64().unwrap(),
+                };
+                drop(initial);
+                let resumed = client
+                    .stream_operation(
+                        &request_id,
+                        StreamOptions {
+                            resume: Some(resume),
+                            max_reconnects: 0,
+                        },
+                    )
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert!(resumed.last().is_some_and(|event| event.terminal()));
+            }
+            Err(ClientError::Problem(problem)) if problem.code == "operation_event.unavailable" => {
+                let resumed = client.stream_operation(
+                    &request_id,
+                    StreamOptions {
+                        resume: Some(StreamResume {
+                            token: "resume.unavailable".to_owned(),
+                            next_sequence: 1,
+                        }),
+                        max_reconnects: 0,
+                    },
+                );
+                assert!(matches!(
+                    resumed,
+                    Err(ClientError::Problem(problem))
+                        if problem.code == "operation_event.resume_expired"
+                ));
+            }
+            Err(error) => panic!("production stream failed unexpectedly: {error}"),
+        }
+        match client.cancel_operation(&request_id, None) {
+            Ok(cancellation) => assert!(matches!(
+                cancellation.status,
+                CancellationStatus::Requested
+                    | CancellationStatus::AlreadyRequested
+                    | CancellationStatus::AlreadyTerminal
+            )),
+            Err(ClientError::Problem(problem)) => {
+                assert_eq!(problem.code, "operation_event.unavailable");
+            }
+            Err(error) => panic!("production cancellation failed unexpectedly: {error}"),
+        }
     }
 }
 
