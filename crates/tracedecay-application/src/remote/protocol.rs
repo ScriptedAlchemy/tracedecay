@@ -21,6 +21,7 @@ use crate::{
 
 pub const REMOTE_PROTOCOL_VERSION_V1: u16 = 1;
 pub const REMOTE_ENROLLMENT_USE_CASE_ID_V1: &str = "use-case.remote.enrollment";
+pub const REMOTE_REPLAY_USE_CASE_ID_V1: &str = "use-case.remote.replay";
 
 pub fn remote_enrollment_result_contract_v1() -> ResultContractRef {
     ResultContractRef::new(
@@ -28,6 +29,15 @@ pub fn remote_enrollment_result_contract_v1() -> ResultContractRef {
         1,
     )
     .expect("static remote result contract is canonical")
+}
+
+pub fn remote_replay_result_contract_v1() -> ResultContractRef {
+    ResultContractRef::new(
+        SchemaId::new("remote.replay.result")
+            .expect("static remote replay result schema id is canonical"),
+        1,
+    )
+    .expect("static remote replay result contract is canonical")
 }
 
 /// Canonical semantic validation required before any authenticated remote
