@@ -11,7 +11,7 @@ use super::user_automation_root;
 use crate::application::memory::MemoryApplication;
 use crate::automation::apply_policy::MemoryApplyPolicy;
 use crate::automation::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
 };
 use crate::automation::config::AutomationConfig;
 use crate::automation::fact_proposals::{
@@ -270,6 +270,7 @@ fn rejected_session_reflector_run(
 /// returning the report plus the not-yet-appended success ledger record.
 pub(super) struct ProposedAgentOutput<'a> {
     pub(super) response: &'a AgentTaskResponse,
+    pub(super) retry_report: &'a AgentTaskRetryReport,
     pub(super) evidence: &'a Value,
     pub(super) evidence_hash: Option<String>,
     pub(super) proposed_ops: &'a Value,
@@ -284,6 +285,7 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
     let ProposedAgentOutput {
         response,
+        retry_report: _,
         evidence,
         evidence_hash,
         proposed_ops,
@@ -499,11 +501,14 @@ pub(super) async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
     );
     let input_hash = Some(request.input_hash.clone());
     let finalizer = run.finalizer(input_hash.clone());
-    let response = match finalizer
+    let (response, retry_report) = match finalizer
         .run_backend_or_fallback(backend, &request, evidence_hash.clone())
         .await?
     {
-        BackendTaskRun::Response(response) => response,
+        BackendTaskRun::Response {
+            response,
+            retry_report,
+        } => (response, retry_report),
         BackendTaskRun::Fallback(record) => {
             let record = *record;
             return Ok(SessionReflectorAutomationRun {
@@ -518,25 +523,42 @@ pub(super) async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
         .response_output_array(
             &response,
             evidence_hash.clone(),
+            &retry_report,
             "facts",
             "session reflector output must include a facts array",
         )
         .await?;
-    let (report, record) = finalize_session_reflector_success(
+    let (report, record) = match finalize_session_reflector_success(
         memory,
         digest_root,
         &finalizer,
         ProposedAgentOutput {
             response: &response,
+            retry_report: &retry_report,
             evidence: &evidence,
-            evidence_hash,
+            evidence_hash: evidence_hash.clone(),
             proposed_ops: &proposed_ops,
             proposals: &proposals,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            finalizer
+                .append_failed_record(
+                    response.model.clone(),
+                    evidence_hash,
+                    Some(proposed_ops),
+                    err.to_string(),
+                    &retry_report,
+                )
+                .await?;
+            return Err(err);
+        }
+    };
     let record = finalizer
-        .append_success_record(&request, &response, record)
+        .append_success_record(&request, &response, &retry_report, record)
         .await?;
 
     Ok(SessionReflectorAutomationRun {

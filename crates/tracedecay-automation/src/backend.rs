@@ -350,26 +350,82 @@ impl BackendRetryPolicy {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTaskRetryAttempt {
+    pub attempt: u32,
+    pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_classification: Option<AgentTaskFailureClass>,
+    pub backoff_millis: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTaskRetryReport {
+    attempts: Vec<AgentTaskRetryAttempt>,
+}
+
+impl AgentTaskRetryReport {
+    pub fn attempt_count(&self) -> usize {
+        self.attempts.len()
+    }
+
+    pub fn attempts(&self) -> &[AgentTaskRetryAttempt] {
+        &self.attempts
+    }
+}
+
 pub async fn run_agent_task_with_retry(
     backend: &dyn AgentTaskBackend,
     request: &AgentTaskRequest,
     policy: &BackendRetryPolicy,
 ) -> Result<AgentTaskResponse> {
+    run_agent_task_with_retry_report(
+        backend,
+        request,
+        policy,
+        &mut AgentTaskRetryReport::default(),
+    )
+    .await
+}
+
+pub async fn run_agent_task_with_retry_report(
+    backend: &dyn AgentTaskBackend,
+    request: &AgentTaskRequest,
+    policy: &BackendRetryPolicy,
+    report: &mut AgentTaskRetryReport,
+) -> Result<AgentTaskResponse> {
+    report.attempts.clear();
     let start = Instant::now();
     let max_attempts = policy.max_attempts.max(1);
     let mut attempt: u32 = 1;
     loop {
         match backend.run_task(request) {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                report.attempts.push(AgentTaskRetryAttempt {
+                    attempt,
+                    succeeded: true,
+                    failure_classification: None,
+                    backoff_millis: 0,
+                });
+                return Ok(response);
+            }
             Err(error) => {
-                if attempt >= max_attempts {
-                    return Err(error);
-                }
-                if !classify_agent_task_error_message(&error.to_string()).is_retryable() {
-                    return Err(error);
-                }
+                let classification = classify_agent_task_error_message(&error.to_string());
                 let backoff = policy.backoff_before_attempt(attempt + 1);
-                if start.elapsed().saturating_add(backoff) >= policy.budget {
+                let should_retry = attempt < max_attempts
+                    && classification.is_retryable()
+                    && start.elapsed().saturating_add(backoff) < policy.budget;
+                report.attempts.push(AgentTaskRetryAttempt {
+                    attempt,
+                    succeeded: false,
+                    failure_classification: Some(classification),
+                    backoff_millis: if should_retry {
+                        u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX)
+                    } else {
+                        0
+                    },
+                });
+                if !should_retry {
                     return Err(error);
                 }
                 if !backoff.is_zero() {
@@ -642,6 +698,39 @@ mod tests {
 
         assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
         assert_eq!(response.run_id, "run_retry");
+    }
+
+    #[tokio::test]
+    async fn retry_report_records_transient_transient_success_attempts() {
+        let backend = FlakyBackend {
+            failures: 2,
+            calls: AtomicUsize::new(0),
+        };
+        let policy = BackendRetryPolicy::new(
+            3,
+            vec![Duration::ZERO, Duration::ZERO],
+            Duration::from_secs(120),
+        );
+        let mut report = AgentTaskRetryReport::default();
+
+        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
+            .await
+            .unwrap();
+
+        assert_eq!(report.attempt_count(), 3);
+        assert_eq!(
+            report
+                .attempts()
+                .iter()
+                .map(|attempt| attempt.failure_classification)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(AgentTaskFailureClass::Timeout),
+                Some(AgentTaskFailureClass::Timeout),
+                None,
+            ]
+        );
+        assert!(report.attempts()[2].succeeded);
     }
 
     #[tokio::test]

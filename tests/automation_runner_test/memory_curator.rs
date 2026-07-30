@@ -1,4 +1,33 @@
 use crate::support::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tracedecay_automation::AutomationError;
+
+struct TransientThenJsonBackend {
+    calls: AtomicUsize,
+}
+
+impl AgentTaskBackend for TransientThenJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+        let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt <= 2 {
+            return Err(AutomationError::config(
+                "timed out waiting for transient test backend",
+            ));
+        }
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: "{\"ops\":[]}".to_string(),
+            output_json: Some(json!({"ops": []})),
+            model: Some("retry-test-model".to_string()),
+            input_tokens: None,
+            output_tokens: None,
+        })
+    }
+}
 
 #[tokio::test]
 async fn memory_curator_runner_skips_when_automation_is_disabled() {
@@ -98,6 +127,9 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(run.ledger_record.backend, "codex_app_server");
     assert_eq!(run.ledger_record.host_mode.as_deref(), Some("standalone"));
     assert_eq!(run.ledger_record.model.as_deref(), Some("fixture-model"));
+    assert_eq!(run.ledger_record.backend_attempt_count, 1);
+    assert_eq!(run.ledger_record.backend_attempts.len(), 1);
+    assert!(run.ledger_record.backend_attempts[0].succeeded);
     assert!(
         run.ledger_record
             .evidence_hash
@@ -550,6 +582,62 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert!(
         !fact_exists(&cg, facts.loser_id).await,
         "default memory curation must apply accepted validated ops"
+    );
+}
+
+#[tokio::test]
+async fn memory_curator_persists_transient_transient_success_retry_receipt() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_duplicate_facts(&cg).await;
+    let backend = TransientThenJsonBackend {
+        calls: AtomicUsize::new(0),
+    };
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            memory_curator: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_memory_curator_with_backend(
+        &cg,
+        &config,
+        &backend,
+        MemoryCuratorAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(run.ledger_record.backend_attempt_count, 3);
+    assert_eq!(
+        run.ledger_record
+            .backend_attempts
+            .iter()
+            .map(|attempt| attempt.failure_classification)
+            .collect::<Vec<_>>(),
+        vec![
+            Some(AgentTaskFailureClass::Timeout),
+            Some(AgentTaskFailureClass::Timeout),
+            None,
+        ]
+    );
+    assert_eq!(
+        run.ledger_record
+            .backend_attempts
+            .iter()
+            .map(|attempt| attempt.backoff_millis)
+            .collect::<Vec<_>>(),
+        vec![2_000, 5_000, 0]
     );
 }
 

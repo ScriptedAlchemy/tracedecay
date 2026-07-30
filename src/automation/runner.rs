@@ -19,9 +19,9 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::backend::{
-    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
-    agent_task_contract, extract_json_object_prefix, prompt_version, run_agent_task_with_retry,
-    task_key,
+    AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
+    BackendRetryPolicy, agent_task_contract, extract_json_object_prefix, prompt_version,
+    run_agent_task_with_retry_report, task_key,
 };
 use super::config::AutomationConfig;
 #[cfg(test)]
@@ -344,11 +344,14 @@ async fn run_skill_writer_for_store(
     );
     let input_hash = Some(request.input_hash.clone());
     let finalizer = run.finalizer(input_hash.clone());
-    let response = match finalizer
+    let (response, retry_report) = match finalizer
         .run_backend_or_fallback(backend, &request, evidence_hash.clone())
         .await?
     {
-        BackendTaskRun::Response(response) => response,
+        BackendTaskRun::Response {
+            response,
+            retry_report,
+        } => (response, retry_report),
         BackendTaskRun::Fallback(record) => {
             let record = *record;
             return Ok(SkillWriterAutomationRun {
@@ -363,25 +366,42 @@ async fn run_skill_writer_for_store(
         .response_output_array(
             &response,
             evidence_hash.clone(),
+            &retry_report,
             "skills",
             "skill writer output must include a skills array",
         )
         .await?;
-    let (report, record) = finalize_skill_writer_success(
+    let (report, record) = match finalize_skill_writer_success(
         &finalizer,
         &profile_root,
         activation_policy,
         ProposedAgentOutput {
             response: &response,
+            retry_report: &retry_report,
             evidence: &evidence,
-            evidence_hash,
+            evidence_hash: evidence_hash.clone(),
             proposed_ops: &proposed_ops,
             proposals: &proposals,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            finalizer
+                .append_failed_record(
+                    response.model.clone(),
+                    evidence_hash,
+                    Some(proposed_ops),
+                    err.to_string(),
+                    &retry_report,
+                )
+                .await?;
+            return Err(err);
+        }
+    };
     let record = finalizer
-        .append_success_record(&request, &response, record)
+        .append_success_record(&request, &response, &retry_report, record)
         .await?;
 
     Ok(SkillWriterAutomationRun {
@@ -394,8 +414,6 @@ async fn run_skill_writer_for_store(
 
 /// Validates and stages the `skills` half of a skill-writer (or combined)
 /// run, returning the report plus the not-yet-appended success ledger record.
-/// A skill-proposal validation failure appends a failed record before
-/// bubbling the error.
 async fn finalize_skill_writer_success(
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
@@ -404,6 +422,7 @@ async fn finalize_skill_writer_success(
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
     let ProposedAgentOutput {
         response,
+        retry_report: _,
         evidence,
         evidence_hash,
         proposed_ops,
@@ -411,27 +430,13 @@ async fn finalize_skill_writer_success(
     } = output;
     let config = finalizer.config();
     let run_id = finalizer.run_id();
-    let proposal_outcome = match validate_and_apply_skill_proposals(
+    let proposal_outcome = validate_and_apply_skill_proposals(
         profile_root,
         run_id,
         proposals,
         config.auto_enable_skills,
     )
-    .await
-    {
-        Ok(result) => result,
-        Err(err) => {
-            finalizer
-                .append_failed_record(
-                    response.model.clone(),
-                    evidence_hash,
-                    Some(proposed_ops.clone()),
-                    err.to_string(),
-                )
-                .await?;
-            return Err(err);
-        }
-    };
+    .await?;
     let accepted_count = proposal_outcome.created.len()
         + proposal_outcome.updated.len()
         + proposal_outcome.consolidations.len();
@@ -526,6 +531,8 @@ fn unpersisted_rejected_parts(
         error: Some(reason.to_string()),
         error_classification: None,
         error_retryable: None,
+        backend_attempt_count: 0,
+        backend_attempts: Vec::new(),
         fallback_status: Some(reason.to_string()),
         report_ref: Some(json!({
             "dashboard_runs": "/api/plugins/holographic/curation/runs",
@@ -750,37 +757,46 @@ async fn run_combined_review_for_retrieval(
     .for_combined_run(run_id.clone());
 
     let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
-    let response = match run_agent_task_with_retry(backend, &request, &retry_policy).await {
-        Ok(response) => response,
-        Err(err) => {
-            let reflector_record = reflector_finalizer
-                .append_backend_fallback_record(
-                    reflector_bundle.evidence_hash.clone(),
-                    err.to_string(),
-                )
-                .await?;
-            let skill_record = skill_finalizer
-                .append_backend_fallback_record(skill_bundle.evidence_hash.clone(), err.to_string())
-                .await?;
-            return Ok(CombinedReviewDispatch::Ran(Box::new(
-                CombinedReviewAutomationRun {
-                    run_id,
-                    session_reflector: SessionReflectorAutomationRun {
-                        run_id: reflector_record.run_id.clone(),
-                        report: failed_backend_fallback_report(&reflector_record),
-                        ledger_record: reflector_record,
-                        backend_response: None,
+    let mut retry_report = AgentTaskRetryReport::default();
+    let response =
+        match run_agent_task_with_retry_report(backend, &request, &retry_policy, &mut retry_report)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let reflector_record = reflector_finalizer
+                    .append_backend_fallback_record(
+                        reflector_bundle.evidence_hash.clone(),
+                        err.to_string(),
+                        &retry_report,
+                    )
+                    .await?;
+                let skill_record = skill_finalizer
+                    .append_backend_fallback_record(
+                        skill_bundle.evidence_hash.clone(),
+                        err.to_string(),
+                        &retry_report,
+                    )
+                    .await?;
+                return Ok(CombinedReviewDispatch::Ran(Box::new(
+                    CombinedReviewAutomationRun {
+                        run_id,
+                        session_reflector: SessionReflectorAutomationRun {
+                            run_id: reflector_record.run_id.clone(),
+                            report: failed_backend_fallback_report(&reflector_record),
+                            ledger_record: reflector_record,
+                            backend_response: None,
+                        },
+                        skill_writer: SkillWriterAutomationRun {
+                            run_id: skill_record.run_id.clone(),
+                            report: failed_backend_fallback_report(&skill_record),
+                            ledger_record: skill_record,
+                            backend_response: None,
+                        },
                     },
-                    skill_writer: SkillWriterAutomationRun {
-                        run_id: skill_record.run_id.clone(),
-                        report: failed_backend_fallback_report(&skill_record),
-                        ledger_record: skill_record,
-                        backend_response: None,
-                    },
-                },
-            )));
-        }
-    };
+                )));
+            }
+        };
 
     let output = match response
         .output_json
@@ -797,6 +813,7 @@ async fn run_combined_review_for_retrieval(
                 &skill_bundle,
                 None,
                 &err,
+                &retry_report,
             )
             .await?;
             return Ok(CombinedReviewDispatch::RecordedFailure {
@@ -819,6 +836,7 @@ async fn run_combined_review_for_retrieval(
             &skill_bundle,
             Some(&output),
             &err,
+            &retry_report,
         )
         .await?;
         return Ok(CombinedReviewDispatch::RecordedFailure {
@@ -838,6 +856,7 @@ async fn run_combined_review_for_retrieval(
             &skill_bundle,
             Some(&output),
             &err,
+            &retry_report,
         )
         .await?;
         return Ok(CombinedReviewDispatch::RecordedFailure {
@@ -846,40 +865,82 @@ async fn run_combined_review_for_retrieval(
         });
     }
 
-    let (reflector_report, reflector_record) = finalize_session_reflector_success(
+    let (reflector_report, reflector_record) = match finalize_session_reflector_success(
         &memory,
         Some(cg.store_layout().project_root.as_path()),
         &reflector_finalizer,
         ProposedAgentOutput {
             response: &response,
+            retry_report: &retry_report,
             evidence: &reflector_bundle.evidence,
             evidence_hash: reflector_bundle.evidence_hash.clone(),
             proposed_ops: &output,
             proposals: &facts,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let (reflector_record, skill_record) = append_combined_failed_records(
+                &reflector_finalizer,
+                &skill_finalizer,
+                &response,
+                &reflector_bundle,
+                &skill_bundle,
+                Some(&output),
+                &err,
+                &retry_report,
+            )
+            .await?;
+            return Ok(CombinedReviewDispatch::RecordedFailure {
+                run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+                error: err,
+            });
+        }
+    };
 
-    let (skill_report, skill_record) = finalize_skill_writer_success(
+    let (skill_report, skill_record) = match finalize_skill_writer_success(
         &skill_finalizer,
         &skill_bundle.profile_root,
         activation_policy,
         ProposedAgentOutput {
             response: &response,
+            retry_report: &retry_report,
             evidence: &skill_bundle.evidence,
             evidence_hash: skill_bundle.evidence_hash.clone(),
             proposed_ops: &output,
             proposals: &skills,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let (reflector_record, skill_record) = append_combined_failed_records(
+                &reflector_finalizer,
+                &skill_finalizer,
+                &response,
+                &reflector_bundle,
+                &skill_bundle,
+                Some(&output),
+                &err,
+                &retry_report,
+            )
+            .await?;
+            return Ok(CombinedReviewDispatch::RecordedFailure {
+                run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+                error: err,
+            });
+        }
+    };
     // Finalize both halves before either ledger append. Non-empty proposal
     // sets already failed closed above; empty arrays may append both successes.
     let reflector_record = reflector_finalizer
-        .append_success_record(&request, &response, reflector_record)
+        .append_success_record(&request, &response, &retry_report, reflector_record)
         .await?;
     let skill_record = skill_finalizer
-        .append_success_record(&request, &response, skill_record)
+        .append_success_record(&request, &response, &retry_report, skill_record)
         .await?;
 
     Ok(CombinedReviewDispatch::Ran(Box::new(
@@ -934,6 +995,7 @@ async fn append_combined_failed_records(
     skill_bundle: &SkillWriterEvidenceBundle,
     proposed_ops: Option<&Value>,
     err: &TraceDecayError,
+    retry_report: &AgentTaskRetryReport,
 ) -> Result<(AutomationRunLedgerRecord, AutomationRunLedgerRecord)> {
     let reflector_record = reflector_finalizer
         .append_failed_record(
@@ -941,6 +1003,7 @@ async fn append_combined_failed_records(
             reflector_bundle.evidence_hash.clone(),
             proposed_ops.cloned(),
             err.to_string(),
+            retry_report,
         )
         .await?;
     let skill_record = skill_finalizer
@@ -949,6 +1012,7 @@ async fn append_combined_failed_records(
             skill_bundle.evidence_hash.clone(),
             proposed_ops.cloned(),
             err.to_string(),
+            retry_report,
         )
         .await?;
     Ok((reflector_record, skill_record))
