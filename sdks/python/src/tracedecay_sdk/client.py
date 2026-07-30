@@ -7,7 +7,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, TypeAlias, cast
+from typing import Any, Final, Literal, TypeAlias, TypedDict, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -101,6 +101,12 @@ class StreamEvent:
     @property
     def terminal(self) -> bool:
         return self.event in _TERMINAL_EVENTS
+
+
+class OperationCancellation(TypedDict):
+    """Canonical cancellation acknowledgement."""
+
+    status: Literal["requested", "already_requested", "already_terminal"]
 
 
 class OperationNamespace:
@@ -215,11 +221,15 @@ class TraceDecayClient:
         _object(value.get("outcome"), "success.outcome")
         return value
 
-    def cancel_operation(self, operation_id: str) -> JsonObject:
+    def cancel_operation(self, operation_id: str) -> OperationCancellation:
         """Request cancellation of an accepted operation."""
         _opaque(operation_id, _MAX_REQUEST_ID_BYTES, "operation_id")
         url = self._lifecycle_url(operation_id, "cancel")
         status, value = self._json_request(url, method="POST")
+        if value.get("kind") == "problem":
+            raise TraceDecayProblemError(
+                status, _object(value.get("value"), "cancellation problem")
+            )
         cancellation = _string(value.get("status"), "cancellation.status")
         valid = (status, cancellation) in {
             (202, "requested"),
@@ -230,7 +240,7 @@ class TraceDecayClient:
             raise TraceDecayProtocolError(
                 "daemon returned a non-canonical cancellation response", status=status
             )
-        return value
+        return cast(OperationCancellation, value)
 
     def stream_operation(
         self, operation_id: str, options: StreamOptions = StreamOptions()
@@ -256,6 +266,13 @@ class TraceDecayClient:
             try:
                 with self._open(url, method="GET", accept="text/event-stream") as response:
                     media_type = response.headers.get_content_type()
+                    if response.status >= 400 and media_type == "application/json":
+                        value = _object(json.load(response), "stream problem")
+                        if value.get("kind") == "problem":
+                            raise TraceDecayProblemError(
+                                response.status,
+                                _object(value.get("value"), "stream problem value"),
+                            )
                     if media_type != "text/event-stream":
                         raise TraceDecayProtocolError(
                             "daemon did not open a canonical event stream",

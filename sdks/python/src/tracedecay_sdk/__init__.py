@@ -2,6 +2,7 @@
 
 from .client import (
     JsonObject,
+    OperationCancellation,
     OperationNamespace,
     PageOptions,
     StreamEvent,
@@ -18,6 +19,7 @@ from .operations import SERVER_OPERATIONS, UNAVAILABLE_OPERATIONS, ServerOperati
 
 __all__ = [
     "JsonObject",
+    "OperationCancellation",
     "OperationNamespace",
     "PageOptions",
     "SERVER_OPERATIONS",
