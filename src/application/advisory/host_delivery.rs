@@ -29,7 +29,7 @@ use crate::application::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
     Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26HookScoutPhaseV1,
 };
-use crate::daemon::lsp_gateway::DaemonLspSessionFactory;
+use crate::application::lsp_runtime::DaemonLspSessionFactory;
 
 use super::runtime::{
     Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1, Pr13AdvisoryCycleRequestV1,

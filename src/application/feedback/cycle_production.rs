@@ -43,6 +43,10 @@ use tracedecay_domain::{
     LanguageDescriptorRevision, LanguageId, ManifestDigest, ProviderId, RetrievalAnchorId, ShardId,
     UtcMicros, VectorWatermark, canonical_sha256,
 };
+use tracedecay_lsp::{
+    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
+    LspRuntimeFuture,
+};
 use tracedecay_policy::TruthSourceStateV1;
 use tracedecay_policy::analyzer::{
     AnalyzerAdmissionInputV1, AnalyzerAvailabilityV1, AnalyzerCandidateV1,
@@ -58,15 +62,11 @@ use crate::application::advisory::{
 };
 use crate::application::configuration::ConfigurationCurrentStateV1;
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
-use crate::daemon::lsp_gateway::{
-    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
-    LspRuntimeFuture,
-};
-use crate::diagnostics::lsp::broker::MountedLspProvider;
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
+use tracedecay_lsp::analyzer::broker::MountedLspProvider;
 
 const POLICY_REVISION_V1: u64 = 1;
 const MANAGED_CAPABILITY: &str = "capability.diagnostics.current";

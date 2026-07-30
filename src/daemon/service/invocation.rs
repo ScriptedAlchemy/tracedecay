@@ -52,6 +52,19 @@ use tracedecay_domain::{
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
     ManifestDigest, ProjectId, RetrievalAnchorId, UserProfileId, UtcMicros, canonical_sha256,
 };
+use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
+use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_lsp::{
+    AdmittedRoot, AuthorizedLspSession, CanonicalContextProjectionAuthority,
+    CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
+    ContextProjectionOutcome, ContextProjectionRegistration, ContextProjectionRequest,
+    DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest,
+    FeedbackCycleRuntimePort, GatewayCapabilities, GenerationDiagnostics, LSP_SESSION_TTL_MS,
+    LspAnalyzerCancellationAuthority, LspEndpointError, LspRequestId, LspRuntimeFailure,
+    LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential,
+    LspSessionId, LspSessionOpenRequest, LspSessionRegistry, MAX_LSP_FRAME_BYTES, SessionLifecycle,
+    UnavailableSemanticProvider, UpstreamCapabilities,
+};
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
     ConfigurationMutationPermissionV1,
@@ -104,8 +117,10 @@ use crate::application::feedback::{
     Pr12FeedbackCycleLspInput, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
     open_pr12_feedback_cycle_runtime,
 };
-use crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
-use crate::application::lsp_runtime::pr12_lsp_session_factory;
+use crate::application::lsp_runtime::{
+    DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
+    production_semantic_authorities,
+};
 use crate::application::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
 };
@@ -125,19 +140,8 @@ use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationS
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
 };
-use crate::daemon::lsp_gateway::{
-    AdmittedRoot, AuthorizedLspSession, DaemonLspRuntimeSession, DaemonLspSessionEndpoint,
-    FeedbackCycleRequest, FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS,
-    LspEndpointError, LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential,
-    LspSessionId, LspSessionOpenRequest, LspSessionRegistry, Pr12LspSessionFactory,
-    SessionLifecycle, UpstreamCapabilities,
-};
 use crate::db::Database;
-use crate::diagnostics::lsp::broker::DiagnosticBroker;
-use crate::diagnostics::lsp::client::LspRefreshTimeouts;
-use crate::diagnostics::lsp::pr12_production_semantic_authorities;
 use crate::errors::TraceDecayError;
-use crate::lsp_bridge::MAX_LSP_FRAME_BYTES;
 use crate::request_identity::{
     GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
     mint_global_opaque_id,
@@ -4150,10 +4154,8 @@ pub(in crate::daemon) fn observe_accepted_feedback_cycle_terminal(
     outcome: Plan26FeedbackOutcomeV1,
 ) {
     let trigger = match request.trigger {
-        crate::daemon::lsp_gateway::DiagnosticTrigger::DocumentSave => "document_save",
-        crate::daemon::lsp_gateway::DiagnosticTrigger::ExplicitDocumentDiagnostics => {
-            "explicit_document_diagnostics"
-        }
+        DiagnosticTrigger::DocumentSave => "document_save",
+        DiagnosticTrigger::ExplicitDocumentDiagnostics => "explicit_document_diagnostics",
     };
     let Ok(subject) = canonical_sha256(&(
         "tracedecay.feedback.accepted-cycle.v1",
@@ -4198,9 +4200,7 @@ impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
     fn execute(
         &self,
         request: FeedbackCycleRequest,
-    ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
-        Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure>,
-    > {
+    ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
         let project_id = self.project_id.clone();
         let observations = Arc::clone(&self.observations);
         Box::pin(async move {
@@ -4210,9 +4210,7 @@ impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
                 &request,
                 Plan26FeedbackOutcomeV1::Unavailable,
             );
-            Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                "feedback-cycle-unavailable",
-            ))
+            Err(LspRuntimeFailure::new("feedback-cycle-unavailable"))
         })
     }
 }
@@ -4224,13 +4222,11 @@ impl SwitchableFeedbackCycleRuntimeV1 {
         }
     }
 
-    fn replace(
-        &self,
-        current: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure> {
-        *self.current.write().map_err(|_| {
-            crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-router")
-        })? = current;
+    fn replace(&self, current: Arc<dyn FeedbackCycleRuntimePort>) -> Result<(), LspRuntimeFailure> {
+        *self
+            .current
+            .write()
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-router"))? = current;
         Ok(())
     }
 }
@@ -4239,16 +4235,12 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
     fn execute(
         &self,
         request: FeedbackCycleRequest,
-    ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
-        Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure>,
-    > {
+    ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
         let current = self
             .current
             .read()
             .map(|current| Arc::clone(&current))
-            .map_err(|_| {
-                crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-cycle-router")
-            });
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-router"));
         Box::pin(async move { current?.execute(request).await })
     }
 }
@@ -5105,17 +5097,17 @@ impl DaemonLspOwnerRegistrar {
         self.service.install_lsp_owner(project_root, owner).await;
     }
 
-    pub(crate) async fn register_pr12_factory(
+    pub(crate) async fn register_factory(
         &self,
         project_root: PathBuf,
-        factory: Arc<Pr12LspSessionFactory>,
+        factory: Arc<DaemonLspSessionFactory>,
     ) {
         self.register_lsp_owner(project_root, DaemonLspInvocationOwner::new(factory))
             .await;
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn build_and_register_pr12(
+    pub(crate) async fn build_and_register(
         &self,
         project_root: PathBuf,
         database: Database,
@@ -5127,7 +5119,7 @@ impl DaemonLspOwnerRegistrar {
         timeouts: LspRefreshTimeouts,
         diagnostics_quiet_window: Duration,
         gateway_capabilities: GatewayCapabilities,
-    ) -> Result<Arc<Pr12LspSessionFactory>, TraceDecayError> {
+    ) -> Result<Arc<DaemonLspSessionFactory>, TraceDecayError> {
         let feedback_runtime = self
             .service
             .feedback_runtime(Some(&project_root))
@@ -5143,7 +5135,7 @@ impl DaemonLspOwnerRegistrar {
                 message: "production feedback cycle input is not registered for the project"
                     .to_owned(),
             })?;
-        let semantics = pr12_production_semantic_authorities(
+        let semantics = production_semantic_authorities(
             runtime.clone(),
             diagnostic_broker.clone(),
             database.clone(),
@@ -5158,7 +5150,7 @@ impl DaemonLspOwnerRegistrar {
             semantic: semantics.semantic_capabilities.clone(),
         };
         let factory = Arc::new(
-            pr12_lsp_session_factory(
+            lsp_session_factory(
                 runtime,
                 feedback_runtime,
                 database,
@@ -5172,11 +5164,10 @@ impl DaemonLspOwnerRegistrar {
                 upstream_capabilities,
             )
             .map_err(|error| TraceDecayError::Config {
-                message: format!("could not construct PR12 LSP session factory: {error:?}"),
+                message: format!("could not construct LSP session factory: {error:?}"),
             })?,
         );
-        self.register_pr12_factory(project_root, factory.clone())
-            .await;
+        self.register_factory(project_root, factory.clone()).await;
         Ok(factory)
     }
 }
@@ -5212,7 +5203,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         project_root: PathBuf,
         input: Pr13AdvisoryRuntimeOpenV1,
         providers: Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
-        lsp_session_factory: Arc<Pr12LspSessionFactory>,
+        lsp_session_factory: Arc<DaemonLspSessionFactory>,
         hook_delivery_port: Arc<
             dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
         >,
@@ -5266,7 +5257,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         project_root: PathBuf,
         input: Pr13AdvisoryRuntimeOpenV1,
         production: Pr13AdvisoryProductionOpenV1,
-        lsp_session_factory: Arc<Pr12LspSessionFactory>,
+        lsp_session_factory: Arc<DaemonLspSessionFactory>,
     ) -> Result<
         Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
         DaemonAdvisoryRuntimeRegistrationError,
@@ -5437,11 +5428,11 @@ type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
 pub(crate) struct DaemonLspInvocationOwner {
-    factory: Arc<Pr12LspSessionFactory>,
+    factory: Arc<DaemonLspSessionFactory>,
 }
 
 impl DaemonLspInvocationOwner {
-    pub(crate) fn new(factory: Arc<Pr12LspSessionFactory>) -> Self {
+    pub(crate) fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {
         Self { factory }
     }
 }
@@ -8140,68 +8131,47 @@ mod tests {
 
     struct UnavailableDiagnosticAuthority;
 
-    impl crate::daemon::lsp_gateway::CanonicalDiagnosticSnapshotAuthority
-        for UnavailableDiagnosticAuthority
-    {
+    impl CanonicalDiagnosticSnapshotAuthority for UnavailableDiagnosticAuthority {
         fn refresh(
             &self,
-            _request: crate::daemon::lsp_gateway::CanonicalDiagnosticRefreshRequest,
-        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
-            Result<
-                crate::daemon::lsp_gateway::GenerationDiagnostics,
-                crate::daemon::lsp_gateway::LspRuntimeFailure,
-            >,
-        > {
-            Box::pin(async {
-                Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                    "test-diagnostics-unavailable",
-                ))
-            })
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>> {
+            Box::pin(async { Err(LspRuntimeFailure::new("test-diagnostics-unavailable")) })
         }
     }
 
     struct UnavailableCancellationAuthority;
 
-    impl crate::daemon::lsp_gateway::LspAnalyzerCancellationAuthority
-        for UnavailableCancellationAuthority
-    {
-        fn cancel_request(
-            &self,
-            _root: &AdmittedRoot,
-            _request_id: &crate::daemon::lsp_gateway::LspRequestId,
-        ) -> bool {
+    impl LspAnalyzerCancellationAuthority for UnavailableCancellationAuthority {
+        fn cancel_request(&self, _root: &AdmittedRoot, _request_id: &LspRequestId) -> bool {
             false
         }
     }
 
     struct UnavailableContextAuthority;
 
-    impl crate::daemon::lsp_gateway::CanonicalContextProjectionAuthority
-        for UnavailableContextAuthority
-    {
-        fn registrations(&self) -> Vec<crate::daemon::lsp_gateway::ContextProjectionRegistration> {
+    impl CanonicalContextProjectionAuthority for UnavailableContextAuthority {
+        fn registrations(&self) -> Vec<ContextProjectionRegistration> {
             Vec::new()
         }
 
         fn snapshot(
             &self,
             _root: AdmittedRoot,
-            _request_id: crate::daemon::lsp_gateway::LspRequestId,
-            _request: crate::daemon::lsp_gateway::ContextProjectionRequest,
-        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
-            crate::daemon::lsp_gateway::ContextProjectionOutcome,
-        > {
-            Box::pin(async { crate::daemon::lsp_gateway::ContextProjectionOutcome::Unsupported })
+            _request_id: LspRequestId,
+            _request: ContextProjectionRequest,
+        ) -> LspRuntimeFuture<ContextProjectionOutcome> {
+            Box::pin(async { ContextProjectionOutcome::Unsupported })
         }
     }
 
-    fn unavailable_lsp_session_factory() -> Arc<Pr12LspSessionFactory> {
-        Arc::new(Pr12LspSessionFactory::new(
+    fn unavailable_lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
+        Arc::new(DaemonLspSessionFactory::new(
             tokio::runtime::Handle::current(),
             Arc::new(unavailable_feedback_cycle(Arc::new(
                 RecordingFeedbackCycleObservations::default(),
             ))),
-            Arc::new(crate::daemon::lsp_gateway::UnavailableSemanticProvider),
+            Arc::new(UnavailableSemanticProvider),
             Arc::new(UnavailableDiagnosticAuthority),
             Arc::new(UnavailableCancellationAuthority),
             Arc::new(UnavailableContextAuthority),
@@ -8216,9 +8186,7 @@ mod tests {
         fn execute(
             &self,
             _request: FeedbackCycleRequest,
-        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
-            Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure>,
-        > {
+        ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
             let calls = Arc::clone(&self.0);
             Box::pin(async move {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -8238,7 +8206,7 @@ mod tests {
         let request = FeedbackCycleRequest {
             root_uri: "file:///project".to_owned(),
             document_uri: "file:///project/src/lib.rs".to_owned(),
-            trigger: crate::daemon::lsp_gateway::DiagnosticTrigger::DocumentSave,
+            trigger: DiagnosticTrigger::DocumentSave,
         };
 
         assert!(router.execute(request.clone()).await.is_err());
@@ -8891,7 +8859,7 @@ mod tests {
         let service = DaemonInvocationService::default();
         let project_root = PathBuf::from("/authoritative");
         DaemonLspOwnerRegistrar::new(&service)
-            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .register_factory(project_root.clone(), unavailable_lsp_session_factory())
             .await;
         let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
         let response = service
@@ -9008,7 +8976,7 @@ mod tests {
         let service = DaemonInvocationService::default();
         let project_root = PathBuf::from("/authoritative");
         DaemonLspOwnerRegistrar::new(&service)
-            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .register_factory(project_root.clone(), unavailable_lsp_session_factory())
             .await;
         let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
 
@@ -9035,7 +9003,7 @@ mod tests {
         let service = DaemonInvocationService::default();
         let project_root = PathBuf::from("/authoritative");
         DaemonLspOwnerRegistrar::new(&service)
-            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .register_factory(project_root.clone(), unavailable_lsp_session_factory())
             .await;
         let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
         let open = |request_id: &'static str| {
