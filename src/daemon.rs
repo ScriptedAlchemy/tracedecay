@@ -8123,10 +8123,14 @@ mod http_application_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod wire_bound_tests {
-    use super::{BrokerStreamTransport, read_line_handling_wire_oversized};
+    use super::{
+        BrokerStreamTransport, DaemonLifecycle, read_line_handling_wire_oversized,
+        serve_routed_rmcp_connection,
+    };
     use crate::application::host_admission::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
     use crate::mcp::McpTransport;
-    use tokio::io::AsyncWriteExt;
+    use rmcp::transport::Transport;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     use super::transport::{BrokerListener, BrokerStream, default_loopback_endpoint};
 
@@ -8163,6 +8167,116 @@ mod wire_bound_tests {
         // hostile fill pattern itself is not echoed.
         assert!(!err.to_string().contains("wwww"));
         writer.await.expect("writer");
+    }
+
+    #[tokio::test]
+    async fn rmcp_broker_transport_keeps_the_tracedecay_frame_limit() {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let mut transport = BrokerStreamTransport::new(server);
+
+        client
+            .write_all(&vec![
+                b'x';
+                crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
+                    + 1
+            ])
+            .await
+            .expect("write oversized frame");
+        client.write_all(b"\n").await.expect("newline");
+        client.flush().await.expect("flush");
+
+        assert!(
+            Transport::<rmcp::RoleServer>::receive(&mut transport)
+                .await
+                .is_none(),
+            "rmcp must receive the same bounded rejection as the daemon transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_routed_rmcp_serves_initialize_and_tools_list() {
+        let (cg, _dir, _pin) = crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let mcp = crate::mcp::McpServer::new(cg, None).await;
+        let lifecycle = DaemonLifecycle::default();
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "rmcp-production-route-test", "version": "1"}
+            }
+        })
+        .to_string();
+        let pending = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list"
+            })
+            .to_string(),
+        ];
+        let task = tokio::spawn({
+            let mcp = std::sync::Arc::clone(&mcp);
+            let lifecycle = lifecycle.clone();
+            async move {
+                serve_routed_rmcp_connection(
+                    mcp,
+                    BrokerStreamTransport::new(server),
+                    initialize,
+                    pending,
+                    None,
+                    false,
+                    &lifecycle,
+                )
+                .await
+            }
+        });
+        let mut client = tokio::io::BufReader::new(client);
+        let mut line = String::new();
+
+        client
+            .read_line(&mut line)
+            .await
+            .expect("initialize response");
+        let initialized: serde_json::Value =
+            serde_json::from_str(&line).expect("initialize JSON response");
+        assert_eq!(initialized["id"], serde_json::json!(1));
+        assert_eq!(
+            initialized["result"]["serverInfo"]["name"],
+            serde_json::json!("tracedecay")
+        );
+        line.clear();
+        client.read_line(&mut line).await.expect("tools response");
+        let tools: serde_json::Value = serde_json::from_str(&line).expect("tools JSON response");
+        assert_eq!(tools["id"], serde_json::json!(2));
+        assert!(
+            tools["result"]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "the production rmcp route must advertise the mounted tool surface"
+        );
+
+        lifecycle.begin_draining();
+        task.await
+            .expect("rmcp route task")
+            .expect("rmcp route completion");
+        mcp.shutdown_background_tasks().await;
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ pub(super) fn git(root: &Path, args: &[&str]) {
     );
 }
 
-pub(super) struct WriterTestFixtureAuthority {
+pub(crate) struct WriterTestFixtureAuthority {
     _pin: PinnedUserDataDir,
     _runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
 }
@@ -74,7 +74,7 @@ pub(super) async fn registered_context(cg: TraceDecay) -> McpServerConstructionC
         .expect("registered MCP server context")
 }
 
-pub(super) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
+pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
     let pin = PinnedUserDataDir::new();
     let dir = TempDir::new().expect("temp repo");
     let root = dir.path();
