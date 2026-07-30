@@ -672,6 +672,80 @@ fn cursor_after_shell_hook_notifies_daemon() {
 }
 
 #[test]
+fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
+    const SAMPLE_COUNT: usize = 10;
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let missing_socket = socket_dir.path().join("missing.sock");
+    let event = json!({
+        "hook_event_name": "afterShellExecution",
+        "command": "git status",
+        "cwd": project_path,
+        "workspace_roots": [project_path],
+    })
+    .to_string();
+    let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+
+    for _ in 0..SAMPLE_COUNT {
+        let started = Instant::now();
+        let output = tracedecay_command_with_home(&home_path)
+            .current_dir(&project_path)
+            .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+            .arg("hook-cursor-after-shell")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .as_mut()
+                    .expect("stdin should be piped")
+                    .write_all(event.as_bytes())?;
+                #[cfg(target_os = "linux")]
+                {
+                    let children =
+                        std::fs::read_to_string(format!("/proc/{0}/task/{0}/children", child.id()))
+                            .unwrap_or_default();
+                    assert!(
+                        children.trim().is_empty(),
+                        "after-shell hook spawned unexpected children: {children}"
+                    );
+                }
+                child.wait_with_output()
+            })
+            .expect("missing-daemon hook command should run");
+        samples.push(started.elapsed());
+        assert!(
+            output.status.success(),
+            "missing-daemon hook must fail open\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    samples.sort_unstable();
+    let min = samples[0];
+    let median = samples[SAMPLE_COUNT / 2];
+    let max = samples[SAMPLE_COUNT - 1];
+    eprintln!(
+        "cursor missing-daemon after-shell samples={SAMPLE_COUNT} min_us={} median_us={} max_us={}",
+        min.as_micros(),
+        median.as_micros(),
+        max.as_micros()
+    );
+    assert!(
+        max < Duration::from_secs(2),
+        "missing-daemon hook exceeded its bounded fail-fast ceiling: {max:?}"
+    );
+}
+
+#[test]
 fn cursor_workspace_open_hook_notifies_daemon() {
     assert_hook_notification(
         "hook-cursor-workspace-open",
