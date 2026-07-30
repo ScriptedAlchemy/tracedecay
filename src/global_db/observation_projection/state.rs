@@ -645,7 +645,7 @@ async fn verify_rows(
     let actual = read_message(conn, &message.provider, &message.message_id).await?;
     let compatible = match actual.as_ref() {
         Some(actual) => {
-            message_rows_compatible(actual, message)
+            actual == message
                 || protected_message_rows_compatible(conn, actual, message).await?
         }
         None => false,
@@ -1021,13 +1021,6 @@ fn reconcile_usage(
         }
         _ => None,
     }
-}
-
-pub(super) fn message_rows_compatible(
-    actual: &SessionMessageRecord,
-    expected: &SessionMessageRecord,
-) -> bool {
-    actual == expected
 }
 
 pub(super) async fn protected_message_rows_compatible(

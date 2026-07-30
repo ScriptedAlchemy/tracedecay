@@ -7,8 +7,8 @@ use tracedecay_store::{
 use crate::db::engine::{Executor, QueryExecutor, params};
 
 use super::state::{
-    has_other_projector_output_owner, message_rows_compatible, protected_message_rows_compatible,
-    same_projection_lineage, storage,
+    has_other_projector_output_owner, protected_message_rows_compatible, same_projection_lineage,
+    storage,
 };
 
 const LIVE_WORKFLOW_FACT_INSERT: &str = "WITH ignored_generation(generation) AS (VALUES (?2))
@@ -247,21 +247,19 @@ fn classify_message_transition(
                 return Ok(MessageTransition::Retain);
             }
             if state.same_generation {
-                return if message_rows_compatible(actual, message) {
+                return if actual == message {
                     Ok(MessageTransition::Retain)
                 } else {
                     Err(output_collision(message))
                 };
             }
-            if !state.projector_owned || message_rows_compatible(actual, message) {
+            if !state.projector_owned || actual == message {
                 Ok(MessageTransition::Retain)
             } else {
                 Ok(MessageTransition::Supersede)
             }
         }
-        (Some(actual), None) if message_rows_compatible(actual, message) => {
-            Ok(MessageTransition::Retain)
-        }
+        (Some(actual), None) if actual == message => Ok(MessageTransition::Retain),
         (Some(_), None) | (None, Some(_)) => Err(output_collision(message)),
         (None, None) => Ok(MessageTransition::Insert),
     }

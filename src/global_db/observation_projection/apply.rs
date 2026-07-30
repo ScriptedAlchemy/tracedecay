@@ -20,8 +20,8 @@ use crate::sessions::claude::{
 };
 
 use super::state::{
-    canonicalize_session_project_paths, message_rows_compatible, read_message, read_output_state,
-    read_session, reconcile_session_rows, storage, storage_message, verify_output_state,
+    canonicalize_session_project_paths, read_message, read_output_state, read_session,
+    reconcile_session_rows, storage, storage_message, verify_output_state,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -1185,7 +1185,7 @@ pub(super) async fn seed_predecessor_message_lineage(
                 provider: message.provider.clone(),
                 message_id: message.message_id.clone(),
             })?;
-        if !message_rows_compatible(&actual, message)
+        if &actual != message
             && upgrade_v1_claude_source_path(
                 conn,
                 observation,
@@ -1202,7 +1202,7 @@ pub(super) async fn seed_predecessor_message_lineage(
                     message_id: message.message_id.clone(),
                 })?;
         }
-        if !message_rows_compatible(&actual, message) {
+        if &actual != message {
             return Err(ProjectionStoreError::OutputCollision {
                 provider: message.provider.clone(),
                 message_id: message.message_id.clone(),
