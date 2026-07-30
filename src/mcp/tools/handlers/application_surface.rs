@@ -11,7 +11,9 @@ use crate::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, NormalizedApplicationToolArgs,
     parse_application_surface_request,
 };
-use crate::daemon_client::{DaemonInvocationExecutor, RequestedOutputFormat};
+use crate::daemon_client::{
+    DaemonInvocationExecutor, InvocationCancellationPolicy, RequestedOutputFormat,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
@@ -21,6 +23,11 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
 const DEFAULT_SURFACE_DEADLINE_MICROS: i64 = 30_000_000;
+pub(super) const MULTI_ROOT_TOOL_NAMES: [&str; 3] = [
+    "tracedecay_multi_root_scope_set_read",
+    "tracedecay_multi_root_scope_set_compare_and_swap",
+    "tracedecay_multi_root_execute",
+];
 
 fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -125,6 +132,150 @@ pub(super) async fn handle_application_surface(
     })?;
 
     render_result(cg, result)
+}
+
+pub(super) async fn handle_multi_root(
+    tool_name: &str,
+    args: Value,
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    protocol_request_id: Option<RequestId>,
+    protocol_deadline: Option<Deadline>,
+    protocol_cancellation: Option<CancellationSignal>,
+) -> Result<crate::mcp::tools::ToolResult> {
+    let executor = executor.ok_or_else(|| TraceDecayError::Config {
+        message: "multi-root daemon authority is unavailable".to_owned(),
+    })?;
+    let request_id = protocol_request_id.unwrap_or(request_id()?);
+    let (deadline, cancellation) = complete_protocol_controls(
+        &request_id,
+        protocol_deadline.or_else(|| {
+            Deadline::new(UtcMicros(
+                current_timestamp()
+                    .saturating_mul(1_000_000)
+                    .saturating_add(DEFAULT_SURFACE_DEADLINE_MICROS),
+            ))
+            .ok()
+        }),
+        protocol_cancellation,
+    )?
+    .ok_or_else(|| TraceDecayError::Config {
+        message: "multi-root invocation controls are unavailable".to_owned(),
+    })?;
+    let observed_at = UtcMicros(current_timestamp().saturating_mul(1_000_000));
+    let invocation = match tool_name {
+        "tracedecay_multi_root_scope_set_read" => {
+            let request = serde_json::from_value(args)?;
+            crate::daemon::DaemonInvocationRequest::multi_root_scope_set_read(
+                request_id.as_str(),
+                request,
+                observed_at,
+                deadline.clone(),
+                cancellation.context(),
+            )
+        }
+        "tracedecay_multi_root_scope_set_compare_and_swap" => {
+            let request = serde_json::from_value(args)?;
+            crate::daemon::DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+                request_id.as_str(),
+                request,
+                observed_at,
+                deadline.clone(),
+                cancellation.context(),
+            )
+        }
+        "tracedecay_multi_root_execute" => {
+            let request = serde_json::from_value(args)?;
+            crate::daemon::DaemonInvocationRequest::multi_root_execute(
+                request_id.as_str(),
+                request,
+                observed_at,
+                deadline.clone(),
+                cancellation.context(),
+            )
+        }
+        _ => {
+            return Err(TraceDecayError::Config {
+                message: format!("unknown multi-root tool: {tool_name}"),
+            });
+        }
+    };
+    let response = executor
+        .invoke_controlled(
+            invocation,
+            deadline,
+            cancellation,
+            if tool_name == "tracedecay_multi_root_scope_set_compare_and_swap" {
+                InvocationCancellationPolicy::AuthoritativeEffect
+            } else {
+                InvocationCancellationPolicy::ReadOnly
+            },
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("multi-root invocation failed: {error:?}"),
+        })?;
+    let (value, failure) = match response.outcome {
+        crate::daemon::DaemonInvocationOutcome::MultiRootScopeSetRead { scope, outcome } => {
+            (
+                serde_json::json!({"request_id": request_id, "scope": scope, "outcome": outcome}),
+                None,
+            )
+        }
+        crate::daemon::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
+            scope,
+            outcome,
+        } => (
+            serde_json::json!({"request_id": request_id, "scope": scope, "outcome": outcome}),
+            None,
+        ),
+        crate::daemon::DaemonInvocationOutcome::MultiRootQueryPage { scope, outcome } => {
+            (
+                serde_json::json!({"request_id": request_id, "scope": scope, "outcome": outcome}),
+                None,
+            )
+        }
+        crate::daemon::DaemonInvocationOutcome::Problem { problem } => {
+            let (status, reason) = match problem {
+                crate::daemon::DaemonInvocationProblem::InvalidRequest
+                | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+                    ("denied", "invalid_request")
+                }
+                crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                    ("denied", "not_found_or_not_authorized")
+                }
+                crate::daemon::DaemonInvocationProblem::Unavailable => {
+                    ("unavailable", "authority_unavailable")
+                }
+            };
+            (
+                serde_json::json!({
+                    "request_id": request_id,
+                    "status": status,
+                    "reason": reason,
+                }),
+                Some(format!("multi-root invocation {status}: {reason}")),
+            )
+        }
+        _ => {
+            return Err(TraceDecayError::Config {
+                message: "multi-root daemon returned a mismatched outcome".to_owned(),
+            });
+        }
+    };
+    let text = serde_json::to_string_pretty(&value)?;
+    let result = crate::mcp::tools::ToolResult::new(
+        serde_json::json!({
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": value,
+        }),
+        Vec::new(),
+    );
+    Ok(match failure {
+        Some(message) => result
+            .with_semantic_error(true)
+            .with_failure_message(message),
+        None => result.with_semantic_error(false),
+    })
 }
 
 fn render_result(

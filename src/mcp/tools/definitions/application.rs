@@ -1,7 +1,35 @@
+use schemars::{JsonSchema, schema_for};
 use serde_json::json;
 
 use super::{def, def_always_load, def_rw, required_object_schema, string_property};
 use crate::mcp::tools::ToolDefinition;
+
+fn canonical_schema<T: JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schema_for!(T)).expect("canonical multi-root schemas are serializable")
+}
+
+pub(super) fn multi_root_definitions() -> Vec<ToolDefinition> {
+    vec![
+        def(
+            "tracedecay_multi_root_scope_set_read",
+            "Read multi-root scope set",
+            "Read one persisted authorized multi-root scope set from the authenticated project store.",
+            canonical_schema::<tracedecay_application::MultiRootScopeSetReadRequestV1>(),
+        ),
+        def_rw(
+            "tracedecay_multi_root_scope_set_compare_and_swap",
+            "Update multi-root scope set",
+            "Create or update an authorized multi-root scope set with stale-revision rejection.",
+            canonical_schema::<tracedecay_application::MultiRootScopeSetCasRequestV1>(),
+        ),
+        def(
+            "tracedecay_multi_root_execute",
+            "Execute multi-root query",
+            "Execute one federated Work, Git, feedback, impact, or query read against a persisted scope-set revision.",
+            canonical_schema::<tracedecay_application::MultiRootExecuteRequestV1>(),
+        ),
+    ]
+}
 
 fn closed_object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
     let mut schema = required_object_schema(properties, required);
