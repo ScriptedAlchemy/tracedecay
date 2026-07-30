@@ -24,6 +24,11 @@ export interface StorySurface {
    * Whether the surface currently renders a wired workspace page or a truthful
    * contract gate. Recorded in the manifest so a reviewer can distinguish an
    * unavailable backend read model from a broken surface.
+   *
+   * Every surface is wired as of the Work routes landing. The field stays
+   * because the distinction it records is the one a reviewer needs the moment
+   * it is false again, and because a manifest that stopped reporting it would
+   * make a gated surface indistinguishable from a wired one.
    */
   readonly wired: boolean;
 }
@@ -117,8 +122,9 @@ export const STORY_SURFACES: readonly StorySurface[] = [
     id: 'work',
     path: '/work',
     label: 'Work',
-    description: 'Canonical task and runtime projections, withheld until their generated contract lands.',
-    wired: false,
+    description:
+      'The canonical task graph for the active project, over nine mounted routes.',
+    wired: true,
   },
 ] as const;
 

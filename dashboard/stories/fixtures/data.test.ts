@@ -51,18 +51,25 @@ import {
   SettingsPayloadV1Schema,
   StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
+  WorkProjectionDeltaV1Schema,
+  WorkProjectionSnapshotV1Schema,
 } from '../../src/contracts/generated.ts';
+import { workPayload } from '../../src/workspaces/work/workApi.ts';
 
 /** Parse one resolved fixture, surfacing zod's issues on failure — the same
  * reporting shape `endpoint-fixtures.test.ts` uses, so a drift report reads the
  * same whichever gate catches it. */
 function expectParses(schema: ZodType<unknown>, pathname: string, search = ''): void {
-  const result = schema.safeParse(resolveFixture(pathname, search));
+  expectValue(schema, resolveFixture(pathname, search), pathname + search);
+}
+
+/** The same report, for a value already extracted from its wrapper. */
+function expectValue(schema: ZodType<unknown>, value: unknown, what: string): void {
+  const result = schema.safeParse(value);
   if (!result.success) {
     throw new Error(
       'fixture ' +
-        pathname +
-        search +
+        what +
         ' failed its generated contract:\n' +
         JSON.stringify(result.error.issues, null, 2),
     );
@@ -110,6 +117,22 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
  * own decoder — but that mirror is hand-written, so this list is the standing
  * record of which routes are still outside the generated boundary.
  */
+/**
+ * Routes that answer with the application's `HttpJsonEnvelope` instead of
+ * `DashboardEnvelopeV1`, mapped to the generated contract inside it.
+ *
+ * The wrapper itself has no generated schema — `contract_schema.rs` exports the
+ * Work payloads but not the application envelope around them — so these cannot
+ * go in `CONTRACTS`, and putting them in `UNCONTRACTED` would be false: their
+ * payloads are fully contracted. The gate below unwraps with the production
+ * walker rather than reaching into the fixture by hand, so a fixture whose
+ * wrapper is subtly wrong fails here exactly as it would in the browser.
+ */
+const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
+  '/api/work/snapshot': WorkProjectionSnapshotV1Schema,
+  '/api/work/delta': WorkProjectionDeltaV1Schema,
+};
+
 const UNCONTRACTED: Readonly<Record<string, string>> = {
   '/api/capabilities': 'mod.rs `capabilities` builds the bundle with `json!`',
   '/api/plugins/hermes-lcm/overview': 'lcm_api::overview answers with a bare Value',
@@ -172,16 +195,39 @@ describe('fixtures parse against the generated contract for their route', () => 
     expectParses(schema, pathname, search ?? '');
   });
 
+  it.each(Object.keys(APPLICATION_ENVELOPE))(
+    'POST %s — application envelope, generated payload',
+    (pathname) => {
+      // The walk the browser performs. A wrapper the app cannot open is
+      // reported to the user as `unsupported_schema`, so a fixture that fails
+      // this assertion would have the audit screenshot a refusal plate.
+      const found = workPayload(resolveFixture(pathname));
+      expect(found.found, `${pathname} fixture is not an application envelope`).toBe(true);
+      if (!found.found) return;
+      expectValue(APPLICATION_ENVELOPE[pathname]!, found.payload, pathname);
+    },
+  );
+
   it('holds every fixture route to a contract or a recorded reason', () => {
-    const classified = new Set([...Object.keys(CONTRACTS), ...Object.keys(UNCONTRACTED)]);
+    const classified = new Set([
+      ...Object.keys(CONTRACTS),
+      ...Object.keys(APPLICATION_ENVELOPE),
+      ...Object.keys(UNCONTRACTED),
+    ]);
     const routes = Object.keys(FIXTURES);
     // A fixture added without a decision about its contract.
     expect(routes.filter((route) => !classified.has(route))).toEqual([]);
     // A decision left behind by a fixture that was removed or renamed, which
     // would otherwise read as coverage that no longer exists.
     expect([...classified].filter((route) => !(route in FIXTURES)).sort()).toEqual([]);
-    // Neither map may claim a route the other one owns.
-    for (const route of Object.keys(CONTRACTS)) expect(UNCONTRACTED[route]).toBeUndefined();
+    // No map may claim a route another one owns.
+    for (const route of Object.keys(CONTRACTS)) {
+      expect(UNCONTRACTED[route]).toBeUndefined();
+      expect(APPLICATION_ENVELOPE[route]).toBeUndefined();
+    }
+    for (const route of Object.keys(APPLICATION_ENVELOPE)) {
+      expect(UNCONTRACTED[route]).toBeUndefined();
+    }
   });
 
   it('serves only already-gated payloads from the prefix fallbacks', () => {
