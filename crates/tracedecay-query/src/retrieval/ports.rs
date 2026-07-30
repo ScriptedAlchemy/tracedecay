@@ -1,7 +1,7 @@
-//! Generic retrieval port surface (Plan 15: `src/query/retrieval/ports.rs`
-//! owns the composition of the single generic `Retriever<R, E>` port from
-//! `tracedecay_domain::retrieval`; Plan 05: read-only ports are implemented
-//! by root store/projector adapters).
+//! Generic retrieval port surface.
+//!
+//! Read-only ports are implemented by root store/projector adapters, while
+//! lanes compose the shared `Retriever<R, E>` domain port.
 //!
 //! No SQL, no transport, no policy imports. Ports are synchronous contracts;
 //! scheduling and cancellation are application-layer concerns.
@@ -9,17 +9,18 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkId, CompactCandidate, ExactTechnicalTermKindV1,
-    FileOccurrenceId, LanguageDescriptorRevision, RetrievalAnchorId, RetrieverBatch,
-    RetrieverOutcome, SourceOccurrenceId, SymbolOccurrenceId,
+    CodeGenerationId, CodeSearchChunkId, ExactTechnicalTermKindV1, FileOccurrenceId,
+    LanguageDescriptorRevision, RetrievalAnchorId, RetrieverBatch, RetrieverOutcome,
+    SourceOccurrenceId, SymbolOccurrenceId,
 };
 
 use super::exact::{ExactLaneEvidence, ExactLaneRequest};
 use super::graph::{GraphLaneEvidence, GraphLaneRequest};
 use super::lexical::{LexicalLaneEvidence, LexicalLaneRequest};
 
-/// Failures of a store/projector read port or a lane adapter (Plan 05: typed
-/// errors; no silent fallback between incompatible indexes or models).
+/// Failures of a store/projector read port or a lane adapter.
+///
+/// Incompatible indexes or models never trigger silent fallback.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalPortError {
     #[error(
@@ -43,9 +44,11 @@ pub enum RetrievalPortError {
 }
 
 /// Read-only port over whole-exact-term postings for one frozen code
-/// generation (Plan 25: the exact lane consumes only whole exact technical
-/// terms plus the central `ExactAdmissionProof`; Plan 15: exact/lexical
-/// authority failure returns unavailable, never substitution).
+/// generation.
+///
+/// The exact lane consumes only whole exact technical terms plus the central
+/// `ExactAdmissionProof`; exact/lexical authority failure returns unavailable,
+/// never substitution.
 ///
 /// Implemented by a root store adapter against the lexical projection rows;
 /// never by the lane itself.
@@ -59,8 +62,9 @@ pub trait ExactTermPostingReadPort {
 }
 
 /// Read-only port over fielded lexical postings for one frozen code
-/// generation (Plan 25: whole-term and language-profiled subtoken postings
-/// are independent; Plan 15: fielded BM25 over typed result grains).
+/// generation.
+///
+/// Whole-term and language-profiled subtoken postings remain independent.
 pub trait LexicalPostingReadPort {
     /// Return the committed candidate prefix for `request` against the
     /// pinned generation.
@@ -70,10 +74,11 @@ pub trait LexicalPostingReadPort {
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError>;
 }
 
-/// Read-only port over generation-bound graph evidence (Plan 25: the graph
-/// lane emits stable code anchors and ordered path evidence without copying
-/// graph rows into a search corpus; Plan 15: graph adapters expose their own
-/// candidate pool and oracle recall).
+/// Read-only port over generation-bound graph evidence.
+///
+/// The graph lane emits stable code anchors and ordered path evidence without
+/// copying graph rows into a search corpus. Graph adapters expose their own
+/// candidate pool and oracle recall.
 pub trait GraphEvidenceReadPort {
     /// Return the committed candidate prefix for `request` against the
     /// pinned generation.
@@ -83,10 +88,11 @@ pub trait GraphEvidenceReadPort {
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
 }
 
-/// Compact-candidate lane adapter surface. Each PR9 lane adapts its typed
-/// request and read port into Plan 15 `CompactCandidate` values; it never
-/// defines a second candidate, contribution, fusion, cursor, or hydration
-/// hierarchy (Plan 25).
+/// Compact-candidate lane adapter surface.
+///
+/// Each lane adapts its typed request and read port into shared compact
+/// candidates; it never defines a second candidate, contribution, fusion,
+/// cursor, or hydration hierarchy.
 pub trait CompactCandidateLane<R, E> {
     /// Produce compact candidates for `request` against the pinned
     /// generation, preserving `(source_occurrence_id,
@@ -97,9 +103,9 @@ pub trait CompactCandidateLane<R, E> {
     ) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalPortError>;
 }
 
-/// Typed reference surface used by lanes to bind candidates to exact code
-/// occurrences (Plan 25: every eligible chunk names exactly one code
-/// generation and file occurrence).
+/// Typed reference used by lanes to bind candidates to exact code occurrences.
+///
+/// Every eligible chunk names exactly one code generation and file occurrence.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeOccurrenceRefV1 {
@@ -110,8 +116,10 @@ pub struct CodeOccurrenceRefV1 {
 }
 
 /// Lane adapter binding between a compact candidate and its code occurrence
-/// evidence anchor (Plan 15: `retriever_evidence_anchor` addresses the same
-/// evidence in the owning source).
+/// evidence anchor.
+///
+/// `retriever_evidence_anchor` addresses the same evidence in the owning
+/// source.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeCandidateBindingV1 {
@@ -120,19 +128,4 @@ pub struct CodeCandidateBindingV1 {
     pub language_descriptor_revision: LanguageDescriptorRevision,
     pub matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
     pub source_occurrence: SourceOccurrenceId,
-}
-
-/// Compile-time witness that a lane emits the shared candidate shape (Plan
-/// 15: code search does not define parallel candidate types).
-pub trait EmitsCompactCandidates {
-    /// The candidate type, which must be `CompactCandidate`.
-    type Candidate;
-}
-
-/// Every lane adapter emits `CompactCandidate`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CompactCandidateEmission;
-
-impl EmitsCompactCandidates for CompactCandidateEmission {
-    type Candidate = CompactCandidate;
 }
