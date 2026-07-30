@@ -48,6 +48,46 @@ describe('Work once a contract lands', () => {
     expect(admission?.querySelector('[data-state]')?.getAttribute('data-state')).toBe('unsupported');
   });
 
+  /**
+   * The lifecycle hazard between a landed schema and a wired row.
+   *
+   * A generated contract says a payload shape exists, not that a route serves
+   * it. Reaching for one on the strength of the schema alone would put the page
+   * into a failed-request state over a backend that never claimed to answer, so
+   * a landed contract must not start a fetch until a row is deliberately wired
+   * to a registered route.
+   */
+  it('reaches for no route on the strength of a schema alone', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<WorkPage />);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /** The structure the accessibility gate depends on has to survive the
+   * transition: it is asserted against the closed state elsewhere, and a state
+   * change is exactly when a landmark or a table caption gets dropped. */
+  it('keeps its landmarks, labels and captions once the wire opens', () => {
+    const { container } = render(<WorkPage />);
+
+    expect(container.querySelector('main'), 'the shell owns the main landmark').toBeNull();
+    const region = container.querySelector('[data-work-authority]');
+    expect(region?.getAttribute('role')).toBe('region');
+    expect(region?.getAttribute('aria-label')).toBe('Work content');
+
+    for (const table of Array.from(container.querySelectorAll('table'))) {
+      expect(table.querySelector('caption')?.textContent ?? '').not.toBe('');
+      expect(table.querySelectorAll('thead th').length).toBeGreaterThan(0);
+    }
+
+    // A landed row still reports a state a screen reader can read out, rather
+    // than an unlabelled colour change.
+    const chip = container.querySelector('[data-work-surface="kanban"] [data-state]');
+    expect((chip?.textContent ?? '').trim()).not.toBe('');
+  });
+
   it('still draws no projection it has not read', () => {
     const { container } = render(<WorkPage />);
     const ledger = container.querySelector('[data-work-ledger]');
