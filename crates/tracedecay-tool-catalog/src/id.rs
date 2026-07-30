@@ -112,11 +112,14 @@ macro_rules! catalog_id {
 catalog_id!(
     BindingId,
     CapabilityId,
+    CodecBindingKey,
     ContributionId,
     FeatureId,
+    OperationId,
     ProfileId,
     RetrieverId,
     SchemaId,
+    ServiceId,
     SortContractId,
     UseCaseId,
 );
