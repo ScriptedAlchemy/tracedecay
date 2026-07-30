@@ -87,6 +87,78 @@ async fn test_create_schema_idempotent() {
     assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 }
 
+#[tokio::test]
+async fn v8_to_v9_backfills_contains_edges_on_real_schema() {
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
+        .await
+        .expect("build real v8 schema");
+    conn.execute_batch(
+        "INSERT INTO nodes (
+            id, kind, name, qualified_name, file_path,
+            start_line, end_line, start_column, end_column, updated_at
+         ) VALUES
+            ('parent', 'module', 'parent', 'parent', 'src/lib.rs', 1, 10, 0, 0, 1),
+            ('child', 'function', 'child', 'parent::child', 'src/lib.rs', 2, 4, 0, 0, 1);
+         INSERT INTO edges (source, target, kind, line)
+         VALUES ('parent', 'child', 'contains', 2);",
+    )
+    .await
+    .expect("seed v8 contains relationship");
+
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
+        .await
+        .expect("migrate real v8 schema to v9");
+
+    assert_eq!(get_user_version(&conn).await, 9);
+    let mut rows = conn
+        .query("SELECT parent_id FROM nodes WHERE id = 'child'", ())
+        .await
+        .expect("query migrated child");
+    let row = rows
+        .next()
+        .await
+        .expect("read migrated child")
+        .expect("migrated child exists");
+    assert_eq!(
+        row.get::<Option<String>>(0).expect("read parent id"),
+        Some("parent".to_owned())
+    );
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM edges WHERE kind = 'contains'").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn v8_to_v9_rejects_preadded_parent_column_and_rolls_back() {
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
+        .await
+        .expect("build real v8 schema");
+    conn.execute("ALTER TABLE nodes ADD COLUMN parent_id TEXT", ())
+        .await
+        .expect("corrupt v8 schema with pre-added v9 column");
+
+    let error = crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
+        .await
+        .expect_err("malformed v8 schema must fail closed");
+
+    assert!(
+        error.to_string().contains("failed to add parent_id column"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(
+        get_user_version(&conn).await,
+        8,
+        "failed v9 migration must not publish its version"
+    );
+    assert!(
+        !table_exists(&conn, "read_cache").await,
+        "failed v9 migration must roll back earlier schema changes"
+    );
+}
+
 /// migrate returns false when already at the latest version.
 #[tokio::test]
 async fn test_migrate_already_latest_returns_false() {
