@@ -1701,6 +1701,10 @@ pub fn apply_config_and_queue_startup(
     Some(owner.status())
 }
 
+#[cfg(all(test, feature = "semantic-fastembed"))]
+#[path = "model_lifecycle/distribution_acquisition_acceptance.rs"]
+mod distribution_acquisition_acceptance;
+
 #[cfg(test)]
 mod tests {
     use super::*;

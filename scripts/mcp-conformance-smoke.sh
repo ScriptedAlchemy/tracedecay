@@ -79,10 +79,10 @@ run_smoke() {
     else
       fail "tools/list has tools with object inputSchemas"
     fi
-    if json_assert "$tools_a" 'j.tools.some(t => t.name === "tracedecay_search")'; then
-      ok "tools/list includes tracedecay_search"
+    if json_assert "$tools_a" '["tracedecay_search", "tracedecay_diagnostics", "tracedecay_impact", "tracedecay_affected", "tracedecay_test_map"].every(name => j.tools.some(t => t.name === name))'; then
+      ok "tools/list includes required search and analysis tools"
     else
-      fail "tools/list includes tracedecay_search"
+      fail "tools/list includes required search and analysis tools"
     fi
   else
     cat "$work_dir/tools-a.err" >&2
@@ -109,7 +109,76 @@ run_smoke() {
     fail "tools/call tracedecay_search finds main()"
   fi
 
-  # 4. resources/list exposes the status resource.
+  # 4. Installed analysis tools execute through the official SDK client.
+  local diagnostics_out affected_out test_map_out search_json impact_out node_id
+  diagnostics_out="$work_dir/diagnostics.json"
+  if inspect --method tools/call --tool-name tracedecay_diagnostics >"$diagnostics_out" 2>/dev/null &&
+    json_assert "$diagnostics_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_diagnostics returns typed evidence"
+  else
+    fail "tools/call tracedecay_diagnostics returns typed evidence"
+  fi
+
+  affected_out="$work_dir/affected.json"
+  if inspect --method tools/call --tool-name tracedecay_affected --tool-arg 'files=["src/main.rs"]' >"$affected_out" 2>/dev/null &&
+    json_assert "$affected_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_affected returns typed evidence"
+  else
+    fail "tools/call tracedecay_affected returns typed evidence"
+  fi
+
+  test_map_out="$work_dir/test-map.json"
+  if inspect --method tools/call --tool-name tracedecay_test_map --tool-arg file=src/main.rs >"$test_map_out" 2>/dev/null &&
+    json_assert "$test_map_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_test_map returns typed evidence"
+  else
+    fail "tools/call tracedecay_test_map returns typed evidence"
+  fi
+
+  search_json="$work_dir/search-json.json"
+  if inspect --method tools/call --tool-name tracedecay_search --tool-arg query=main --tool-arg format=json >"$search_json" 2>/dev/null; then
+    node_id=$(node - "$search_json" <<'NODE'
+const fs = require("fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+function findNodeId(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findNodeId(item);
+      if (found) return found;
+    }
+  } else if (value && typeof value === "object") {
+    if (typeof value.node_id === "string" && value.node_id) return value.node_id;
+    for (const item of Object.values(value)) {
+      const found = findNodeId(item);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+for (const content of response.content || []) {
+  if (content.type !== "text") continue;
+  try {
+    const found = findNodeId(JSON.parse(content.text));
+    if (found) {
+      process.stdout.write(found);
+      process.exit(0);
+    }
+  } catch {}
+}
+process.exit(1);
+NODE
+    ) || true
+  fi
+  impact_out="$work_dir/impact.json"
+  if [[ -n ${node_id:-} ]] &&
+    inspect --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id" >"$impact_out" 2>/dev/null &&
+    json_assert "$impact_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
+    ok "tools/call tracedecay_impact returns typed evidence"
+  else
+    fail "tools/call tracedecay_impact returns typed evidence"
+  fi
+
+  # 5. resources/list exposes the status resource.
   res_out="$work_dir/resources.json"
   if inspect --method resources/list > "$res_out" 2>/dev/null &&
     json_assert "$res_out" 'Array.isArray(j.resources) && j.resources.some(r => r.uri === "tracedecay://status")'; then
@@ -118,7 +187,7 @@ run_smoke() {
     fail "resources/list exposes tracedecay://status"
   fi
 
-  # 5. Error path: unknown tool must fail with a nonzero exit code.
+  # 6. Error path: unknown tool must fail with a nonzero exit code.
   if inspect --method tools/call --tool-name definitely_not_a_tool >/dev/null 2>&1; then
     fail "tools/call unknown tool exits nonzero"
   else
