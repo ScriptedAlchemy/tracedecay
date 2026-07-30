@@ -24,6 +24,12 @@ pub enum QueryExecutionContractErrorV1 {
     GenerationMismatch,
     #[error("the admitted generation identity is invalid")]
     InvalidGeneration,
+    #[error("lane evidence violates the canonical retrieval contract")]
+    InvalidLaneEvidence,
+    #[error("the generation-bound native record is unavailable")]
+    RecordUnavailable,
+    #[error("the native record identity does not match its lane evidence")]
+    RecordIdentityMismatch,
 }
 
 /// Query-native occurrence shape. Application and transport records adapt
@@ -117,15 +123,21 @@ pub enum NativeLaneOutcomeV1<T> {
 pub trait NativeRecordReadPortV1 {
     fn generation(&self) -> &CodeGenerationId;
 
-    fn occurrence(&self, binding: &CodeCandidateBindingV1) -> Option<NativeCodeOccurrenceV1>;
+    fn occurrence(
+        &self,
+        binding: &CodeCandidateBindingV1,
+    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1>;
 
-    fn occurrence_by_chunk(&self, chunk: &CodeSearchChunkId) -> Option<NativeCodeOccurrenceV1>;
+    fn occurrence_by_chunk(
+        &self,
+        chunk: &CodeSearchChunkId,
+    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1>;
 
     fn symbol(
         &self,
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
-    ) -> Option<NativeSymbolRecordV1>;
+    ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1>;
 }
 
 /// One generation checked against its native record authority.
@@ -164,16 +176,22 @@ where
         matched_literal: &str,
         expected_kind: Option<ExactTechnicalTermKindV1>,
         path_admitted: impl Fn(&str) -> bool,
-    ) -> NativeLaneOutcomeV1<NativeExactRecordV1> {
+    ) -> Result<NativeLaneOutcomeV1<NativeExactRecordV1>, QueryExecutionContractErrorV1> {
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let Some(evidence) = batch
+                let evidence = batch
                     .evidence_by_occurrence
                     .get(&candidate.source_occurrence_id)
-                else {
+                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                self.validate_binding(&evidence.binding)?;
+                if !evidence
+                    .matched_literals
+                    .iter()
+                    .any(|literal| literal.original_bytes == matched_literal.as_bytes())
+                {
                     continue;
-                };
+                }
                 let Some(matched_kind) = evidence
                     .binding
                     .matched_term_kinds
@@ -183,9 +201,8 @@ where
                 else {
                     continue;
                 };
-                let Some(occurrence) = self.records.occurrence(&evidence.binding) else {
-                    continue;
-                };
+                let occurrence = self.records.occurrence(&evidence.binding)?;
+                self.validate_occurrence(&evidence.binding, &occurrence)?;
                 if path_admitted(&occurrence.path) {
                     items.push(NativeExactRecordV1 {
                         occurrence,
@@ -194,33 +211,30 @@ where
                     });
                 }
             }
-            items
+            Ok(items)
         })
     }
 
     pub fn lexical(
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>,
-        requested_phrases: &[String],
         path_admitted: impl Fn(&str) -> bool,
-    ) -> NativeLaneOutcomeV1<NativeLexicalRecordV1> {
+    ) -> Result<NativeLaneOutcomeV1<NativeLexicalRecordV1>, QueryExecutionContractErrorV1> {
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let Some(evidence) = batch
+                let evidence = batch
                     .evidence_by_occurrence
                     .get(&candidate.source_occurrence_id)
-                else {
-                    continue;
-                };
-                let Some(occurrence) = self.records.occurrence(&evidence.binding) else {
-                    continue;
-                };
+                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                self.validate_binding(&evidence.binding)?;
+                let occurrence = self.records.occurrence(&evidence.binding)?;
+                self.validate_occurrence(&evidence.binding, &occurrence)?;
                 if path_admitted(&occurrence.path) {
                     items.push(NativeLexicalRecordV1 {
                         occurrence,
                         score_micros: candidate.raw_score.0,
-                        matched_phrases: requested_phrases.to_vec(),
+                        matched_phrases: evidence.matched_phrases.clone(),
                         matched_terms: evidence
                             .matched_whole_terms
                             .iter()
@@ -230,7 +244,7 @@ where
                     });
                 }
             }
-            items
+            Ok(items)
         })
     }
 
@@ -238,25 +252,24 @@ where
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>,
         path_admitted: impl Fn(&str) -> bool,
-    ) -> NativeLaneOutcomeV1<NativeGraphRecordV1> {
+    ) -> Result<NativeLaneOutcomeV1<NativeGraphRecordV1>, QueryExecutionContractErrorV1> {
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let Some(evidence) = batch
+                let evidence = batch
                     .evidence_by_occurrence
                     .get(&candidate.source_occurrence_id)
-                else {
-                    continue;
-                };
+                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                self.validate_binding(&evidence.binding)?;
                 let Some(symbol) = evidence.binding.occurrence.symbol.as_ref() else {
                     continue;
                 };
-                let Some(record) = self
+                let record = self
                     .records
-                    .symbol(symbol, &evidence.binding.occurrence.file)
-                else {
-                    continue;
-                };
+                    .symbol(symbol, &evidence.binding.occurrence.file)?;
+                if &record.occurrence != symbol {
+                    return Err(QueryExecutionContractErrorV1::RecordIdentityMismatch);
+                }
                 if path_admitted(&record.path) {
                     items.push(NativeGraphRecordV1 {
                         symbol: record,
@@ -265,7 +278,7 @@ where
                     });
                 }
             }
-            items
+            Ok(items)
         })
     }
 
@@ -273,19 +286,18 @@ where
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>,
         path_admitted: impl Fn(&str) -> bool,
-    ) -> NativeLaneOutcomeV1<NativeSemanticRecordV1> {
+    ) -> Result<NativeLaneOutcomeV1<NativeSemanticRecordV1>, QueryExecutionContractErrorV1> {
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let Some(evidence) = batch
+                let evidence = batch
                     .evidence_by_occurrence
                     .get(&candidate.source_occurrence_id)
-                else {
-                    continue;
-                };
-                let Some(occurrence) = self.records.occurrence_by_chunk(&evidence.chunk_id) else {
-                    continue;
-                };
+                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                let occurrence = self.records.occurrence_by_chunk(&evidence.chunk_id)?;
+                if occurrence.chunk.as_ref() != Some(&evidence.chunk_id) {
+                    return Err(QueryExecutionContractErrorV1::RecordIdentityMismatch);
+                }
                 if path_admitted(&occurrence.path) {
                     items.push(NativeSemanticRecordV1 {
                         occurrence,
@@ -294,29 +306,65 @@ where
                     });
                 }
             }
-            items
+            Ok(items)
         })
     }
 
     fn translate<E, T>(
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<E>>,
-        translate_batch: impl Fn(&RetrieverBatch<E>) -> Vec<T>,
-    ) -> NativeLaneOutcomeV1<T> {
+        translate_batch: impl Fn(&RetrieverBatch<E>) -> Result<Vec<T>, QueryExecutionContractErrorV1>,
+    ) -> Result<NativeLaneOutcomeV1<T>, QueryExecutionContractErrorV1> {
         match outcome {
             RetrieverOutcome::Complete(batch) => {
-                NativeLaneOutcomeV1::Complete(self.page(&batch, translate_batch(&batch)))
+                batch
+                    .validate()
+                    .map_err(|_| QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                Ok(NativeLaneOutcomeV1::Complete(
+                    self.page(&batch, translate_batch(&batch)?),
+                ))
             }
-            RetrieverOutcome::Partial { value, reason } => NativeLaneOutcomeV1::Partial {
-                page: self.page(&value, translate_batch(&value)),
-                reason,
-            },
-            RetrieverOutcome::Unavailable(reason) => NativeLaneOutcomeV1::Unavailable(reason),
-            RetrieverOutcome::Denied => NativeLaneOutcomeV1::Denied,
-            RetrieverOutcome::Stale(freshness) => NativeLaneOutcomeV1::Stale(freshness),
-            RetrieverOutcome::BudgetExceeded(usage) => NativeLaneOutcomeV1::BudgetExceeded(usage),
-            RetrieverOutcome::Cancelled => NativeLaneOutcomeV1::Cancelled,
+            RetrieverOutcome::Partial { value, reason } => {
+                value
+                    .validate()
+                    .map_err(|_| QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                Ok(NativeLaneOutcomeV1::Partial {
+                    page: self.page(&value, translate_batch(&value)?),
+                    reason,
+                })
+            }
+            RetrieverOutcome::Unavailable(reason) => Ok(NativeLaneOutcomeV1::Unavailable(reason)),
+            RetrieverOutcome::Denied => Ok(NativeLaneOutcomeV1::Denied),
+            RetrieverOutcome::Stale(freshness) => Ok(NativeLaneOutcomeV1::Stale(freshness)),
+            RetrieverOutcome::BudgetExceeded(usage) => {
+                Ok(NativeLaneOutcomeV1::BudgetExceeded(usage))
+            }
+            RetrieverOutcome::Cancelled => Ok(NativeLaneOutcomeV1::Cancelled),
         }
+    }
+
+    fn validate_binding(
+        &self,
+        binding: &CodeCandidateBindingV1,
+    ) -> Result<(), QueryExecutionContractErrorV1> {
+        if binding.occurrence.generation != self.generation {
+            return Err(QueryExecutionContractErrorV1::GenerationMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_occurrence(
+        &self,
+        binding: &CodeCandidateBindingV1,
+        occurrence: &NativeCodeOccurrenceV1,
+    ) -> Result<(), QueryExecutionContractErrorV1> {
+        if occurrence.file != binding.occurrence.file
+            || occurrence.symbol != binding.occurrence.symbol
+            || occurrence.chunk != binding.occurrence.chunk
+        {
+            return Err(QueryExecutionContractErrorV1::RecordIdentityMismatch);
+        }
+        Ok(())
     }
 
     fn page<E, T>(&self, batch: &RetrieverBatch<E>, items: Vec<T>) -> NativeLanePageV1<T> {
@@ -456,20 +504,26 @@ mod tests {
             &self.generation
         }
 
-        fn occurrence(&self, _: &CodeCandidateBindingV1) -> Option<NativeCodeOccurrenceV1> {
-            Some(Self::occurrence())
+        fn occurrence(
+            &self,
+            _: &CodeCandidateBindingV1,
+        ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
+            Ok(Self::occurrence())
         }
 
-        fn occurrence_by_chunk(&self, _: &CodeSearchChunkId) -> Option<NativeCodeOccurrenceV1> {
-            Some(Self::occurrence())
+        fn occurrence_by_chunk(
+            &self,
+            _: &CodeSearchChunkId,
+        ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
+            Ok(Self::occurrence())
         }
 
         fn symbol(
             &self,
             symbol: &SymbolOccurrenceId,
             _: &FileOccurrenceId,
-        ) -> Option<NativeSymbolRecordV1> {
-            Some(NativeSymbolRecordV1 {
+        ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
+            Ok(NativeSymbolRecordV1 {
                 occurrence: symbol.clone(),
                 name: "callee".to_owned(),
                 qualified_name: "fixture::callee".to_owned(),
@@ -508,71 +562,76 @@ mod tests {
         };
         let mut exact_candidate = candidate(RetrieverKind::ExactLiteral);
         exact_candidate.exact_admission_proof = Some(proof.clone());
-        let exact = context.exact(
-            RetrieverOutcome::Complete(batch(
-                exact_candidate,
-                ExactLaneEvidence {
-                    binding: binding(),
-                    matched_literals: vec![ExactLiteralV1 {
-                        field: ExactFieldV1::Identifier,
-                        original_bytes: b"callee".to_vec(),
-                        canonical_bytes: b"callee".to_vec(),
-                    }],
-                    admission_proof: proof,
-                },
-            )),
-            "callee",
-            Some(ExactTechnicalTermKindV1::WholeSymbol),
-            |_| true,
-        );
+        let exact = context
+            .exact(
+                RetrieverOutcome::Complete(batch(
+                    exact_candidate,
+                    ExactLaneEvidence {
+                        binding: binding(),
+                        matched_literals: vec![ExactLiteralV1 {
+                            field: ExactFieldV1::Identifier,
+                            original_bytes: b"callee".to_vec(),
+                            canonical_bytes: b"callee".to_vec(),
+                        }],
+                        admission_proof: proof,
+                    },
+                )),
+                "callee",
+                Some(ExactTechnicalTermKindV1::WholeSymbol),
+                |_| true,
+            )
+            .expect("exact translation");
         let NativeLaneOutcomeV1::Complete(exact) = exact else {
             panic!("exact lane completes");
         };
         assert_eq!(exact.items[0].matched_literal, "callee");
         assert_eq!(exact.items[0].occurrence.path, "src/lib.rs");
 
-        let lexical = context.lexical(
-            RetrieverOutcome::Complete(batch(
-                candidate(RetrieverKind::Lexical),
-                LexicalLaneEvidence {
-                    binding: binding(),
-                    field_scores_micros: vec![(LexicalFieldV1::SymbolName, 42)],
-                    matched_whole_terms: vec!["callee".to_owned()],
-                    matched_subtokens: vec!["call".to_owned()],
-                    matched_phrases: vec!["callee".to_owned()],
-                    typo_recovery_applied: false,
-                    echo_penalty_applied: false,
-                },
-            )),
-            &["callee".to_owned()],
-            |_| true,
-        );
+        let lexical = context
+            .lexical(
+                RetrieverOutcome::Complete(batch(
+                    candidate(RetrieverKind::Lexical),
+                    LexicalLaneEvidence {
+                        binding: binding(),
+                        field_scores_micros: vec![(LexicalFieldV1::SymbolName, 42)],
+                        matched_whole_terms: vec!["callee".to_owned()],
+                        matched_subtokens: vec!["call".to_owned()],
+                        matched_phrases: vec!["callee".to_owned()],
+                        typo_recovery_applied: false,
+                        echo_penalty_applied: false,
+                    },
+                )),
+                |_| true,
+            )
+            .expect("lexical translation");
         let NativeLaneOutcomeV1::Complete(lexical) = lexical else {
             panic!("lexical lane completes");
         };
         assert_eq!(lexical.items[0].score_micros, 42);
         assert_eq!(lexical.items[0].matched_terms, ["callee", "call"]);
 
-        let graph = context.graph(
-            RetrieverOutcome::Complete(batch(
-                candidate(RetrieverKind::Graph),
-                GraphLaneEvidence {
-                    binding: binding(),
-                    path: vec![GraphPathSegmentV1 {
-                        from: id("symbol.caller"),
-                        to: id("symbol.query-execution"),
-                        edge_kind: RelationEdgeKindV1::Calls,
-                        authority: EdgeAuthorityV1::SyntaxExact,
-                        evidence_span: SourceSpan {
-                            start_byte: 1,
-                            end_byte: 2,
-                        },
-                    }],
-                    weakest_authority: EdgeAuthorityV1::SyntaxExact,
-                },
-            )),
-            |_| true,
-        );
+        let graph = context
+            .graph(
+                RetrieverOutcome::Complete(batch(
+                    candidate(RetrieverKind::Graph),
+                    GraphLaneEvidence {
+                        binding: binding(),
+                        path: vec![GraphPathSegmentV1 {
+                            from: id("symbol.caller"),
+                            to: id("symbol.query-execution"),
+                            edge_kind: RelationEdgeKindV1::Calls,
+                            authority: EdgeAuthorityV1::SyntaxExact,
+                            evidence_span: SourceSpan {
+                                start_byte: 1,
+                                end_byte: 2,
+                            },
+                        }],
+                        weakest_authority: EdgeAuthorityV1::SyntaxExact,
+                    },
+                )),
+                |_| true,
+            )
+            .expect("graph translation");
         let NativeLaneOutcomeV1::Complete(graph) = graph else {
             panic!("graph lane completes");
         };
@@ -584,17 +643,23 @@ mod tests {
     fn semantic_and_failure_lane_decisions_remain_typed() {
         let context = context();
         assert_eq!(
-            context.semantic(RetrieverOutcome::Cancelled, |_| true),
+            context
+                .semantic(RetrieverOutcome::Cancelled, |_| true)
+                .expect("cancelled decision"),
             NativeLaneOutcomeV1::Cancelled
         );
         assert!(matches!(
-            context.exact(RetrieverOutcome::Stale(freshness()), "callee", None, |_| {
-                true
-            }),
+            context
+                .exact(RetrieverOutcome::Stale(freshness()), "callee", None, |_| {
+                    true
+                })
+                .expect("stale decision"),
             NativeLaneOutcomeV1::Stale(_)
         ));
         assert_eq!(
-            context.lexical(RetrieverOutcome::Denied, &[], |_| true),
+            context
+                .lexical(RetrieverOutcome::Denied, |_| true)
+                .expect("denied decision"),
             NativeLaneOutcomeV1::Denied
         );
     }

@@ -49,7 +49,7 @@ use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
     NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
-    inspect_prepared_query_cursor,
+    QueryExecutionContractErrorV1, inspect_prepared_query_cursor,
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
@@ -546,9 +546,12 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         &self.latest.generation.manifest().generation_id
     }
 
-    fn occurrence(&self, binding: &CodeCandidateBindingV1) -> Option<NativeCodeOccurrenceV1> {
+    fn occurrence(
+        &self,
+        binding: &CodeCandidateBindingV1,
+    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
         if &binding.occurrence.generation != self.generation() {
-            return None;
+            return Err(QueryExecutionContractErrorV1::GenerationMismatch);
         }
         let file = self
             .latest
@@ -556,16 +559,21 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
             .snapshot()
             .files
             .iter()
-            .find(|file| file.file_occurrence_id == binding.occurrence.file)?;
-        let chunk = binding.occurrence.chunk.as_ref().and_then(|chunk_id| {
-            self.latest
-                .generation
-                .chunks()
-                .chunks()
-                .iter()
-                .find(|chunk| &chunk.id == chunk_id)
-        });
-        Some(NativeCodeOccurrenceV1 {
+            .find(|file| file.file_occurrence_id == binding.occurrence.file)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
+        let chunk = match binding.occurrence.chunk.as_ref() {
+            Some(chunk_id) => Some(
+                self.latest
+                    .generation
+                    .chunks()
+                    .chunks()
+                    .iter()
+                    .find(|chunk| &chunk.id == chunk_id)
+                    .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?,
+            ),
+            None => None,
+        };
+        Ok(NativeCodeOccurrenceV1 {
             file: binding.occurrence.file.clone(),
             symbol: binding.occurrence.symbol.clone(),
             chunk: binding.occurrence.chunk.clone(),
@@ -580,22 +588,27 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         })
     }
 
-    fn occurrence_by_chunk(&self, chunk_id: &CodeSearchChunkId) -> Option<NativeCodeOccurrenceV1> {
+    fn occurrence_by_chunk(
+        &self,
+        chunk_id: &CodeSearchChunkId,
+    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
         let chunk = self
             .latest
             .generation
             .chunks()
             .chunks()
             .iter()
-            .find(|chunk| &chunk.id == chunk_id)?;
+            .find(|chunk| &chunk.id == chunk_id)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let file = self
             .latest
             .generation
             .snapshot()
             .files
             .iter()
-            .find(|file| file.file_occurrence_id == chunk.anchor.file_occurrence_id)?;
-        Some(NativeCodeOccurrenceV1 {
+            .find(|file| file.file_occurrence_id == chunk.anchor.file_occurrence_id)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
+        Ok(NativeCodeOccurrenceV1 {
             file: chunk.anchor.file_occurrence_id.clone(),
             symbol: chunk.anchor.symbol_occurrence_id.clone(),
             chunk: Some(chunk.id.clone()),
@@ -608,21 +621,23 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         &self,
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
-    ) -> Option<NativeSymbolRecordV1> {
+    ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
         let lineage = self
             .latest
             .generation
             .symbols()
             .symbols
             .iter()
-            .find(|record| &record.occurrence == symbol)?;
+            .find(|record| &record.occurrence == symbol)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let source = self
             .latest
             .generation
             .snapshot()
             .files
             .iter()
-            .find(|source| &source.file_occurrence_id == file)?;
+            .find(|source| &source.file_occurrence_id == file)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let chunk = self
             .latest
             .generation
@@ -653,7 +668,7 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
             .next()
             .unwrap_or(&qualified_name)
             .to_owned();
-        Some(NativeSymbolRecordV1 {
+        Ok(NativeSymbolRecordV1 {
             occurrence: symbol.clone(),
             name,
             qualified_name,
@@ -1187,10 +1202,13 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let outcome = owners.exact.retrieve_exact(&lane_request);
             match outcome {
                 Ok(outcome) => {
-                    let outcome =
+                    let Ok(outcome) =
                         native_context.exact(outcome, &request.literal, request.kind, |path| {
                             path_is_in_code_query_scope(path, &request.scope)
-                        });
+                        })
+                    else {
+                        return unavailable(finished_at);
+                    };
                     finish_native_lane_query(
                         &prepared,
                         &context,
@@ -1284,9 +1302,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let outcome = owners.lexical.retrieve_lexical(&lane_request);
             match outcome {
                 Ok(outcome) => {
-                    let outcome = native_context.lexical(outcome, &request.phrases, |path| {
+                    let Ok(outcome) = native_context.lexical(outcome, |path| {
                         path_is_in_code_query_scope(path, &request.scope)
-                    });
+                    }) else {
+                        return unavailable(finished_at);
+                    };
                     finish_native_lane_query(
                         &prepared,
                         &context,
@@ -1375,9 +1395,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let outcome = owners.graph.retrieve_graph(&lane_request);
             match outcome {
                 Ok(outcome) => {
-                    let outcome = native_context.graph(outcome, |path| {
+                    let Ok(outcome) = native_context.graph(outcome, |path| {
                         path_is_in_code_query_scope(path, &request.scope)
-                    });
+                    }) else {
+                        return unavailable(finished_at);
+                    };
                     finish_native_lane_query(
                         &prepared,
                         &context,

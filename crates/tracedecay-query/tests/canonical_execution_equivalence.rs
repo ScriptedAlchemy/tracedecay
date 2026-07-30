@@ -261,20 +261,29 @@ impl NativeRecordReadPortV1 for FixtureRecords {
         &self.generation
     }
 
-    fn occurrence(&self, _: &CodeCandidateBindingV1) -> Option<NativeCodeOccurrenceV1> {
-        Some(Self::occurrence())
+    fn occurrence(
+        &self,
+        _: &CodeCandidateBindingV1,
+    ) -> Result<NativeCodeOccurrenceV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
+    {
+        Ok(Self::occurrence())
     }
 
-    fn occurrence_by_chunk(&self, _: &CodeSearchChunkId) -> Option<NativeCodeOccurrenceV1> {
-        Some(Self::occurrence())
+    fn occurrence_by_chunk(
+        &self,
+        _: &CodeSearchChunkId,
+    ) -> Result<NativeCodeOccurrenceV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
+    {
+        Ok(Self::occurrence())
     }
 
     fn symbol(
         &self,
         symbol: &SymbolOccurrenceId,
         _: &FileOccurrenceId,
-    ) -> Option<NativeSymbolRecordV1> {
-        Some(Self::symbol(symbol))
+    ) -> Result<NativeSymbolRecordV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
+    {
+        Ok(Self::symbol(symbol))
     }
 }
 
@@ -292,12 +301,14 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
 
     let mut exact_candidate = candidate(RetrieverKind::ExactLiteral, 1_000_000);
     exact_candidate.exact_admission_proof = Some(exact_proof());
-    let exact = context.exact(
-        RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
-        "run_query",
-        Some(ExactTechnicalTermKindV1::WholeSymbol),
-        |path| path.starts_with("src/query/"),
-    );
+    let exact = context
+        .exact(
+            RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
+            "run_query",
+            Some(ExactTechnicalTermKindV1::WholeSymbol),
+            |path| path.starts_with("src/query/"),
+        )
+        .expect("exact translation");
     assert_eq!(
         exact,
         NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
@@ -312,15 +323,15 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         })
     );
 
-    let requested_phrases = vec!["canonical execution".to_owned()];
-    let lexical = context.lexical(
-        RetrieverOutcome::Complete(batch(
-            candidate(RetrieverKind::Lexical, 875_000),
-            lexical_evidence(),
-        )),
-        &requested_phrases,
-        |path| path.starts_with("src/query/"),
-    );
+    let lexical = context
+        .lexical(
+            RetrieverOutcome::Complete(batch(
+                candidate(RetrieverKind::Lexical, 875_000),
+                lexical_evidence(),
+            )),
+            |path| path.starts_with("src/query/"),
+        )
+        .expect("lexical translation");
     assert_eq!(
         lexical,
         NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
@@ -328,7 +339,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
             items: vec![NativeLexicalRecordV1 {
                 occurrence: FixtureRecords::occurrence(),
                 score_micros: 875_000,
-                matched_phrases: requested_phrases,
+                matched_phrases: vec!["canonical execution".to_owned()],
                 matched_terms: vec![
                     "canonical".to_owned(),
                     "execution".to_owned(),
@@ -340,13 +351,15 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         })
     );
 
-    let graph = context.graph(
-        RetrieverOutcome::Complete(batch(
-            candidate(RetrieverKind::Graph, 750_000),
-            graph_evidence(),
-        )),
-        |path| path.starts_with("src/query/"),
-    );
+    let graph = context
+        .graph(
+            RetrieverOutcome::Complete(batch(
+                candidate(RetrieverKind::Graph, 750_000),
+                graph_evidence(),
+            )),
+            |path| path.starts_with("src/query/"),
+        )
+        .expect("graph translation");
     assert_eq!(
         graph,
         NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
@@ -361,13 +374,15 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         })
     );
 
-    let semantic = context.semantic(
-        RetrieverOutcome::Complete(batch(
-            candidate(RetrieverKind::Semantic, 700_000),
-            semantic_evidence(),
-        )),
-        |path| path.starts_with("src/query/"),
-    );
+    let semantic = context
+        .semantic(
+            RetrieverOutcome::Complete(batch(
+                candidate(RetrieverKind::Semantic, 700_000),
+                semantic_evidence(),
+            )),
+            |path| path.starts_with("src/query/"),
+        )
+        .expect("semantic translation");
     assert_eq!(
         semantic,
         NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
@@ -399,25 +414,53 @@ fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
     };
 
     assert_eq!(
-        context.lexical(RetrieverOutcome::Denied, &[], |_| true),
+        context
+            .lexical(RetrieverOutcome::Denied, |_| true)
+            .expect("denied decision"),
         NativeLaneOutcomeV1::Denied
     );
     assert_eq!(
-        context.exact(
-            RetrieverOutcome::Stale(stale.clone()),
-            "run_query",
-            None,
-            |_| true,
-        ),
+        context
+            .exact(
+                RetrieverOutcome::Stale(stale.clone()),
+                "run_query",
+                None,
+                |_| true,
+            )
+            .expect("stale decision"),
         NativeLaneOutcomeV1::Stale(stale)
     );
     assert_eq!(
-        context.graph(RetrieverOutcome::BudgetExceeded(budget), |_| true),
+        context
+            .graph(RetrieverOutcome::BudgetExceeded(budget), |_| true)
+            .expect("budget decision"),
         NativeLaneOutcomeV1::BudgetExceeded(budget)
     );
     assert_eq!(
-        context.semantic(RetrieverOutcome::Cancelled, |_| true),
+        context
+            .semantic(RetrieverOutcome::Cancelled, |_| true)
+            .expect("cancelled decision"),
         NativeLaneOutcomeV1::Cancelled
+    );
+}
+
+#[test]
+fn public_execution_rejects_cross_generation_evidence() {
+    let records = FixtureRecords {
+        generation: generation(),
+    };
+    let context = context(&records);
+    let mut evidence = lexical_evidence();
+    evidence.binding.occurrence.generation = id("generation.other");
+
+    assert_eq!(
+        context.lexical(
+            RetrieverOutcome::Complete(
+                batch(candidate(RetrieverKind::Lexical, 875_000), evidence,)
+            ),
+            |_| true,
+        ),
+        Err(tracedecay_query::retrieval::QueryExecutionContractErrorV1::GenerationMismatch)
     );
 }
 
@@ -546,8 +589,15 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         digest::<ManifestDigest>('9'),
     )
     .expect("valid prepared-query bindings");
-    let items = vec!["first".to_owned(), "second".to_owned()];
+    let items = vec!["first".to_owned(), "second".to_owned(), "third".to_owned()];
     let now = UtcMicros(10);
+
+    assert_eq!(
+        PreparedQueryV1::prepare(authority.clone(), request.clone(), None)
+            .expect("zero-page prepared query")
+            .paginate(&bindings, items.clone(), 0, now),
+        Err(tracedecay_query::retrieval::PreparedQueryErrorV1::Invalid)
+    );
 
     let first = PreparedQueryV1::prepare(authority.clone(), request.clone(), None)
         .expect("first equivalent prepared query")
@@ -559,7 +609,7 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         .expect("second prepared-query page");
 
     assert_eq!(first.items, ["first"]);
-    assert_eq!(first.total, 2);
+    assert_eq!(first.total, 3);
     assert_eq!(first.next_cursor, second.next_cursor);
     let first_cursor = first.next_cursor.expect("first continuation cursor");
     let second_cursor = second.next_cursor.expect("second continuation cursor");
@@ -580,9 +630,15 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
 
     let resumed = PreparedQueryV1::prepare(authority, request, Some(&first_cursor))
         .expect("authenticated prepared-query continuation")
-        .paginate(&bindings, items, 1, now)
+        .paginate(&bindings, items, 1, UtcMicros(100))
         .expect("resumed prepared-query page");
     assert_eq!(resumed.items, ["second"]);
-    assert_eq!(resumed.total, 2);
-    assert!(resumed.next_cursor.is_none());
+    assert_eq!(resumed.total, 3);
+    let resumed_cursor = resumed.next_cursor.expect("second continuation cursor");
+    assert_eq!(
+        inspect_prepared_query_cursor(&resumed_cursor)
+            .expect("resumed cursor routing")
+            .expires_at,
+        UtcMicros(900_000_010)
+    );
 }
