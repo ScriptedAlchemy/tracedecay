@@ -212,6 +212,9 @@ jobs:
       - name: Test dashboard workflow contract
         run: bash tests/dashboard_workflow_contract_test.sh
 
+      - name: Check production feature profile
+        run: python3 scripts/check-production-feature-profile.py
+
       - name: Test local dogfood command contract
         run: bash tests/dogfood_command_test.sh
 

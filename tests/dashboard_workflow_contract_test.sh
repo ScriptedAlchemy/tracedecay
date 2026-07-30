@@ -67,6 +67,8 @@ for required in [
     "npm run contracts:check",
     "npm test",
     "npm run boundary:check",
+    "cargo nextest run --all-features --test dashboard_api_test",
+    "--no-tests=fail",
 ]:
     if required not in dashboard_job:
         raise SystemExit(
@@ -503,6 +505,12 @@ if "github.event_name == 'push'" not in drift_job:
         "release-version-drift must run on push as well as pull_request, or "
         "these contract checks never run on master"
     )
+if not re.search(r"(?m)^  push:\s*\n\s+branches: \[master\]", plugin):
+    raise SystemExit("plugin validation must run on master pushes")
+cursor_job = job_block(plugin, "cursor-native-extension")
+for required in ["npm ci", "npm run check", "npm test", "npm run package"]:
+    if required not in cursor_job:
+        raise SystemExit(f"Cursor extension job must preserve {required!r}")
 
 # A boundary step wired to an empty rule set passes every time and proves
 # nothing, so the gate's contents are part of the contract, not just its
