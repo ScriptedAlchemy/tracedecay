@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod binding;
+mod executable;
 mod id;
 mod manifest;
 mod profile;
@@ -18,10 +19,15 @@ pub use binding::{
     BindingDeprecation, BindingStatus, BindingSurface, ProtocolRevisionRange,
     SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
 };
+pub use executable::{
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    ExecutableCodecV1, ExecutableUnavailableDispositionV1, ExecutionOwnerV1, RouteExposureV1,
+    SchemaBodyAuthorityV1,
+};
 pub use id::{
-    BindingId, CapabilityId, CatalogDigest, CatalogDigestError, ContributionId, FeatureId,
-    IdentifierError, MAX_CATALOG_IDENTIFIER_BYTES, ProfileId, RetrieverId, SchemaId,
-    SortContractId, UseCaseId,
+    BindingId, CapabilityId, CatalogDigest, CatalogDigestError, CodecBindingKey, ContributionId,
+    FeatureId, IdentifierError, MAX_CATALOG_IDENTIFIER_BYTES, OperationId, ProfileId, RetrieverId,
+    SchemaId, ServiceId, SortContractId, UseCaseId,
 };
 pub use manifest::{
     AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
