@@ -750,7 +750,10 @@ fn symbol_record(
     file: &tracedecay_domain::FileOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
     let records = LatestCompleteNativeRecordReadPortV1 { latest };
-    records.symbol(symbol, file).map(application_symbol_record)
+    records
+        .symbol(symbol, file)
+        .ok()
+        .map(application_symbol_record)
 }
 
 fn symbol_record_by_id(
