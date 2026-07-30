@@ -7,19 +7,21 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1, RemoteCapabilityV1,
-    RemoteRepositoryScopeV1, RemoteWriterFenceV1, UtcMicros,
+    CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1, DurableObservationV1,
+    EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ProjectionGenerationId, RemoteCapabilityV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, RetrievalAnchorRecordV2, UtcMicros,
 };
-use tracedecay_store::StoredObservationRowV1;
 use tracedecay_tool_catalog::SchemaId;
 
 use super::auth::{
     OpaqueRemoteCredential, RemoteAuthenticationError, RemoteEnrollmentAuthorityErrorV1,
-    RemoteEnrollmentCredentialLookupPortV1, authenticate_caller,
+    RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentCredentialLookupPortV1, authenticate_caller,
 };
 use super::composition::{ExpectedRemoteShardV1, RemoteQueryCompositionV1, ShardCoverageStateV1};
 use super::protocol::{
@@ -27,10 +29,9 @@ use super::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
     remote_protocol_problem,
 };
-use super::replay::{RemoteReplayClockPortV1, SystemRemoteReplayClockV1};
 use crate::{
-    ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, ResolvedScope,
-    ResultContractRef,
+    ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, Deadline, RequestId,
+    ResolvedScope, ResultContractRef,
 };
 
 pub const REMOTE_QUERY_SCHEMA_REVISION_V1: u16 = 1;
@@ -120,9 +121,7 @@ impl RemoteQueryRequestV1 {
                 field: "remote query expected authority",
             })?;
         self.page.validate()?;
-        if self.expected_shards.is_empty()
-            || self.expected_shards.len() > MAX_REMOTE_QUERY_EXPECTED_SHARDS_V1
-        {
+        if self.expected_shards.len() != 1 {
             return Err(ApplicationContractError::InvalidRange {
                 field: "remote query expected shard inventory",
             });
@@ -156,6 +155,15 @@ impl RemoteQueryRequestV1 {
                 });
             }
             brain_id.get_or_insert_with(|| shard.brain_id.clone());
+        }
+        let expected = &self.expected_shards[0];
+        if expected.brain_id != self.expected_authority.brain_id.as_str()
+            || expected.shard_id != self.expected_authority.shard_id.as_str()
+            || expected.generation_id != self.expected_authority.generation_id.as_str()
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "remote query authority inventory binding",
+            });
         }
         Ok(())
     }
@@ -208,8 +216,58 @@ pub struct RemoteQueryResultV1 {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
 pub enum RemoteExactObservationResultV1 {
-    Found(Box<StoredObservationRowV1>),
+    Found(Box<RemoteSanitizedObservationV1>),
     NotFound,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteSanitizedObservationV1 {
+    pub sequence: u64,
+    pub observation: DurableObservationV1,
+    pub committed_cursor: ObservationSourceCursorV1,
+    pub retrieval_anchor: RetrievalAnchorRecordV2,
+    pub projection_generation: ProjectionGenerationId,
+    pub repository_provenance: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
+    pub repository_anchor: Option<RetrievalAnchorRecordV2>,
+    pub projection_queued: bool,
+}
+
+impl RemoteSanitizedObservationV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.retrieval_anchor
+            .validate()
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "remote observation retrieval anchor",
+            })?;
+        if let Some(provenance) = self.repository_provenance.value() {
+            provenance
+                .validate()
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "remote observation repository provenance",
+                })?;
+        }
+        if let Some(anchor) = &self.repository_anchor {
+            anchor
+                .validate()
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "remote observation repository anchor",
+                })?;
+        }
+        if self.sequence == 0
+            || self.observation.source() != self.committed_cursor.source()
+            || self.observation.scope() != self.committed_cursor.scope()
+            || self.observation.identity().generation() != self.committed_cursor.generation()
+            || self.observation.identity().ordering_domain()
+                != self.committed_cursor.ordering_domain()
+            || self.repository_provenance.value().is_some() != self.repository_anchor.is_some()
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "remote sanitized observation evidence",
+            });
+        }
+        Ok(())
+    }
 }
 
 impl RemoteQueryResultV1 {
@@ -227,6 +285,9 @@ impl RemoteQueryResultV1 {
                 });
             }
         }
+        if let RemoteExactObservationResultV1::Found(row) = &self.observation {
+            row.validate()?;
+        }
         Ok(())
     }
 }
@@ -236,19 +297,68 @@ pub struct RemoteExactObservationQueryOutcomeV1 {
     pub result: ApplicationEnvelope<RemoteQueryResultV1>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteExactObservationQueryBudgetV1 {
+    pub maximum_units: u64,
+    pub maximum_bytes: u64,
+    pub maximum_elapsed_micros: u64,
+}
+
+impl RemoteExactObservationQueryBudgetV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.maximum_units == 0 || self.maximum_bytes == 0 || self.maximum_elapsed_micros == 0 {
+            return Err(ApplicationContractError::ZeroValue {
+                field: "remote exact observation query budget",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteExactObservationQueryCommandV1 {
+    pub request_id: RequestId,
+    pub observation_id: CanonicalObservationIdV1,
+    pub scope: ResolvedScope,
+    pub repository_scope: RemoteRepositoryScopeV1,
+    pub expected_authority: RemoteWriterFenceV1,
+    pub expected_shard: ExpectedRemoteShardV1,
+    pub caller_admission: RemoteEnrollmentCommitReceiptV1,
+    pub effective_deadline: Deadline,
+    pub budget: RemoteExactObservationQueryBudgetV1,
+    pub observed_at: UtcMicros,
+}
+
 pub trait RemoteExactObservationQueryReadPortV1: Send + Sync {
     fn read_exact_observation(
         &self,
-        request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
-        caller: &tracedecay_domain::EnrollmentCredentialRecordV1,
-        observed_at: UtcMicros,
+        command: &RemoteExactObservationQueryCommandV1,
     ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1>;
+}
+
+pub trait RemoteQueryClockPortV1: Send + Sync {
+    fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemRemoteQueryClockV1;
+
+impl RemoteQueryClockPortV1 for SystemRemoteQueryClockV1 {
+    fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
+        let micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?
+            .as_micros();
+        i64::try_from(micros)
+            .map(UtcMicros)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)
+    }
 }
 
 pub struct RemoteExactObservationQueryServiceV1 {
     credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
     read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
-    clock: Arc<dyn RemoteReplayClockPortV1>,
+    clock: Arc<dyn RemoteQueryClockPortV1>,
 }
 
 impl RemoteExactObservationQueryServiceV1 {
@@ -256,13 +366,13 @@ impl RemoteExactObservationQueryServiceV1 {
         credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
         read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
     ) -> Self {
-        Self::new_with_clock(credentials, read, Arc::new(SystemRemoteReplayClockV1))
+        Self::new_with_clock(credentials, read, Arc::new(SystemRemoteQueryClockV1))
     }
 
     pub fn new_with_clock(
         credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
         read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
-        clock: Arc<dyn RemoteReplayClockPortV1>,
+        clock: Arc<dyn RemoteQueryClockPortV1>,
     ) -> Self {
         Self {
             credentials,
@@ -283,6 +393,7 @@ impl RemoteExactObservationQueryServiceV1 {
             .validate_metadata()
             .and_then(|()| request.body.validate())
             .map_err(|_| RemoteExactObservationQueryErrorV1::InvalidRequest)?;
+        validate_protocol_authority_binding(request)?;
         let observed_at = self
             .clock
             .now()
@@ -304,26 +415,128 @@ impl RemoteExactObservationQueryServiceV1 {
             observed_at,
         )
         .map_err(RemoteExactObservationQueryErrorV1::Authentication)?;
-        let outcome = self
-            .read
-            .read_exact_observation(request, &caller, observed_at)?;
+        let caller_admission = self
+            .credentials
+            .enrollment_commit_receipt(&caller.enrollment_id)
+            .map_err(RemoteExactObservationQueryErrorV1::Credential)?;
+        caller_admission
+            .validate()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
+        if caller_admission.enrollment != caller {
+            return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
+        }
+        let scope = caller_admission.admission.scope().clone();
+        if !resolved_scope_matches(&scope, &request.body.scope) {
+            return Err(RemoteExactObservationQueryErrorV1::ScopeMismatch);
+        }
+        let effective_deadline = Deadline::new(caller.expires_at)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::DeadlineElapsed)?;
+        if effective_deadline.is_elapsed_at(observed_at) {
+            return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed);
+        }
+        let budget = RemoteExactObservationQueryBudgetV1 {
+            maximum_units: 1,
+            maximum_bytes: 1024 * 1024,
+            maximum_elapsed_micros: 5_000_000,
+        };
+        budget
+            .validate()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::BudgetExceeded)?;
+        let command = RemoteExactObservationQueryCommandV1 {
+            request_id: request.request_id.clone(),
+            observation_id: request.body.observation_id().clone(),
+            scope,
+            repository_scope: request.body.scope.clone(),
+            expected_authority: request.body.expected_authority.clone(),
+            expected_shard: request.body.expected_shards[0].clone(),
+            caller_admission,
+            effective_deadline,
+            budget,
+            observed_at,
+        };
+        let outcome = self.read.read_exact_observation(&command)?;
+        match &outcome.authority {
+            CurrentRemoteAuthorityStateV1::Available(authority)
+                if authority.validate().is_ok()
+                    && authority.fence == command.expected_authority => {}
+            CurrentRemoteAuthorityStateV1::Available(_) => {
+                return Err(RemoteExactObservationQueryErrorV1::StaleFence);
+            }
+            CurrentRemoteAuthorityStateV1::Partial { .. }
+            | CurrentRemoteAuthorityStateV1::Unavailable { .. } => {
+                return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
+            }
+        }
         if outcome.result.contract != remote_exact_observation_query_result_contract_v1()
             || outcome.result.request_id != request.request_id
             || !resolved_scope_matches(&outcome.result.scope, &request.body.scope)
         {
             return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
         }
+        validate_query_evidence(&outcome.result)?;
+        let ApplicationOutcome::Evidence(packet) = &outcome.result.outcome else {
+            unreachable!("query evidence validation rejects non-evidence outcomes");
+        };
+        if packet.execution.started_at < command.observed_at
+            || packet.execution.ended_at > command.effective_deadline.expires_at
+            || packet.execution.budget.units_consumed > command.budget.maximum_units
+            || packet.execution.budget.bytes_consumed > command.budget.maximum_bytes
+            || packet.execution.budget.elapsed_micros > command.budget.maximum_elapsed_micros
+        {
+            return Err(RemoteExactObservationQueryErrorV1::BudgetExceeded);
+        }
         query_payload(&outcome.result)
             .ok_or(RemoteExactObservationQueryErrorV1::ReceiptMismatch)?
             .validate()
             .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
         if let Some(row) = exact_observation_row(&outcome.result)
-            && row.observation.observation_id() != request.body.observation_id()
+            && (row.observation.observation_id() != request.body.observation_id()
+                || row.projection_generation != command.expected_authority.generation_id
+                || !observation_scope_matches(&row.observation, &request.body.scope))
         {
             return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
         }
+        validate_composition(
+            query_payload(&outcome.result)
+                .ok_or(RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
+            &command.expected_shard,
+            &command.expected_authority,
+        )?;
         Ok(outcome)
     }
+}
+
+pub(super) fn validate_protocol_authority_binding(
+    request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
+) -> Result<(), RemoteExactObservationQueryErrorV1> {
+    if request.expected_authority.as_ref() != Some(&request.body.expected_authority) {
+        return Err(RemoteExactObservationQueryErrorV1::StaleFence);
+    }
+    Ok(())
+}
+
+fn validate_query_evidence(
+    envelope: &ApplicationEnvelope<RemoteQueryResultV1>,
+) -> Result<(), RemoteExactObservationQueryErrorV1> {
+    let ApplicationOutcome::Evidence(packet) = &envelope.outcome else {
+        return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
+    };
+    packet
+        .authority
+        .validate_for(&envelope.scope)
+        .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
+    packet
+        .coverage
+        .validate()
+        .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
+    packet
+        .execution
+        .validate()
+        .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
+    if packet.execution.ended_at < packet.execution.started_at {
+        return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
+    }
+    Ok(())
 }
 
 fn resolved_scope_matches(resolved: &ResolvedScope, scope: &RemoteRepositoryScopeV1) -> bool {
@@ -333,9 +546,39 @@ fn resolved_scope_matches(resolved: &ResolvedScope, scope: &RemoteRepositoryScop
         && resolved.reference == scope.reference
 }
 
+fn observation_scope_matches(
+    observation: &DurableObservationV1,
+    scope: &RemoteRepositoryScopeV1,
+) -> bool {
+    matches!(
+        observation.scope(),
+        ObservationScopeV1::Project { project_id } if project_id == &scope.project_id
+    )
+}
+
+pub(super) fn validate_composition(
+    result: &RemoteQueryResultV1,
+    expected: &ExpectedRemoteShardV1,
+    fence: &RemoteWriterFenceV1,
+) -> Result<(), RemoteExactObservationQueryErrorV1> {
+    if result.composition.contributions.len() != 1 || !result.composition.is_complete() {
+        return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
+    }
+    let manifest = &result.composition.contributions[0].manifest;
+    if manifest.brain_id != expected.brain_id
+        || manifest.shard_id != expected.shard_id
+        || manifest.generation_id != expected.generation_id
+        || manifest.placement_revision != fence.placement_revision.get()
+        || manifest.authority_epoch != fence.authority_epoch.0
+    {
+        return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
+    }
+    Ok(())
+}
+
 fn exact_observation_row(
     envelope: &ApplicationEnvelope<RemoteQueryResultV1>,
-) -> Option<&StoredObservationRowV1> {
+) -> Option<&RemoteSanitizedObservationV1> {
     let payload = query_payload(envelope)?;
     match &payload.observation {
         RemoteExactObservationResultV1::Found(row) => Some(row),
@@ -443,14 +686,15 @@ pub enum RemoteExactObservationQueryErrorV1 {
     ReceiptMismatch,
 }
 
-fn query_protocol_failure(error: RemoteExactObservationQueryErrorV1) -> RemoteProtocolFailureV1 {
+pub(super) fn query_protocol_failure(
+    error: RemoteExactObservationQueryErrorV1,
+) -> RemoteProtocolFailureV1 {
     match error {
         RemoteExactObservationQueryErrorV1::UnsupportedVersion => {
             RemoteProtocolFailureV1::UnsupportedVersion
         }
         RemoteExactObservationQueryErrorV1::InvalidRequest
-        | RemoteExactObservationQueryErrorV1::ScopeMismatch
-        | RemoteExactObservationQueryErrorV1::ReceiptMismatch => {
+        | RemoteExactObservationQueryErrorV1::ScopeMismatch => {
             RemoteProtocolFailureV1::ScopeMismatch
         }
         RemoteExactObservationQueryErrorV1::Authentication(authentication) => {
@@ -475,7 +719,10 @@ fn query_protocol_failure(error: RemoteExactObservationQueryErrorV1) -> RemotePr
         ) => RemoteProtocolFailureV1::CallerAuthenticationFailed,
         RemoteExactObservationQueryErrorV1::Credential(_)
         | RemoteExactObservationQueryErrorV1::PolicyUnavailable
-        | RemoteExactObservationQueryErrorV1::AuthorityUnavailable => {
+        | RemoteExactObservationQueryErrorV1::AuthorityUnavailable
+        | RemoteExactObservationQueryErrorV1::ReceiptMismatch
+        | RemoteExactObservationQueryErrorV1::BudgetExceeded
+        | RemoteExactObservationQueryErrorV1::DeadlineElapsed => {
             RemoteProtocolFailureV1::AuthorityUnavailable
         }
         RemoteExactObservationQueryErrorV1::StaleFence => {
@@ -483,10 +730,6 @@ fn query_protocol_failure(error: RemoteExactObservationQueryErrorV1) -> RemotePr
         }
         RemoteExactObservationQueryErrorV1::PolicyDenied => {
             RemoteProtocolFailureV1::InsufficientCapability
-        }
-        RemoteExactObservationQueryErrorV1::BudgetExceeded
-        | RemoteExactObservationQueryErrorV1::DeadlineElapsed => {
-            RemoteProtocolFailureV1::AuthorityUnavailable
         }
     }
 }
