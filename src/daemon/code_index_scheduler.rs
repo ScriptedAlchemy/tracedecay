@@ -1514,8 +1514,9 @@ pub(crate) mod semantic_query_runtime;
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
 // stay stable for the daemon and MCP server that mount and query worktrees.
 pub(crate) use cadence::{
-    CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
-    CodeIndexEventToReadyReceiptV1,
+    CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceReadModelV1,
+    CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
+    newly_eligible_percentile,
 };
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
