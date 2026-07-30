@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useScope } from '../../data/scope/store.ts';
 import { AutomationsPage } from './AutomationsPage.tsx';
 
 afterEach(() => {
@@ -337,6 +338,99 @@ describe('AutomationsPage list completeness', () => {
  * here compares their numbers. What it uses is the containment: a pending item
  * is one of the items the list enumerates.
  */
+/**
+ * The scheduler control against the scope it is pointed at.
+ *
+ * Pause and resume are addressed through the project gateway, which serves
+ * every project other than the active one read-only. So an enabled button in a
+ * non-active scope is an offer the daemon will refuse — and an enabled button in
+ * a scope whose activation has not been read yet is an offer nobody has checked.
+ * Both have to be disabled, and both have to say which, because a greyed-out
+ * control with no reason is indistinguishable from a broken one.
+ */
+describe('AutomationsPage scheduler control scope', () => {
+  /** The control label, whichever direction it currently offers. */
+  const control = () =>
+    screen.getByRole<HTMLButtonElement>('button', { name: /(Pause|Resume) scheduler/i });
+
+  afterEach(() => useScope.getState().selectAllProjects());
+
+  it('offers the control in the active project, naming what it applies to', async () => {
+    useScope.setState({ scope: projectScope('active') });
+    stubAutomation({ status: scheduler(measured(0), measured(0)) });
+    renderAutomations();
+    await screen.findByText('pending proposals');
+
+    expect(control().disabled).toBe(false);
+    expect(scopeNote().textContent).toBe('Applies to Other project.');
+    expect(scopeNote().getAttribute('data-scope-writability')).toBe('writable');
+    // The target is described to the control an offered write would go through,
+    // not only to a refused one.
+    expect(control().getAttribute('aria-describedby')).toBe(scopeNote().id);
+  });
+
+  it('states that an aggregate write lands on the active project alone', async () => {
+    useScope.getState().selectAllProjects();
+    stubAutomation({ status: scheduler(measured(0), measured(0)) });
+    renderAutomations();
+    await screen.findByText('pending proposals');
+
+    expect(control().disabled).toBe(false);
+    // The aggregate reads across projects, so a control under it could easily be
+    // read as applying across them too.
+    expect(scopeNote().textContent).toBe('Applies to the active project.');
+  });
+
+  it('disables the control in a selected non-active project and says how to enable it', async () => {
+    useScope.setState({ scope: projectScope('selected') });
+    const fetchMock = stubAutomation({ status: scheduler(measured(0), measured(0)) });
+    renderAutomations();
+    await screen.findByText('pending proposals');
+
+    expect(control().disabled).toBe(true);
+    const note = scopeNote();
+    expect(note.getAttribute('data-scope-writability')).toBe('read_only');
+    expect(note.textContent).toContain('is not the active project');
+    expect(note.textContent).toContain('Switch scope to the active project');
+    // The reason is associated with the control, not merely near it.
+    expect(control().getAttribute('aria-describedby')).toBe(note.id);
+
+    // Nothing was sent to the pause route, on top of the button being disabled.
+    const posted = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(posted).toEqual([]);
+  });
+
+  it('disables the control while activation is unresolved, without claiming refusal', async () => {
+    useScope.setState({ scope: projectScope('unresolved') });
+    stubAutomation({ status: scheduler(measured(0), measured(0)) });
+    renderAutomations();
+    await screen.findByText('pending proposals');
+
+    expect(control().disabled).toBe(true);
+    const note = scopeNote();
+    expect(note.getAttribute('data-scope-writability')).toBe('unknown');
+    // An unread registry is not a refusal, and must not be reported as one.
+    expect(note.textContent).toContain('not known yet');
+    expect(note.textContent).not.toMatch(/read-only|not permitted/i);
+  });
+});
+
+function projectScope(activation: 'active' | 'selected' | 'unresolved') {
+  return {
+    kind: 'project',
+    projectId: 'proj_other',
+    label: 'Other project',
+    activation,
+  } as const;
+}
+
+/** The sentence the control carries about its scope. */
+function scopeNote(): HTMLElement {
+  const note = document.querySelector<HTMLElement>('[data-scope-writability]');
+  if (!note) throw new Error('the scheduler control rendered no scope sentence');
+  return note;
+}
+
 describe('AutomationsPage queue agreement', () => {
   it('will not call the proposal queue empty while the scheduler could not read it', async () => {
     stubAutomation({

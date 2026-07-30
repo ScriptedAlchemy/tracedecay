@@ -1,10 +1,15 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
+import { useScope, type ScopeWritability } from '../../data/scope/store.ts';
 import { SettingsPage } from './SettingsPage.tsx';
 import { applySettingsMutation } from './settingsMutation.ts';
+
+/** The dashboard pointed at the project the daemon has active — the scope every
+ * case below is about something other than. */
+const ACTIVE_SCOPE: ScopeWritability = { state: 'writable', target: 'tracedecay' };
 
 describe('SettingsPage authorized changes', () => {
   beforeEach(() => {
@@ -288,11 +293,135 @@ describe('SettingsPage authorized changes', () => {
   });
 });
 
+/**
+ * Both patch routes are addressed through the project gateway, so the scope the
+ * dashboard is pointed at decides whether either editor can be written at all —
+ * independently of whether the daemon advertises the apply action.
+ *
+ * Conflating the two is what this covers. The read-only banner used to say "this
+ * dashboard is not authorized to apply project settings" for every reason it
+ * could be read-only, which under a selected project sent the reader looking for
+ * a permission problem that did not exist while the actual remedy — switch scope
+ * — went unmentioned.
+ */
+describe('Settings scope authority', () => {
+  const fieldset = (label: string) =>
+    screen.getByLabelText(label).closest('fieldset') as HTMLFieldSetElement;
+
+  afterEach(() => useScope.getState().selectAllProjects());
+
+  it('takes both editors read-only in a selected non-active project, naming the scope', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_other',
+        label: 'Other project',
+        activation: 'selected',
+      },
+    });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
+        return jsonResponse(settings());
+      }),
+    );
+    renderSettings();
+
+    // Both scopes, because the obstacle is the gateway rather than either
+    // scope's own authority — the envelope advertises both apply actions here.
+    const banners = await waitFor(() => {
+      const found = document.querySelectorAll('[data-settings-gate="read_only"]');
+      expect(found).toHaveLength(2);
+      return [...found];
+    });
+    for (const banner of banners) {
+      expect(banner.textContent).toContain('is not the active project');
+      expect(banner.textContent).toContain('Switch scope to the active project');
+      // The permission accusation is the wrong one here and must be absent.
+      expect(banner.textContent).not.toMatch(/not authorized/i);
+    }
+    expect(fieldset('Maximum file size (bytes)').disabled).toBe(true);
+    expect(fieldset('Watcher debounce').disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Review project changes' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Review user changes' })).toBeNull();
+
+    // The read is legitimate in any scope; nothing else went out.
+    expect(calls.filter((call) => !call.startsWith('GET '))).toEqual([]);
+  });
+
+  it('keeps the permission accusation for a scope the daemon does not advertise', async () => {
+    // The active project, so the scope is not the obstacle and the banner must
+    // still name the authority that is.
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_active',
+        label: 'Active project',
+        activation: 'active',
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settingsWithout('configuration_batch'))));
+    renderSettings();
+
+    expect(
+      await screen.findByText(
+        'Read-only · this dashboard is not authorized to apply project settings',
+      ),
+    ).toBeTruthy();
+    expect(fieldset('Watcher debounce').disabled).toBe(false);
+    expect(
+      document.querySelector('[data-settings-gate="unauthorized"]')?.textContent,
+    ).toContain('not authorized');
+  });
+
+  it('does not claim a refusal while the scope activation is unresolved', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_link',
+        label: 'Linked project',
+        activation: 'unresolved',
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
+    renderSettings();
+
+    const banner = await waitFor(() => {
+      const found = document.querySelector('[data-settings-gate="unknown"]');
+      expect(found).toBeTruthy();
+      return found as Element;
+    });
+    expect(banner.textContent).toContain('not known yet');
+    expect(banner.textContent).not.toMatch(/not authorized|read-only project/i);
+  });
+
+  it('names the write target in the active project', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'proj_active',
+        label: 'Active project',
+        activation: 'active',
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
+    renderSettings();
+
+    await screen.findByRole('button', { name: 'Review project changes' });
+    const notes = [...document.querySelectorAll('[data-settings-gate="writable"]')];
+    expect(notes).toHaveLength(2);
+    for (const note of notes) expect(note.textContent).toBe('Applies to Active project.');
+  });
+});
+
 describe('Settings response authority', () => {
   it('classifies a malformed refresh payload as a settings contract violation', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse([])));
 
     const result = await applySettingsMutation({
+      writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
       readUrl: '/api/settings',
@@ -312,6 +441,7 @@ describe('Settings response authority', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ payload: {} })));
 
     const result = await applySettingsMutation({
+      writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
       readUrl: '/api/settings',
@@ -337,6 +467,7 @@ describe('Settings response authority', () => {
     );
 
     const result = await applySettingsMutation({
+      writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
       readUrl: '/api/settings',
@@ -362,6 +493,7 @@ describe('Settings response authority', () => {
     );
 
     const result = await applySettingsMutation({
+      writability: ACTIVE_SCOPE,
       scope: 'user',
       expectedRevisionId: 'user-rev-7',
       readUrl: '/api/settings',
@@ -381,6 +513,7 @@ describe('Settings response authority', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('not json')));
 
     const result = await applySettingsMutation({
+      writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
       readUrl: '/api/settings',

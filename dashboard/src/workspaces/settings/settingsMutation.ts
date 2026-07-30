@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { SettingsPayloadV1 } from '../../contracts/generated.ts';
+import { readOnlyScopeRefusal, type ScopeWritability } from '../../data/scope/store.ts';
 import {
   buildSettingsEditor,
   readSettingsEnvelope,
@@ -42,6 +43,19 @@ export type SettingsMutationResult =
       readonly outcome: 'unavailable';
       readonly detail: string;
     }
+  /** The scope declined the write before anything was sent. Not a failure of
+   * the write — the absence of one, with the scope authority's own reason. */
+  | {
+      readonly outcome: 'not_dispatched';
+      readonly detail: string;
+    }
+  /** The project gateway refused the PATCH because this project is not the
+   * active one. Distinct from `error`: the request was well-formed, and the
+   * remedy is to change scope rather than to retry. */
+  | {
+      readonly outcome: 'read_only_scope';
+      readonly detail: string;
+    }
   | {
       readonly outcome: 'protocol_error';
       readonly authority: string;
@@ -54,11 +68,22 @@ export interface SettingsMutationRequest {
   readonly readUrl: string;
   readonly patchUrl: string;
   readonly patch: ProjectSettingsChangeSet | UserSettingsChangeSet;
+  /** Whether the dashboard scope these routes are addressed in accepts writes.
+   * Supplied by the caller rather than read from the store here, so this stays
+   * a function of its request and remains directly testable. */
+  readonly writability: ScopeWritability;
 }
 
 export async function applySettingsMutation(
   request: SettingsMutationRequest,
 ): Promise<SettingsMutationResult> {
+  // Before the refresh, not just before the PATCH. A control the scope has
+  // disabled must issue no request at all: re-reading settings the user cannot
+  // change is work the daemon was never asked for, and it would make the
+  // disabled control look like it had started something.
+  const refusal = scopeRefusal(request.writability);
+  if (refusal) return refusal;
+
   const readAuthority = `GET ${request.readUrl}`;
   const current = await fetchJson(request.readUrl);
   if (current.outcome !== 'response') return current;
@@ -99,6 +124,18 @@ export async function applySettingsMutation(
   if (patched.response.status === 503) {
     return { outcome: 'unavailable', detail: unavailableDetail(patched.body) };
   }
+  // The gateway's read-only refusal, recognized by its own body rather than by
+  // the status alone: a 405 this dashboard cannot account for stays a plain
+  // error below rather than borrowing the scope explanation.
+  if (patched.response.status === 405) {
+    const scopeRefused = readOnlyScopeRefusal(patched.body);
+    if (scopeRefused) {
+      return {
+        outcome: 'read_only_scope',
+        detail: `Nothing was applied: ${scopeRefused.detail.replace(/\.$/, '')}.`,
+      };
+    }
+  }
   if (!patched.response.ok) {
     const validation = readValidation(patched.body);
     return validation ?? {
@@ -123,6 +160,31 @@ export async function applySettingsMutation(
     resyncRecommended: patchedPayload.payload.resync_recommended === true,
     restartRecommended: patchedPayload.payload.restart_recommended === true,
   };
+}
+
+/**
+ * The refusal to return instead of writing, or `null` when the scope accepts
+ * the write.
+ *
+ * Exhaustive over `ScopeWritability`, so a state added to the scope authority
+ * cannot reach this write as an implicit permission — which is the direction
+ * the mistake would go, since anything not matched would fall through to the
+ * PATCH.
+ */
+function scopeRefusal(
+  writability: ScopeWritability,
+): Extract<SettingsMutationResult, { outcome: 'not_dispatched' }> | null {
+  switch (writability.state) {
+    case 'writable':
+      return null;
+    case 'read_only':
+    case 'unknown':
+      return { outcome: 'not_dispatched', detail: `Nothing was sent. ${writability.reason}` };
+    default: {
+      const exhaustive: never = writability;
+      return exhaustive;
+    }
+  }
 }
 
 type ContractedPayload =

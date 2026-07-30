@@ -9,7 +9,9 @@ import {
   automationSchedulerKey,
   schedulerStatusUrl,
   useSchedulerControl,
+  type SchedulerControlResult,
 } from '../../data/query/automation.ts';
+import type { ScopeWritability } from '../../data/scope/store.ts';
 import {
   AutomationSchedulerStatusV1Schema,
   type AutomationSchedulerStatusV1,
@@ -359,6 +361,7 @@ export function AutomationsPage() {
               paused={scheduler.data.data.paused}
               pending={control.isPending}
               failure={controlFailure(control.data)}
+              writability={control.writability}
               onToggle={(paused) => control.mutate(paused)}
             />
           </>
@@ -611,7 +614,7 @@ function StateLabel({ state }: { state: string }) {
  * non-`ok` outcome gets words. `unsupported_schema` is called out separately
  * because it means the request very likely *did* take effect and only the reply
  * was unreadable — the opposite advice from `offline`. */
-function controlFailure(result: LegacyResult<SchedulerStatus> | undefined): string | null {
+function controlFailure(result: SchedulerControlResult | undefined): string | null {
   if (result === undefined) return null;
   switch (result.outcome) {
     case 'ok':
@@ -626,8 +629,37 @@ function controlFailure(result: LegacyResult<SchedulerStatus> | undefined): stri
       return `The daemon refused the change (${result.detail}).`;
     case 'unsupported_schema':
       return 'The daemon answered in a shape this dashboard cannot read, so whether the scheduler changed is unknown — reload to re-read it.';
+    // The gateway refused the write because this project is not the active one.
+    // Its own sentence is repeated rather than reworded, and it is stated as a
+    // scope fact so the remedy is switching scope rather than retrying.
+    case 'read_only_scope':
+      return `The scheduler was not changed: ${result.refusal.detail}.`;
+    // No request was made, so the phrasing has to be about this dashboard
+    // declining rather than the daemon refusing.
+    case 'not_dispatched':
+      return scopeRefusalSentence(result.writability);
     default: {
       const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
+}
+
+/** Why a control did not dispatch, from the scope authority's own reading.
+ *
+ * Exhaustive so a fourth writability state cannot reach a control as silence.
+ * `writable` is unreachable by construction — the control only produces a
+ * `not_dispatched` for the other two — but it is answered rather than thrown
+ * on, because a sentence is what this function is for. */
+function scopeRefusalSentence(writability: ScopeWritability): string {
+  switch (writability.state) {
+    case 'writable':
+      return `Nothing was sent, though writes to ${writability.target} are accepted — reload to re-read the scheduler.`;
+    case 'read_only':
+    case 'unknown':
+      return `Nothing was sent. ${writability.reason}`;
+    default: {
+      const exhaustive: never = writability;
       return exhaustive;
     }
   }
@@ -652,18 +684,27 @@ function SchedulerControl({
   paused,
   pending,
   failure,
+  writability,
   onToggle,
 }: {
   paused: boolean;
   pending: boolean;
   failure: string | null;
+  writability: ScopeWritability;
   onToggle: (paused: boolean) => void;
 }) {
+  // Disabled before dispatch, on the same reading the mutation refuses on. The
+  // reason is on the control itself rather than only in a status line, because
+  // a disabled button with the explanation elsewhere reads as a broken button.
+  const blocked = writability.state !== 'writable';
   return (
     <div className="flex items-center gap-2">
       <button
         type="button"
-        disabled={pending}
+        disabled={pending || blocked}
+        // Described in every state: the target of an accepted write is as much
+        // a thing to know before pressing as the reason for a refused one.
+        aria-describedby="scheduler-control-scope"
         onClick={() => onToggle(!paused)}
         // A 17.5px chip beside the scheduler badge it matches. The chip keeps
         // that size — it is paired with `SchedulerBadge` and the two have to
@@ -680,6 +721,16 @@ function SchedulerControl({
           {pending ? 'working…' : paused ? 'Resume scheduler' : 'Pause scheduler'}
         </span>
       </button>
+      {/* Present in every state, including the writable one: a write under the
+        * all-projects aggregate lands on a single project, and the reader is
+        * told which rather than left to assume the change fans out. */}
+      <span
+        id="scheduler-control-scope"
+        data-scope-writability={writability.state}
+        className="text-2xs text-text-secondary"
+      >
+        {scopeControlReason(writability)}
+      </span>
       {failure ? (
         <span role="status" className="text-2xs text-text-secondary">
           {failure}
@@ -687,6 +738,24 @@ function SchedulerControl({
       ) : null}
     </div>
   );
+}
+
+/** The scope sentence a control carries beside itself.
+ *
+ * Exhaustive: a new writability state must choose its wording here rather than
+ * defaulting to an unexplained enabled or disabled button. */
+function scopeControlReason(writability: ScopeWritability): string {
+  switch (writability.state) {
+    case 'writable':
+      return `Applies to ${writability.target}.`;
+    case 'read_only':
+    case 'unknown':
+      return writability.reason;
+    default: {
+      const exhaustive: never = writability;
+      return exhaustive;
+    }
+  }
 }
 
 function SchedulerBadge({ status, paused }: { status: string; paused: boolean }) {

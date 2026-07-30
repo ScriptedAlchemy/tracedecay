@@ -26,16 +26,62 @@ import {
 } from './settingsEditorMachine.ts';
 import { buildSettingsEditor } from './settingsModel.ts';
 import { applySettingsMutation } from './settingsMutation.ts';
+import type { ScopeWritability } from '../../data/scope/store.ts';
 
-/** Which settings scopes the server currently authorizes a write for. */
+/**
+ * Whether a settings scope may be written, and why not when it may not.
+ *
+ * Two independent authorities have to agree, and a boolean could only report
+ * their conjunction — which left a disabled editor claiming "this dashboard is
+ * not authorized" when the real obstacle was that the selected project is not
+ * the active one. They stay distinguishable:
+ *
+ *   - `unauthorized`: the envelope advertises no apply action for this scope,
+ *     so the daemon has no mounted authority for it.
+ *   - `read_only` / `unknown`: the scope this dashboard is pointed at, from
+ *     `scopeWritable`.
+ */
+export type SettingsWriteGate =
+  | { readonly state: 'writable'; readonly target: string }
+  | { readonly state: 'unauthorized' }
+  | { readonly state: 'read_only'; readonly reason: string }
+  | { readonly state: 'unknown'; readonly reason: string };
+
 export interface WritableScopes {
-  readonly project: boolean;
-  readonly user: boolean;
+  readonly project: SettingsWriteGate;
+  readonly user: SettingsWriteGate;
+}
+
+/**
+ * Fold the two authorities into one gate.
+ *
+ * Server authorization is checked first: without an advertised apply action
+ * there is nothing to write in any scope, so naming the scope would point at
+ * the wrong obstacle. Exhaustive over `ScopeWritability`.
+ */
+export function settingsWriteGate(
+  authorized: boolean,
+  writability: ScopeWritability,
+): SettingsWriteGate {
+  if (!authorized) return { state: 'unauthorized' };
+  switch (writability.state) {
+    case 'writable':
+      return { state: 'writable', target: writability.target };
+    case 'read_only':
+      return { state: 'read_only', reason: writability.reason };
+    case 'unknown':
+      return { state: 'unknown', reason: writability.reason };
+    default: {
+      const exhaustive: never = writability;
+      return exhaustive;
+    }
+  }
 }
 
 export function SettingsEditorPanel({
   payload,
   writable,
+  writability,
   readUrl,
   projectPatchUrl,
   userPatchUrl,
@@ -43,6 +89,7 @@ export function SettingsEditorPanel({
 }: {
   payload: SettingsPayloadV1;
   writable: WritableScopes;
+  writability: ScopeWritability;
   readUrl: string;
   projectPatchUrl: string;
   userPatchUrl: string;
@@ -88,8 +135,11 @@ export function SettingsEditorPanel({
     }
     if (inFlight.current === state.review.reviewId) return;
     inFlight.current = state.review.reviewId;
-    mutate(settingsSubmission(state, routes));
-  }, [state, routes, mutate]);
+    // The scope authority travels with the request, so what disabled the field
+    // set and what the write refuses on are the same reading rather than two
+    // that could be taken at different moments.
+    mutate({ ...settingsSubmission(state, routes), writability });
+  }, [state, routes, mutate, writability]);
 
   if (state.status === 'editor_unavailable') {
     return (
