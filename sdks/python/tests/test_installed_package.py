@@ -98,22 +98,32 @@ class InstalledPackageConformance(unittest.TestCase):
                 )
                 project_id = context["project"]["project_id"]
 
-                run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "pip",
-                        "wheel",
-                        "--no-deps",
-                        "--wheel-dir",
-                        str(wheelhouse),
-                        str(PACKAGE_ROOT),
-                    ],
-                    cwd=scratch,
-                    env=os.environ.copy(),
-                )
-                wheels = list(wheelhouse.glob("tracedecay_sdk-*.whl"))
-                self.assertEqual(len(wheels), 1)
+                external_wheel = os.environ.get("TRACEDECAY_SDK_WHEEL")
+                if external_wheel:
+                    # Publish-lane callers build the wheel exactly once and pass
+                    # it in here so conformance exercises the identical bytes
+                    # that later get published, rather than a fresh rebuild.
+                    wheels = [Path(external_wheel).resolve()]
+                    self.assertTrue(
+                        wheels[0].is_file(), f"missing prebuilt wheel: {wheels[0]}"
+                    )
+                else:
+                    run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "pip",
+                            "wheel",
+                            "--no-deps",
+                            "--wheel-dir",
+                            str(wheelhouse),
+                            str(PACKAGE_ROOT),
+                        ],
+                        cwd=scratch,
+                        env=os.environ.copy(),
+                    )
+                    wheels = list(wheelhouse.glob("tracedecay_sdk-*.whl"))
+                    self.assertEqual(len(wheels), 1)
                 run(
                     [sys.executable, "-m", "venv", str(venv)],
                     cwd=scratch,
