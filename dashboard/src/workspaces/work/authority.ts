@@ -77,16 +77,35 @@ export function withheldPresentation(reason: WithheldReason): WithheldPresentati
 }
 
 /**
- * The names a landed projection could arrive under.
+ * The names a landed read contract could arrive under.
  *
- * `WorkSnapshotV1` and `WorkDeltaV1` are what the committed application
- * authority actually serves; the `WorkProjectionSnapshot` and `WorkEventDelta`
- * spellings are what the wire boundary was announced as. Both are watched
- * because whichever one reaches `DashboardContractCatalogV1` first is the one
- * that must switch these rows off.
+ * Canonical first: the domain crate's read contracts are
+ * `WorkProjectionSnapshotV1` and `WorkProjectionDeltaV1`, both generation-bound
+ * and carrying their own sequence and coverage. The `WorkSnapshot` and
+ * `WorkDelta` spellings are the application authority's own, and `WorkEventDelta`
+ * is what the boundary was first announced as; all are watched because whichever
+ * reaches `DashboardContractCatalogV1` first is the one that must switch these
+ * rows off.
+ *
+ * Held as prefixes rather than exact names so a `V1`, a later revision and the
+ * zod schema const beside each all count as the same arrival. Deliberately not
+ * the bare `WorkProjection`: it is the per-task domain type every one of these
+ * wraps, so watching it would collapse every projection row onto whichever
+ * contract landed first.
  */
-const SNAPSHOT_NAMES = ['WorkSnapshot', 'WorkProjectionSnapshot'] as const;
-const DELTA_NAMES = ['WorkDelta', 'WorkEventDelta'] as const;
+const SNAPSHOT_NAMES = ['WorkProjectionSnapshot', 'WorkSnapshot'] as const;
+const DELTA_NAMES = ['WorkProjectionDelta', 'WorkDelta', 'WorkEventDelta'] as const;
+
+/**
+ * The runtime aggregate, from the canonical runtime contracts.
+ *
+ * `WorkAttemptV1` is the one payload the execution rows all read: it carries the
+ * lease fence, the requested route beside the route actually taken, progress,
+ * artifacts, cancellation and recovery state, and the terminal evidence. Rows
+ * that need only one of those also watch the leaf, since a leaf can be
+ * registered before the aggregate is.
+ */
+const ATTEMPT_NAMES = ['WorkAttempt'] as const;
 
 /**
  * Everything Work is made of.
@@ -145,31 +164,31 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Workload and capacity',
         draws: 'active and deferred work, requested against actual concurrency, queue and defer reasons, deadlines and budgets',
         requires: 'WorkProjection',
-        watches: SNAPSHOT_NAMES,
+        watches: [...SNAPSHOT_NAMES, ...ATTEMPT_NAMES],
         reason: 'read_model_absent',
       },
       {
         id: 'executor',
         name: 'Executor and model',
         draws: 'recommendation evidence beside the route actually taken, without prompts or credentials',
-        requires: 'WorkProjection',
-        watches: SNAPSHOT_NAMES,
+        requires: 'WorkProviderRoute',
+        watches: [...ATTEMPT_NAMES, 'WorkProviderRoute'],
         reason: 'read_model_absent',
       },
       {
         id: 'repository',
         name: 'Repository and delivery',
         draws: 'the repository, worktree and exact commits a task requires and produces',
-        requires: 'WorkProjection',
-        watches: SNAPSHOT_NAMES,
+        requires: 'WorkArtifactRef',
+        watches: [...ATTEMPT_NAMES, 'WorkArtifactRef'],
         reason: 'read_model_absent',
       },
       {
         id: 'evidence',
         name: 'Evidence',
         draws: 'TaskId-rooted bounded evidence with its coverage, unknowns and anchors',
-        requires: 'WorkProjection',
-        watches: SNAPSHOT_NAMES,
+        requires: 'WorkProjectionCoverage',
+        watches: [...SNAPSHOT_NAMES, 'WorkProjectionCoverage', 'WorkTerminalEvidence'],
         reason: 'read_model_absent',
       },
       {
@@ -177,7 +196,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'History',
         draws: 'current, as-of, evolution and forensic reads of one TaskId',
         requires: 'WorkEvent',
-        watches: DELTA_NAMES,
+        watches: [...DELTA_NAMES, 'WorkProjectionResumeCursor', 'WorkEventKind'],
         reason: 'read_model_absent',
       },
     ],
@@ -214,19 +233,25 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         id: 'run-control',
         name: 'Control a run',
         draws: 'cancel, resume and restart against a fenced lease and attempt',
-        requires: 'RunControl',
-        // The one row with no counterpart in the committed application
-        // authority either: run control is designed but not yet implemented, so
-        // only the design name can be watched.
-        watches: ['RunControl'],
+        requires: 'WorkCancellationRequest',
+        // No longer design-only: the canonical runtime contracts carry
+        // cancellation request, acknowledgement and escalation, recovery state,
+        // and the lease fence every one of them is fenced against.
+        watches: [
+          ...ATTEMPT_NAMES,
+          'WorkCancellation',
+          'WorkRecoveryState',
+          'WorkLeaseFence',
+          'RunControl',
+        ],
         reason: 'command_absent',
       },
       {
         id: 'acceptance',
         name: 'Accept an outcome',
         draws: 'sealed terminal evidence, accepted, rejected or replanned as its own step',
-        requires: 'TerminalEvidence',
-        watches: ['AttachRuntimeEvidenceCommand', 'TerminalEvidence'],
+        requires: 'WorkTerminalEvidence',
+        watches: ['WorkTerminalEvidence', 'AttachRuntimeEvidenceCommand'],
         reason: 'command_absent',
       },
     ],
@@ -241,10 +266,11 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         draws: 'lease, attempt and progress changes as they land, under a bounded monotone reducer',
         requires: 'task_activity',
         // A typed stream arrives as a variant of the daemon's event-kind union
-        // rather than as a payload of its own, so the union is the contract this
-        // row actually waits on: without it the dashboard cannot name any
-        // stream to subscribe to, let alone this one.
-        watches: ['DashboardEventKind'],
+        // rather than as a payload of its own, so the union is one of the two
+        // things this row waits on: without it the dashboard cannot name any
+        // stream to subscribe to, let alone this one. The other is the progress
+        // payload such a stream would carry.
+        watches: ['DashboardEventKind', 'WorkAttemptProgress'],
         reason: 'stream_absent',
       },
     ],
