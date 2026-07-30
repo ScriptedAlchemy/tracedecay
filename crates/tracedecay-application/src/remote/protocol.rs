@@ -20,6 +20,15 @@ use crate::{
 
 pub const REMOTE_PROTOCOL_VERSION_V1: u16 = 1;
 
+/// Canonical semantic validation required before any authenticated remote
+/// request reaches a production port.
+pub trait RemoteProtocolBodyV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError>;
+}
+
 /// Authenticated transport boundary for one versioned remote operation.
 ///
 /// Concrete HTTP/SSE and persistence adapters remain outside the application
@@ -57,10 +66,6 @@ impl<Port> RemoteProtocolServiceV1<Port> {
         Self { port }
     }
 
-    pub const fn port(&self) -> &Port {
-        &self.port
-    }
-
     pub fn execute<Request>(
         &self,
         request: RemoteProtocolRequestV1<Request>,
@@ -68,9 +73,40 @@ impl<Port> RemoteProtocolServiceV1<Port> {
     ) -> Result<RemoteProtocolResponseV1<Port::Output>, ApplicationContractError>
     where
         Port: RemoteProtocolPortV1<Request>,
+        Request: RemoteProtocolBodyV1,
     {
         request.validate_metadata()?;
+        request
+            .body
+            .validate_remote_protocol_body(request.sent_at)?;
         Ok(self.port.execute(request, credential))
+    }
+
+    pub fn execute_enrollment(
+        &self,
+        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        grant_credential: OpaqueRemoteCredential,
+        enrollment_credential: OpaqueRemoteCredential,
+    ) -> Result<RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>, ApplicationContractError>
+    where
+        Port: RemoteEnrollmentProtocolPortV1,
+    {
+        request.validate_metadata()?;
+        request
+            .body
+            .validate_remote_protocol_body(request.sent_at)?;
+        Ok(self
+            .port
+            .execute_enrollment(request, grant_credential, enrollment_credential))
+    }
+}
+
+impl RemoteProtocolBodyV1 for () {
+    fn validate_remote_protocol_body(
+        &self,
+        _sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        Ok(())
     }
 }
 
@@ -196,6 +232,15 @@ impl CurrentAuthorityRequestV1 {
     }
 }
 
+impl RemoteProtocolBodyV1 for CurrentAuthorityRequestV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        _sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate()
+    }
+}
+
 /// Ensure discovered authority evidence addresses exactly the requested
 /// Brain/shard/generation/placement. A response for a nearby shard or stale
 /// placement is never accepted as current.
@@ -264,6 +309,15 @@ impl EnrollmentRequestV1 {
     }
 }
 
+impl RemoteProtocolBodyV1 for EnrollmentRequestV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate(sent_at)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialRotationRequestV1 {
@@ -289,6 +343,15 @@ impl CredentialRotationRequestV1 {
     }
 }
 
+impl RemoteProtocolBodyV1 for CredentialRotationRequestV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate(sent_at)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialRevocationRequestV1 {
@@ -306,6 +369,15 @@ impl CredentialRevocationRequestV1 {
             });
         }
         Ok(())
+    }
+}
+
+impl RemoteProtocolBodyV1 for CredentialRevocationRequestV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        _sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.validate()
     }
 }
 
