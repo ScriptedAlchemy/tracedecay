@@ -426,6 +426,21 @@ where
         lease: &WorkLeaseFenceV1,
         request: WorkCancellationRequestV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
+        if let Some(current) = self.attempt(identity)?
+            && current.is_terminal()
+        {
+            if current.lease() != lease {
+                return Err(WorkExecutionError::StaleLease);
+            }
+            return match current.cancellation() {
+                WorkCancellationStateV1::Acknowledged(acknowledgement)
+                    if acknowledgement.request() == &request =>
+                {
+                    Ok(current)
+                }
+                _ => Err(WorkExecutionError::TerminalConflict),
+            };
+        }
         let acknowledged_at = request.requested_at();
         let _requested =
             self.execution
@@ -873,7 +888,7 @@ for line in sys.stdin:
         )
         .unwrap();
         let cancelled = runtime
-            .cancel(&cancelled_identity, &lease(1), cancellation)
+            .cancel(&cancelled_identity, &lease(1), cancellation.clone())
             .await
             .unwrap();
         assert_eq!(cancelled.state(), WorkAttemptStateV1::Cancelled);
@@ -881,6 +896,13 @@ for line in sys.stdin:
             cancelled.cancellation(),
             WorkCancellationStateV1::Acknowledged(_)
         ));
+        assert_eq!(
+            runtime
+                .cancel(&cancelled_identity, &lease(1), cancellation)
+                .await
+                .unwrap(),
+            cancelled
+        );
 
         let resumed_identity = identity(&task_id, "resumed");
         runtime
