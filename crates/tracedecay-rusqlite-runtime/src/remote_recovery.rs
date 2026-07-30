@@ -256,7 +256,7 @@ pub fn stage_sqlite_restore(
     }
     Ok(IsolatedStagedRestoreV1 {
         path: staging_destination,
-        expected_binding: manifest.writer.runtime.clone(),
+        expected_binding: manifest.runtime.clone(),
         manifest_digest,
         state: RuntimeStagedRestoreStateV1::ClosureVerified,
     })
@@ -413,33 +413,33 @@ mod tests {
         let bytes = fs::metadata(&source).unwrap().len();
         let binding =
             crate::test_support::binding(&crate::test_support::metadata("restore", "restore", 'r'));
-        let writer: tracedecay_store::RemoteWriterBindingV1 =
+        let writer: tracedecay_domain::RemoteWriterFenceV1 =
             serde_json::from_value(serde_json::json!({
-                "fence": {
-                    "brain_id": "brain.runtime",
-                    "shard_id": "shard.remote",
-                    "generation_id": "generation.remote",
-                    "placement_revision": "placement.remote.1",
-                    "authority_epoch": binding.authority_epoch.get(),
-                    "authority_node_id": "node.authority"
-                },
-                "runtime": binding
+                "brain_id": "brain.runtime",
+                "shard_id": "shard.remote",
+                "generation_id": "generation.remote",
+                "placement_revision": "placement.remote.1",
+                "authority_epoch": binding.authority_epoch.get(),
+                "authority_node_id": "node.authority"
             }))
             .unwrap();
         let authentication: tracedecay_store::AuthenticatedManifestContextV1 =
             serde_json::from_value(serde_json::json!({
                 "enrollment": {
                     "enrollment_id": "enrollment.remote",
-                    "enrollment_revision": 1,
+                    "brain_id": "brain.runtime",
                     "node_id": "node.authority",
-                    "repository": {
-                        "project_id": "project.runtime",
-                        "scope": {
-                            "repository_id": "repository.runtime",
-                            "worktree_id": "worktree.runtime",
-                            "reference": "refs/heads/main",
-                            "snapshot_id": "snapshot.runtime"
-                        }
+                    "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "revision": 1,
+                    "issued_at": 1,
+                    "expires_at": 10,
+                    "revoked_at": null,
+                    "capabilities": ["read_backup"],
+                    "scope": {
+                        "repository_id": "repository.runtime",
+                        "worktree_id": "worktree.runtime",
+                        "reference": "refs/heads/main",
+                        "snapshot_id": "snapshot.runtime"
                     }
                 },
                 "authorization_revision": 1,
@@ -450,12 +450,13 @@ mod tests {
         let manifest = BackupManifestV1 {
             backup_id: "backup.1".into(),
             authentication,
-            writer: writer.clone(),
+            writer,
+            runtime: binding.clone(),
             schema_digest: [1; 32],
             source_frontier: ShardWatermarkV1 {
-                shard_id: writer.runtime.shard_id.clone(),
-                incarnation: writer.runtime.incarnation,
-                authority_epoch: writer.runtime.authority_epoch,
+                shard_id: binding.shard_id,
+                incarnation: binding.incarnation,
+                authority_epoch: binding.authority_epoch,
                 commit_sequence: tracedecay_store::CommitSequenceV1(1),
             },
             parent_backup_id: None,

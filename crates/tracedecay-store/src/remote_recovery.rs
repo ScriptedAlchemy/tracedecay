@@ -8,19 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::{EntityId, UtcMicros};
-
-use crate::{
-    RemoteEnrollmentIdentityV1, RemoteWriterBindingV1, ShardWatermarkV1, StoreRuntimeBindingV1,
-    StoreShardIdV1,
+use tracedecay_domain::{
+    EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EntityId, RemoteWriterFenceV1,
+    UtcMicros,
 };
+
+use crate::{ShardWatermarkV1, StoreRuntimeBindingV1, StoreShardIdV1};
 
 pub type ContentDigestV1 = [u8; 32];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticatedManifestContextV1 {
-    pub enrollment: RemoteEnrollmentIdentityV1,
+    pub enrollment: EnrollmentCredentialRecordV1,
     pub authorization_revision: u64,
     pub authentication_receipt_id: EntityId,
     pub authenticated_at: UtcMicros,
@@ -30,7 +30,8 @@ pub struct AuthenticatedManifestContextV1 {
 #[serde(deny_unknown_fields)]
 pub struct ReplicaCacheManifestV1 {
     pub authentication: AuthenticatedManifestContextV1,
-    pub writer: RemoteWriterBindingV1,
+    pub writer: RemoteWriterFenceV1,
+    pub runtime: StoreRuntimeBindingV1,
     pub schema_digest: ContentDigestV1,
     pub watermark: ShardWatermarkV1,
     pub material_digest: ContentDigestV1,
@@ -42,16 +43,15 @@ pub struct ReplicaCacheManifestV1 {
 impl ReplicaCacheManifestV1 {
     pub fn validate_for(
         &self,
-        expected_writer: &RemoteWriterBindingV1,
+        expected_writer: &RemoteWriterFenceV1,
+        expected_runtime: &StoreRuntimeBindingV1,
         expected_schema_digest: ContentDigestV1,
         now_micros: i64,
     ) -> Result<(), RemoteRecoveryContractErrorV1> {
         validate_authentication(&self.authentication)?;
-        self.writer
-            .validate()
-            .map_err(|_| RemoteRecoveryContractErrorV1::BindingMismatch)?;
-        validate_binding_watermark(&self.writer.runtime, &self.watermark)?;
-        if &self.writer != expected_writer {
+        validate_writer_binding(&self.writer, &self.runtime)?;
+        validate_binding_watermark(&self.runtime, &self.watermark)?;
+        if &self.writer != expected_writer || &self.runtime != expected_runtime {
             return Err(RemoteRecoveryContractErrorV1::BindingMismatch);
         }
         if self.schema_digest != expected_schema_digest {
@@ -102,7 +102,8 @@ pub struct BackupArtifactV1 {
 pub struct BackupManifestV1 {
     pub backup_id: String,
     pub authentication: AuthenticatedManifestContextV1,
-    pub writer: RemoteWriterBindingV1,
+    pub writer: RemoteWriterFenceV1,
+    pub runtime: StoreRuntimeBindingV1,
     pub schema_digest: ContentDigestV1,
     pub source_frontier: ShardWatermarkV1,
     pub parent_backup_id: Option<String>,
@@ -119,10 +120,8 @@ impl BackupManifestV1 {
     pub fn validate(&self, now_micros: i64) -> Result<(), RemoteRecoveryContractErrorV1> {
         validate_identifier(&self.backup_id)?;
         validate_authentication(&self.authentication)?;
-        self.writer
-            .validate()
-            .map_err(|_| RemoteRecoveryContractErrorV1::BindingMismatch)?;
-        validate_binding_watermark(&self.writer.runtime, &self.source_frontier)?;
+        validate_writer_binding(&self.writer, &self.runtime)?;
+        validate_binding_watermark(&self.runtime, &self.source_frontier)?;
         if self.schema_digest == [0; 32] || self.lineage_digest == [0; 32] {
             return Err(RemoteRecoveryContractErrorV1::InvalidArtifact);
         }
@@ -420,10 +419,28 @@ fn validate_binding_watermark(
     Ok(())
 }
 
+fn validate_writer_binding(
+    writer: &RemoteWriterFenceV1,
+    runtime: &StoreRuntimeBindingV1,
+) -> Result<(), RemoteRecoveryContractErrorV1> {
+    writer
+        .validate()
+        .map_err(|_| RemoteRecoveryContractErrorV1::BindingMismatch)?;
+    if !runtime.shard_id.is_mutable()
+        || writer.brain_id != runtime.shard_id.brain_id
+        || writer.authority_epoch.0 != runtime.authority_epoch.get()
+    {
+        return Err(RemoteRecoveryContractErrorV1::BindingMismatch);
+    }
+    Ok(())
+}
+
 fn validate_authentication(
     authentication: &AuthenticatedManifestContextV1,
 ) -> Result<(), RemoteRecoveryContractErrorV1> {
     if authentication.enrollment.validate().is_err()
+        || authentication.enrollment.state_at(authentication.authenticated_at)
+            != EnrollmentCredentialStateV1::Active
         || authentication.authorization_revision == 0
         || authentication
             .authentication_receipt_id
@@ -449,7 +466,7 @@ fn validate_identifier(value: &str) -> Result<(), RemoteRecoveryContractErrorV1>
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_domain::{BrainId, UserProfileId};
+    use tracedecay_domain::{BrainId, RemoteWriterFenceV1, UserProfileId};
 
     use super::*;
     use crate::{CommitSequenceV1, StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1};
@@ -483,17 +500,14 @@ mod tests {
         }
     }
 
-    fn writer(epoch: u64) -> RemoteWriterBindingV1 {
+    fn writer(epoch: u64) -> RemoteWriterFenceV1 {
         serde_json::from_value(serde_json::json!({
-            "fence": {
-                "brain_id": "brain.remote",
-                "shard_id": "shard.remote",
-                "generation_id": "generation.remote",
-                "placement_revision": "placement.remote.1",
-                "authority_epoch": epoch,
-                "authority_node_id": "node.authority"
-            },
-            "runtime": binding(epoch)
+            "brain_id": "brain.remote",
+            "shard_id": "shard.remote",
+            "generation_id": "generation.remote",
+            "placement_revision": "placement.remote.1",
+            "authority_epoch": epoch,
+            "authority_node_id": "node.authority"
         }))
         .unwrap()
     }
@@ -502,16 +516,19 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "enrollment": {
                 "enrollment_id": "enrollment.remote",
-                "enrollment_revision": 2,
+                "brain_id": "brain.remote",
                 "node_id": "node.standby",
-                "repository": {
-                    "project_id": "project.remote",
-                    "scope": {
-                        "repository_id": "repository.remote",
-                        "worktree_id": "worktree.remote",
-                        "reference": "refs/heads/main",
-                        "snapshot_id": "snapshot.remote"
-                    }
+                "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "revision": 2,
+                "issued_at": 1,
+                "expires_at": 100,
+                "revoked_at": null,
+                "capabilities": ["read_backup"],
+                "scope": {
+                    "repository_id": "repository.remote",
+                    "worktree_id": "worktree.remote",
+                    "reference": "refs/heads/main",
+                    "snapshot_id": "snapshot.remote"
                 }
             },
             "authorization_revision": 3,
@@ -526,6 +543,7 @@ mod tests {
         let manifest = ReplicaCacheManifestV1 {
             authentication: authentication(),
             writer: writer(8),
+            runtime: binding(8),
             schema_digest: [1; 32],
             watermark: watermark(8, 12),
             material_digest: [2; 32],
@@ -534,7 +552,7 @@ mod tests {
             expires_at_micros: 20,
         };
         assert_eq!(
-            manifest.validate_for(&writer(9), [1; 32], 11),
+            manifest.validate_for(&writer(9), &binding(9), [1; 32], 11),
             Err(RemoteRecoveryContractErrorV1::BindingMismatch)
         );
     }
@@ -545,6 +563,7 @@ mod tests {
             backup_id: "backup.1".into(),
             authentication: authentication(),
             writer: writer(8),
+            runtime: binding(8),
             schema_digest: [3; 32],
             source_frontier: watermark(8, 12),
             parent_backup_id: None,
