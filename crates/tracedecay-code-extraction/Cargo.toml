@@ -5,7 +5,16 @@ edition.workspace = true
 license = "MIT"
 description = "TraceDecay tree-sitter language extraction leaf"
 build = "build.rs"
-include = ["/src/**", "/vendor/tree-sitter-wgsl/src/**", "/build.rs"]
+include = [
+    "/src/**",
+    "/fixtures/**",
+    "/tests/**",
+    "/vendor/tree-sitter-rust/LICENSE",
+    "/vendor/tree-sitter-rust/queries/**",
+    "/vendor/tree-sitter-rust/src/**",
+    "/vendor/tree-sitter-wgsl/src/**",
+    "/build.rs",
+]
 
 [features]
 default = ["lite", "medium", "full"]

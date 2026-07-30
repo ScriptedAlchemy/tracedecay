@@ -180,6 +180,26 @@ PY
     "$root_package/plugin"
 }
 
+assert_code_extraction_assets() {
+  local extraction_package=$1
+  local required
+  local -a assets=(
+    "tests/rust.rs"
+    "vendor/tree-sitter-rust/LICENSE"
+    "vendor/tree-sitter-rust/queries/highlights.scm"
+    "vendor/tree-sitter-rust/queries/injections.scm"
+    "vendor/tree-sitter-rust/queries/tags.scm"
+    "vendor/tree-sitter-rust/src/node-types.json"
+    "vendor/tree-sitter-rust/src/parser.c"
+    "vendor/tree-sitter-rust/src/scanner.c"
+  )
+
+  for required in "${assets[@]}"; do
+    [[ -f "$extraction_package/$required" ]] ||
+      die "packaged tracedecay-code-extraction crate is missing $required"
+  done
+}
+
 verify_feature_wiring() {
   local source_manifest=$1
   local packaged_manifest=$2
@@ -662,11 +682,13 @@ application_package=${package_dirs[tracedecay-application]:-}
 api_package=${package_dirs[tracedecay-api]:-}
 catalog_package=${package_dirs[tracedecay-tool-catalog]:-}
 lsp_package=${package_dirs[tracedecay-lsp]:-}
-[[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package && -n $lsp_package ]] ||
+code_extraction_package=${package_dirs[tracedecay-code-extraction]:-}
+[[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package && -n $lsp_package && -n $code_extraction_package ]] ||
   die "workspace packages required by the distribution gate were not produced"
 
 assert_required_assets \
   "$root_package" "$application_package" "$api_package" "$lsp_package"
+assert_code_extraction_assets "$code_extraction_package"
 verify_feature_wiring "$repo/Cargo.toml" "$root_package/Cargo.toml"
 
 patch_config="$work/packaged-crates.toml"
@@ -686,6 +708,15 @@ for package in sorted(metadata["packages"], key=lambda value: value["name"]):
     path = packages / f'{package["name"]}-{package["version"]}'
     print(f'{json.dumps(package["name"])} = {{ path = {json.dumps(str(path))} }}')
 PY
+
+echo "distribution acceptance: testing packaged patched Rust grammar"
+cargo test \
+  --manifest-path "$code_extraction_package/Cargo.toml" \
+  --all-features \
+  --config "$patch_config" \
+  --test rust \
+  test_rust_cfg_attribute_in_struct_pattern_field \
+  -- --exact
 
 echo "distribution acceptance: compiling packaged library with every feature"
 cargo check \
