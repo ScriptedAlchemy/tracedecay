@@ -180,3 +180,65 @@ describe('StatusStrip', () => {
     expect(link).toBe('live');
   });
 });
+
+/**
+ * What is actually announced, as opposed to what is on screen.
+ *
+ * The feed reading changes with no user action, which is why it is a live region
+ * at all. `role="status"` sat on the state word alone and the sentence saying
+ * what is owed was a sibling outside it, so an assistive technology was told
+ * `stale` and never `a refresh is owed: overflow` — the half that names a cause
+ * and a next action, changing silently. Asserted through the region's own text
+ * rather than the page's: `getByText(/overflow/)` passes either way, which is
+ * how the split survived.
+ */
+describe('the StatusStrip feed announcement', () => {
+  /** The region carrying the feed reading, found by the state word it holds, so
+   * the Link region cannot be mistaken for it. */
+  function feedRegion(): HTMLElement {
+    const region = screen
+      .getAllByRole('status')
+      .find((node) => node.getAttribute('data-feed-state') !== null);
+    if (!region) throw new Error('the strip rendered no feed status region');
+    return region;
+  }
+
+  it('announces the reason a refresh is owed, not only that one is', () => {
+    sync.value = { kind: 'stale', reason: 'overflow' };
+    render(<StatusStrip />);
+
+    const announced = feedRegion().textContent ?? '';
+    expect(announced).toContain('stale');
+    expect(announced).toContain('a refresh is owed: overflow');
+  });
+
+  it('announces why a resync rejected, inside the same region as the state', () => {
+    sync.value = { kind: 'failed', reason: 'invalidation rejected' };
+    render(<StatusStrip />);
+
+    const announced = feedRegion().textContent ?? '';
+    expect(announced).toContain('resync failed');
+    expect(announced).toContain('the projection is behind and the refresh rejected');
+    expect(announced).toContain('invalidation rejected');
+  });
+
+  /** A stale reading with no reason recorded still announces the state and the
+   * bare fact that a refresh is owed, rather than an empty qualifier. */
+  it('announces a reasonless stale reading without inventing a cause', () => {
+    sync.value = { kind: 'stale', reason: null };
+    render(<StatusStrip />);
+
+    const announced = feedRegion().textContent ?? '';
+    expect(announced).toContain('a refresh is owed');
+    expect(announced).not.toContain('owed:');
+  });
+
+  /** No detail to carry, no stray text in the region: the healthy readings
+   * announce one word, which is all there is to say. */
+  it('announces only the state when there is no reason to give', () => {
+    sync.value = { kind: 'synced' };
+    render(<StatusStrip />);
+
+    expect(feedRegion().textContent).toBe('synced');
+  });
+});

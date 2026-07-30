@@ -83,7 +83,11 @@ export function StatusStrip() {
          * same moment and only mean anything together, so they are announced
          * together.
          */}
-        <span className="flex min-w-0 items-center gap-1.5" role="status">
+        <span
+          role="status"
+          className="flex min-w-0 items-center gap-1.5"
+          data-feed-state={feed.value}
+        >
           <span className="td-value text-2xs uppercase">{feed.value}</span>
           {feed.detail !== null && (
             // The state is carried by the word, not the swatch; the reason is
