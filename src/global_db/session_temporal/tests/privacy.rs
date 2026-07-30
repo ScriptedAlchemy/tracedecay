@@ -29,12 +29,12 @@ use crate::application::session::{
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
-use crate::query::temporal::TemporalKernelResult;
-use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
+use tracedecay_temporal_query::TemporalKernelResult;
+use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 
