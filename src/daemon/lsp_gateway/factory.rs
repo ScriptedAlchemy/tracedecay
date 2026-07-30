@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::runtime::Handle;
 use tracedecay_lsp::{
-    AdmittedRoot, AnalyzerCancellationAdapter, AnalyzerCancellationPort,
+    AdmittedRoot, AnalyzerCancellationAdapter, AnalyzerCancellationPort, AuthorizedLspWorkspace,
     CanonicalContextProjectionAuthority, CanonicalDiagnosticSnapshotAuthority,
     ContextExpansionOutcome, ContextExpansionRequest, ContextProjectionAdapter,
     ContextProjectionChange, ContextProjectionOutcome, ContextProjectionPort,

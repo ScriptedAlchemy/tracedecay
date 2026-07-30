@@ -16,7 +16,7 @@ use tokio::net::UnixStream;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
-use tracedecay_lsp::{AdmittedRoot, LspSessionRegistry};
+use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace, LspSessionRegistry};
 
 use crate::application::context::CancellationToken;
 use crate::application_surface::ApplicationSurfaceOperation;

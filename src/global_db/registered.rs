@@ -291,6 +291,33 @@ impl RegisteredGlobalDb {
         Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
     }
 
+    pub(crate) fn authorized_scope_set_storage(
+        &self,
+    ) -> crate::errors::Result<
+        tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
+    > {
+        let handle = self
+            .runtime
+            .authorized_migration_sql_handle(self.authority.clone())
+            .map_err(|error| {
+                registered_error(
+                    "attach registered authorized scope-set storage",
+                    format!("{error:?}"),
+                )
+            })?;
+        validate_registered_identity(
+            handle.binding(),
+            handle.verified_locator(),
+            self.runtime.binding(),
+            self.runtime.locator().verified(),
+        )?;
+        Ok(
+            tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage::from_registered(
+                handle,
+            ),
+        )
+    }
+
     pub(crate) fn work_application_services(
         &self,
     ) -> crate::errors::Result<RegisteredWorkApplicationServicesV1> {
