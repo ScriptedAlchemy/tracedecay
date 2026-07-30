@@ -184,13 +184,20 @@ fn exact_query_snapshot_is_atomic_and_publication_gated() {
         .initialize_authority(&writer, &binding, 11, &frontier)
         .unwrap();
 
-    let (state, stored_binding, stored_frontier) = store.query_authority_snapshot(&writer).unwrap();
+    let snapshot = store
+        .query_authority_snapshot(
+            &writer.project_id,
+            &writer.scope,
+            &writer.authority.fence,
+            writer.authority.observed_at,
+        )
+        .unwrap();
     assert!(matches!(
-        state,
+        snapshot.authority,
         tracedecay_domain::CurrentRemoteAuthorityStateV1::Partial { .. }
     ));
-    assert_eq!(stored_binding, binding);
-    assert_eq!(stored_frontier, Some(frontier.clone()));
+    assert_eq!(snapshot.binding, binding);
+    assert_eq!(snapshot.frontier, Some(frontier.clone()));
 
     store
         .install_fence("writer", &writer, &binding, 11)
@@ -198,13 +205,20 @@ fn exact_query_snapshot_is_atomic_and_publication_gated() {
     store
         .publish_and_enable_serving(&binding, &writer, 11, &frontier, &["writer"])
         .unwrap();
-    let (state, stored_binding, stored_frontier) = store.query_authority_snapshot(&writer).unwrap();
+    let snapshot = store
+        .query_authority_snapshot(
+            &writer.project_id,
+            &writer.scope,
+            &writer.authority.fence,
+            writer.authority.observed_at,
+        )
+        .unwrap();
     assert_eq!(
-        state,
+        snapshot.authority,
         tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone())
     );
-    assert_eq!(stored_binding, binding);
-    assert_eq!(stored_frontier, Some(frontier));
+    assert_eq!(snapshot.binding, binding);
+    assert_eq!(snapshot.frontier, Some(frontier));
 }
 
 #[test]

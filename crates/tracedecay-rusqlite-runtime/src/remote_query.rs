@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::remote::capture::RemoteWriterAuthorityV1;
 use tracedecay_application::remote::composition::{
     AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalObservationsV1,
     QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1, RemoteQueryCompositionV1,
@@ -16,20 +15,22 @@ use tracedecay_application::remote::query::{
     RemoteSanitizedObservationV1, remote_exact_observation_query_result_contract_v1,
 };
 use tracedecay_application::{
-    ApplicationEnvelope, Deadline, EvidenceCoverage, EvidenceDomain, EvidencePacket,
-    OperationBudgetUsage, OperationReceipt, PageState, RetrievalEvidence, TemporalState,
+    ApplicationEnvelope, CancellationSignal, Deadline, EvidenceCoverage, EvidenceDomain,
+    EvidencePacket, OperationBudgetUsage, OperationReceipt, PageState, RetrievalEvidence,
+    TemporalState,
 };
-use tracedecay_domain::{CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1, UtcMicros};
+use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 use tracedecay_store::{
     ConsistencyModeV1, ObservationReadOperationV1, ObservationReadResultV1, OperationPriorityV1,
     ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1,
     RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
     RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardScopeV1,
+    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreRuntimeBindingV1,
+    StoreShardScopeV1, UnavailableReasonV1,
 };
 use tracedecay_tool_catalog::SortContractId;
 
-use super::RusqliteRemoteAuthorityStoreV1;
+use super::{RemoteQueryAuthoritySnapshotV1, RusqliteRemoteAuthorityStoreV1};
 use crate::repository::RepositoryRuntimePhysicalAttachment;
 
 pub struct RusqliteRemoteExactObservationQueryPortV1 {
@@ -54,41 +55,31 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
         &self,
         command: &RemoteExactObservationQueryCommandV1,
     ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1> {
+        if command.cancellation.is_cancelled() {
+            return Err(RemoteExactObservationQueryErrorV1::Cancelled);
+        }
         if command
             .effective_deadline
             .is_elapsed_at(command.observed_at)
         {
             return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed);
         }
-        let requested = RemoteWriterAuthorityV1 {
-            project_id: command.repository_scope.project_id.clone(),
-            scope: command.repository_scope.clone(),
-            authority: CurrentRemoteAuthorityV1 {
-                fence: command.expected_authority.clone(),
-                credential_revision: command.caller_admission.enrollment.revision,
-                observed_at: command.observed_at,
-            },
-        };
-        let (authority, binding, frontier) = self
+        let snapshot = self
             .authority
-            .query_authority_snapshot(&requested)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
-        let CurrentRemoteAuthorityStateV1::Available(current) = &authority else {
-            return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
-        };
-        if current.fence != command.expected_authority
-            || binding != self.repository.binding()
-            || binding.authority_epoch.get() != command.expected_authority.authority_epoch.0
-            || binding.shard_id.brain_id != command.expected_authority.brain_id
-            || !matches!(
-                &binding.shard_id.scope,
-                StoreShardScopeV1::ProjectSessions { project_id }
-                    if project_id == &command.repository_scope.project_id
+            .query_authority_snapshot(
+                &command.repository_scope.project_id,
+                &command.repository_scope,
+                &command.expected_authority,
+                command.observed_at,
             )
-        {
-            return Err(RemoteExactObservationQueryErrorV1::StaleFence);
-        }
-        let frontier = frontier.ok_or(RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        validate_snapshot(command, &snapshot, &self.repository.binding())?;
+        let authority = snapshot.authority.clone();
+        let binding = snapshot.binding.clone();
+        let frontier = snapshot
+            .frontier
+            .clone()
+            .ok_or(RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
         if frontier.shard_id != binding.shard_id
             || frontier.incarnation != binding.incarnation
             || frontier.authority_epoch != binding.authority_epoch
@@ -105,7 +96,7 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
             .len();
         let control = runtime_control(command)?;
         let request = RuntimeReadRequestV1::new(
-            binding,
+            binding.clone(),
             ConsistencyModeV1::LatestAvailable,
             RuntimeReadOperationV1::Repository {
                 op: RepositoryReadOperationV1::Project(ProjectReadOperationV1::Observation(
@@ -119,11 +110,15 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
             control.clone(),
         )
         .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        let started = Instant::now();
         let probe = QueryProbe {
             cancellation: control.cancellation,
             deadline: control.deadline,
+            application_cancellation: command.cancellation.clone(),
+            started,
+            maximum_elapsed: Duration::from_micros(command.budget.maximum_elapsed_micros),
+            decision: Mutex::new(None),
         };
-        let started = Instant::now();
         let outcome = self
             .repository
             .dispatch_read(request, &probe)
@@ -132,11 +127,34 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
         if elapsed > command.budget.maximum_elapsed_micros {
             return Err(RemoteExactObservationQueryErrorV1::BudgetExceeded);
         }
-        if !matches!(
-            outcome.coverage(),
-            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
-        ) {
-            return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
+        match outcome.coverage() {
+            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. } => {}
+            RuntimeReadCoverageV1::Unavailable {
+                reason: UnavailableReasonV1::Cancelled,
+                ..
+            } => return Err(RemoteExactObservationQueryErrorV1::Cancelled),
+            RuntimeReadCoverageV1::Unavailable {
+                reason: UnavailableReasonV1::DeadlineExceeded,
+                ..
+            } => return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed),
+            RuntimeReadCoverageV1::Partial { .. }
+            | RuntimeReadCoverageV1::Stale { .. }
+            | RuntimeReadCoverageV1::Unavailable { .. } => {
+                return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
+            }
+        }
+        let current_snapshot = self
+            .authority
+            .query_authority_snapshot(
+                &command.repository_scope.project_id,
+                &command.repository_scope,
+                &command.expected_authority,
+                command.observed_at,
+            )
+            .map_err(|_| RemoteExactObservationQueryErrorV1::StaleFence)?;
+        validate_snapshot(command, &current_snapshot, &self.repository.binding())?;
+        if current_snapshot != snapshot {
+            return Err(RemoteExactObservationQueryErrorV1::StaleFence);
         }
         let row = match outcome.value() {
             Some(RuntimeReadResultV1::Repository {
@@ -284,6 +302,38 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
     }
 }
 
+fn validate_snapshot(
+    command: &RemoteExactObservationQueryCommandV1,
+    snapshot: &RemoteQueryAuthoritySnapshotV1,
+    repository_binding: &StoreRuntimeBindingV1,
+) -> Result<(), RemoteExactObservationQueryErrorV1> {
+    if snapshot.project_id != command.repository_scope.project_id
+        || snapshot.scope != command.repository_scope
+        || snapshot.observed_at != command.observed_at
+    {
+        return Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch);
+    }
+    let CurrentRemoteAuthorityStateV1::Available(current) = &snapshot.authority else {
+        return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
+    };
+    if current.observed_at != command.observed_at
+        || current.fence != command.expected_authority
+        || snapshot.placement_revision != command.expected_authority.placement_revision.get()
+        || snapshot.binding != *repository_binding
+        || snapshot.binding.authority_epoch.get() != command.expected_authority.authority_epoch.0
+        || snapshot.binding.shard_id.brain_id != command.expected_authority.brain_id
+        || snapshot.binding.shard_id.scope.project_id()
+            != Some(&command.repository_scope.project_id)
+        || !matches!(
+            &snapshot.binding.shard_id.scope,
+            StoreShardScopeV1::ProjectSessions { .. }
+        )
+    {
+        return Err(RemoteExactObservationQueryErrorV1::StaleFence);
+    }
+    Ok(())
+}
+
 fn runtime_control(
     command: &RemoteExactObservationQueryCommandV1,
 ) -> Result<RuntimeRequestControlV1, RemoteExactObservationQueryErrorV1> {
@@ -313,6 +363,10 @@ fn runtime_control(
 struct QueryProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
+    application_cancellation: CancellationSignal,
+    started: Instant,
+    maximum_elapsed: Duration,
+    decision: Mutex<Option<RuntimeInterruptionV1>>,
 }
 
 impl RuntimeRequestProbeV1 for QueryProbe {
@@ -325,6 +379,19 @@ impl RuntimeRequestProbeV1 for QueryProbe {
     }
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        None
+        let mut decision = self
+            .decision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if decision.is_none() {
+            *decision = if self.application_cancellation.is_cancelled() {
+                Some(RuntimeInterruptionV1::Cancelled)
+            } else if self.started.elapsed() >= self.maximum_elapsed {
+                Some(RuntimeInterruptionV1::DeadlineExceeded)
+            } else {
+                None
+            };
+        }
+        *decision
     }
 }
