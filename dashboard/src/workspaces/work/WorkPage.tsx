@@ -2,6 +2,7 @@ import { StateChip } from '../../ui/StateChip.tsx';
 import { Corners, Legend, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { WIRE_AUTHORITY, WITHHELD_WORK, type WithheldSurface } from './authority.ts';
 import {
+  type WorkWire,
   type WorkWireState,
   resolveWorkStates,
   resolveWorkWire,
@@ -12,12 +13,13 @@ import {
 /**
  * Work — channel thirteen.
  *
- * The workspace is routed, named and reachable, and its data plane is closed.
- * That is the whole design: a Kanban board, a dependency DAG or a run status
- * drawn here today would be this dashboard's own invention, and inventing them
- * is the one thing this surface must never do. So it draws the boundary itself —
- * every projection, command and stream Work is made of, each carrying the
- * generated contract it waits on and the state it is actually in.
+ * The workspace is routed, named and reachable, and this build carries no
+ * contract able to fill it. That is the whole design: a Kanban board, a
+ * dependency DAG or a run status drawn without one would be this dashboard's own
+ * invention, and inventing them is the one thing this surface must never do. So
+ * it draws the boundary instead — every projection, command and stream Work is
+ * made of, each naming the generated contract it waits on beside the state this
+ * build measures it in.
  *
  * No fetch is issued. Without a generated Work contract there is no request or
  * response shape to send, and hand-writing one here would put a second,
@@ -43,7 +45,7 @@ const GATE_SENTENCE =
  * rather than from a fixed sentence. A landed contract has to change this
  * paragraph, or the page would keep describing a closed channel over one that
  * had started to open. */
-function gateReading(wire: typeof WIRE): string {
+function gateReading(wire: WorkWire): string {
   switch (wire.kind) {
     case 'closed':
       return GATE_SENTENCE;
@@ -58,6 +60,10 @@ function gateReading(wire: typeof WIRE): string {
       return unhandled;
     }
   }
+}
+
+function stateOf(surface: WithheldSurface): WorkWireState {
+  return WIRE_STATES.get(surface.id) ?? wireStateFor(surface);
 }
 
 /** One group's reading for the aside, from the measured wire.
@@ -83,10 +89,6 @@ const BOUNDARY: readonly { term: string; reading: string }[] = [
   { term: 'Commands', reading: boundaryReading('commands', 'Not exposed') },
   { term: 'Activity stream', reading: boundaryReading('streams', 'Not registered') },
 ];
-
-function stateOf(surface: WithheldSurface): WorkWireState {
-  return WIRE_STATES.get(surface.id) ?? wireStateFor(surface);
-}
 
 /** What one group says about itself, once.
  *
