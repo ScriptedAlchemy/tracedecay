@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AutomationsPage } from './AutomationsPage.tsx';
@@ -182,6 +182,258 @@ describe('AutomationsPage scheduler control', () => {
 });
 
 /**
+ * A list body that is not this route's answer must not resolve to an empty
+ * collection.
+ *
+ * The schemas these panels parse with used to make the collection optional and
+ * offer an `items` alternative no handler has ever sent, so anything lacking
+ * the real key fell through `?? []` and printed as a queue that had been read
+ * and found empty. Requiring the field the handler always writes is what turns
+ * those bodies into the unsupported-schema state instead.
+ */
+describe('AutomationsPage list contracts', () => {
+  it('refuses a skills body with no skills key instead of reporting an empty store', async () => {
+    stubAutomation({
+      status: scheduler(measured(0), measured(0)),
+      // What an unmounted profile root would leave behind: a well-formed JSON
+      // object that says nothing about skills at all.
+      skills: { error: 'managed skill root could not be resolved' },
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Managed skills');
+    expect(within(panel).queryByText(/no managed skills/i)).toBeNull();
+    expect(panelState(panel)).toBe('unsupported_schema');
+  });
+
+  it('refuses a proposals body with no proposals key instead of reporting an empty queue', async () => {
+    stubAutomation({
+      status: scheduler(measured(0), measured(0)),
+      'fact-proposals': { error: 'fact proposal authority unavailable' },
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).queryByText(/no pending fact proposals/i)).toBeNull();
+    expect(panelState(panel)).toBe('unsupported_schema');
+  });
+
+  it('does not accept the `items` shape, which no automation handler sends', async () => {
+    // This key was the card's second fallback for years. Accepting it meant any
+    // body carrying an empty `items` rendered as a read, empty queue.
+    stubAutomation({
+      status: scheduler(measured(0), measured(0)),
+      skills: { items: [], count: 0 },
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Managed skills');
+    expect(within(panel).queryByText(/no managed skills/i)).toBeNull();
+    expect(panelState(panel)).toBe('unsupported_schema');
+  });
+
+  it('shows a proposal that carries no fact request as carrying none, not as its id', async () => {
+    stubAutomation({
+      status: scheduler(measured(1), measured(0)),
+      'fact-proposals': proposalsBody([proposal('fp-orphan', null)]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).getByText(/this proposal carries no fact request/i)).toBeTruthy();
+    expect(within(panel).queryByText('fp-orphan')).toBeNull();
+  });
+});
+
+/**
+ * A list that disagrees with the tally its own handler computed for it is not
+ * the complete collection, and must not be drawn as one.
+ */
+describe('AutomationsPage list completeness', () => {
+  it('says a job list is partial when it does not match the count beside it', async () => {
+    stubAutomation({
+      status: scheduler(measured(0), measured(0)),
+      jobs: jobsBody([job('memory-curator', 'Memory curator')], 4),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Jobs');
+    // The row is real and still shown; what it stops being is the whole list.
+    expect(within(panel).getByText('Memory curator')).toBeTruthy();
+    expect(within(panel).getByRole('status').textContent).toContain(
+      'the daemon counted 4 jobs and sent 1',
+    );
+  });
+
+  it('still reports an empty job list as empty when the count agrees', async () => {
+    // Jobs are a configured list with no review queue behind them, so a
+    // coherent empty body really is an empty list and says so.
+    stubAutomation({
+      status: scheduler(measured(0), measured(0)),
+      jobs: jobsBody([]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Jobs');
+    expect(within(panel).getByText(/no automation jobs defined/i)).toBeTruthy();
+    expect(within(panel).queryByRole('status')).toBeNull();
+  });
+
+  it('names the request cap when the proposal page is full', async () => {
+    // `coerce_limit(params.limit, 50, 200)`: this page sends no limit, so a
+    // response holding exactly 50 is a page and not a total.
+    const page = Array.from({ length: 50 }, (_, i) => proposal(`fp-${i}`, `Fact ${i}.`));
+    stubAutomation({
+      status: scheduler(measured(50), measured(0)),
+      'fact-proposals': proposalsBody(page),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).getByRole('status').textContent).toContain(
+      'this is the first 50 proposals, the request cap, so there may be more',
+    );
+    expect(within(panel).getByText('Fact 0.')).toBeTruthy();
+  });
+
+  it('refuses a page holding more rows than the cap it ran under', async () => {
+    // The query cannot outrun its own limit, so this is an incoherent body
+    // rather than a full page, and saying "the first 2" would understate it.
+    stubAutomation({
+      status: scheduler(measured(3), measured(0)),
+      'fact-proposals': proposalsBody(
+        [proposal('fp-0', 'One.'), proposal('fp-1', 'Two.'), proposal('fp-2', 'Three.')],
+        { limit: 2 },
+      ),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).getByRole('status').textContent).toContain(
+      'the daemon sent 3 proposals under a request cap of 2',
+    );
+  });
+
+  it('does not call a full page partial when it is under the cap', async () => {
+    stubAutomation({
+      status: scheduler(measured(2), measured(0)),
+      'fact-proposals': proposalsBody([proposal('fp-0', 'One.'), proposal('fp-1', 'Two.')]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).queryByRole('status')).toBeNull();
+    expect(within(panel).getByText('One.')).toBeTruthy();
+  });
+});
+
+/**
+ * The scheduler's `pending_review` is the authority on whether anything awaits
+ * human approval, so a card may only call its queue empty when that authority
+ * measured it.
+ *
+ * The two reads count different populations — the list routes return every
+ * state under a cap, `pending_review` counts what awaits approval — so nothing
+ * here compares their numbers. What it uses is the containment: a pending item
+ * is one of the items the list enumerates.
+ */
+describe('AutomationsPage queue agreement', () => {
+  it('will not call the proposal queue empty while the scheduler could not read it', async () => {
+    stubAutomation({
+      status: scheduler(unreadable('the project fact authority is mid-migration'), measured(0)),
+      'fact-proposals': proposalsBody([]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).queryByText(/no pending fact proposals/i)).toBeNull();
+    expect(within(panel).getByRole('status').textContent).toContain(
+      'whether the fact proposals queue is empty is unknown: the project fact authority is mid-migration',
+    );
+  });
+
+  it('reports the disagreement when the queue is measured non-empty and the list is not', async () => {
+    // Pending proposals are a subset of the proposals the list enumerates, so
+    // these two readings cannot both be true and neither is chosen.
+    stubAutomation({
+      status: scheduler(measured(3), measured(0)),
+      'fact-proposals': proposalsBody([]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).queryByText(/no pending fact proposals/i)).toBeNull();
+    expect(within(panel).getByRole('status').textContent).toContain(
+      'the scheduler counted 3 awaiting review',
+    );
+  });
+
+  it('says the queue is empty when both reads agree it is', async () => {
+    stubAutomation({
+      status: scheduler(measured(0), measured(0)),
+      'fact-proposals': proposalsBody([]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).getByText(/no pending fact proposals/i)).toBeTruthy();
+    expect(within(panel).queryByRole('status')).toBeNull();
+  });
+
+  it('applies the same rule to managed skills', async () => {
+    stubAutomation({
+      status: scheduler(measured(0), unreadable('the managed skill store could not be opened')),
+      skills: skillsBody([]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Managed skills');
+    expect(within(panel).queryByText(/no managed skills/i)).toBeNull();
+    expect(within(panel).getByRole('status').textContent).toContain(
+      'whether the skill drafts queue is empty is unknown',
+    );
+  });
+
+  it('withholds the empty claim when the scheduler read itself never landed', async () => {
+    // The cards render independently of the scheduler panel, so a failed
+    // scheduler read has to reach them as an unreadable queue rather than as a
+    // missing argument that defaults to "nothing is waiting".
+    stubAutomation({
+      status: () => new Response('nope', { status: 500 }),
+      'fact-proposals': proposalsBody([]),
+    });
+    renderAutomations();
+
+    const panel = await settledPanel('Fact proposals');
+    expect(within(panel).queryByText(/no pending fact proposals/i)).toBeNull();
+    expect(within(panel).getByRole('status').textContent).toContain(
+      'the scheduler read failed (HTTP 500)',
+    );
+  });
+});
+
+/**
+ * One panel, once its own read has returned.
+ *
+ * The region is in the tree from the first render, so `findByRole` matches it
+ * while the read behind it is still in flight and every assertion would sample
+ * the loading state. The four panels settle independently, so waiting on a
+ * neighbour — the way the scheduler tests wait on a tile — proves nothing here.
+ */
+async function settledPanel(name: string): Promise<HTMLElement> {
+  const panel = await screen.findByRole('region', { name });
+  await waitFor(() => {
+    expect(panel.querySelector('[data-state="loading"]')).toBeNull();
+  });
+  return panel;
+}
+
+/** The domain state a panel settled on, or null when it rendered content. */
+function panelState(panel: HTMLElement): string | null {
+  return panel.querySelector('[data-state]')?.getAttribute('data-state') ?? null;
+}
+
+/**
  * One review tile, read the way the browser gate reads it: the value and the
  * evidence marker that belong to a specific label. Throws rather than returning
  * a blank when the tile is missing, so a vanished tile fails as a vanished tile
@@ -243,6 +495,73 @@ function scheduler(
   };
 }
 
+/* --- Wire-true list bodies -------------------------------------------------
+ *
+ * Each builder emits exactly the `json!` literal its handler writes, including
+ * the tally the handler derives from the very vector it serializes. Tests that
+ * need a body to disagree with its own tally pass `count` explicitly, which is
+ * the only way to express a truncated read.
+ */
+
+/** `automation_jobs_api::list` → `{jobs, count}`. */
+function jobsBody(jobs: unknown[], count = jobs.length): Record<string, unknown> {
+  return { jobs, count };
+}
+
+function job(id: string, name: string): Record<string, unknown> {
+  return { id, name, schedule: '0 3 * * *', enabled: true, interval_secs: null };
+}
+
+/** `automation_skills_api::list` → `{profile_root, skills_root, count, skills, …}`. */
+function skillsBody(skills: unknown[], count = skills.length): Record<string, unknown> {
+  return {
+    profile_root: '/home/x/.tracedecay',
+    skills_root: '/home/x/.tracedecay/managed-skills',
+    count,
+    skills,
+    skill_metadata: [],
+    usage_summaries: [],
+    stale_recommendations: [],
+    improvement_recommendations: [],
+  };
+}
+
+function skill(id: string, title: string, state = 'active'): Record<string, unknown> {
+  return {
+    metadata: { id, title, summary: `${title}.`, category: 'dev', state, pinned: false },
+    body_markdown: `# ${title}`,
+    support_files: [],
+  };
+}
+
+/** `automation_fact_proposals_api::list` → `{proposals, count, limit, error}`.
+ * The page sends no `limit`, so the handler's own default of 50 is the cap
+ * every one of these bodies is read under. */
+function proposalsBody(
+  proposals: unknown[],
+  options: { count?: number; limit?: number } = {},
+): Record<string, unknown> {
+  return {
+    proposals,
+    count: options.count ?? proposals.length,
+    limit: options.limit ?? 50,
+    error: '',
+  };
+}
+
+function proposal(id: string, content: string | null): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    schema_version: 1,
+    proposal_id: id,
+    run_id: 'session-reflector-0',
+    state: 'pending_approval',
+  };
+  // `add_fact_request` carries `skip_serializing_if = "Option::is_none"`, so a
+  // record without one omits the key rather than sending null.
+  if (content !== null) row['add_fact_request'] = { content, category: 'preference' };
+  return row;
+}
+
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -256,15 +575,22 @@ type Reply = unknown | (() => Response);
 
 /**
  * Routes by trailing path segment: `status`, `pause`, `resume`, `jobs`,
- * `skills`, `fact-proposals`. Anything the test does not name answers empty
- * rather than failing, so a queue assertion never trips over an unrelated
- * panel. Returns the mock so a test can assert what was actually requested.
+ * `skills`, `fact-proposals`. Anything the test does not name answers a
+ * wire-true single-row body rather than failing, so a queue assertion never
+ * trips over an unrelated panel. Returns the mock so a test can assert what was
+ * actually requested.
+ *
+ * The list fallbacks carry a row on purpose. An empty list is no longer inert
+ * scaffolding — the skills and proposal cards consult the scheduler's queue
+ * before they will call themselves empty, so an empty fallback beside a
+ * measured queue would render a contradiction notice in every unrelated test.
+ * A row keeps those panels out of the way, which is what a fallback is for.
  */
 function stubAutomation(replies: Record<string, Reply>) {
   const fallbacks: Record<string, unknown> = {
-    jobs: { jobs: [], count: 0 },
-    skills: { skills: [] },
-    'fact-proposals': { proposals: [] },
+    jobs: jobsBody([job('nightly-sweep', 'Nightly sweep')]),
+    skills: skillsBody([skill('code-slop', 'Code Slop Cleanup')]),
+    'fact-proposals': proposalsBody([proposal('fp-1', 'A recorded project fact.')]),
   };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const endpoint = String(input).split('?')[0]?.split('/').pop() ?? '';
