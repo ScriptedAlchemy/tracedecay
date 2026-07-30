@@ -26,10 +26,11 @@ use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AffectedTestsRetrievalPort,
     AnalyzerAdmittedDiagnosticProviderV1, ApplicationContractError, ApplicationOperation,
     ApplicationOutcome, ApplicationProblem, ApplicationProblemKind, ApplicationResult,
-    AttachRuntimeEvidenceCommand, AuthorityReceipt, CallableCodeAuthorizationPort,
-    CallableCodeOperationKind, CallableCodeQueryService, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, CreateWorkCommand,
-    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
+    AttachRuntimeEvidenceCommand, AuthorityReceipt, AuthorizedScopeSet,
+    AuthorizedScopeSetAuthority, CallableCodeAuthorizationPort, CallableCodeOperationKind,
+    CallableCodeQueryService, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+    CoverageCompleteness, CoverageDomainState, CreateWorkCommand, Deadline,
+    DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
     EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity,
     EvidencePacket, EvidenceScore, GitIndexApplyPortResultV1, GitIndexApplyRequestV1,
     GitIndexEffectProofV1, GitIndexOperationBindingV1, GitIndexPreviewPortResultV1,
@@ -55,8 +56,9 @@ use tracedecay_domain::feedback::{FeedbackCycleTerminationV1, ProviderEvaluation
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    ManifestDigest, ProjectId, RetrievalAnchorId, UserProfileId, UtcMicros, WorkAuthority,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, canonical_sha256,
+    ManifestDigest, ProjectId, RetrievalAnchorId, ScopeSetId, ScopeSetRevision, UserProfileId,
+    UtcMicros, WorkAuthority, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
+    canonical_sha256,
 };
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
@@ -5569,6 +5571,8 @@ impl DaemonLspOwnerRegistrar {
     pub(crate) async fn build_and_register(
         &self,
         project_root: PathBuf,
+        scope_grant: CapabilityGrantSnapshot,
+        registered_database: Arc<crate::global_db::RegisteredGlobalDb>,
         database: Database,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         runtime: tokio::runtime::Handle,
@@ -5626,7 +5630,12 @@ impl DaemonLspOwnerRegistrar {
                 message: format!("could not construct LSP session factory: {error:?}"),
             })?,
         );
-        self.register_factory(project_root, factory.clone()).await;
+        let scope_set_storage = registered_database.authorized_scope_set_storage()?;
+        self.register_lsp_owner(
+            project_root,
+            DaemonLspInvocationOwner::authorized(factory.clone(), scope_grant, scope_set_storage),
+        )
+        .await;
         Ok(factory)
     }
 }
@@ -5899,6 +5908,9 @@ type RuntimeLspActor = DaemonLspRuntimeSession;
 #[derive(Clone)]
 pub(crate) struct DaemonLspInvocationOwner {
     factory: Arc<DaemonLspSessionFactory>,
+    scope_grant: Option<CapabilityGrantSnapshot>,
+    scope_set_storage:
+        Option<tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage>,
 }
 
 #[derive(Clone)]
@@ -5910,18 +5922,35 @@ struct AuthorizedDaemonLspWorkspace {
 
 impl DaemonLspInvocationOwner {
     pub(crate) fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {
-        Self { factory }
+        Self {
+            factory,
+            scope_grant: None,
+            scope_set_storage: None,
+        }
+    }
+
+    pub(crate) fn authorized(
+        factory: Arc<DaemonLspSessionFactory>,
+        scope_grant: CapabilityGrantSnapshot,
+        scope_set_storage: tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
+    ) -> Self {
+        Self {
+            factory,
+            scope_grant: Some(scope_grant),
+            scope_set_storage: Some(scope_set_storage),
+        }
     }
 }
 
-/// Admission binds a session to the root independently resolved by the daemon
-/// before this protocol is invoked. Client root hints are never consulted.
+/// Admission binds a session to the workspace independently resolved by the
+/// daemon before this protocol is invoked. Client root hints are never
+/// authority.
 #[derive(Clone, Debug)]
-struct AdmittedRootSessionAdmission {
-    root: AdmittedRoot,
+struct AdmittedWorkspaceSessionAdmission {
+    workspace: AuthorizedLspWorkspace,
 }
 
-impl LspSessionAdmissionPort for AdmittedRootSessionAdmission {
+impl LspSessionAdmissionPort for AdmittedWorkspaceSessionAdmission {
     fn admit_lsp_session(
         &self,
         _request: &LspSessionOpenRequest,
@@ -5938,7 +5967,7 @@ impl LspSessionAdmissionPort for AdmittedRootSessionAdmission {
         Ok(AuthorizedLspSession {
             session_id,
             credential,
-            workspace: AuthorizedLspWorkspace::single(self.root.clone()),
+            workspace: self.workspace.clone(),
             expires_at_ms: now_ms.saturating_add(LSP_SESSION_TTL_MS),
         })
     }
@@ -10529,7 +10558,9 @@ mod tests {
             .invoke(
                 &registry,
                 Some(&project_root),
-                Some(AdmittedRoot::new("file:///authoritative")),
+                Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                    "file:///authoritative",
+                ))),
                 None,
                 DaemonInvocationRequest::lsp_open(
                     "request.1",
@@ -10647,7 +10678,9 @@ mod tests {
             .invoke(
                 &registry,
                 Some(&project_root),
-                Some(AdmittedRoot::new("file:///authoritative")),
+                Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                    "file:///authoritative",
+                ))),
                 None,
                 DaemonInvocationRequest::lsp_open("request.revision", "3.17", None, Vec::new()),
             )
@@ -10673,7 +10706,9 @@ mod tests {
             service.invoke(
                 &registry,
                 Some(&project_root),
-                Some(AdmittedRoot::new("file:///authoritative")),
+                Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                    "file:///authoritative",
+                ))),
                 None,
                 DaemonInvocationRequest::lsp_open(
                     request_id,
@@ -10796,7 +10831,9 @@ mod tests {
             .invoke(
                 &registry,
                 None,
-                Some(AdmittedRoot::new("file:///authoritative")),
+                Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                    "file:///authoritative",
+                ))),
                 None,
                 DaemonInvocationRequest {
                     protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),

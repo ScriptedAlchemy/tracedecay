@@ -1,28 +1,34 @@
 //! Daemon façade over canonical multi-root CAS and query authorities.
 
-use rusqlite::Connection;
 use tracedecay_application::{
     AuthorizedMultiRootQueryService, AuthorizedScopeSet, MultiRootQueryError, MultiRootQueryPageV1,
     MultiRootQueryPort, MultiRootQueryRequestV1,
 };
-use tracedecay_domain::ScopeSetRevision;
 use tracedecay_rusqlite_runtime::repository::{
-    AuthorizedScopeSetExecutor, AuthorizedScopeSetStoreError,
+    AuthorizedScopeSetSqliteStorage, AuthorizedScopeSetStoreError,
 };
 use tracedecay_store::runtime::ScopeSetCasOutcomeV1;
 
 use super::invocation::DaemonInvocationService;
 
 impl DaemonInvocationService {
-    /// Persist a canonical scope set under the daemon's already-open store
-    /// authority. The caller retains connection and migration ownership.
-    pub(crate) fn compare_and_swap_scope_set(
+    /// Admit an exact canonical scope set through the registered store. A
+    /// concurrent idempotent publication is accepted only after re-reading the
+    /// stored set; conflicts never authorize the proposed request object.
+    pub(crate) fn persist_exact_scope_set(
         &self,
-        connection: &mut Connection,
-        expected_revision: Option<ScopeSetRevision>,
+        storage: &AuthorizedScopeSetSqliteStorage,
         next: &AuthorizedScopeSet,
-    ) -> Result<ScopeSetCasOutcomeV1, AuthorizedScopeSetStoreError> {
-        AuthorizedScopeSetExecutor::compare_and_swap(connection, expected_revision, next)
+    ) -> Result<Option<AuthorizedScopeSet>, AuthorizedScopeSetStoreError> {
+        if let Some(current) = storage.read(next.scope_set_id())? {
+            return Ok((current == *next).then_some(current));
+        }
+        match storage.compare_and_swap(None, next)? {
+            ScopeSetCasOutcomeV1::Applied(_) | ScopeSetCasOutcomeV1::Conflict { .. } => {}
+        }
+        Ok(storage
+            .read(next.scope_set_id())?
+            .filter(|stored| stored == next))
     }
 
     /// Execute one federated query after transport admission has supplied the

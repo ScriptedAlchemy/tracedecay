@@ -42,7 +42,7 @@ use tracedecay_lsp::{
     ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
     GatewayCapabilities, LspRuntimeFailure, LspRuntimeFuture, TRACEDECAY_CONTEXT_REVISION,
 };
-use tracedecay_tool_catalog::CapabilityId;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrationError,
@@ -115,6 +115,9 @@ const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
 const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
+pub(super) const LSP_WORKSPACE_CAPABILITY_ID_V1: &str =
+    "capability.application.lsp.workspace-folders";
+pub(super) const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.workspace-folders";
 
 #[derive(Clone)]
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
@@ -1235,9 +1238,16 @@ pub(super) async fn register_project_open_production_owners(
     // Feedback runtime registration installed a typed unavailable cycle. The
     // LSP gateway can therefore publish now and switches to the exact
     // production cycle after code-index mount.
+    let lsp_scope_grant = project_open_lsp_scope_grant(&access, now_micros()).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("project-open LSP workspace grant is invalid: {error}"),
+        }
+    })?;
     let lsp_session_factory = register_production_lsp_owner(
         invocation,
         project_root,
+        lsp_scope_grant,
+        Arc::clone(&session_db),
         database.clone(),
         diagnostic_broker,
         &admitted_providers,
@@ -1628,6 +1638,8 @@ async fn register_production_feedback_cycle(
 async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
+    scope_grant: tracedecay_application::CapabilityGrantSnapshot,
+    registered_database: Arc<crate::global_db::RegisteredGlobalDb>,
     database: crate::db::Database,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     admitted_providers: &[AdmittedLspProvider],
@@ -1638,6 +1650,8 @@ async fn register_production_lsp_owner(
         .lsp_owner_registrar()
         .build_and_register(
             project_root.to_path_buf(),
+            scope_grant,
+            registered_database,
             database,
             Arc::new(invocation.code_index_schedulers.clone()),
             tokio::runtime::Handle::current(),
@@ -2772,6 +2786,59 @@ fn project_open_work_grant(
     )
 }
 
+pub(super) fn project_open_lsp_scope_grant(
+    access: &ProjectSourceAccessSnapshot,
+    observed_at: UtcMicros,
+) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
+{
+    let capability = CapabilityId::new(LSP_WORKSPACE_CAPABILITY_ID_V1).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "project-open LSP workspace capability",
+        }
+    })?;
+    if observed_at >= access.grant_expires_at
+        || !access.effective_capabilities.contains(&capability)
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "project-open LSP workspace capability grant",
+        });
+    }
+    let use_case = UseCaseId::new(LSP_WORKSPACE_USE_CASE_ID_V1).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "project-open LSP workspace use case",
+        }
+    })?;
+    let capabilities = BTreeSet::from([capability]);
+    let use_cases = BTreeSet::from([use_case]);
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.project-open.lsp-workspace-grant.v1",
+        &access.scope,
+        &access.requester,
+        &access.configuration_digest,
+        &access.configuration_provenance_digest,
+        &capabilities,
+        &use_cases,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open LSP workspace grant digest",
+    })?;
+    tracedecay_application::CapabilityGrantSnapshot::new(
+        tracedecay_application::CapabilityGrantId::new(format!(
+            "grant.tracedecay-daemon.project-open.lsp-workspace.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))?,
+        POLICY_REVISION_V1,
+        grant_digest,
+        access.requester.clone(),
+        observed_at,
+        access.grant_expires_at,
+        access.scope.clone(),
+        capabilities,
+        use_cases,
+        tracedecay_application::DisclosureClass::Sensitive,
+    )
+}
+
 fn production_owner_capabilities()
 -> std::result::Result<BTreeSet<CapabilityId>, ApplicationContractError> {
     let mut capabilities = BTreeSet::new();
@@ -2812,6 +2879,7 @@ fn production_owner_capabilities()
         "capability.application.git.history",
         "capability.application.git.blame",
         "capability.application.git.hunks",
+        LSP_WORKSPACE_CAPABILITY_ID_V1,
         "capability.application.source-edit.ast-grep-rewrite",
         "capability.application.source-edit.insert-at",
         "capability.application.source-edit.insert-at-symbol",
