@@ -51,6 +51,8 @@ pub struct RemoteBrainHttpsConfigV1 {
     pub certificate_chain_path: Option<PathBuf>,
     #[serde(default)]
     pub private_key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub client_ca_bundle_path: Option<PathBuf>,
 }
 
 impl Default for RemoteBrainHttpsConfigV1 {
@@ -62,6 +64,7 @@ impl Default for RemoteBrainHttpsConfigV1 {
             advertised_endpoint: None,
             certificate_chain_path: None,
             private_key_path: None,
+            client_ca_bundle_path: None,
         }
     }
 }
@@ -114,11 +117,16 @@ impl RemoteBrainHttpsConfigV1 {
             .private_key_path
             .clone()
             .ok_or(RemoteBrainHttpsError::MissingField("private_key_path"))?;
+        let client_ca_bundle_path = self
+            .client_ca_bundle_path
+            .clone()
+            .ok_or(RemoteBrainHttpsError::MissingField("client_ca_bundle_path"))?;
         Ok(RemoteBrainHttpsBindingV1 {
             bind_address,
             advertised_endpoint: endpoint,
             certificate_chain_path,
             private_key_path,
+            client_ca_bundle_path,
         })
     }
 }
@@ -146,6 +154,7 @@ pub struct RemoteBrainHttpsBindingV1 {
     pub advertised_endpoint: url::Url,
     pub certificate_chain_path: PathBuf,
     pub private_key_path: PathBuf,
+    pub client_ca_bundle_path: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -186,17 +195,14 @@ impl RemoteBrainHttpsService {
             + RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1>
             + RemoteProtocolPortV1<RemoteQueryRequestV1, Output = RemoteQueryResultV1>
             + RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1>
-            + RemoteProtocolPortV1<
-                StagedRestoreConfirmationV1,
-                Output = StagedRestoreProgressV1,
-            > + RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1>
+            + RemoteProtocolPortV1<StagedRestoreConfirmationV1, Output = StagedRestoreProgressV1>
+            + RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1>
             + Send
             + Sync
             + 'static,
     {
-        let router = tracedecay_api::remote::remote_protocol_router::<Port, RemoteQueryRequestV1>(
-            port,
-        );
+        let router =
+            tracedecay_api::remote::remote_protocol_router::<Port, RemoteQueryRequestV1>(port);
         Self::bind(config, router).await
     }
 
@@ -307,8 +313,25 @@ fn load_server_config(
     let private_key = rustls_pemfile::private_key(&mut BufReader::new(private_key_file))
         .map_err(|_| RemoteBrainHttpsError::TlsCredentials)?
         .ok_or(RemoteBrainHttpsError::TlsCredentials)?;
+    let client_ca_file = std::fs::File::open(&binding.client_ca_bundle_path)
+        .map_err(|_| RemoteBrainHttpsError::TlsCredentials)?;
+    let client_ca_certificates = rustls_pemfile::certs(&mut BufReader::new(client_ca_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| RemoteBrainHttpsError::TlsCredentials)?;
+    if client_ca_certificates.is_empty() {
+        return Err(RemoteBrainHttpsError::TlsCredentials);
+    }
+    let mut client_roots = rustls::RootCertStore::empty();
+    for certificate in client_ca_certificates {
+        client_roots
+            .add(certificate)
+            .map_err(|_| RemoteBrainHttpsError::TlsCredentials)?;
+    }
+    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(client_roots))
+        .build()
+        .map_err(|_| RemoteBrainHttpsError::TlsCredentials)?;
     rustls::ServerConfig::builder()
-        .with_no_client_auth()
+        .with_client_cert_verifier(client_verifier)
         .with_single_cert(certificates, private_key)
         .map_err(|_| RemoteBrainHttpsError::TlsCredentials)
 }
