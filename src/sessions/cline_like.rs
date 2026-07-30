@@ -21,7 +21,9 @@ use std::time::UNIX_EPOCH;
 
 use crate::application::host_admission::HostAdmissionFacade;
 #[cfg(test)]
-use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use crate::application::host_admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus, HostAdmissionTestRuntimeV1,
+};
 use crate::application::observation::ObservationCancellation;
 #[cfg(test)]
 use crate::privacy::parse_normalized_observation_record_v1;
@@ -51,6 +53,8 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
 };
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
+#[cfg(test)]
+use tracedecay_store::ObservationReplayRequest;
 
 /// Cap task-directory scans so a long VS Code globalStorage history cannot
 /// block dashboard startup.
@@ -903,6 +907,207 @@ fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+
+    fn write_checked_in_native_task(tasks: &Path, project: &Path, api_filename: &str) -> PathBuf {
+        let task = tasks.join("checked-in-native");
+        std::fs::create_dir_all(&task).unwrap();
+        let mut metadata: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
+        ))
+        .unwrap();
+        metadata["workspacePath"] = Value::String(project.to_string_lossy().into_owned());
+        std::fs::write(
+            task.join("task_metadata.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+        let fixture = match api_filename {
+            "api_messages.json" => include_str!(
+                "../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
+            ),
+            "api_conversation_history.json" => include_str!(
+                "../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
+            ),
+            other => panic!("unsupported checked-in Cline-family fixture {other}"),
+        };
+        let api = task.join(api_filename);
+        std::fs::write(&api, fixture).unwrap();
+        std::fs::write(
+            task.join("ui_messages.json"),
+            include_str!(
+                "../../tests/fixtures/transcript_golden/cline_like/input/ui_messages.json"
+            ),
+        )
+        .unwrap();
+        api
+    }
+
+    #[tokio::test]
+    async fn checked_in_cline_family_snapshots_preserve_receipts_through_failures_and_restart() {
+        for (provider, api_filename) in [
+            ("cline", "api_conversation_history.json"),
+            ("roo-code", "api_messages.json"),
+            ("kilo", "api_conversation_history.json"),
+        ] {
+            let temp = tempfile::TempDir::new().expect("temp Cline-family storage");
+            let project = temp.path().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            let tasks = temp.path().join("tasks");
+            let api = write_checked_in_native_task(&tasks, &project, api_filename);
+            let source = ClineLikeSource {
+                provider,
+                storage_roots: vec![tasks],
+                user_registered_roots: None,
+            };
+            let profile_root = temp.path().join("profile");
+            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .expect("open canonical observation runtime");
+            let facade = runtime.facade();
+
+            let first = capture_cline_like_snapshot_observations(
+                &facade,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{provider}: checked-in capture failed: {error}"));
+            assert_eq!(first.stats.messages_upserted, 3, "{provider}");
+
+            let observations = runtime
+                .replay_observations(
+                    HostAdmissionScope::Profile,
+                    ObservationReplayRequest::new(0, 16).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(observations.len(), 3, "{provider}");
+            let receipts = observations
+                .iter()
+                .map(|item| {
+                    let envelope =
+                        parse_normalized_observation_record_v1(item.observation().payload())
+                            .unwrap_or_else(|error| {
+                                panic!("{provider}: sanitized envelope: {error}")
+                            });
+                    assert_eq!(envelope.provider().as_str(), provider);
+                    item.commit_receipt().clone()
+                })
+                .collect::<Vec<_>>();
+            for receipt in &receipts {
+                let committed = runtime
+                    .external_source_receipt_for_test(HostAdmissionScope::Profile, receipt)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{provider}: missing external-source receipt"));
+                assert_eq!(committed.projection().effects().len(), 1, "{provider}");
+            }
+
+            for _ in 0..16 {
+                capture_cline_like_snapshot_observations(
+                    &facade,
+                    &source,
+                    &project,
+                    ObservationScopeV1::Profile,
+                    None,
+                    &ObservationCancellation::default(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{provider}: duplicate storm failed: {error}"));
+            }
+            assert_eq!(
+                runtime
+                    .replay_observations(
+                        HostAdmissionScope::Profile,
+                        ObservationReplayRequest::new(0, 16).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .len(),
+                3,
+                "{provider}: duplicate storm must coalesce"
+            );
+
+            let original = std::fs::read(&api).unwrap();
+            std::fs::write(&api, b"[{\"role\":\"assistant\"").unwrap();
+            let poison = capture_cline_like_snapshot_observations(
+                &facade,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .expect_err("malformed replacement must remain non-durable");
+            assert!(
+                matches!(
+                    poison,
+                    TranscriptIngestError::NonDurableRecord {
+                        reason: "malformed snapshot JSON",
+                        ..
+                    }
+                ),
+                "{provider}: {poison:?}"
+            );
+            std::fs::write(&api, original).unwrap();
+
+            let cancelled = ObservationCancellation::default();
+            cancelled.cancel();
+            let revoked = capture_cline_like_snapshot_observations(
+                &facade,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &cancelled,
+            )
+            .await
+            .expect_err("revoked capture must stop before persistence");
+            assert!(
+                matches!(
+                    revoked,
+                    TranscriptIngestError::NonDurableRecord {
+                        reason: "admission_cancelled",
+                        ..
+                    }
+                ),
+                "{provider}: {revoked:?}"
+            );
+            drop(facade);
+            drop(runtime);
+
+            let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
+                .await
+                .expect("reopen canonical observation runtime");
+            for receipt in &receipts {
+                let committed = reopened
+                    .external_source_receipt_for_test(HostAdmissionScope::Profile, receipt)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{provider}: receipt lost across restart"));
+                assert_eq!(committed.projection().effects().len(), 1, "{provider}");
+            }
+            let facade = reopened.facade();
+            let replay = capture_cline_like_snapshot_observations(
+                &facade,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{provider}: restart replay failed: {error}"));
+            assert_eq!(
+                replay.stats.messages_upserted, 0,
+                "{provider}: acknowledgement-boundary replay must be exact"
+            );
+        }
+    }
 
     #[test]
     fn snapshot_budget_counts_all_task_input_files_once() {
