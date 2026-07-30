@@ -359,8 +359,7 @@ mod tests {
         let linked = linked.canonicalize().unwrap();
         let requested = root.join("../linked-feature");
         let owner = owner_for(&root, "project.mcp-scope-test");
-        let project_id =
-            tracedecay_domain::ProjectId::new("project.mcp-scope-test").unwrap();
+        let project_id = tracedecay_domain::ProjectId::new("project.mcp-scope-test").unwrap();
 
         let scope = resolve_query_scope(&owner, &requested).unwrap();
         let daemon_scope =
@@ -398,8 +397,7 @@ mod tests {
         let requested = root.join("linked-alias");
         symlink(&linked, &requested).unwrap();
         let owner = owner_for(&root, "project.mcp-scope-test");
-        let project_id =
-            tracedecay_domain::ProjectId::new("project.mcp-scope-test").unwrap();
+        let project_id = tracedecay_domain::ProjectId::new("project.mcp-scope-test").unwrap();
 
         let scope = resolve_query_scope(&owner, &requested).unwrap();
         let daemon_scope =
