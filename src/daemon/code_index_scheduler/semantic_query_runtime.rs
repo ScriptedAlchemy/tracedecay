@@ -5,15 +5,14 @@
 //! independently activated PASS profile carrying exact calibration and vector
 //! compatibility pins.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    DiversityPolicy, EphemeralSanitizedQueryViewV1, FusionProfile, OptionalStagePublicStatus,
-    RerankPolicy, RetrievalRequest, RetrieverKind, SanitizedStageFailure,
+    EphemeralSanitizedQueryViewV1, OptionalStagePublicStatus, RetrievalRequest, RetrieverKind,
     SemanticRetrievalContinuationV1,
 };
 
@@ -31,25 +30,21 @@ use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityP
 use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
 use tracedecay_query::retrieval::AuthorizedPr9FallbackV1;
 use tracedecay_query::retrieval::Pr9QueryAuthorityV1;
-use tracedecay_query::retrieval::fusion::{
-    CompositionKernel, CompositionOutputV1, FusionStageInput, digest_candidate_set,
-};
-use tracedecay_query::retrieval::rerank::{BoundedRerankOutcomeV1, RerankExecutionControlV1};
+use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_set};
+use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
-    SemanticAbstentionV1, SemanticCalibrationEvidenceV1, SemanticExecutionControl,
-    SemanticQueryModeV1, SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
-    SemanticRetrievalRequestV1,
+    SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCalibrationEvidenceV1,
+    SemanticCompositionExecutionAuthorityV1, SemanticCompositionExecutionOutcomeV1,
+    SemanticExecutionControl, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticRerankExecutionPortV1, SemanticRerankReadinessV1, SemanticRetrievalRequestV1,
 };
 
 #[derive(Clone)]
 pub(in crate::daemon) struct SemanticQueryAuthorityV1 {
     activation: SemanticCurrentLinkedActivationV1,
     profile_digest: tracedecay_domain::ManifestDigest,
-    profile: FusionProfile,
-    diversity: DiversityPolicy,
-    rerank_policy: Option<RerankPolicy>,
+    execution: SemanticCompositionExecutionAuthorityV1,
     rerank: Option<ConfiguredRerankAuthorityV1>,
-    kernel: CompositionKernel,
 }
 
 #[derive(Clone)]
@@ -104,22 +99,23 @@ impl SemanticQueryAuthorityV1 {
         {
             return Err(SemanticQueryAuthorityErrorV1::IncompatibleActivation);
         }
-        let profile = accepted.profile().clone();
-        let diversity = accepted.diversity().clone();
-        let fusion_revision = pins.fusion_revision.clone();
         let rerank = rerank_pins.map(|pins| {
             let mounted = crate::semantic_code::shared_lifecycle_owner()
                 .and_then(|owner| owner.mount_reranker(pins.clone()).ok());
             ConfiguredRerankAuthorityV1 { pins, mounted }
         });
+        let execution = SemanticCompositionExecutionAuthorityV1::new(
+            accepted.profile().clone(),
+            accepted.diversity().clone(),
+            accepted.rerank().cloned(),
+            pins.fusion_revision.clone(),
+        )
+        .map_err(|error| SemanticQueryAuthorityErrorV1::Mount(error.to_string()))?;
         Ok(Self {
             activation,
             profile_digest,
-            profile,
-            diversity,
-            rerank_policy,
+            execution,
             rerank,
-            kernel: CompositionKernel::new(fusion_revision),
         })
     }
 
@@ -395,7 +391,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let pins = authority.pins();
         if !semantic_cursor_matches_activation(
             authorized_pr9.request_cursor.as_ref(),
-            &authority.profile.profile_id,
+            &authority.execution.profile().profile_id,
             &authority.profile_digest,
             &code_generation.manifest().generation_id,
             &pins.vector_generation_id,
@@ -418,7 +414,7 @@ impl CodeIndexSchedulerRegistryV1 {
             capability_manifest_digest: pins.calibration.capability_manifest_digest.clone(),
             vector_generation: pins.vector_generation_id.clone(),
             code_generation: code_generation.manifest().generation_id.clone(),
-            budget: authority.profile.retrieval_budget,
+            budget: authority.execution.profile().retrieval_budget,
         };
         if request.validate().is_err() {
             return semantic_abstention(
@@ -438,58 +434,48 @@ impl CodeIndexSchedulerRegistryV1 {
                 authorized_pr9,
             )
             .await?;
-        if !Arc::ptr_eq(outcome.fallback(), &authorized_pr9.fallback) {
-            return Err(SemanticQueryServiceError::InvalidFallback);
-        }
+        let mut rerank_executor = authority
+            .rerank
+            .as_ref()
+            .and_then(|configured| {
+                configured
+                    .mounted
+                    .as_ref()
+                    .filter(|rerank| rerank.compatibility() == &configured.pins)
+            })
+            .map(|rerank| SemanticRerankExecutorV1 {
+                rerank,
+                code_generation,
+                query_view,
+                control,
+            });
+        let rerank_readiness = if authority.execution.rerank_policy().is_none() {
+            None
+        } else {
+            Some(match rerank_executor.as_mut() {
+                Some(executor) => SemanticRerankReadinessV1::Ready(executor),
+                None => SemanticRerankReadinessV1::Unavailable(
+                    tracedecay_domain::SanitizedStageFailure::AuthorityUnavailable,
+                ),
+            })
+        };
+        let outcome = authority.execution.execute(
+            base,
+            authorized_pr9,
+            outcome,
+            semantic_abstention_disposition(mode),
+            rerank_readiness,
+        )?;
         match outcome {
-            SemanticQueryServiceOutcomeV1::Fallback {
+            SemanticCompositionExecutionOutcomeV1::Fallback {
                 abstention,
                 fallback,
             } => Ok(SemanticAugmentationOutcomeV1::Fallback {
                 abstention,
                 fallback,
             }),
-            SemanticQueryServiceOutcomeV1::Augmented {
-                semantic_lane,
-                calibration,
-                fallback,
-            } => {
-                let mut lanes = authorized_pr9.pr9_lanes.clone();
-                lanes.push(semantic_lane);
-                let mut composition = match authority.kernel.compose(
-                    &FusionStageInput {
-                        profile: authority.profile.clone(),
-                        lanes,
-                    },
-                    &authority.diversity,
-                ) {
-                    Ok(composition) => composition,
-                    Err(_) => {
-                        return semantic_abstention(
-                            mode,
-                            SemanticAbstentionV1::LaneFailure,
-                            fallback,
-                        );
-                    }
-                };
-                let rerank = match authorized_pr9
-                    .request_cursor
-                    .as_ref()
-                    .and_then(|cursor| cursor.semantic.as_ref())
-                {
-                    Some(continuation) => {
-                        restore_frozen_semantic_order(continuation, &mut composition)?;
-                        continuation.rerank.clone()
-                    }
-                    None => execute_rerank_after_fusion(
-                        authority.as_ref(),
-                        code_generation,
-                        base,
-                        query_view,
-                        control,
-                        &mut composition,
-                    )?,
-                };
+            SemanticCompositionExecutionOutcomeV1::Augmented(executed) => {
+                let mut composition = executed.composition;
                 let Some(pr9_authority) = self.pr9_query_authority_for_scope(scope).await else {
                     return Err(SemanticQueryServiceError::InvalidCursor);
                 };
@@ -504,18 +490,18 @@ impl CodeIndexSchedulerRegistryV1 {
                     pins.projection.projection_key(),
                     &pins.search_index_key,
                     &pins.fusion_revision,
-                    &authority.profile.retrieval_budget,
-                    &rerank,
+                    &authority.execution.profile().retrieval_budget,
+                    &executed.rerank,
                     &mut composition,
                 )?;
                 Ok(SemanticAugmentationOutcomeV1::Augmented(Box::new(
                     SemanticAugmentedCompositionV1 {
                         composition,
                         cursor,
-                        hydration_budget: authority.profile.retrieval_budget,
-                        calibration,
-                        rerank,
-                        fallback,
+                        hydration_budget: authority.execution.profile().retrieval_budget,
+                        calibration: executed.calibration,
+                        rerank: executed.rerank,
+                        fallback: executed.fallback,
                     },
                 )))
             }
@@ -548,37 +534,6 @@ fn semantic_cursor_matches_activation(
         && semantic.ranking_revision.as_str() == semantic_ranking_revision.as_str()
 }
 
-fn restore_frozen_semantic_order(
-    continuation: &SemanticRetrievalContinuationV1,
-    composition: &mut CompositionOutputV1,
-) -> Result<(), SemanticQueryServiceError> {
-    let mut by_anchor = composition
-        .ranked_candidates
-        .drain(..)
-        .map(|candidate| (candidate.candidate.anchor_id.clone(), candidate))
-        .collect::<BTreeMap<_, _>>();
-    if by_anchor.len() != continuation.ordered_candidate_anchors.len() {
-        return Err(SemanticQueryServiceError::InvalidCursor);
-    }
-    let mut ordered = Vec::with_capacity(by_anchor.len());
-    for anchor in &continuation.ordered_candidate_anchors {
-        ordered.push(
-            by_anchor
-                .remove(anchor)
-                .ok_or(SemanticQueryServiceError::InvalidCursor)?,
-        );
-    }
-    if !by_anchor.is_empty() {
-        return Err(SemanticQueryServiceError::InvalidCursor);
-    }
-    for (ordinal, candidate) in ordered.iter_mut().enumerate() {
-        candidate.final_ordinal =
-            u32::try_from(ordinal).map_err(|_| SemanticQueryServiceError::InvalidCursor)?;
-    }
-    composition.ranked_candidates = ordered;
-    Ok(())
-}
-
 struct SemanticRerankControlV1<'a, C: ?Sized>(&'a C);
 
 impl<C> RerankExecutionControlV1 for SemanticRerankControlV1<'_, C>
@@ -594,60 +549,33 @@ where
     }
 }
 
-fn execute_rerank_after_fusion<C>(
-    authority: &SemanticQueryAuthorityV1,
-    code_generation: &CodeIndexPublishedGenerationV1,
-    request: &RetrievalRequest,
-    query_view: &EphemeralSanitizedQueryViewV1,
-    control: &C,
-    composition: &mut CompositionOutputV1,
-) -> Result<OptionalStagePublicStatus, SemanticQueryServiceError>
+struct SemanticRerankExecutorV1<'a, C: ?Sized> {
+    rerank: &'a ProductionCodeRerankAuthorityV1,
+    code_generation: &'a CodeIndexPublishedGenerationV1,
+    query_view: &'a EphemeralSanitizedQueryViewV1,
+    control: &'a C,
+}
+
+impl<C> SemanticRerankExecutionPortV1 for SemanticRerankExecutorV1<'_, C>
 where
     C: SemanticExecutionControl + ?Sized,
 {
-    let Some(policy) = authority.rerank_policy.as_ref() else {
-        return Ok(OptionalStagePublicStatus::NotRequested);
-    };
-    let original = composition.ranked_candidates.clone();
-    let Some(configured) = authority.rerank.as_ref() else {
-        return Ok(OptionalStagePublicStatus::Unavailable(
-            SanitizedStageFailure::AuthorityUnavailable,
-        ));
-    };
-    let Some(rerank) = configured
-        .mounted
-        .as_ref()
-        .filter(|rerank| rerank.compatibility() == &configured.pins)
-    else {
-        return Ok(OptionalStagePublicStatus::Unavailable(
-            SanitizedStageFailure::AuthorityUnavailable,
-        ));
-    };
-    let rerank_control = SemanticRerankControlV1(control);
-    let outcome = rerank.execute(
-        code_generation,
-        query_view,
-        request,
-        policy,
-        &original,
-        &rerank_control,
-    );
-    apply_rerank_outcome(original, outcome, composition)
-}
-
-fn apply_rerank_outcome(
-    original: Vec<tracedecay_domain::RankedCandidate>,
-    outcome: BoundedRerankOutcomeV1,
-    composition: &mut CompositionOutputV1,
-) -> Result<OptionalStagePublicStatus, SemanticQueryServiceError> {
-    if outcome.public_status == OptionalStagePublicStatus::Complete {
-        composition.ranked_candidates = outcome.ordered_candidates;
-    } else {
-        // The optional-stage contract requires the exact pre-rerank value on
-        // every failure, irrespective of executor behavior.
-        composition.ranked_candidates = original;
+    fn execute_rerank(
+        &mut self,
+        request: &RetrievalRequest,
+        policy: &tracedecay_domain::RerankPolicy,
+        pre_rerank: &[tracedecay_domain::RankedCandidate],
+    ) -> tracedecay_query::retrieval::rerank::BoundedRerankOutcomeV1 {
+        let rerank_control = SemanticRerankControlV1(self.control);
+        self.rerank.execute(
+            self.code_generation,
+            self.query_view,
+            request,
+            policy,
+            pre_rerank,
+            &rerank_control,
+        )
     }
-    Ok(outcome.public_status)
 }
 
 fn paginate_semantic_composition(
@@ -772,6 +700,13 @@ fn semantic_abstention(
         SemanticQueryModeV1::StrictSemantic => {
             Err(SemanticQueryServiceError::StrictUnavailable(abstention))
         }
+    }
+}
+
+fn semantic_abstention_disposition(mode: SemanticQueryModeV1) -> SemanticAbstentionDispositionV1 {
+    match mode {
+        SemanticQueryModeV1::FallbackAllowed => SemanticAbstentionDispositionV1::UseFallback,
+        SemanticQueryModeV1::StrictSemantic => SemanticAbstentionDispositionV1::RejectUnavailable,
     }
 }
 
@@ -1213,8 +1148,11 @@ mod tests {
                 RetrieverKind::Semantic,
             ],
         );
-        restore_frozen_semantic_order(continuation, &mut resumed)
-            .expect("authenticated order restores");
+        tracedecay_query::retrieval::semantic::restore_frozen_semantic_order(
+            continuation,
+            &mut resumed,
+        )
+        .expect("authenticated order restores");
         assert_eq!(
             resumed
                 .ranked_candidates
@@ -1587,92 +1525,5 @@ mod tests {
                 abstention: SemanticAbstentionV1::CalibrationUnavailable,
             } if selected == generation
         ));
-    }
-
-    #[test]
-    fn successful_rerank_order_is_applied_before_pagination() {
-        let profile =
-            id::<tracedecay_domain::FusionProfileId>("profile.semantic.rerank-success.v1");
-        let mut composition = composition(profile, &[RetrieverKind::Semantic]);
-        let original = composition.ranked_candidates.clone();
-        let mut reranked = original.clone();
-        reranked.reverse();
-        for (ordinal, candidate) in reranked.iter_mut().enumerate() {
-            candidate.final_ordinal = ordinal as u32;
-        }
-
-        let status = apply_rerank_outcome(
-            original,
-            BoundedRerankOutcomeV1 {
-                ordered_candidates: reranked.clone(),
-                public_status: OptionalStagePublicStatus::Complete,
-                usage: tracedecay_query::retrieval::rerank::RerankUsageV1::default(),
-            },
-            &mut composition,
-        )
-        .expect("successful rerank");
-
-        assert_eq!(status, OptionalStagePublicStatus::Complete);
-        assert_eq!(composition.ranked_candidates, reranked);
-    }
-
-    #[test]
-    fn rerank_failure_restores_byte_identical_post_fusion_order() {
-        let profile =
-            id::<tracedecay_domain::FusionProfileId>("profile.semantic.rerank-fallback.v1");
-        let mut composition = composition(profile, &[RetrieverKind::Semantic]);
-        let original = composition.ranked_candidates.clone();
-        let expected_bytes = serde_json::to_vec(&original).expect("canonical test bytes");
-        let status = apply_rerank_outcome(
-            original,
-            BoundedRerankOutcomeV1 {
-                ordered_candidates: vec![ranked(99)],
-                public_status: OptionalStagePublicStatus::Unavailable(
-                    SanitizedStageFailure::Internal,
-                ),
-                usage: tracedecay_query::retrieval::rerank::RerankUsageV1::default(),
-            },
-            &mut composition,
-        )
-        .expect("fallback mode retains semantic composition");
-
-        assert_eq!(
-            status,
-            OptionalStagePublicStatus::Unavailable(SanitizedStageFailure::Internal)
-        );
-        assert_eq!(
-            serde_json::to_vec(&composition.ranked_candidates).expect("canonical test bytes"),
-            expected_bytes
-        );
-    }
-
-    #[test]
-    fn strict_semantic_preserves_byte_identical_order_on_optional_rerank_failure() {
-        let profile =
-            id::<tracedecay_domain::FusionProfileId>("profile.semantic.rerank-strict-fallback.v1");
-        let mut composition = composition(profile, &[RetrieverKind::Semantic]);
-        let original = composition.ranked_candidates.clone();
-        let expected_bytes = serde_json::to_vec(&original).expect("canonical test bytes");
-        let status = apply_rerank_outcome(
-            original,
-            BoundedRerankOutcomeV1 {
-                ordered_candidates: vec![ranked(99)],
-                public_status: OptionalStagePublicStatus::Unavailable(
-                    SanitizedStageFailure::AuthorityUnavailable,
-                ),
-                usage: tracedecay_query::retrieval::rerank::RerankUsageV1::default(),
-            },
-            &mut composition,
-        )
-        .expect("strict semantic mode retains optional rerank fallback");
-
-        assert_eq!(
-            status,
-            OptionalStagePublicStatus::Unavailable(SanitizedStageFailure::AuthorityUnavailable)
-        );
-        assert_eq!(
-            serde_json::to_vec(&composition.ranked_candidates).expect("canonical test bytes"),
-            expected_bytes
-        );
     }
 }
