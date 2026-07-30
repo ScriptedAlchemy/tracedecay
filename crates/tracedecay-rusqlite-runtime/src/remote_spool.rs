@@ -8,6 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ring::rand::SecureRandom;
 use ring::{aead, rand};
@@ -23,7 +24,7 @@ use tracedecay_application::{
     remote::replay::{
         RemoteReplayCommitReceiptV1, RemoteReplayFrameLookupPortV1, RemoteReplayFrameV1,
         RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
-        RemoteReplayTransitionV1,
+        RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
     },
 };
 use tracedecay_domain::{
@@ -206,6 +207,7 @@ enum DurableSpoolRecordV2 {
     },
     Transition {
         transition: RemoteReplayTransitionV1,
+        receipt: RemoteReplayTransitionReceiptV1,
     },
     ReplayAttempt {
         event_id: String,
@@ -358,7 +360,10 @@ impl RemoteCaptureSpool {
                         return Err(RemoteSpoolError::Corruption);
                     }
                 }
-                DurableSpoolRecordV2::Transition { transition } => {
+                DurableSpoolRecordV2::Transition {
+                    transition,
+                    receipt,
+                } => {
                     transition
                         .validate()
                         .map_err(|_| RemoteSpoolError::Corruption)?;
@@ -368,6 +373,19 @@ impl RemoteCaptureSpool {
                     if event.state != transition.from
                         || event.last_attempt != transition.replay_attempt
                         || event.active_attempt != Some(transition.replay_attempt)
+                    {
+                        return Err(RemoteSpoolError::Corruption);
+                    }
+                    receipt
+                        .validate_for(&transition)
+                        .map_err(|_| RemoteSpoolError::Corruption)?;
+                    let expected_pre = replay_state_digest(event)?;
+                    let mut terminal = event.clone();
+                    terminal.state = transition.to;
+                    terminal.receipt = transition.receipt.clone();
+                    let expected_terminal = replay_state_digest(&terminal)?;
+                    if receipt.pre_state_digest != expected_pre
+                        || receipt.terminal_state_digest != expected_terminal
                     {
                         return Err(RemoteSpoolError::Corruption);
                     }
@@ -492,7 +510,7 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
     fn transition(
         &self,
         transition: RemoteReplayTransitionV1,
-    ) -> Result<(), RemoteCapturePersistenceErrorV1> {
+    ) -> Result<RemoteReplayTransitionReceiptV1, RemoteCapturePersistenceErrorV1> {
         let _guard = self
             .write_guard
             .lock()
@@ -520,8 +538,38 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
                 return Err(RemoteCapturePersistenceErrorV1::Corruption);
             }
         }
-        self.append(&DurableSpoolRecordV2::Transition { transition })
-            .map_err(map_persistence_error)
+        let started = Instant::now();
+        let pre_state_digest = replay_state_digest(event).map_err(map_persistence_error)?;
+        let mut terminal = event.clone();
+        terminal.state = transition.to;
+        terminal.receipt = transition.receipt.clone();
+        let terminal_state_digest =
+            replay_state_digest(&terminal).map_err(map_persistence_error)?;
+        let transition_bytes = serde_json::to_vec(&transition)
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        let receipt = RemoteReplayTransitionReceiptV1 {
+            event_id: transition.event_id.clone(),
+            replay_attempt: transition.replay_attempt,
+            from: transition.from,
+            to: transition.to,
+            pre_state_digest,
+            terminal_state_digest,
+            committed_at: current_utc_micros()
+                .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?,
+            budget: OperationBudgetUsage {
+                units_consumed: 1,
+                bytes_consumed: u64::try_from(transition_bytes.len())
+                    .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?,
+                elapsed_micros: u64::try_from(started.elapsed().as_micros())
+                    .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?,
+            },
+        };
+        self.append(&DurableSpoolRecordV2::Transition {
+            transition,
+            receipt: receipt.clone(),
+        })
+        .map_err(map_persistence_error)?;
+        Ok(receipt)
     }
 
     fn begin_replay_attempt(
@@ -551,6 +599,35 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
         })
         .map_err(map_persistence_error)?;
         Ok(replay_attempt)
+    }
+
+    fn abandon_replay_attempt(
+        &self,
+        event_id: &str,
+        replay_attempt: u64,
+    ) -> Result<(), RemoteCapturePersistenceErrorV1> {
+        let _guard = self
+            .write_guard
+            .lock()
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
+        let snapshot = self.snapshot().map_err(map_persistence_error)?;
+        let event = snapshot
+            .get(event_id)
+            .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
+        if event.last_attempt != replay_attempt {
+            return Err(RemoteCapturePersistenceErrorV1::Corruption);
+        }
+        if event.active_attempt.is_none() {
+            return Ok(());
+        }
+        if event.active_attempt != Some(replay_attempt) {
+            return Err(RemoteCapturePersistenceErrorV1::Corruption);
+        }
+        self.append(&DurableSpoolRecordV2::ReplayAttemptAbandoned {
+            event_id: event_id.to_owned(),
+            replay_attempt,
+        })
+        .map_err(map_persistence_error)
     }
 }
 
@@ -604,6 +681,25 @@ fn derive_event_id(command: &AdmittedRemoteCaptureV1) -> Result<String, RemoteSp
     ))
     .map_err(|_| RemoteSpoolError::Encoding)?;
     Ok(event_id(&digest))
+}
+
+fn replay_state_digest(event: &PersistedSpoolEventV2) -> Result<ManifestDigest, RemoteSpoolError> {
+    canonical_sha256(&(
+        "tracedecay.remote-replay-spool-state.v1",
+        &event.capture.event_id,
+        event.state,
+        &event.receipt,
+        event.last_attempt,
+    ))
+    .map_err(|_| RemoteSpoolError::Encoding)
+}
+
+fn current_utc_micros() -> Result<UtcMicros, ()> {
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?
+        .as_micros();
+    i64::try_from(micros).map(UtcMicros).map_err(|_| ())
 }
 
 fn derive_persisted_event_id(
@@ -1099,7 +1195,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        RemoteReplaySpoolPortV1::transition(
+        let durable_transition = RemoteReplaySpoolPortV1::transition(
             &capture_spool,
             RemoteReplayTransitionV1 {
                 event_id: capture_receipt.event_id.clone(),
@@ -1112,6 +1208,12 @@ mod tests {
             },
         )
         .unwrap();
+        assert_ne!(
+            durable_transition.pre_state_digest,
+            durable_transition.terminal_state_digest
+        );
+        assert!(durable_transition.budget.bytes_consumed > 0);
+        assert!(durable_transition.committed_at >= UtcMicros(20));
         drop(capture_spool);
 
         let reopened = spool(&root);
@@ -1181,6 +1283,29 @@ mod tests {
             2
         );
         assert_eq!(reopened.state(&receipt.event_id).unwrap().last_attempt, 2);
+    }
+
+    #[test]
+    fn abandoned_attempt_allows_monotonic_same_process_retry() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        let receipt = capture_spool.capture_pending(&command(1, None)).unwrap();
+        let first = capture_spool
+            .begin_replay_attempt(&receipt.event_id, UtcMicros(20))
+            .unwrap();
+        capture_spool
+            .abandon_replay_attempt(&receipt.event_id, first)
+            .unwrap();
+        assert_eq!(
+            capture_spool
+                .begin_replay_attempt(&receipt.event_id, UtcMicros(21))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            capture_spool.state(&receipt.event_id).unwrap().last_attempt,
+            2
+        );
     }
 
     #[test]
