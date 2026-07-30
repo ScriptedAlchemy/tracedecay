@@ -4,8 +4,8 @@ use super::{
     is_extract_worker, is_local_install_command, should_skip_agent_install_maintenance,
     should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
 };
-use tracedecay::extraction::complexity::{RUST_COMPLEXITY, count_complexity};
 use tracedecay::user_config::UserConfig;
+use tracedecay_code_extraction::complexity::{RUST_COMPLEXITY, count_complexity};
 use tree_sitter::Node;
 
 fn find_rust_function<'tree>(node: Node<'tree>, source: &[u8], name: &str) -> Option<Node<'tree>> {
@@ -38,7 +38,7 @@ fn dispatch_command_stays_a_thin_family_router() {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(
-            &tracedecay::extraction::ts_provider::language("rust")
+            &tracedecay_code_extraction::ts_provider::language("rust")
                 .expect("failed to load Rust grammar"),
         )
         .expect("failed to load Rust grammar");
