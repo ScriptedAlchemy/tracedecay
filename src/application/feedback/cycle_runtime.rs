@@ -34,12 +34,12 @@ use tracedecay_domain::feedback::{
 use tracedecay_domain::{
     FileOccurrenceId, RetrievalAnchorId, SymbolOccurrenceId, canonical_sha256,
 };
-use tracedecay_policy::CapabilityRoutingDecisionV1;
-
-use crate::daemon::lsp_gateway::{
+use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
     LspRuntimeFuture,
 };
+use tracedecay_policy::CapabilityRoutingDecisionV1;
+
 use crate::db::Database;
 use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
 use crate::tracedecay::TraceDecay;

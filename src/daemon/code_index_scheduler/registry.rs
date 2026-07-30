@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
+use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
 use super::{
     CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceTelemetryV1,
@@ -1131,15 +1132,11 @@ impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentI
     {
         let registry = self.clone();
         Box::pin(async move {
-            let root = project_root.canonicalize().map_err(|_| {
-                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                    "feedback-code-index-root-unavailable",
-                )
-            })?;
+            let root = project_root
+                .canonicalize()
+                .map_err(|_| LspRuntimeFailure::new("feedback-code-index-root-unavailable"))?;
             let current = registry.latest_complete_ready(&root).await.ok_or_else(|| {
-                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                    "feedback-code-index-generation-unavailable",
-                )
+                LspRuntimeFailure::new("feedback-code-index-generation-unavailable")
             })?;
             let generation = &current.generation;
             let snapshot = generation.snapshot();
@@ -1151,9 +1148,7 @@ impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentI
                         .iter()
                         .find(|file| file.logical_path == logical_path)
                         .ok_or_else(|| {
-                            crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                                "feedback-code-index-document-unavailable",
-                            )
+                            LspRuntimeFailure::new("feedback-code-index-document-unavailable")
                         })?
                 }
                 None => snapshot
@@ -1166,17 +1161,13 @@ impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentI
                             == Some("rs")
                     })
                     .ok_or_else(|| {
-                        crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                            "feedback-code-index-rust-document-unavailable",
-                        )
+                        LspRuntimeFailure::new("feedback-code-index-rust-document-unavailable")
                     })?,
             };
             let generation_digest =
                 ManifestDigest::new(generation.manifest().snapshot_digest.as_str().to_owned())
                     .map_err(|_| {
-                        crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                            "feedback-code-index-generation-invalid",
-                        )
+                        LspRuntimeFailure::new("feedback-code-index-generation-invalid")
                     })?;
             Ok(
                 crate::application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1 {
@@ -1276,24 +1267,18 @@ impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
         &self,
         project_root: PathBuf,
         document_relative_path: Option<String>,
-    ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
-        Result<
-            crate::application::lsp_runtime::LspCodeIndexProjectionIdentity,
-            crate::daemon::lsp_gateway::LspRuntimeFailure,
-        >,
+    ) -> LspRuntimeFuture<
+        Result<crate::application::lsp_runtime::LspCodeIndexProjectionIdentity, LspRuntimeFailure>,
     > {
         let registry = self.clone();
         Box::pin(async move {
-            let root = project_root.canonicalize().map_err(|_| {
-                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                    "lsp-code-index-root-unavailable",
-                )
-            })?;
-            let current = registry.latest_complete_ready(&root).await.ok_or_else(|| {
-                crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                    "lsp-code-index-generation-unavailable",
-                )
-            })?;
+            let root = project_root
+                .canonicalize()
+                .map_err(|_| LspRuntimeFailure::new("lsp-code-index-root-unavailable"))?;
+            let current = registry
+                .latest_complete_ready(&root)
+                .await
+                .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
             let generation = &current.generation;
             let document_content_digest = document_relative_path
                 .map(|path| path.replace('\\', "/"))
@@ -1305,9 +1290,7 @@ impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                         .find(|file| file.logical_path == logical_path)
                         .map(|file| file.content_digest.clone())
                         .ok_or_else(|| {
-                            crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-                                "lsp-code-index-document-unavailable",
-                            )
+                            LspRuntimeFailure::new("lsp-code-index-document-unavailable")
                         })
                 })
                 .transpose()?;
@@ -1327,34 +1310,27 @@ impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
 fn feedback_document_logical_path(
     project_root: &Path,
     document_uri: &str,
-) -> Result<String, crate::daemon::lsp_gateway::LspRuntimeFailure> {
-    let url = url::Url::parse(document_uri).map_err(|_| {
-        crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-uri-invalid")
-    })?;
+) -> Result<String, LspRuntimeFailure> {
+    let url = url::Url::parse(document_uri)
+        .map_err(|_| LspRuntimeFailure::new("feedback-document-uri-invalid"))?;
     if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
-        return Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-            "feedback-document-uri-invalid",
-        ));
+        return Err(LspRuntimeFailure::new("feedback-document-uri-invalid"));
     }
-    let path = url.to_file_path().map_err(|()| {
-        crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-uri-invalid")
-    })?;
-    let relative = path.strip_prefix(project_root).map_err(|_| {
-        crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-outside-root")
-    })?;
+    let path = url
+        .to_file_path()
+        .map_err(|()| LspRuntimeFailure::new("feedback-document-uri-invalid"))?;
+    let relative = path
+        .strip_prefix(project_root)
+        .map_err(|_| LspRuntimeFailure::new("feedback-document-outside-root"))?;
     if relative.as_os_str().is_empty()
         || relative
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
     {
-        return Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
-            "feedback-document-uri-invalid",
-        ));
+        return Err(LspRuntimeFailure::new("feedback-document-uri-invalid"));
     }
     relative
         .to_str()
         .map(|path| path.replace('\\', "/"))
-        .ok_or_else(|| {
-            crate::daemon::lsp_gateway::LspRuntimeFailure::new("feedback-document-path-unavailable")
-        })
+        .ok_or_else(|| LspRuntimeFailure::new("feedback-document-path-unavailable"))
 }

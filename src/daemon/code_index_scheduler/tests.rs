@@ -3506,7 +3506,6 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
         LspFeedbackDocumentSnapshotPort, LspFeedbackProjectionScope,
     };
-    use crate::daemon::lsp_gateway::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure};
     use crate::diagnostics_publication::{
         CodeIndexPublicationIdentityPortV1, CompilerDiagnosticPublicationOutcomeV1,
         publish_compiler_diagnostics_through_code_index_v1,
@@ -3520,6 +3519,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         FeedbackResultId, FeedbackScopeV1, FeedbackTargetV1, ProviderEvaluationStateV1,
     };
     use tracedecay_domain::{ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan};
+    use tracedecay_lsp::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure, LspRuntimeFuture};
 
     struct FixedDocument(String);
 
@@ -3528,9 +3528,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
             &self,
             _root: AdmittedRoot,
             _document_uri: String,
-        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
-            Result<LspFeedbackDocumentSnapshot, LspRuntimeFailure>,
-        > {
+        ) -> LspRuntimeFuture<Result<LspFeedbackDocumentSnapshot, LspRuntimeFailure>> {
             let text = self.0.clone();
             Box::pin(async move { Ok(LspFeedbackDocumentSnapshot { text }) })
         }

@@ -93,6 +93,7 @@ use crate::application::feedback::{
     ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
     resolve_production_feedback_cycle_parts,
 };
+use crate::application::lsp_runtime::{DaemonLspSessionFactory, graph_semantic_capabilities};
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
     admitted_root_uri_for_project, locator_digest_for_project,
@@ -100,16 +101,14 @@ use crate::application::primitives::{
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
-use crate::daemon::lsp_gateway::DaemonLspSessionFactory;
 use crate::daemon::service::invocation::{
     daemon_operation_event_authority, observe_accepted_feedback_cycle_terminal,
 };
-use crate::diagnostics::lsp::broker::{AdmittedLspProvider, MountedLspProvider};
-use crate::diagnostics::lsp::client::LspRefreshTimeouts;
-use crate::diagnostics::lsp::semantic::graph_semantic_capabilities;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::mcp::McpServer;
+use tracedecay_lsp::analyzer::broker::{AdmittedLspProvider, MountedLspProvider};
+use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
 const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
@@ -1582,7 +1581,7 @@ async fn register_production_lsp_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     database: crate::db::Database,
-    diagnostic_broker: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     admitted_providers: &[AdmittedLspProvider],
     root_uri: String,
 ) -> Result<Arc<DaemonLspSessionFactory>> {

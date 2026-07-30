@@ -8,7 +8,7 @@ use super::{
     SharedCodeIndexBytePoolV1,
 };
 use crate::code_index::production::{CodeIndexInterruptionV1, CodeIndexProductionErrorV1};
-use crate::daemon::lsp_gateway::{
+use tracedecay_lsp::{
     AdmittedRoot, ClientCapabilities, DaemonLspProtocolSession, FeedbackCyclePort,
     FeedbackCycleRequest, FeedbackCycleResponse, GatewayCapabilities, SemanticProviderPort,
     UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, negotiate_capabilities,
