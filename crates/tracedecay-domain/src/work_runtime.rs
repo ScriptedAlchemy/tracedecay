@@ -450,8 +450,12 @@ pub enum WorkRecoveryStateV1 {
         source_attempt_id: AttemptId,
         reason: WorkRestartReasonV1,
     },
+    /// The attempt cannot continue and must be recovered. A first attempt
+    /// lost before it ever resumed anything has no predecessor, so the source
+    /// is absent rather than pointing at the attempt itself.
     RecoveryRequired {
-        source_attempt_id: AttemptId,
+        #[serde(default)]
+        source_attempt_id: Option<AttemptId>,
         reason: WorkRestartReasonV1,
     },
 }
@@ -466,10 +470,10 @@ impl WorkRecoveryStateV1 {
             }
             | Self::Restarted {
                 source_attempt_id, ..
-            }
-            | Self::RecoveryRequired {
-                source_attempt_id, ..
             } => Some(source_attempt_id),
+            Self::RecoveryRequired {
+                source_attempt_id, ..
+            } => source_attempt_id.as_ref(),
         }
     }
 }

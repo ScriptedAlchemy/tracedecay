@@ -438,11 +438,7 @@ where
         let current = self.load_with_fence(authority, identity, lease)?;
         let artifacts = current.artifacts().to_vec();
         let recovery = WorkRecoveryStateV1::RecoveryRequired {
-            source_attempt_id: current
-                .recovery()
-                .source_attempt_id()
-                .cloned()
-                .ok_or(WorkRuntimeContractError::SelfRecovery)?,
+            source_attempt_id: current.recovery().source_attempt_id().cloned(),
             reason,
         };
         self.transition(
@@ -860,14 +856,14 @@ mod tests {
         assert_eq!(
             recovering.recovery(),
             &WorkRecoveryStateV1::RecoveryRequired {
-                source_attempt_id: predecessor,
+                source_attempt_id: Some(predecessor),
                 reason: WorkRestartReasonV1::ProviderUnavailable,
             }
         );
     }
 
     #[test]
-    fn an_attempt_with_no_predecessor_cannot_be_marked_for_recovery() {
+    fn a_first_attempt_lost_before_it_resumed_anything_can_still_require_recovery() {
         let attempt = leased_attempt("attempt.work.fresh-recovery");
         let identity = attempt.identity().clone();
         let service = WorkExecutionService::new(FakePersistence::seeded(attempt));
@@ -881,16 +877,27 @@ mod tests {
             )
             .unwrap();
 
+        let recovering = service
+            .require_recovery(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRestartReasonV1::ProcessLost,
+            )
+            .unwrap();
+
+        assert_eq!(recovering.state(), WorkAttemptStateV1::RecoveryRequired);
         assert_eq!(
-            service
-                .require_recovery(
-                    &authority(),
-                    &identity,
-                    &lease(1),
-                    WorkRestartReasonV1::ProcessLost,
-                )
-                .unwrap_err(),
-            WorkExecutionError::Contract(WorkRuntimeContractError::SelfRecovery)
+            recovering.recovery(),
+            &WorkRecoveryStateV1::RecoveryRequired {
+                source_attempt_id: None,
+                reason: WorkRestartReasonV1::ProcessLost,
+            },
+            "a first attempt has no predecessor and must not name itself"
+        );
+        assert_ne!(
+            recovering.recovery().source_attempt_id(),
+            Some(identity.attempt_id())
         );
     }
 

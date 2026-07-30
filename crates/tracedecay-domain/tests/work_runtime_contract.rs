@@ -370,3 +370,87 @@ fn generated_runtime_schema_names_are_stable() {
     );
     assert_eq!(schema_name::<WorkAttemptV1>(), "WorkAttemptV1");
 }
+
+#[test]
+fn a_first_attempt_can_require_recovery_without_naming_a_predecessor() {
+    let attempt = |recovery| {
+        WorkAttemptV1::new(
+            identity(),
+            binding(),
+            lease(2),
+            WorkAttemptStateV1::RecoveryRequired,
+            None,
+            Vec::new(),
+            WorkCancellationStateV1::None,
+            recovery,
+            route("provider.work.requested", "route.work.requested"),
+            None,
+            None,
+        )
+    };
+
+    let orphan = attempt(WorkRecoveryStateV1::RecoveryRequired {
+        source_attempt_id: None,
+        reason: WorkRestartReasonV1::ProcessLost,
+    })
+    .expect("a lost first attempt has no predecessor to name");
+    assert_eq!(orphan.recovery().source_attempt_id(), None);
+
+    let successor = attempt(WorkRecoveryStateV1::RecoveryRequired {
+        source_attempt_id: Some(id::<AttemptId>("attempt.work.runtime.0")),
+        reason: WorkRestartReasonV1::ProcessLost,
+    })
+    .expect("a later attempt names the predecessor it recovers");
+    assert_eq!(
+        successor.recovery().source_attempt_id(),
+        Some(&id::<AttemptId>("attempt.work.runtime.0"))
+    );
+
+    assert!(
+        attempt(WorkRecoveryStateV1::RecoveryRequired {
+            source_attempt_id: Some(identity().attempt_id().clone()),
+            reason: WorkRestartReasonV1::ProcessLost,
+        })
+        .is_err(),
+        "an attempt must never recover from itself"
+    );
+}
+
+#[test]
+fn persisted_recovery_required_payloads_survive_the_optional_predecessor() {
+    let orphan = WorkRecoveryStateV1::RecoveryRequired {
+        source_attempt_id: None,
+        reason: WorkRestartReasonV1::LeaseLost,
+    };
+    let encoded = serde_json::to_value(&orphan).unwrap();
+    assert_eq!(encoded["state"], json!("recovery_required"));
+    assert_eq!(encoded["source_attempt_id"], json!(null));
+    assert_eq!(
+        serde_json::from_value::<WorkRecoveryStateV1>(encoded).unwrap(),
+        orphan
+    );
+
+    // A payload written before the predecessor became optional still names one.
+    assert_eq!(
+        serde_json::from_value::<WorkRecoveryStateV1>(json!({
+            "state": "recovery_required",
+            "source_attempt_id": "attempt.work.runtime.0",
+            "reason": "process_lost"
+        }))
+        .unwrap(),
+        WorkRecoveryStateV1::RecoveryRequired {
+            source_attempt_id: Some(id::<AttemptId>("attempt.work.runtime.0")),
+            reason: WorkRestartReasonV1::ProcessLost,
+        }
+    );
+
+    // A payload that omits the field entirely reads as no predecessor.
+    assert_eq!(
+        serde_json::from_value::<WorkRecoveryStateV1>(json!({
+            "state": "recovery_required",
+            "reason": "lease_lost"
+        }))
+        .unwrap(),
+        orphan
+    );
+}
