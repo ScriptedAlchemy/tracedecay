@@ -92,7 +92,7 @@ impl WorkStoragePort for TestStore {
             .find(|event| event.command_id() == request.event.command_id())
         {
             return if prior.input_digest() == request.event.input_digest() {
-                Ok(WorkAppendOutcome::Replayed(history.clone()))
+                Ok(WorkAppendOutcome::Replayed(projection(history)?))
             } else {
                 Err(WorkStorageError::IdempotencyConflict)
             };
@@ -103,8 +103,12 @@ impl WorkStoragePort for TestStore {
             return Err(WorkStorageError::VersionConflict);
         }
         history.push(request.event.clone());
-        Ok(WorkAppendOutcome::Appended(history.clone()))
+        Ok(WorkAppendOutcome::Appended(projection(history)?))
     }
+}
+
+fn projection(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
+    WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
 }
 
 fn create(
