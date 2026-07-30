@@ -255,6 +255,7 @@ pub struct MultiRootContinuationV1 {
     root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
     query_digest: ManifestDigest,
     order_digest: ManifestDigest,
+    #[schemars(range(min = 1))]
     next_page: u64,
     digest: ManifestDigest,
 }
