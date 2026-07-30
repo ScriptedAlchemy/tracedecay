@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 pub const V0067_RELEASE_TAG: &str = "v0.0.67";
 pub const V0067_RELEASE_COMMIT: &str = "b3eace523cedeaa8e2d1c8d3f7a669167ec6858d";
 pub const LAST_RELEASED_SCHEMA_ID: &str = "tracedecay.release.v0.0.67";
@@ -16,7 +18,8 @@ const LCM_SCHEMA_SOURCE_SHA256: &str =
 const STORAGE_SCHEMA_SOURCE_SHA256: &str =
     "eff245be30b0c23587caef2dee87be080eb24f03d3c93722b49c8100331c153b";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReleasedStoreKind {
     Project,
     GlobalSession,
@@ -25,7 +28,8 @@ pub enum ReleasedStoreKind {
     RepositoryIdentity,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleasedSchemaEvidence {
     pub kind: ReleasedStoreKind,
     pub user_version: Option<u32>,
@@ -211,6 +215,8 @@ pub enum FinalSchemaFamily {
     RemoteReplayDeduplication,
     RemoteBackupStaging,
     RemoteAuthorityCas,
+    ExternalSourceAuthorityRevisions,
+    ExternalSourceProjectionPublications,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -252,6 +258,8 @@ impl FinalTargetSchemaManifest {
             RemoteReplayDeduplication,
             RemoteBackupStaging,
             RemoteAuthorityCas,
+            ExternalSourceAuthorityRevisions,
+            ExternalSourceProjectionPublications,
         ]
         .into_iter()
         .map(|family| {
@@ -280,6 +288,16 @@ impl FinalTargetSchemaManifest {
                     BTreeSet::from([FinalSchemaInvariant::VerifiedBackupBeforeDestruction])
                 }
                 RemoteAuthorityCas => BTreeSet::from([FinalSchemaInvariant::CompareAndSwap]),
+                ExternalSourceAuthorityRevisions => BTreeSet::from([
+                    FinalSchemaInvariant::ExactProjectAndSourceGeneration,
+                    FinalSchemaInvariant::CompareAndSwap,
+                    FinalSchemaInvariant::DurableReplayDeduplication,
+                ]),
+                ExternalSourceProjectionPublications => BTreeSet::from([
+                    FinalSchemaInvariant::ExactProjectAndSourceGeneration,
+                    FinalSchemaInvariant::CompareAndSwap,
+                    FinalSchemaInvariant::DurableReplayDeduplication,
+                ]),
             };
             FinalSchemaFamilyManifest { family, invariants }
         })
@@ -298,7 +316,7 @@ impl FinalTargetSchemaManifest {
     }
 
     pub fn validate(&self) -> Result<(), MigrationContractError> {
-        if self.schema_id != FINAL_V2_SCHEMA_ID || self.families.len() != 13 {
+        if self.schema_id != FINAL_V2_SCHEMA_ID || self.families.len() != 15 {
             return Err(MigrationContractError::TargetSchemaMismatch);
         }
         let unique = self
@@ -347,7 +365,8 @@ impl LastReleasedToFinalV2MigrationContract {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExactMigrationSourceIdentity {
     pub project_id: String,
     pub source_generation: String,
@@ -375,7 +394,8 @@ impl ExactMigrationSourceIdentity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerifiedBackupIdentity {
     pub backup_id: String,
     pub source: ExactMigrationSourceIdentity,
@@ -410,7 +430,8 @@ impl VerifiedBackupIdentity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CutoverPublicationReceipt {
     pub receipt_id: String,
     pub source: ExactMigrationSourceIdentity,
@@ -492,7 +513,8 @@ pub enum CutoverRecoveryAction {
     RollForwardAfterPublication,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurableMigrationCheckpoint {
     pub checkpoint_id: String,
     pub migration_id: String,
