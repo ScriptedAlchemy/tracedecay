@@ -60,7 +60,7 @@ pub(crate) async fn read_source(
     let args_hash = read_cache::args_hash(&json!({
         "lines": raw_lines,
         "last_sync_at": last_sync_at,
-    }));
+    }))?;
 
     let cache_connection = graph.db().engine_conn();
     if let Some(cached) = read_cache::get(
