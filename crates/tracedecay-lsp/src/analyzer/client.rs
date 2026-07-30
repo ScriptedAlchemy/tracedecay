@@ -296,6 +296,7 @@ impl StdioLspClient {
                 "params": {
                     "processId": null,
                     "rootUri": file_uri(project_root),
+                    "initializationOptions": lsp_initialization_options(command),
                     "capabilities": {
                         "textDocument": {
                             "publishDiagnostics": {},
@@ -996,6 +997,20 @@ fn file_uri(path: &Path) -> String {
     file_uri_from_path_text(&absolute.to_string_lossy())
 }
 
+fn lsp_initialization_options(command: &str) -> Value {
+    if Path::new(command)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        == Some("rust-analyzer")
+    {
+        // TraceDecay owns compiler diagnostics separately. Keep rust-analyzer's
+        // fast native diagnostics without launching a competing Cargo flycheck.
+        json!({ "checkOnSave": false })
+    } else {
+        json!({})
+    }
+}
+
 /// Build a `file://` URI from raw path text, normalizing `\` to `/` and
 /// percent-encoding. Handles POSIX paths, Windows drive paths (`C:/…`), and UNC
 /// (`//server/share`) prefixes. Shared with the Kiro installer.
@@ -1104,7 +1119,7 @@ mod tests {
 
     use super::{
         LspSemanticRequestError, cancel_request_message, file_uri_from_path_text,
-        is_current_diagnostic_publication,
+        is_current_diagnostic_publication, lsp_initialization_options,
     };
 
     #[test]
@@ -1176,6 +1191,15 @@ mod tests {
                 "params": { "id": 42 },
             })
         );
+    }
+
+    #[test]
+    fn rust_analyzer_initialization_disables_competing_cargo_flycheck() {
+        assert_eq!(
+            lsp_initialization_options("/toolchains/stable/bin/rust-analyzer"),
+            json!({ "checkOnSave": false })
+        );
+        assert_eq!(lsp_initialization_options("clangd"), json!({}));
     }
 
     #[test]

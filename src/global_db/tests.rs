@@ -999,6 +999,13 @@ async fn session_temporal_repair_drains_to_an_honest_terminal_state() {
             .unwrap(),
         super::SessionTemporalRepairOutcome::NotRequired
     );
+    assert_eq!(
+        super::enqueue_session_temporal_store_repair(&db)
+            .await
+            .unwrap(),
+        super::SessionTemporalRepairOutcome::NotRequired,
+        "the exact completed repair version must not be enqueued again"
+    );
 }
 
 #[cfg(unix)]
