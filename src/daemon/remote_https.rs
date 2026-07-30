@@ -1,6 +1,6 @@
 use std::io::{BufReader, ErrorKind};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls;
 use tower::ServiceExt;
 use tracedecay_application::remote::protocol::{
-    EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolPortV1,
+    RemoteEnrollmentProtocolPortV1, RemoteProtocolPortV1,
 };
 use tracedecay_application::remote::query::{RemoteQueryRequestV1, RemoteQueryResultV1};
 use tracedecay_application::remote::recovery::{
@@ -30,6 +30,7 @@ use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplay
 
 const REMOTE_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_REMOTE_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_REMOTE_CONNECTIONS: usize = 64;
 
 /// Versioned daemon-owned Remote Brain HTTPS listener configuration.
@@ -70,6 +71,43 @@ impl Default for RemoteBrainHttpsConfigV1 {
 }
 
 impl RemoteBrainHttpsConfigV1 {
+    pub fn load_optional(path: Option<&Path>) -> Result<Self, RemoteBrainHttpsError> {
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let metadata = std::fs::metadata(path).map_err(RemoteBrainHttpsError::ConfigIo)?;
+        if metadata.len() > MAX_REMOTE_CONFIG_BYTES {
+            return Err(RemoteBrainHttpsError::InvalidConfiguration);
+        }
+        let bytes = std::fs::read(path).map_err(RemoteBrainHttpsError::ConfigIo)?;
+        let config: Self = serde_json::from_slice(&bytes)
+            .map_err(|_| RemoteBrainHttpsError::InvalidConfiguration)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), RemoteBrainHttpsError> {
+        if self.version != 1 {
+            return Err(RemoteBrainHttpsError::UnsupportedVersion(self.version));
+        }
+        match self.enablement {
+            RemoteBrainHttpsEnablementV1::Enabled => {
+                self.validate_enabled()?;
+            }
+            RemoteBrainHttpsEnablementV1::Unconfigured | RemoteBrainHttpsEnablementV1::Disabled => {
+                if self.bind_address.is_some()
+                    || self.advertised_endpoint.is_some()
+                    || self.certificate_chain_path.is_some()
+                    || self.private_key_path.is_some()
+                    || self.client_ca_bundle_path.is_some()
+                {
+                    return Err(RemoteBrainHttpsError::InvalidConfiguration);
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn state(&self) -> RemoteBrainHttpsStateV1 {
         match self.enablement {
@@ -171,6 +209,10 @@ pub enum RemoteBrainHttpsError {
     InvalidAdvertisedEndpoint,
     #[error("Remote Brain TLS credentials are unavailable or invalid")]
     TlsCredentials,
+    #[error("Remote Brain HTTPS configuration is invalid")]
+    InvalidConfiguration,
+    #[error("Remote Brain HTTPS configuration could not be read: {0}")]
+    ConfigIo(std::io::Error),
     #[error("Remote Brain HTTPS listener failed: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -230,15 +272,17 @@ impl RemoteBrainHttpsService {
 
     pub async fn shutdown(self) -> Result<(), RemoteBrainHttpsError> {
         let _ = self.shutdown.send(());
-        timeout(REMOTE_CONNECTION_DRAIN_TIMEOUT, self.task)
+        self.task
             .await
-            .map_err(|_| {
-                RemoteBrainHttpsError::Io(std::io::Error::new(
-                    ErrorKind::TimedOut,
-                    "Remote Brain HTTPS listener did not drain",
-                ))
-            })?
             .map_err(|error| RemoteBrainHttpsError::Io(std::io::Error::other(error)))?
+    }
+
+    #[cfg(test)]
+    pub(super) async fn bind_test_router(
+        config: &RemoteBrainHttpsConfigV1,
+        router: Router,
+    ) -> Result<Self, RemoteBrainHttpsError> {
+        Self::bind(config, router).await
     }
 }
 
