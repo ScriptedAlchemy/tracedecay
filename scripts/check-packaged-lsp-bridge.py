@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 import json
 import os
-import select
-import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import BinaryIO
 
 
 TIMEOUT_SECONDS = 30
@@ -22,25 +19,10 @@ def framed(value: dict[str, object]) -> bytes:
     return f"Content-Length: {len(body)}\r\n\r\n".encode() + body
 
 
-def read_available(stream: BinaryIO, deadline: float) -> bytes:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        fail("packaged LSP bridge initialize response timed out")
-    ready, _, _ = select.select([stream], [], [], remaining)
-    if not ready:
-        fail("packaged LSP bridge initialize response timed out")
-    chunk = os.read(stream.fileno(), 8192)
-    if not chunk:
-        fail("packaged LSP bridge closed before initialize response")
-    return chunk
-
-
-def read_frame(stream: BinaryIO) -> dict[str, object]:
-    deadline = time.monotonic() + TIMEOUT_SECONDS
-    buffered = b""
-    while b"\r\n\r\n" not in buffered:
-        buffered += read_available(stream, deadline)
-    header, buffered = buffered.split(b"\r\n\r\n", 1)
+def read_frame(payload: bytes) -> dict[str, object]:
+    if b"\r\n\r\n" not in payload:
+        fail("packaged LSP bridge returned incomplete Content-Length framing")
+    header, buffered = payload.split(b"\r\n\r\n", 1)
     lengths = [
         line.split(b":", 1)[1].strip()
         for line in header.split(b"\r\n")
@@ -49,8 +31,8 @@ def read_frame(stream: BinaryIO) -> dict[str, object]:
     if len(lengths) != 1 or not lengths[0].isdigit():
         fail("packaged LSP bridge returned invalid Content-Length framing")
     body_length = int(lengths[0])
-    while len(buffered) < body_length:
-        buffered += read_available(stream, deadline)
+    if len(buffered) < body_length:
+        fail("packaged LSP bridge closed before initialize response")
     try:
         value = json.loads(buffered[:body_length])
     except json.JSONDecodeError as error:
@@ -71,20 +53,61 @@ def terminate(process: subprocess.Popen[bytes] | None) -> None:
         process.wait(timeout=5)
 
 
-def wait_for_daemon(socket_path: Path, daemon: subprocess.Popen[bytes]) -> None:
+def daemon_command(
+    binary: Path, socket_path: Path, *, platform_name: str = os.name
+) -> list[str]:
+    command = [str(binary), "daemon", "run"]
+    if platform_name != "nt":
+        command.extend(["--socket", str(socket_path)])
+    return command
+
+
+def daemon_environment(
+    environment: dict[str, str],
+    socket_path: Path,
+    *,
+    platform_name: str = os.name,
+) -> dict[str, str]:
+    configured = environment.copy()
+    configured.pop("TRACEDECAY_DAEMON_SOCKET", None)
+    if platform_name != "nt":
+        configured["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+    return configured
+
+
+def wait_for_daemon(
+    binary: Path,
+    project: Path,
+    environment: dict[str, str],
+    daemon: subprocess.Popen[bytes],
+) -> None:
     deadline = time.monotonic() + TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if daemon.poll() is not None:
             fail(f"packaged daemon exited before bridge startup with {daemon.returncode}")
         try:
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            client.settimeout(0.1)
-            client.connect(str(socket_path))
-            client.close()
-            return
-        except OSError:
+            probe = subprocess.run(
+                [
+                    binary,
+                    "tool",
+                    "active_project",
+                    "--args",
+                    '{"format":"json"}',
+                ],
+                cwd=project,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=2,
+                check=False,
+            )
+            if probe.returncode == 0:
+                return
+        except subprocess.TimeoutExpired:
+            pass
+        if time.monotonic() < deadline:
             time.sleep(0.05)
-    fail("packaged daemon socket did not become ready")
+    fail("packaged daemon endpoint did not become ready")
 
 
 def main() -> None:
@@ -105,12 +128,12 @@ def main() -> None:
     )
     (project / "src/lib.rs").write_text("pub fn answer() -> u8 { 42 }\n", encoding="utf-8")
 
-    environment = os.environ.copy()
-    environment.pop("TRACEDECAY_DATA_DIR", None)
-    environment.pop("NEXTEST_TEST_NAME", None)
-    environment["HOME"] = str(home)
-    environment["USERPROFILE"] = str(home)
-    environment["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+    base_environment = os.environ.copy()
+    base_environment.pop("TRACEDECAY_DATA_DIR", None)
+    base_environment.pop("NEXTEST_TEST_NAME", None)
+    base_environment["HOME"] = str(home)
+    base_environment["USERPROFILE"] = str(home)
+    environment = daemon_environment(base_environment, socket_path)
     initialized = subprocess.run(
         [binary, "init", project],
         cwd=project,
@@ -130,14 +153,14 @@ def main() -> None:
     try:
         with daemon_log.open("wb") as daemon_stderr:
             daemon = subprocess.Popen(
-                [binary, "daemon", "run", "--socket", socket_path],
+                daemon_command(binary, socket_path),
                 cwd=project,
                 env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=daemon_stderr,
             )
-            wait_for_daemon(socket_path, daemon)
+            wait_for_daemon(binary, project, environment, daemon)
             with bridge_log.open("wb") as bridge_stderr:
                 bridge = subprocess.Popen(
                     [binary, "lsp", "bridge", "--stdio", "--project", project],
@@ -161,9 +184,13 @@ def main() -> None:
                         },
                     },
                 }
-                bridge.stdin.write(framed(request))
-                bridge.stdin.flush()
-                response = read_frame(bridge.stdout)
+                try:
+                    bridge_output, _ = bridge.communicate(
+                        input=framed(request), timeout=TIMEOUT_SECONDS
+                    )
+                except subprocess.TimeoutExpired:
+                    fail("packaged LSP bridge initialize response timed out")
+                response = read_frame(bridge_output)
                 if response.get("id") != 1 or not isinstance(response.get("result"), dict):
                     fail(f"packaged LSP bridge initialize failed: {response}")
                 capabilities = response["result"].get("capabilities")
