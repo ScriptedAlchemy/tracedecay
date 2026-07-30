@@ -1060,7 +1060,7 @@ mod tests {
         let operations = canonical_operations(&registry).unwrap();
         let unavailable = canonical_unavailable_operations(&registry);
 
-        assert_eq!(operations.len(), 17);
+        assert_eq!(operations.len(), 18);
         assert!(unavailable.is_empty());
         let generated = render_operations(&operations, &unavailable).unwrap();
         assert!(generated.contains("route: \"/application/work/snapshot\""));
@@ -1099,7 +1099,7 @@ mod tests {
         let unavailable = canonical_unavailable_operations(&registry);
         let generated = super::render_python_operations(&operations, &unavailable).unwrap();
 
-        assert_eq!(generated.matches("\": \"/application/").count(), 81);
+        assert_eq!(generated.matches("\": \"/application/").count(), 82);
         assert_eq!(generated.matches("\": \"schema_unavailable\"").count(), 64);
         assert!(generated.contains("\"work_attempt_start\": \"/application/work/attempt/start\""));
         assert!(generated.contains("\"work_snapshot\": \"/application/work/snapshot\""));
@@ -1116,7 +1116,7 @@ mod tests {
         let operations = canonical_operations(&registry).unwrap();
         let generated = super::render_rust_operations(&operations).unwrap();
 
-        assert_eq!(generated.matches("typed_operation!(").count(), 17);
+        assert_eq!(generated.matches("typed_operation!(").count(), 18);
         assert!(generated.contains("pub mod work_snapshot"));
         assert!(generated.contains("WorkSnapshot"));
         assert!(generated.contains("pub type Request = request::"));

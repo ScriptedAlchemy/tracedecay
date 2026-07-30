@@ -172,7 +172,7 @@ class ClientTest(unittest.TestCase):
         unavailable_work = set(UNAVAILABLE_OPERATIONS)
 
         self.assertEqual(len(base_names), 64)
-        self.assertEqual(len(available_work), 17)
+        self.assertEqual(len(available_work), 18)
         self.assertEqual(len(unavailable_work), 64)
         self.assertFalse(available_work & unavailable_work)
         self.assertTrue(

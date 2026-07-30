@@ -342,7 +342,7 @@ describe("TraceDecayClient generated operation bindings", () => {
 
   it("publishes all mounted Work routes as executable operations", () => {
     const available = OPERATIONS.map((operation) => operation.operation);
-    expect(OPERATIONS).toHaveLength(17);
+    expect(OPERATIONS).toHaveLength(18);
     expect(UNAVAILABLE_OPERATIONS).toHaveLength(0);
     expect(available).toEqual(
       expect.arrayContaining([

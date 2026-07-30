@@ -59,7 +59,7 @@ fn work_inventory_exposes_every_mounted_route() {
         attempt,
         operation::ExecutableBindingAvailabilityV1::Available { .. }
     ));
-    assert_eq!(registry.iter().count(), 17);
+    assert_eq!(registry.iter().count(), 18);
 }
 
 #[test]
