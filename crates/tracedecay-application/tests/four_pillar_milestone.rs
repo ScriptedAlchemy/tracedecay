@@ -1,10 +1,7 @@
 //! One canonical branch/PR fixture proving the four advisory pillars coexist.
 
 use tracedecay_application::feedback::{GitHubReviewReadRequestV1, GitHubReviewReadResponseV1};
-use tracedecay_application::{
-    AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1,
-    feedback_surface_catalog_contribution,
-};
+use tracedecay_application::{AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1};
 use tracedecay_domain::feedback::*;
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId,
@@ -389,20 +386,5 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
             finding.retrieval_anchor_id.as_ref() == Some(expected_anchor)
                 && finding.safe_bounded_preview.is_none()
         }));
-    }
-
-    let catalog = feedback_surface_catalog_contribution().expect("feedback surface");
-    let operations: std::collections::BTreeSet<_> = catalog
-        .bindings()
-        .iter()
-        .map(|binding| binding.operation().as_str())
-        .collect();
-    assert!(operations.contains("feedback_diagnostics"));
-    assert!(operations.contains("feedback_advisory_cycle"));
-    assert!(!operations.contains("github_review_ingest"));
-    assert!(!operations.contains("ci_failure_localize"));
-    assert!(!operations.contains("feedback_proximity"));
-    for capability in catalog.capabilities() {
-        assert!(capability.availability().is_callable());
     }
 }

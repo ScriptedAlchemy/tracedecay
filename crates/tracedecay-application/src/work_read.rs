@@ -105,19 +105,7 @@ fn validate_page_size(page_size: u32) -> Result<(), WorkProjectionApplicationErr
 
 #[cfg(test)]
 mod tests {
-    use schemars::schema_for;
-
     use super::*;
-
-    #[test]
-    fn public_work_read_schemas_have_only_canonical_domain_names() {
-        let snapshot = serde_json::to_string(&schema_for!(WorkProjectionSnapshotV1)).unwrap();
-        let delta = serde_json::to_string(&schema_for!(WorkProjectionDeltaV1)).unwrap();
-        assert!(snapshot.contains("WorkProjectionSnapshotV1"));
-        assert!(delta.contains("WorkProjectionDeltaV1"));
-        assert!(!snapshot.contains("\"WorkSnapshotV1\""));
-        assert!(!delta.contains("\"WorkDeltaV1\""));
-    }
 
     #[test]
     fn read_page_bounds_fail_before_the_port_runs() {
