@@ -19,7 +19,7 @@ use super::binding::registered_project_reader_tool_names;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 163;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 166;
 #[cfg(test)]
 pub(crate) const UNADVERTISED_HANDLE_GATED_TOOL_NAMES: &[&str] = &[
     "tracedecay_feedback_diagnostics",
@@ -619,6 +619,7 @@ fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
     ];
     definitions.extend(configuration_definitions());
     definitions.extend(context_scout_control_definitions());
+    definitions.extend(multi_root_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
@@ -934,6 +935,33 @@ mod tests {
         assert_eq!(definition.name, "tracedecay_hook_runtime");
         assert_eq!(definition.input_schema, json!({ "type": "object" }));
         assert!(internal_daemon_tool_definition("tracedecay_unknown").is_none());
+    }
+
+    #[test]
+    fn multi_root_tools_publish_canonical_closed_schemas() {
+        let definitions = get_tool_definitions();
+        for name in [
+            "tracedecay_multi_root_scope_set_read",
+            "tracedecay_multi_root_scope_set_compare_and_swap",
+            "tracedecay_multi_root_execute",
+        ] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap_or_else(|| panic!("{name} must be mounted"));
+            assert_eq!(
+                definition.input_schema["additionalProperties"],
+                Value::Bool(false)
+            );
+        }
+        let execute = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_multi_root_execute")
+            .expect("execute definition");
+        assert_eq!(
+            execute.input_schema["$defs"]["ScopeSetRevision"]["minimum"],
+            1
+        );
     }
 
     #[test]

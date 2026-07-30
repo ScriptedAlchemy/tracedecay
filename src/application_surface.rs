@@ -1378,18 +1378,53 @@ where
             },
         )
         .await;
-    let Ok(crate::daemon::DaemonInvocationResponse { outcome, .. }) = response else {
-        return work_adapter_unavailable(
-            request_id,
-            "multi_root.transport_unavailable",
-            "The multi-root application transport is unavailable",
-        );
+    let outcome = match response {
+        Ok(crate::daemon::DaemonInvocationResponse { outcome, .. }) => outcome,
+        Err(_) => {
+            return work_adapter_unavailable(
+                request_id,
+                "multi_root.transport_unavailable",
+                "The multi-root application transport is unavailable",
+            );
+        }
+    };
+    if let crate::daemon::DaemonInvocationOutcome::Problem { problem } = outcome {
+        let problem = match problem {
+            crate::daemon::DaemonInvocationProblem::InvalidRequest
+            | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+                ApplicationProblem::InvalidRequest {
+                    diagnostic: SafeDiagnostic {
+                        code: "multi_root.invalid_request".to_owned(),
+                        message: "The multi-root request is invalid".to_owned(),
+                    },
+                    retry: RetryDirective::Never,
+                    legal_actions: vec![LegalAction::CorrectRequest],
+                }
+            }
+            crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+            }
+            crate::daemon::DaemonInvocationProblem::Unavailable => {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "multi_root.unavailable".to_owned(),
+                    message: "The multi-root authority is unavailable".to_owned(),
+                })
+            }
+        };
+        return CanonicalInvocationResult::<T>::new(
+            binding_id.clone(),
+            Err(
+                ApplicationProblemEnvelope::new(result_contract, request_id, problem)
+                    .with_owning_layer(ProblemOwningLayer::Runtime),
+            ),
+        )
+        .into_http_response();
     };
     let Some((scope, outcome)) = select_outcome(outcome) else {
         return work_adapter_unavailable(
             request_id,
             "multi_root.runtime_unavailable",
-            "The multi-root runtime authority rejected the request",
+            "The multi-root runtime returned a mismatched outcome",
         );
     };
     CanonicalInvocationResult::new(

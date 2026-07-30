@@ -8331,7 +8331,7 @@ impl DaemonInvocationService {
                     );
                 };
                 match storage.read(&request.scope_set_id) {
-                    Ok(scope_set) => {
+                    Ok(Some(scope_set)) => {
                         let Some(project_root) = project_root else {
                             return DaemonInvocationResponse::problem(
                                 request_id,
@@ -8344,7 +8344,7 @@ impl DaemonInvocationService {
                                 RequestId::new(request_id.clone())
                                     .expect("validated daemon request id"),
                                 "scope_set_read",
-                                scope_set,
+                                Some(scope_set),
                                 observed_at,
                                 deadline,
                                 cancellation,
@@ -8361,6 +8361,10 @@ impl DaemonInvocationService {
                             DaemonInvocationOutcome::MultiRootScopeSetRead { scope, outcome },
                         )
                     }
+                    Ok(None) => DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    ),
                     Err(_) => DaemonInvocationResponse::problem(
                         request_id,
                         DaemonInvocationProblem::Unavailable,
