@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Cross-platform installed-binary MCP stdio transport acceptance."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+INSPECTOR_VERSION = "0.22.0"
+REQUIRED_TOOLS = {
+    "tracedecay_search",
+    "tracedecay_diagnostics",
+    "tracedecay_impact",
+    "tracedecay_affected",
+    "tracedecay_test_map",
+}
+
+
+def run(
+    arguments: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        arguments,
+        cwd=cwd,
+        env=environment,
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def inspect(
+    npx: str,
+    binary: Path,
+    fixture: Path,
+    environment: dict[str, str],
+    *arguments: str,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return run(
+        [
+            npx,
+            "-y",
+            f"@modelcontextprotocol/inspector@{INSPECTOR_VERSION}",
+            "--cli",
+            str(binary),
+            "serve",
+            "-p",
+            str(fixture),
+            *arguments,
+        ],
+        cwd=fixture,
+        environment=environment,
+        check=check,
+    )
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        raise SystemExit(
+            "usage: check-packaged-mcp-stdio.py TRACEDecay_BINARY WORK_DIRECTORY"
+        )
+    binary = Path(sys.argv[1]).resolve()
+    work = Path(sys.argv[2]).resolve()
+    npx = shutil.which("npx")
+    if not binary.is_file():
+        raise SystemExit(f"installed tracedecay binary is missing: {binary}")
+    if npx is None:
+        raise SystemExit("npx is required for MCP stdio acceptance")
+
+    fixture = work / "project"
+    home = work / "home"
+    fixture.joinpath("src").mkdir(parents=True, exist_ok=True)
+    home.mkdir(parents=True, exist_ok=True)
+    fixture.joinpath("src", "main.rs").write_text(
+        'fn main() { println!("hello"); }\n', encoding="utf-8"
+    )
+    run(["git", "init", "--quiet"], cwd=fixture, environment=os.environ.copy())
+    run(["git", "add", "src/main.rs"], cwd=fixture, environment=os.environ.copy())
+    run(
+        [
+            "git",
+            "-c",
+            "user.name=TraceDecay MCP Smoke",
+            "-c",
+            "user.email=tracedecay-mcp-smoke@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test: seed MCP smoke fixture",
+        ],
+        cwd=fixture,
+        environment=os.environ.copy(),
+    )
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "APPDATA": str(home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(home / "AppData" / "Local"),
+        }
+    )
+    run([str(binary), "init"], cwd=fixture, environment=environment)
+
+    first = inspect(
+        npx,
+        binary,
+        fixture,
+        environment,
+        "--method",
+        "tools/list",
+    )
+    second = inspect(
+        npx,
+        binary,
+        fixture,
+        environment,
+        "--method",
+        "tools/list",
+    )
+    if first.stdout != second.stdout:
+        raise SystemExit("MCP tools/list output changed across identical invocations")
+    payload = json.loads(first.stdout)
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or not tools:
+        raise SystemExit("MCP tools/list returned no tools")
+    names = {
+        tool.get("name")
+        for tool in tools
+        if isinstance(tool, dict)
+        and isinstance(tool.get("inputSchema"), dict)
+        and tool["inputSchema"].get("type") == "object"
+    }
+    missing = sorted(REQUIRED_TOOLS - names)
+    if missing:
+        raise SystemExit("MCP tools/list omitted required tools: " + ", ".join(missing))
+
+    resources = inspect(
+        npx,
+        binary,
+        fixture,
+        environment,
+        "--method",
+        "resources/list",
+    )
+    resource_payload = json.loads(resources.stdout)
+    if not any(
+        resource.get("uri") == "tracedecay://status"
+        for resource in resource_payload.get("resources", [])
+        if isinstance(resource, dict)
+    ):
+        raise SystemExit("MCP resources/list omitted tracedecay://status")
+
+    unknown = inspect(
+        npx,
+        binary,
+        fixture,
+        environment,
+        "--method",
+        "tools/call",
+        "--tool-name",
+        "definitely_not_a_tool",
+        check=False,
+    )
+    if unknown.returncode == 0:
+        raise SystemExit("unknown MCP tool unexpectedly succeeded")
+
+    print("packaged MCP stdio acceptance passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

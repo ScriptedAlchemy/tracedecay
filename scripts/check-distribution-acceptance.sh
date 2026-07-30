@@ -16,8 +16,6 @@ into an isolated temporary directory, and tests the packaged library and CLI.
 Options:
   --repo PATH   Repository root (default: parent of this script)
   --keep-temp   Preserve the isolated package/install directory
-  --plan        Print the heavyweight commands without running them
-  --self-test   Run static script tests only
   -h, --help    Show this help
 EOF
 }
@@ -29,29 +27,6 @@ die() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
-}
-
-print_plan() {
-  cat <<'EOF'
-python3 tests/distribution/fastembed/prepare_fixture.py --check tests/distribution/fastembed
-# Optional setup accelerator: TRACEDECAY_DISTRIBUTION_FASTEMBED_CACHE=<verified dir>
-python3 tests/distribution/fastembed/prepare_fixture.py tests/distribution/fastembed <temporary verified fixture>
-python3 tests/distribution/fastembed/validate_fixture.py <temporary verified fixture>
-cargo build --workspace --release --all-features --lib --bins
-cargo package --workspace --all-features --allow-dirty --no-verify
-cargo check --release --all-features --lib <extracted tracedecay package>
-CARGO_NET_OFFLINE=true cargo test --release --all-features --lib <packaged model-acquisition lifecycle suite>
-CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 cargo test --release --all-features --lib <packaged background model-acquisition acceptance>
-CARGO_NET_OFFLINE=true cargo test --release --all-features --lib <packaged typed semantic-unavailable acceptance>
-cargo install --root <temporary install root> --all-features <extracted tracedecay package>
-CARGO_NET_OFFLINE=true cargo run --release --bin tracedecay-distribution-consumer <temporary packaged-library consumer>
-cargo build --release --all-features --example fastembed_distribution_acceptance <extracted tracedecay package>
-CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 <built fastembed_distribution_acceptance> <verified local fixture>
-<installed tracedecay> tool
-<installed tracedecay> tool <required-tool> --help
-<installed tracedecay> lsp servers --json
-<installed tracedecay> lsp bridge --help
-EOF
 }
 
 assert_fastembed_fixture() {
@@ -98,9 +73,6 @@ assert_required_assets() {
     "src/application/advisory/runtime.rs"
     "src/application/feedback/cycle_runtime.rs"
     "src/application/primitives/runtime.rs"
-    "src/daemon/lsp_gateway/mod.rs"
-    "src/query/retrieval/semantic/service.rs"
-    "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
     "src/semantic_code/model_lifecycle.rs"
     "tests/fixtures/packaged_host_events/claude.json"
@@ -298,247 +270,6 @@ if unwired:
 PY
 }
 
-run_self_test() {
-  bash -n "$script_path"
-
-  local plan
-  plan=$("$script_path" --plan)
-  local expected
-  for expected in \
-    "python3 tests/distribution/fastembed/prepare_fixture.py" \
-    "python3 tests/distribution/fastembed/validate_fixture.py" \
-    "cargo build --workspace --release --all-features --lib --bins" \
-    "cargo package --workspace --all-features --allow-dirty --no-verify" \
-    "cargo check --release --all-features --lib" \
-    "packaged model-acquisition lifecycle suite" \
-    "packaged background model-acquisition acceptance" \
-    "CARGO_NET_OFFLINE=true cargo test --release --all-features --lib" \
-    "cargo install --root <temporary install root> --all-features" \
-    "cargo build --release --all-features --example fastembed_distribution_acceptance" \
-    "CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 <built fastembed_distribution_acceptance>"; do
-    [[ $plan == *"$expected"* ]] ||
-      die "self-test: plan omitted required all-feature command: $expected"
-  done
-  local pinned_fixture_metadata
-  pinned_fixture_metadata=$(python3 \
-    "$repo/tests/distribution/fastembed/prepare_fixture.py" \
-    --check \
-    "$repo/tests/distribution/fastembed")
-  [[ $pinned_fixture_metadata == $'768\t8192' ]] ||
-    die "self-test: pinned Jina fixture metadata is invalid"
-
-  local fixture
-  fixture=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution-script-test.XXXXXX")
-  local root="$fixture/root"
-  local application="$fixture/application"
-  local api="$fixture/api"
-  local lsp="$fixture/lsp"
-  local path
-  for path in plugin/.lsp.json; do
-    mkdir -p -- "$root/$(dirname -- "$path")"
-    printf '{"fixture":true}\n' >"$root/$path"
-  done
-  for path in \
-    plugin/.claude-plugin/plugin.json \
-    plugin/.codex-plugin/plugin.json \
-    plugin/.cursor-plugin/plugin.json \
-    plugin/.kimi-plugin/plugin.json; do
-    mkdir -p -- "$root/$(dirname -- "$path")"
-    cp -- "$repo/$path" "$root/$path"
-  done
-  for path in \
-    plugin/cursor-native-extension/dist/extension.js \
-    src/agents/host_bundle_registry.rs \
-    src/agents/host_bundle_v2.rs \
-    src/application/advisory/host_delivery.rs \
-    src/application/advisory/runtime.rs \
-    src/application/feedback/cycle_runtime.rs \
-    src/application/primitives/runtime.rs \
-    src/daemon/lsp_gateway/mod.rs \
-    src/query/retrieval/semantic/service.rs \
-    src/query/retrieval/semantic/tests.rs \
-    src/semantic_code/fastembed_adapter.rs \
-    src/semantic_code/model_lifecycle.rs \
-    tests/fixtures/packaged_host_events/claude.json \
-    tests/fixtures/packaged_host_events/claude/post_tool_use_write.json \
-    tests/fixtures/packaged_host_events/cline-family.json \
-    tests/fixtures/packaged_host_events/codex.json \
-    tests/fixtures/packaged_host_events/cursor.json \
-    tests/fixtures/packaged_host_events/hermes.json \
-    tests/fixtures/packaged_host_events/hermes/saved-edit.json \
-    tests/fixtures/packaged_host_events/hermes/terminal-receipt.json \
-    tests/fixtures/packaged_host_events/kiro.json \
-    tests/fixtures/packaged_host_events/kimi-code.json \
-    tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json \
-    tests/fixtures/packaged_host_events/opencode/baseline.json \
-    tests/fixtures/provider_normalization/codex/session_meta.input.json \
-    tests/fixtures/provider_normalization/codex/agent_message.input.json \
-    tests/fixtures/analytics/codex_skill_prose.txt \
-    tests/session_suite/lcm_schema/mod.rs \
-    benchmarks/pr5-observation/workload-v1.json \
-    benchmarks/pr7-memory/workload-v1.json \
-    tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json \
-    benchmarks/search-quality/pr9-fallback-report-v1.json; do
-    mkdir -p -- "$root/$(dirname -- "$path")"
-    : >"$root/$path"
-  done
-  for path in src/feedback/read.rs src/feedback/github_ci_proximity.rs src/advisory.rs; do
-    mkdir -p -- "$application/$(dirname -- "$path")"
-    : >"$application/$path"
-  done
-  for path in src/http.rs src/sse.rs; do
-    mkdir -p -- "$api/$(dirname -- "$path")"
-    : >"$api/$path"
-  done
-  for path in src/bridge.rs src/protocol.rs; do
-    mkdir -p -- "$lsp/$(dirname -- "$path")"
-    : >"$lsp/$path"
-  done
-  mkdir -p -- "$root/dashboard/app-dist/static/js"
-  printf '<script src="/static/js/index.fixture.js"></script>\n' \
-    >"$root/dashboard/app-dist/index.html"
-  printf '%0800d' 0 >"$root/dashboard/app-dist/static/js/index.fixture.js"
-  assert_required_assets "$root" "$application" "$api" "$lsp"
-  rm -- "$lsp/src/protocol.rs"
-  if (assert_required_assets "$root" "$application" "$api" "$lsp") >/dev/null 2>&1; then
-    die "self-test: missing extracted LSP asset was accepted"
-  fi
-  : >"$lsp/src/protocol.rs"
-  rm -- "$root/plugin/.lsp.json"
-  if (assert_required_assets "$root" "$application" "$api" "$lsp") >/dev/null 2>&1; then
-    die "self-test: missing distribution asset was accepted"
-  fi
-
-  cat >"$fixture/source.toml" <<'EOF'
-[package]
-name = "fixture"
-version = "0.0.0"
-
-[features]
-full = ["medium"]
-medium = ["dep:medium"]
-token-counting = ["dep:tokens"]
-semantic-fastembed = ["dep:fastembed"]
-test-transport = []
-
-[dependencies]
-medium = { version = "1", optional = true }
-tokens = { version = "1", optional = true }
-fastembed = { version = "1", optional = true, default-features = false }
-EOF
-  python3 - "$fixture/source.toml" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-path.write_text(
-    path.read_text(encoding="utf-8").replace(
-        'semantic-fastembed = ["dep:fastembed"]',
-        'semantic-fastembed = ["dep:fastembed", "fastembed/ort-download-binaries-rustls-tls"]',
-    ),
-    encoding="utf-8",
-)
-PY
-  cp -- "$fixture/source.toml" "$fixture/packaged.toml"
-  verify_feature_wiring "$fixture/source.toml" "$fixture/packaged.toml"
-  python3 - "$fixture/packaged.toml" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-path.write_text(
-    path.read_text(encoding="utf-8").replace(
-        ', "fastembed/ort-download-binaries-rustls-tls"', ""
-    ),
-    encoding="utf-8",
-)
-PY
-  if (verify_feature_wiring "$fixture/source.toml" "$fixture/packaged.toml") \
-    >/dev/null 2>&1; then
-    die "self-test: missing bundled ORT feature wiring was accepted"
-  fi
-  cp -- "$fixture/source.toml" "$fixture/packaged.toml"
-  python3 - "$fixture/packaged.toml" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-path.write_text(
-    path.read_text(encoding="utf-8").replace(
-        'semantic-fastembed = ["dep:fastembed", "fastembed/ort-download-binaries-rustls-tls"]\n',
-        "",
-    ),
-    encoding="utf-8",
-)
-PY
-  if (verify_feature_wiring "$fixture/source.toml" "$fixture/packaged.toml") \
-    >/dev/null 2>&1; then
-    die "self-test: missing feature wiring was accepted"
-  fi
-
-  local fastembed_fixture="$fixture/fastembed"
-  mkdir -p -- "$fastembed_fixture"
-  python3 - "$fastembed_fixture" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-members = {
-    "model": "model.onnx",
-    "tokenizer": "tokenizer.json",
-    "config": "config.json",
-    "special_tokens_map": "special_tokens_map.json",
-    "tokenizer_config": "tokenizer_config.json",
-}
-manifest_members = {}
-for role, name in members.items():
-    data = f"static validator fixture for {role}".encode()
-    (root / name).write_bytes(data)
-    manifest_members[role] = {
-        "path": name,
-        "upstream_path": name,
-        "length": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-    }
-(root / "fixture.json").write_text(
-    json.dumps(
-        {
-            "schema": "tracedecay.distribution.fastembed-fixture.v1",
-            "model": "JinaEmbeddingsV2BaseCode",
-            "source": {
-                "upstream": "self-test",
-                "revision": "immutable-self-test",
-                "license": "MIT",
-                "license_url": "https://example.invalid/license",
-                "provenance": "self-test provenance",
-            },
-            "expected_dimensions": 2,
-            "max_length": 8,
-            "members": manifest_members,
-        }
-    ),
-    encoding="utf-8",
-)
-PY
-  local fixture_metadata
-  fixture_metadata=$(assert_fastembed_fixture \
-    "$fastembed_fixture" \
-    "$repo/tests/distribution/fastembed/validate_fixture.py")
-  [[ $fixture_metadata == $'2\t8' ]] ||
-    die "self-test: FastEmbed fixture validator returned unexpected metadata"
-  printf 'corrupt\n' >>"$fastembed_fixture/model.onnx"
-  if (assert_fastembed_fixture \
-    "$fastembed_fixture" \
-    "$repo/tests/distribution/fastembed/validate_fixture.py") >/dev/null 2>&1; then
-    die "self-test: corrupt FastEmbed fixture was accepted"
-  fi
-
-  rm -rf -- "$fixture"
-  echo "distribution acceptance script self-test passed"
-}
-
 while (($#)); do
   case "$1" in
     --repo)
@@ -549,14 +280,6 @@ while (($#)); do
     --keep-temp)
       keep_temp=true
       shift
-      ;;
-    --plan)
-      print_plan
-      exit 0
-      ;;
-    --self-test)
-      run_self_test
-      exit 0
       ;;
     -h|--help)
       usage
@@ -607,10 +330,7 @@ cleanup() {
 trap cleanup EXIT
 
 fastembed_fixture_source="$repo/tests/distribution/fastembed"
-fastembed_acquisition_acceptance="$fastembed_fixture_source/acquisition_tests.rs.inc"
 fastembed_fixture="$work/fastembed"
-[[ -f $fastembed_acquisition_acceptance ]] ||
-  die "FastEmbed acquisition acceptance is missing: $fastembed_acquisition_acceptance"
 echo "distribution acceptance: acquiring immutable Jina FastEmbed fixture"
 python3 \
   "$fastembed_fixture_source/prepare_fixture.py" \
@@ -621,12 +341,13 @@ fixture_metadata=$(assert_fastembed_fixture \
   "$fastembed_fixture_source/validate_fixture.py")
 IFS=$'\t' read -r fastembed_dimensions fastembed_max_length <<<"$fixture_metadata"
 
-echo "distribution acceptance: release-building every feature"
+echo "distribution acceptance: release-building the production feature set"
 cargo build \
   --manifest-path "$repo/Cargo.toml" \
   --workspace \
   --release \
-  --all-features \
+  --no-default-features \
+  --features tracedecay/production \
   --lib \
   --bins
 
@@ -634,7 +355,6 @@ echo "distribution acceptance: packaging every workspace crate"
 cargo package \
   --manifest-path "$repo/Cargo.toml" \
   --workspace \
-  --all-features \
   --allow-dirty \
   --no-verify
 
@@ -686,7 +406,8 @@ api_package=${package_dirs[tracedecay-api]:-}
 catalog_package=${package_dirs[tracedecay-tool-catalog]:-}
 lsp_package=${package_dirs[tracedecay-lsp]:-}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]:-}
-[[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package && -n $lsp_package && -n $code_extraction_package ]] ||
+query_package=${package_dirs[tracedecay-query]:-}
+[[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package && -n $lsp_package && -n $code_extraction_package && -n $query_package ]] ||
   die "workspace packages required by the distribution gate were not produced"
 
 assert_required_assets \
@@ -713,7 +434,7 @@ for package in sorted(metadata["packages"], key=lambda value: value["name"]):
 PY
 
 echo "distribution acceptance: testing packaged patched Rust grammar"
-cargo test \
+"$repo/scripts/require-exact-test.sh" cargo test \
   --manifest-path "$code_extraction_package/Cargo.toml" \
   --all-features \
   --config "$patch_config" \
@@ -721,11 +442,12 @@ cargo test \
   test_rust_cfg_attribute_in_struct_pattern_field \
   -- --exact
 
-echo "distribution acceptance: compiling packaged library with every feature"
+echo "distribution acceptance: compiling packaged library with production features"
 cargo check \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
-  --all-features \
+  --no-default-features \
+  --features production \
   --lib \
   --config "$patch_config"
 
@@ -752,49 +474,95 @@ PY
 export ORT_LIB_PATH="$ort_lib_path"
 
 echo "distribution acceptance: checking packaged model-acquisition lifecycle suite"
-CARGO_NET_OFFLINE=true cargo test \
+CARGO_NET_OFFLINE=true REQUIRE_EXACT_TEST_COUNT=15 \
+  "$repo/scripts/require-exact-test.sh" cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
-  --all-features \
+  --no-default-features \
+  --features production \
   --lib \
   --config "$patch_config" \
   semantic_code::model_lifecycle::tests::
 
-cat "$repo/tests/distribution/fastembed/semantic_unavailable_tests.rs.inc" \
-  >>"$root_package/src/query/retrieval/semantic/tests.rs"
-cat "$fastembed_acquisition_acceptance" \
-  >>"$root_package/src/semantic_code/model_lifecycle.rs"
-echo "distribution acceptance: checking packaged background model acquisition"
+echo "distribution acceptance: checking extracted query semantic fallback behavior"
+CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
+  --manifest-path "$query_package/Cargo.toml" \
+  --release \
+  --all-features \
+  --lib \
+  --config "$patch_config" \
+  retrieval::semantic::tests::every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes \
+  -- \
+  --exact
+
+echo "distribution acceptance: checking extracted root strict semantic unavailability"
+CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
+  --manifest-path "$root_package/Cargo.toml" \
+  --release \
+  --no-default-features \
+  --features production \
+  --lib \
+  --config "$patch_config" \
+  daemon::code_index_scheduler::semantic_query_runtime::tests::strict_semantic_reports_typed_unavailable_without_a_fallback_result \
+  -- \
+  --exact
+
+echo "distribution acceptance: checking extracted LSP framing and protocol behavior"
+for lsp_test in \
+  bridge::tests::strict_content_length_codec_rejects_ambiguous_or_malformed_headers \
+  protocol::tests::bridge_transport_parses_typed_session_frames_and_acks_delivery; do
+  CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
+    --manifest-path "$lsp_package/Cargo.toml" \
+    --release \
+    --all-features \
+    --lib \
+    --config "$patch_config" \
+    "$lsp_test" \
+    -- \
+    --exact
+done
+
+echo "distribution acceptance: checking packaged MCP tool behavior"
+for mcp_test in \
+  mcp_handler_test::graph_query_test::test_impact \
+  mcp_handler_test::graph_query_test::test_affected \
+  mcp_handler_test::graph_analysis_test::test_test_map_lists_ts_it_title_as_covering_test \
+  git_correlation_test::sessions_for_and_diagnostics_flag_empty_correlation_index; do
+  CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
+    --manifest-path "$root_package/Cargo.toml" \
+    --release \
+    --no-default-features \
+    --features production \
+    --test mcp_suite \
+    --config "$patch_config" \
+    "$mcp_test" \
+    -- \
+    --exact
+done
+
+echo "distribution acceptance: checking packaged Jina background acquisition"
 TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT="$work/semantic-model-profile" \
   CARGO_NET_OFFLINE=true \
   HF_HUB_OFFLINE=1 \
-  cargo test \
+  "$repo/scripts/require-exact-test.sh" cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
-  --all-features \
+  --no-default-features \
+  --features production \
   --lib \
   --config "$patch_config" \
   semantic_code::model_lifecycle::distribution_acquisition_acceptance::distribution_background_acquisition_installs_verified_jina_model \
   -- \
   --exact
-echo "distribution acceptance: checking typed semantic fallback and strict unavailability"
-CARGO_NET_OFFLINE=true cargo test \
-  --manifest-path "$root_package/Cargo.toml" \
-  --release \
-  --all-features \
-  --lib \
-  --config "$patch_config" \
-  query::retrieval::semantic::tests::distribution_missing_or_invalid_artifacts_use_typed_fallback_and_strict_unavailable \
-  -- \
-  --exact
 
 install_root="$work/install"
-echo "distribution acceptance: installing packaged CLI with every feature"
+echo "distribution acceptance: installing packaged CLI with production features"
 cargo install \
   --path "$root_package" \
   --root "$install_root" \
-  --all-features \
+  --no-default-features \
+  --features production \
   --config "$patch_config"
 
 consumer="$work/library-consumer"
@@ -808,7 +576,8 @@ from pathlib import Path
 
 with Path(sys.argv[1]).open("rb") as handle:
     manifest = tomllib.load(handle)
-features = sorted(manifest.get("features", {}))
+if "production" not in manifest.get("features", {}):
+    raise SystemExit("packaged tracedecay manifest omitted the production feature")
 print("""[package]
 name = "tracedecay-distribution-consumer"
 version = "0.0.0"
@@ -818,9 +587,7 @@ edition = "2024"
 print(
     "tracedecay = { path = "
     + json.dumps(sys.argv[2])
-    + ", default-features = false, features = "
-    + json.dumps(features)
-    + " }"
+    + ', default-features = false, features = ["production"] }'
 )
 print(
     "tracedecay-tool-catalog = { path = "
@@ -908,6 +675,36 @@ CARGO_NET_OFFLINE=true cargo run \
   --bin tracedecay-distribution-consumer \
   --config "$patch_config"
 
+test_api_probe="$work/test-api-probe"
+mkdir -p -- "$test_api_probe/src"
+cat >"$test_api_probe/Cargo.toml" <<TOML
+[package]
+name = "tracedecay-test-api-probe"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+tracedecay = { path = "$root_package", default-features = false, features = ["production"] }
+TOML
+cat >"$test_api_probe/src/main.rs" <<'RS'
+use tracedecay::mcp::McpServer;
+
+fn main() {
+    let _ = McpServer::has_project_session_retrieval_service_for_test;
+}
+RS
+echo "distribution acceptance: proving production package omits test APIs"
+test_api_stderr="$work/test-api-probe.stderr"
+if CARGO_NET_OFFLINE=true cargo check \
+  --manifest-path "$test_api_probe/Cargo.toml" \
+  --config "$patch_config" \
+  2>"$test_api_stderr"; then
+  die "production package exposed test-transport APIs"
+fi
+grep -Eq "no function or associated item named .*has_project_session_retrieval_service_for_test" \
+  "$test_api_stderr" ||
+  die "test API probe failed for an unexpected reason"
+
 mkdir -p -- "$root_package/examples"
 cp -- \
   "$repo/tests/distribution/fastembed/acceptance.rs" \
@@ -923,7 +720,8 @@ fastembed_build_messages="$work/fastembed-build.jsonl"
 cargo build \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
-  --all-features \
+  --no-default-features \
+  --features production \
   --example fastembed_distribution_acceptance \
   --config "$patch_config" \
   --message-format=json-render-diagnostics >"$fastembed_build_messages"
@@ -962,29 +760,14 @@ binary="$install_root/bin/tracedecay"
 [[ -x $binary ]] || die "cargo install did not produce $binary"
 "$binary" --version
 
-tool_list="$work/tool-list.txt"
-"$binary" tool >"$tool_list"
-for required_tool in \
-  diagnostics \
-  impact \
-  affected \
-  test_map; do
-  if ! python3 - "$tool_list" "$required_tool" <<'PY'
-from pathlib import Path
-import sys
-
-names = {
-    line.split()[0]
-    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-    if line.startswith("  ") and line.split()
-}
-raise SystemExit(0 if sys.argv[2] in names else 1)
-PY
-  then
-    die "installed CLI tool catalog omitted $required_tool"
-  fi
-  "$binary" tool "$required_tool" --help >/dev/null
-done
+echo "distribution acceptance: exercising installed MCP behavior"
+if [[ ${RUNNER_OS:-} == Windows ]]; then
+  python3 "$repo/scripts/check-packaged-mcp-stdio.py" \
+    "$binary" \
+    "$work/mcp-stdio"
+else
+  TRACEDECAY_BIN="$binary" "$repo/scripts/mcp-conformance-smoke.sh"
+fi
 
 lsp_servers="$work/lsp-servers.json"
 "$binary" lsp servers --json >"$lsp_servers"
@@ -995,7 +778,7 @@ from pathlib import Path
 
 value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 if not isinstance(value, list) or not value:
-    raise SystemExit("distribution acceptance: lsp servers returned an empty or invalid inventory")
+    raise SystemExit("distribution acceptance: lsp servers returned an empty inventory")
 required_languages = {"rust", "typescript", "javascript", "python", "go", "c", "cpp"}
 languages = set()
 for server in value:
@@ -1008,15 +791,15 @@ for server in value:
         or not isinstance(server.get("extensions"), list)
         or not server["extensions"]
     ):
-        raise SystemExit("distribution acceptance: lsp servers returned an invalid server entry")
+        raise SystemExit("distribution acceptance: invalid lsp server entry")
     languages.add(server["language"])
 missing = sorted(required_languages - languages)
 if missing:
     raise SystemExit(
-        "distribution acceptance: lsp server inventory omitted required languages: "
-        + ", ".join(missing)
+        "distribution acceptance: lsp inventory omitted " + ", ".join(missing)
     )
 PY
+
 python3 "$repo/scripts/check-packaged-lsp-bridge.py" \
   "$binary" \
   "$work/lsp-bridge"
