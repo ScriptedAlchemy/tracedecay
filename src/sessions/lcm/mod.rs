@@ -17,6 +17,8 @@ mod summarizer;
 pub mod types;
 pub mod util;
 
+pub use crate::application::session::lcm::compression_policy;
+
 pub const LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT: &str = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.";
 
 /// Rows requested per keyset page of a whole-table LCM scan.
