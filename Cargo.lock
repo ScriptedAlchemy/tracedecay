@@ -5468,6 +5468,7 @@ dependencies = [
  "same-file",
  "schemars",
  "self-replace",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -5484,7 +5485,9 @@ dependencies = [
  "tower",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-automation",
  "tracedecay-capture",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-hooks",
@@ -5498,6 +5501,7 @@ dependencies = [
  "tracedecay-sessions",
  "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
+ "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
  "tracing",
  "tracing-subscriber",
@@ -5540,6 +5544,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-automation"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "tracedecay-capture"
 version = "0.1.0"
 dependencies = [
@@ -5551,11 +5567,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-code-extraction"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tokensave-large-treesitters",
+ "tokensave-medium-treesitters",
+ "tracedecay-domain",
+ "tree-sitter",
+ "tree-sitter-hlsl",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tracedecay-code-index"
 version = "0.1.0"
 dependencies = [
  "ast-grep-core",
- "cc",
+ "hex",
  "ignore",
  "rayon",
  "serde",
@@ -5564,12 +5593,9 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror",
- "tokensave-large-treesitters",
- "tokensave-medium-treesitters",
- "tracedecay-application",
+ "tracedecay-code-extraction",
  "tracedecay-domain",
  "tree-sitter",
- "tree-sitter-hlsl",
  "tree-sitter-language",
 ]
 
@@ -5612,8 +5638,12 @@ dependencies = [
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
+ "lsp-types",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracedecay-domain",
  "url",
 ]
@@ -5649,9 +5679,10 @@ dependencies = [
  "sha2 0.11.0",
  "static_assertions",
  "thiserror",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
- "tracedecay-policy",
+ "tracedecay-temporal-query",
  "zeroize",
 ]
 
@@ -5689,8 +5720,11 @@ dependencies = [
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "regex",
  "serde",
+ "serde_json",
+ "tracedecay-domain",
 ]
 
 [[package]]
@@ -5712,6 +5746,20 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-temporal-query"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.13.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "tracedecay-domain",
+ "zeroize",
 ]
 
 [[package]]
