@@ -100,6 +100,13 @@ pub(crate) fn append_registered(
         return outcome;
     }
 
+    // A caller supplying an expected version asserts the task already exists,
+    // so its absence is not a losing compare-and-swap. Fold state is absent
+    // only for a task with no events, because an unmigrated task rebuilds.
+    if current.is_none() && request.expected_version.is_some() {
+        let _ = transaction.rollback();
+        return Err(WorkStorageError::NotFoundOrNotAuthorized);
+    }
     let current_version = current.as_ref().map(WorkProjectionStateV1::version);
     if current_version != request.expected_version {
         let _ = transaction.rollback();

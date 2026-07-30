@@ -481,31 +481,6 @@ where
         occurred_at: UtcMicros,
         event_kind: WorkEventKind,
     ) -> Result<WorkProjection, ApplicationProblem> {
-        let mut history = self.load_history(&authority, &task_id)?;
-        if let Some(prior) = history
-            .iter()
-            .find(|event| event.command_id() == &command_id)
-        {
-            return if prior.input_digest() == &input_digest {
-                rebuild(history)
-            } else {
-                Err(conflict_problem(
-                    "application.work.idempotency-conflict",
-                    "The Work command identity was already used with different input.",
-                ))
-            };
-        }
-
-        let current_version = history
-            .last()
-            .map(WorkEvent::version)
-            .ok_or_else(not_found_problem)?;
-        if current_version != expected_version {
-            return Err(conflict_problem(
-                "application.work.version-conflict",
-                "Work changed after this command was prepared.",
-            ));
-        }
         if let WorkEventKind::DependenciesReplanned { dependencies } = &event_kind
             && self.would_create_dependency_cycle(&authority, &task_id, dependencies)?
         {
@@ -524,9 +499,6 @@ where
             event_kind,
         )
         .map_err(domain_problem)?;
-
-        history.push(event.clone());
-        WorkProjection::rebuild(&history).map_err(domain_problem)?;
         self.append(WorkAppendRequest {
             expected_version: Some(expected_version),
             event,

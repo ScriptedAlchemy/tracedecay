@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationProblemKind,
@@ -60,9 +60,9 @@ fn context(project: &str, actor: &str) -> RequestContext {
     .unwrap()
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TestStore {
-    histories: Mutex<BTreeMap<(WorkAuthority, TaskId), Vec<WorkEvent>>>,
+    histories: Arc<Mutex<BTreeMap<(WorkAuthority, TaskId), Vec<WorkEvent>>>>,
 }
 
 impl WorkStoragePort for TestStore {
@@ -85,23 +85,28 @@ impl WorkStoragePort for TestStore {
             request.event.authority().clone(),
             request.event.task_id().clone(),
         );
-        let history = histories.entry(key).or_default();
+        let existing = histories.get(&key).cloned().unwrap_or_default();
 
-        if let Some(prior) = history
+        if let Some(prior) = existing
             .iter()
             .find(|event| event.command_id() == request.event.command_id())
         {
             return if prior.input_digest() == request.event.input_digest() {
-                Ok(WorkAppendOutcome::Replayed(projection(history)?))
+                Ok(WorkAppendOutcome::Replayed(projection(&existing)?))
             } else {
                 Err(WorkStorageError::IdempotencyConflict)
             };
         }
 
-        let current = history.last().map(WorkEvent::version);
+        let current = existing.last().map(WorkEvent::version);
+        // A caller supplying an expected version asserts the task already exists.
+        if current.is_none() && request.expected_version.is_some() {
+            return Err(WorkStorageError::NotFoundOrNotAuthorized);
+        }
         if current != request.expected_version {
             return Err(WorkStorageError::VersionConflict);
         }
+        let history = histories.entry(key).or_default();
         history.push(request.event.clone());
         Ok(WorkAppendOutcome::Appended(projection(history)?))
     }
@@ -357,4 +362,165 @@ fn terminal_runtime_evidence_never_auto_accepts_the_task() {
         )
         .unwrap();
     assert!(accepted.is_task_accepted());
+}
+
+fn authority(context: &RequestContext) -> WorkAuthority {
+    WorkAuthority::new(
+        context.scope().project_id.clone(),
+        context.scope().repository_id.clone(),
+        context.scope().worktree_id.clone(),
+        context.actor().clone(),
+        context.grant().digest.clone(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn successive_mutations_match_a_full_history_rebuild() {
+    let store = TestStore::default();
+    let service = WorkService::new(store.clone());
+    let context = context("project.work.fold", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.fold");
+    create(
+        &service,
+        &context,
+        task_id.as_str(),
+        "command.work.fold.create",
+        BTreeSet::new(),
+    );
+
+    let mut version = WorkVersion::initial();
+    let mut last = None;
+    for step in 1i64..=6 {
+        let run_id = format!("runtime.work.fold.{step}");
+        let command_id = format!("command.work.fold.attach.{step}");
+        let projection = service
+            .attach_runtime_evidence(
+                &context,
+                AttachRuntimeEvidenceCommand {
+                    task_id: task_id.clone(),
+                    evidence: RuntimeEvidenceRef::new(id(&run_id), digest('e'), true).unwrap(),
+                    expected_version: version,
+                    command_id: id(&command_id),
+                    occurred_at: UtcMicros(10 + step * 10),
+                },
+            )
+            .unwrap();
+        version = projection.version();
+        last = Some(projection);
+    }
+
+    let history = store.load(&authority(&context), &task_id).unwrap();
+    assert_eq!(history.len(), 7);
+    assert_eq!(last.unwrap(), WorkProjection::rebuild(&history).unwrap());
+}
+
+#[test]
+fn replaying_the_same_mutation_command_is_idempotent_and_input_sensitive() {
+    let store = TestStore::default();
+    let service = WorkService::new(store.clone());
+    let context = context("project.work.idempotent", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.idempotent");
+    create(
+        &service,
+        &context,
+        task_id.as_str(),
+        "command.work.idempotent.create",
+        BTreeSet::new(),
+    );
+
+    let command = AcceptTaskCommand {
+        task_id: task_id.clone(),
+        expected_version: WorkVersion::initial(),
+        command_id: id("command.work.idempotent.accept"),
+        occurred_at: UtcMicros(20),
+    };
+    let accepted = service.accept_task(&context, command.clone()).unwrap();
+    let replayed = service.accept_task(&context, command.clone()).unwrap();
+    assert_eq!(accepted, replayed);
+    assert_eq!(store.load(&authority(&context), &task_id).unwrap().len(), 2);
+
+    let conflict = service
+        .accept_task(
+            &context,
+            AcceptTaskCommand {
+                occurred_at: UtcMicros(30),
+                ..command
+            },
+        )
+        .unwrap_err();
+    assert_eq!(conflict.kind(), ApplicationProblemKind::Conflict);
+    assert_eq!(
+        conflict.diagnostic().unwrap().code,
+        "application.work.idempotency-conflict"
+    );
+    assert_eq!(store.load(&authority(&context), &task_id).unwrap().len(), 2);
+}
+
+#[test]
+fn a_stale_expected_version_is_a_version_conflict_and_appends_nothing() {
+    let store = TestStore::default();
+    let service = WorkService::new(store.clone());
+    let context = context("project.work.cas", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.cas");
+    create(
+        &service,
+        &context,
+        task_id.as_str(),
+        "command.work.cas.create",
+        BTreeSet::new(),
+    );
+
+    let first = service
+        .accept_task(
+            &context,
+            AcceptTaskCommand {
+                task_id: task_id.clone(),
+                expected_version: WorkVersion::initial(),
+                command_id: id("command.work.cas.accept.first"),
+                occurred_at: UtcMicros(20),
+            },
+        )
+        .unwrap();
+    let second = service
+        .attach_runtime_evidence(
+            &context,
+            AttachRuntimeEvidenceCommand {
+                task_id: task_id.clone(),
+                evidence: RuntimeEvidenceRef::new(id("runtime.work.cas"), digest('e'), true)
+                    .unwrap(),
+                expected_version: WorkVersion::initial(),
+                command_id: id("command.work.cas.attach.stale"),
+                occurred_at: UtcMicros(30),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(second.kind(), ApplicationProblemKind::Conflict);
+    assert_eq!(
+        second.diagnostic().unwrap().code,
+        "application.work.version-conflict"
+    );
+    assert_eq!(store.load(&authority(&context), &task_id).unwrap().len(), 2);
+    assert_eq!(service.load(&context, &task_id).unwrap(), first);
+}
+
+#[test]
+fn a_mutation_against_a_task_that_never_existed_is_not_found() {
+    let service = WorkService::new(TestStore::default());
+    let context = context("project.work.missing", "actor.work.owner");
+    let missing = service
+        .accept_task(
+            &context,
+            AcceptTaskCommand {
+                task_id: id("task.work.missing"),
+                expected_version: WorkVersion::initial(),
+                command_id: id("command.work.missing.accept"),
+                occurred_at: UtcMicros(20),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        missing.kind(),
+        ApplicationProblemKind::NotFoundOrNotAuthorized
+    );
 }
