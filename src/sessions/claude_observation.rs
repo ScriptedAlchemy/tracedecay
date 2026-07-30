@@ -907,10 +907,21 @@ mod tests {
     };
 
     use super::*;
-    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-    use crate::application::observation::{ObservationApplication, ReplayObservationsRequest};
+    use std::future::Future;
+
+    use crate::application::host_admission::{
+        HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
+        HostProjectionDrainOutcome, ObservationCaptureAdmissionPort,
+        TranscriptCursorAdmissionPort,
+    };
+    use crate::application::observation::{
+        CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
+        ReplayObservationsRequest,
+    };
     use crate::privacy::ClaudeRecordSanitizerV1;
     use crate::sessions::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
+    use tracedecay_domain::{ObservationSourceCursorV1, ObservationSourceIdentityV1};
+    use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
     const INGEST_STATE_TABLES: &[&str] = &[
         "sanitization_receipts",
         "observations",
@@ -924,24 +935,146 @@ mod tests {
         "session_messages_fts",
     ];
 
-    #[test]
-    fn production_ingest_uses_capture_and_cursor_ports() {
-        let production = include_str!("claude_observation.rs")
-            .split_once("#[cfg(test)]")
-            .expect("test module boundary")
-            .0;
+    #[derive(Default)]
+    struct CapturePortSpy {
+        capture_calls: std::sync::atomic::AtomicUsize,
+        cursor_reads: std::sync::atomic::AtomicUsize,
+        drain_calls: std::sync::atomic::AtomicUsize,
+    }
 
-        assert!(!production.contains("open_at("));
-        assert!(!production.contains("try_open"));
-        assert!(!production.contains("GlobalDbObservationStore::new"));
-        assert!(!production.contains("ObservationApplication::new"));
-        assert!(!production.contains("ClaudeRecordSanitizerV1::"));
-        assert!(!production.contains("HostAdmissionAuthorities::unregistered_"));
-        assert!(!production.contains("HostAdmissionFacade"));
-        assert!(production.contains("ObservationCaptureAdmissionPort"));
-        assert!(production.contains("TranscriptCursorAdmissionPort"));
-        assert!(production.contains(".get_parse_offset("));
-        assert!(production.contains(".drain_projection_queue("));
+    impl ObservationCaptureAdmissionPort for CapturePortSpy {
+        fn capture_observation(
+            &self,
+            _request: CaptureObservationRequest,
+        ) -> impl Future<Output = Result<CaptureObservationOutcome, HostAdmissionOutcome>> + Send
+        {
+            self.capture_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async {
+                Err(HostAdmissionOutcome::retained_unavailable(
+                    "capture_port_spy",
+                ))
+            }
+        }
+
+        fn advance_non_durable_source_cursor(
+            &self,
+            _advance: ObservationCursorAdvance,
+            _cancellation: ObservationCancellation,
+        ) -> impl Future<Output = Result<CursorAdvanceOutcome, HostAdmissionOutcome>> + Send
+        {
+            async { Err(HostAdmissionOutcome::retained_unavailable("unused")) }
+        }
+
+        fn get_source_cursor<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+        ) -> impl Future<Output = Result<Option<ObservationSourceCursorV1>, HostAdmissionOutcome>>
+        + Send
+        + 'a {
+            async { Ok(None) }
+        }
+
+        fn drain_projection_queue<'a>(
+            &'a self,
+            _provider: &'a str,
+            _scope: &'a ObservationScopeV1,
+            _cancellation: &'a ObservationCancellation,
+            _max: usize,
+        ) -> impl Future<Output = Result<HostProjectionDrainOutcome, HostAdmissionOutcome>> + Send + 'a
+        {
+            self.drain_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Err(HostAdmissionOutcome::retained_unavailable("unused")) }
+        }
+    }
+
+    impl TranscriptCursorAdmissionPort for CapturePortSpy {
+        fn get_parse_offset<'a>(
+            &'a self,
+            _scope: &'a ObservationScopeV1,
+            _path: &'a str,
+        ) -> impl Future<Output = Result<Option<ParseOffset>, HostAdmissionOutcome>> + Send + 'a
+        {
+            self.cursor_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Ok(None) }
+        }
+
+        fn advance_parse_offset<'a>(
+            &'a self,
+            _scope: &'a ObservationScopeV1,
+            _path: &'a str,
+            _offset: ParseOffset,
+        ) -> impl Future<Output = Result<(), HostAdmissionOutcome>> + Send + 'a {
+            async { Ok(()) }
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_frame_routes_through_observation_capture_port() {
+        let fixture = Fixture::new("port-spy-session").await;
+        fixture.write_record("port spy content", "port-spy-secret");
+        let identity = identify_claude_source(&fixture.transcript).unwrap();
+        let mut scan = scan_claude_source_frames(identity.clone(), StoredCursor::default(), None)
+            .expect("scan complete spy frame");
+        let source = ClaudeSourceIdentityV1::for_source(
+            SessionId::new(identity.session_id).unwrap(),
+            SessionId::new(identity.source_id).unwrap(),
+        )
+        .unwrap();
+        let spy = CapturePortSpy::default();
+        let result = capture_frame(
+            &spy,
+            scan.frames.first_mut().expect("spy frame"),
+            None,
+            &FrameCaptureContext {
+                source,
+                scope: ObservationScopeV1::Profile,
+                generation: ClaudeFileGenerationV1::new(scan.file_generation).unwrap(),
+                file_identity: scan.file_identity,
+                retention_class: RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS).unwrap(),
+                cancellation: ObservationCancellation::default(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            spy.capture_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        match result {
+            Err(ClaudeObservationIngestError::Transcript(
+                crate::sessions::source::TranscriptIngestError::NonDurableRecord { reason, .. },
+            )) => assert_eq!(reason, "capture_port_spy"),
+            Ok(_) => panic!("spy must reject capture through the admission port"),
+            Err(other) => panic!("capture_frame must surface the capture-port rejection: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_source_paths_read_cursor_through_transcript_cursor_port() {
+        let fixture = Fixture::new("cursor-port-session").await;
+        fixture.write_record("cursor port content", "cursor-port-secret");
+        let source = fixture.source("cursor-port-session");
+        let spy = CapturePortSpy::default();
+        let (paths, _deferred) = scheduled_source_paths(
+            &spy,
+            &ObservationScopeV1::Profile,
+            &source,
+            &fixture.profile,
+        )
+        .await
+        .expect("cursor port admits scheduling");
+        assert!(
+            !paths.is_empty(),
+            "fixture transcript must be discoverable for cursor-port coverage"
+        );
+        assert!(
+            spy.cursor_reads.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "scheduling must read the durable frontier through TranscriptCursorAdmissionPort"
+        );
     }
 
     struct Fixture {
