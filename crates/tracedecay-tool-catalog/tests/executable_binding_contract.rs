@@ -211,10 +211,8 @@ fn unavailable_disposition_cannot_carry_an_executable_binding() {
 fn executable_registry_rejects_duplicate_operation_ids() {
     let binding = binding();
     let operation_id = binding.operation_id().clone();
-    let first = ExecutableBindingAvailabilityV1::Available {
-        binding: binding.clone(),
-    };
-    let duplicate = ExecutableBindingAvailabilityV1::Available { binding };
+    let first = ExecutableBindingAvailabilityV1::available(binding.clone());
+    let duplicate = ExecutableBindingAvailabilityV1::available(binding);
 
     assert!(ExecutableBindingRegistryV1::new(vec![first, duplicate]).is_err());
 
