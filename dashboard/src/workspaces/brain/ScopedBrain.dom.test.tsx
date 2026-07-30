@@ -236,11 +236,11 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
         '/api/projects/proj_x/plugins/graph/overview': {
           status: 200,
           body: graphOverview({ nodes: 0, edges: 0, files: 0 }),
         },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
     );
@@ -251,6 +251,26 @@ describe('ScopedBrain', () => {
     expect(readout('nodes')).toBe('0');
     expect(readout('edges')).toBe('0');
     expect(readout('files')).toBe('0');
+  });
+
+  it('withholds graph totals when the overview read fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/overview': {
+          status: 500,
+          body: { status: 'read_failed', error: 'graph count query failed' },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    await waitFor(() => expect(readout('nodes')).toBe('—'));
+    expect(readout('edges')).toBe('—');
+    expect(readout('files')).toBe('—');
   });
 
   it('keeps a real figure when a neighbouring one is zero', async () => {
