@@ -1680,7 +1680,7 @@ fn persist_registered_terminal_evidence(
             )
             .map_err(|_| AttemptStoreError::Unavailable)?,
         )
-        .map_err(|_| AttemptStoreError::TerminalAlreadyPublished)?;
+        .map_err(|_| AttemptStoreError::Unavailable)?;
     Ok(())
 }
 
