@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tracedecay::migrate::profile_backup::{
     create_complete_profile_backup, rehearse_complete_profile_backup,
+    set_rehearsal_publication_fault_for_test,
 };
 use tracedecay::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
@@ -170,4 +171,53 @@ fn released_copy_rehearsal_recovers_owned_interrupted_staging() {
     assert!(restore.join("profile-identity.json").is_file());
     assert!(!staging.exists());
     assert!(!restore.join("partial").exists());
+}
+
+#[test]
+fn released_copy_rehearsal_rejects_missing_store_manifest() {
+    let temp = TempDir::new().unwrap();
+    let fixture = seed_released_profile(&temp);
+    let backup = create_backup(&temp, &fixture);
+    let restore = temp.path().join("rehearsed-profile");
+    let manifest_entry = format!("projects/{}/{}", fixture.project_id, STORE_MANIFEST_FILENAME);
+    fs::remove_file(backup.join(&manifest_entry)).unwrap();
+    let manifest_path = backup.join("backup-manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let entries = manifest
+        .get_mut("entries")
+        .and_then(|value| value.as_array_mut())
+        .unwrap();
+    entries.retain(|entry| {
+        entry
+            .get("logical_path")
+            .and_then(|value| value.as_str())
+            != Some(manifest_entry.as_str())
+    });
+    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    assert!(
+        error.contains("missing required store_manifest.json"),
+        "unexpected error: {error}"
+    );
+    assert!(!restore.exists());
+}
+
+#[test]
+fn released_copy_rehearsal_resumes_after_rename_before_marker_removal() {
+    let temp = TempDir::new().unwrap();
+    let fixture = seed_released_profile(&temp);
+    let backup = create_backup(&temp, &fixture);
+    let restore = temp.path().join("rehearsed-profile");
+    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
+
+    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    assert!(error.contains("injected rehearsal publication fault"));
+    assert!(restore.join(".tracedecay-profile-rehearsal.json").is_file());
+
+    set_rehearsal_publication_fault_for_test("");
+    rehearse_complete_profile_backup(&backup, &restore).unwrap();
+    assert!(restore.join("profile-identity.json").is_file());
+    assert!(!restore.join(".tracedecay-profile-rehearsal.json").exists());
 }
