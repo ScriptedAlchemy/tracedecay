@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use tokio::net::UnixStream;
@@ -18,6 +19,7 @@ use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, LspSessionRegistry};
 
 use crate::application::context::CancellationToken;
+use crate::application_surface::ApplicationSurfaceOperation;
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
@@ -1964,6 +1966,301 @@ impl DaemonInvocationState {
             })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_multi_root_for_project(
+        &self,
+        store_administration: &StoreAdministration,
+        active_project_root: &Path,
+        request_id: String,
+        request: tracedecay_application::MultiRootExecuteRequestV1,
+        observed_at: tracedecay_domain::UtcMicros,
+        deadline: tracedecay_application::Deadline,
+        cancellation: tracedecay_application::CancellationContext,
+    ) -> DaemonInvocationResponse {
+        let Some(scope_set) = self
+            .service
+            .persisted_scope_set(active_project_root, &request.scope_set_id)
+            .await
+        else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        if scope_set.revision() != request.scope_set_revision
+            || scope_set.digest() != &request.scope_set_digest
+        {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        }
+        let operation_value = match serde_json::to_value(&request.operation) {
+            Ok(value) => value,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        };
+        let query_digest = tracedecay_domain::canonical_sha256(&(
+            "tracedecay.daemon.multi-root-query.v1",
+            &operation_value,
+        ))
+        .expect("validated operation is canonical");
+        let order_digest = tracedecay_domain::canonical_sha256(&(
+            "tracedecay.daemon.multi-root-order.v1",
+            scope_set
+                .roots()
+                .iter()
+                .map(|scope| &scope.scope_digest)
+                .collect::<Vec<_>>(),
+        ))
+        .expect("validated scope set is canonical");
+        let database = match store_administration.registered_profile_database().await {
+            Ok(database) => database,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            }
+        };
+        let mut contexts = Vec::new();
+        let mut generations = Vec::with_capacity(scope_set.roots().len());
+        let mut outcomes = BTreeMap::new();
+        for (ordinal, scope) in scope_set.roots().iter().enumerate() {
+            let registry_context = match database
+                .project_registry_context_by_id(scope.project_id.as_str())
+                .await
+            {
+                Ok(context) => context,
+                Err(_) => {
+                    generations.push(unavailable_root_generation(
+                        scope,
+                        tracedecay_domain::ScopeUnavailableReasonV1::StoreUnavailable,
+                    ));
+                    continue;
+                }
+            };
+            let Some(registry_context) = registry_context else {
+                generations.push(denied_root_generation(scope));
+                continue;
+            };
+            let root = PathBuf::from(registry_context.project.canonical_root);
+            if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
+                generations.push(unavailable_root_generation(
+                    scope,
+                    tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
+                ));
+                continue;
+            }
+            let Some((context, authority_digest)) = self
+                .service
+                .multi_root_query_context(&root, scope, ordinal, observed_at)
+                .await
+            else {
+                generations.push(denied_root_generation(scope));
+                continue;
+            };
+            let source_revision = if matches!(
+                request.operation,
+                tracedecay_application::MultiRootOperationV1::Git { .. }
+            ) {
+                match explicit_git_state(&root) {
+                    Some(head) => head,
+                    None => {
+                        generations.push(unavailable_root_generation(
+                            scope,
+                            tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                scope.scope_digest.as_str().to_owned()
+            };
+            let generation = frozen_root_generation(
+                scope,
+                &authority_digest,
+                &source_revision,
+                &operation_value,
+            );
+            let value = self
+                .execute_one_multi_root_operation(
+                    store_administration,
+                    &root,
+                    scope,
+                    ordinal,
+                    &request.operation,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.clone(),
+                )
+                .await;
+            let outcome = match value {
+                Ok(value) => tracedecay_domain::ScopeOutcome::Exact(vec![value]),
+                Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
+                    tracedecay_domain::ScopeOutcome::Denied
+                }
+                Err(_) => tracedecay_domain::ScopeOutcome::Unavailable {
+                    reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                },
+            };
+            contexts.push(context);
+            generations.push(
+                tracedecay_domain::RootScopeOutcomeV1::new(
+                    scope.scope_digest.clone(),
+                    tracedecay_domain::ScopeOutcome::Exact(generation),
+                )
+                .expect("persisted scope digest is valid"),
+            );
+            outcomes.insert(scope.scope_digest.clone(), outcome);
+        }
+        let query = tracedecay_application::MultiRootQueryRequestV1 {
+            scope_set,
+            contexts,
+            root_generations: generations,
+            capability_id: tracedecay_tool_catalog::CapabilityId::new(
+                project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1,
+            )
+            .expect("static multi-root capability is valid"),
+            use_case_id: tracedecay_tool_catalog::UseCaseId::new(
+                project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1,
+            )
+            .expect("static multi-root use case is valid"),
+            observed_at,
+            query: operation_value,
+            query_digest,
+            order_digest,
+            page: request.page,
+            continuation: request.continuation,
+        };
+        let page = match self
+            .service
+            .execute_multi_root_query(PrecomputedMultiRootQueryPort { outcomes }, query)
+        {
+            Ok(page) => page,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        };
+        let Some((scope, outcome)) = self
+            .service
+            .multi_root_evidence(
+                active_project_root,
+                tracedecay_application::RequestId::new(request_id.clone())
+                    .expect("validated daemon request id"),
+                "execute",
+                page,
+                observed_at,
+                deadline,
+                cancellation,
+            )
+            .await
+        else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        };
+        DaemonInvocationResponse::with_outcome(
+            request_id,
+            service::invocation::DaemonInvocationOutcome::MultiRootQueryPage { scope, outcome },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_one_multi_root_operation(
+        &self,
+        store_administration: &StoreAdministration,
+        root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        ordinal: usize,
+        operation: &tracedecay_application::MultiRootOperationV1,
+        observed_at: tracedecay_domain::UtcMicros,
+        deadline: tracedecay_application::Deadline,
+        cancellation: tracedecay_application::CancellationContext,
+    ) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
+        match operation {
+            tracedecay_application::MultiRootOperationV1::Work { request } => {
+                let request = serde_json::from_value::<
+                    service::invocation::WorkApplicationInvocationV1,
+                >(request.clone())
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+                if !matches!(
+                    request,
+                    service::invocation::WorkApplicationInvocationV1::Snapshot(_)
+                        | service::invocation::WorkApplicationInvocationV1::Delta(_)
+                ) {
+                    return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+                }
+                let response = Box::pin(self.invoke_for_project(
+                    store_administration,
+                    Some(root),
+                    DaemonInvocationRequest::work_application(
+                        format!("request.multi-root.work.{ordinal}"),
+                        request,
+                        observed_at,
+                        deadline,
+                        cancellation,
+                    ),
+                ))
+                .await;
+                let service::invocation::DaemonInvocationOutcome::WorkApplication {
+                    scope: actual_scope,
+                    outcome,
+                } = response.outcome
+                else {
+                    return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+                };
+                if &actual_scope != scope {
+                    return Err(
+                        service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    );
+                }
+                extract_application_payload(&outcome)
+            }
+            tracedecay_application::MultiRootOperationV1::Git { request }
+            | tracedecay_application::MultiRootOperationV1::Feedback { request }
+            | tracedecay_application::MultiRootOperationV1::Impact { request }
+            | tracedecay_application::MultiRootOperationV1::Query { request } => {
+                let wire = serde_json::from_value::<FederatedSurfaceRequestV1>(request.clone())
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+                if !multi_root_family_allows(operation, wire.operation) {
+                    return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+                }
+                crate::application_surface::invoke_multi_root_surface_request(
+                    Arc::new(InProcessDaemonInvocationExecutor::new(
+                        self.clone(),
+                        store_administration.clone(),
+                        root.to_path_buf(),
+                        scope.clone(),
+                    )),
+                    wire.operation,
+                    tracedecay_application::RequestId::new(format!(
+                        "request.multi-root.surface.{ordinal}"
+                    ))
+                    .expect("static federated request id is valid"),
+                    tracedecay_application::PageRequest::new(100, None)
+                        .expect("static federated page request is valid"),
+                    deadline,
+                    tracedecay_application::CancellationSignal::active(
+                        cancellation.token_id.as_str(),
+                    )
+                    .expect("validated cancellation token is reusable"),
+                    wire.request,
+                )
+                .await
+                .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)
+            }
+        }
+    }
+
     async fn shutdown(&self) {
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.shutdown().await;
@@ -1978,7 +2275,117 @@ impl DaemonInvocationState {
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
         let request_project_path = request.requires_project().then_some(project_path).flatten();
-        let root = request_project_path.and_then(admitted_lsp_root_for_project_path);
+        if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+            request: scope_set_request,
+            observed_at,
+            deadline,
+            cancellation,
+        } = &request.payload
+        {
+            let Some(active_project_root) = request_project_path else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id.clone(),
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let roots = match resolve_multi_root_projects(
+                store_administration,
+                &self.service,
+                &scope_set_request.project_ids,
+            )
+            .await
+            {
+                Ok(roots) => roots,
+                Err(problem) => {
+                    return DaemonInvocationResponse::problem(request.request_id.clone(), problem);
+                }
+            };
+            return match self
+                .service
+                .compare_and_swap_scope_set(
+                    active_project_root,
+                    scope_set_request.clone(),
+                    roots,
+                    *observed_at,
+                )
+                .await
+            {
+                Some((_scope, result)) => {
+                    let Some((scope, outcome)) = self
+                        .service
+                        .multi_root_evidence(
+                            active_project_root,
+                            tracedecay_application::RequestId::new(request.request_id.clone())
+                                .expect("validated daemon request id"),
+                            "scope_set_compare_and_swap",
+                            result,
+                            *observed_at,
+                            deadline.clone(),
+                            cancellation.clone(),
+                        )
+                        .await
+                    else {
+                        return DaemonInvocationResponse::problem(
+                            request.request_id,
+                            service::invocation::DaemonInvocationProblem::Unavailable,
+                        );
+                    };
+                    DaemonInvocationResponse::with_outcome(
+                        request.request_id,
+                        service::invocation::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
+                            scope,
+                            outcome,
+                        },
+                    )
+                }
+                None => DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                ),
+            };
+        }
+        if let service::invocation::DaemonInvocationPayload::MultiRootExecute {
+            request: execute_request,
+            observed_at,
+            deadline,
+            cancellation,
+        } = &request.payload
+        {
+            let Some(active_project_root) = request_project_path else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            return self
+                .execute_multi_root_for_project(
+                    store_administration,
+                    active_project_root,
+                    request.request_id,
+                    execute_request.clone(),
+                    *observed_at,
+                    deadline.clone(),
+                    cancellation.clone(),
+                )
+                .await;
+        }
+        let lsp_workspace =
+            if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
+                match request_project_path {
+                    Some(project_path) => {
+                        admitted_lsp_workspace_for_request(
+                            store_administration,
+                            &self.service,
+                            project_path,
+                            &request,
+                        )
+                        .await
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
         let git_service = if invocation_is_git_operation(request.operation()) {
             git_service_for_project_path(store_administration, request_project_path).await
         } else {
@@ -1988,11 +2395,168 @@ impl DaemonInvocationState {
             .invoke(
                 &self.lsp_session_registry,
                 request_project_path,
-                root,
+                lsp_workspace,
                 git_service,
                 request,
             )
             .await
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FederatedSurfaceRequestV1 {
+    operation: ApplicationSurfaceOperation,
+    request: Value,
+}
+
+struct PrecomputedMultiRootQueryPort {
+    outcomes:
+        BTreeMap<tracedecay_domain::ManifestDigest, tracedecay_domain::ScopeOutcome<Vec<Value>>>,
+}
+
+impl tracedecay_application::MultiRootQueryPort<Value, Value> for PrecomputedMultiRootQueryPort {
+    fn query_root(
+        &self,
+        context: &tracedecay_application::RequestContext,
+        _generation: &tracedecay_domain::RootGenerationV1,
+        _query: &Value,
+        _page: u64,
+    ) -> tracedecay_domain::ScopeOutcome<Vec<Value>> {
+        self.outcomes
+            .get(&context.scope().scope_digest)
+            .cloned()
+            .unwrap_or(tracedecay_domain::ScopeOutcome::Unavailable {
+                reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+            })
+    }
+}
+
+fn denied_root_generation(
+    scope: &tracedecay_application::ResolvedScope,
+) -> tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1> {
+    tracedecay_domain::RootScopeOutcomeV1::new(
+        scope.scope_digest.clone(),
+        tracedecay_domain::ScopeOutcome::Denied,
+    )
+    .expect("persisted scope digest is valid")
+}
+
+fn unavailable_root_generation(
+    scope: &tracedecay_application::ResolvedScope,
+    reason: tracedecay_domain::ScopeUnavailableReasonV1,
+) -> tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1> {
+    tracedecay_domain::RootScopeOutcomeV1::new(
+        scope.scope_digest.clone(),
+        tracedecay_domain::ScopeOutcome::Unavailable { reason },
+    )
+    .expect("persisted scope digest is valid")
+}
+
+fn frozen_root_generation(
+    scope: &tracedecay_application::ResolvedScope,
+    authority_digest: &tracedecay_domain::ManifestDigest,
+    source_revision: &str,
+    operation: &Value,
+) -> tracedecay_domain::RootGenerationV1 {
+    tracedecay_domain::RootGenerationV1::new(
+        scope.scope_digest.clone(),
+        tracedecay_domain::CollectionRevision::new(
+            tracedecay_domain::canonical_sha256(&(
+                "tracedecay.multi-root.collection.v1",
+                scope,
+                source_revision,
+            ))
+            .expect("validated scope and source revision are canonical"),
+        )
+        .expect("canonical collection digest is valid"),
+        tracedecay_domain::StackRevision::new(
+            tracedecay_domain::canonical_sha256(&(
+                "tracedecay.multi-root.stack.v1",
+                authority_digest,
+                operation,
+            ))
+            .expect("validated authority and operation are canonical"),
+        )
+        .expect("canonical stack digest is valid"),
+    )
+    .expect("validated root generation is canonical")
+}
+
+fn explicit_git_state(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=normal",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8(output.stdout).ok()?;
+    let head = head.trim();
+    (!head.is_empty()).then(|| head.to_owned())
+}
+
+fn extract_application_payload<T: serde::Serialize>(
+    outcome: &T,
+) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
+    serde_json::to_value(outcome)
+        .ok()
+        .and_then(|value| value.get("value")?.get("payload").cloned())
+        .ok_or(service::invocation::DaemonInvocationProblem::Unavailable)
+}
+
+fn multi_root_family_allows(
+    family: &tracedecay_application::MultiRootOperationV1,
+    operation: ApplicationSurfaceOperation,
+) -> bool {
+    match family {
+        tracedecay_application::MultiRootOperationV1::Git { .. } => matches!(
+            operation,
+            ApplicationSurfaceOperation::GitStatus
+                | ApplicationSurfaceOperation::GitDiff
+                | ApplicationSurfaceOperation::GitHistory
+                | ApplicationSurfaceOperation::GitBlame
+                | ApplicationSurfaceOperation::GitHunks
+        ),
+        tracedecay_application::MultiRootOperationV1::Feedback { .. } => matches!(
+            operation,
+            ApplicationSurfaceOperation::FeedbackDiagnostics
+                | ApplicationSurfaceOperation::FeedbackGet
+                | ApplicationSurfaceOperation::FeedbackExpand
+                | ApplicationSurfaceOperation::FeedbackList
+                | ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+        ),
+        tracedecay_application::MultiRootOperationV1::Impact { .. } => matches!(
+            operation,
+            ApplicationSurfaceOperation::FeedbackImpact
+                | ApplicationSurfaceOperation::AffectedTests
+                | ApplicationSurfaceOperation::TestResults
+        ),
+        tracedecay_application::MultiRootOperationV1::Query { .. } => matches!(
+            operation,
+            ApplicationSurfaceOperation::CodeExactOccurrence
+                | ApplicationSurfaceOperation::CodePhraseSearch
+                | ApplicationSurfaceOperation::CodeSymbolSearch
+                | ApplicationSurfaceOperation::CodeSignatureSearch
+                | ApplicationSurfaceOperation::CodeImplementations
+                | ApplicationSurfaceOperation::CodeTypeHierarchy
+                | ApplicationSurfaceOperation::CodeCallers
+                | ApplicationSurfaceOperation::CodeCallees
+                | ApplicationSurfaceOperation::CodeFacets
+                | ApplicationSurfaceOperation::CodeTimeline
+                | ApplicationSurfaceOperation::CodeDeclaration
+                | ApplicationSurfaceOperation::CodeDefinition
+                | ApplicationSurfaceOperation::CodeTypeDefinition
+                | ApplicationSurfaceOperation::CodeReferences
+        ),
+        tracedecay_application::MultiRootOperationV1::Work { .. } => false,
     }
 }
 
@@ -7605,6 +8169,108 @@ fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoo
     url::Url::from_file_path(project_path)
         .ok()
         .map(|uri| AdmittedRoot::new(uri.to_string()))
+}
+
+async fn admitted_lsp_workspace_for_request(
+    store_administration: &StoreAdministration,
+    service: &service::invocation::DaemonInvocationService,
+    project_path: &Path,
+    request: &DaemonInvocationRequest,
+) -> Option<AuthorizedLspWorkspace> {
+    let requested_uris = match request.lsp_workspace_folders()? {
+        [] => vec![url::Url::from_file_path(project_path).ok()?.to_string()],
+        folders => folders.to_vec(),
+    };
+    let graphs = store_administration.mounted_project_graphs().await;
+    let mut resolved_roots = Vec::with_capacity(requested_uris.len());
+    for requested_uri in requested_uris {
+        let uri = url::Url::parse(&requested_uri).ok()?;
+        if uri.scheme() != "file" || uri.query().is_some() || uri.fragment().is_some() {
+            return None;
+        }
+        let requested_path = uri.to_file_path().ok()?.canonicalize().ok()?;
+        let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
+        let mut candidates = Vec::new();
+        for graph in &graphs {
+            let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {
+                continue;
+            };
+            let Ok(project_id) = tracedecay_domain::ProjectId::new(raw_project_id.to_owned())
+            else {
+                continue;
+            };
+            #[allow(deprecated)]
+            let Ok(scope) = crate::application::context::resolve_registered_root_scope(
+                graph.project_root(),
+                &requested_path,
+                &project_id,
+            ) else {
+                continue;
+            };
+            if !service
+                .lsp_owner_matches_scope(graph.project_root(), &scope)
+                .await
+            {
+                continue;
+            }
+            candidates.push((graph.project_root().to_path_buf(), scope));
+        }
+        candidates.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
+        candidates.dedup_by(|left, right| left.1.scope_digest == right.1.scope_digest);
+        let [(registered_root, scope)] = candidates.as_slice() else {
+            return None;
+        };
+        resolved_roots.push((registered_root.clone(), canonical_uri, scope.clone()));
+    }
+    service
+        .authorize_lsp_workspace(
+            resolved_roots,
+            tracedecay_domain::UtcMicros(mcp_now_micros()),
+        )
+        .await
+}
+
+async fn resolve_multi_root_projects(
+    store_administration: &StoreAdministration,
+    service: &service::invocation::DaemonInvocationService,
+    project_ids: &[tracedecay_domain::ProjectId],
+) -> std::result::Result<
+    Vec<(PathBuf, tracedecay_application::ResolvedScope)>,
+    service::invocation::DaemonInvocationProblem,
+> {
+    let database = store_administration
+        .registered_profile_database()
+        .await
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+    let mut roots = Vec::with_capacity(project_ids.len());
+    for project_id in project_ids {
+        let context = database
+            .project_registry_context_by_id(project_id.as_str())
+            .await
+            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
+            .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+        if context.project.project_id != project_id.as_str() {
+            return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+        }
+        let root = PathBuf::from(context.project.canonical_root);
+        if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
+            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+        }
+        let scope = project_open_owners::resolved_scope_for_project(&root, project_id)
+            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        if !service.lsp_owner_matches_scope(&root, &scope).await {
+            return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+        }
+        roots.push((root, scope));
+    }
+    roots.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
+    if roots
+        .windows(2)
+        .any(|pair| pair[0].1.scope_digest == pair[1].1.scope_digest)
+    {
+        return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
+    }
+    Ok(roots)
 }
 
 #[cfg(unix)]
