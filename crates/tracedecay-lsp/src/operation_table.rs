@@ -166,16 +166,14 @@ where
         self.poll_matching(key, |_| true)
     }
 
-    pub(crate) fn cancel(&self, key: &K, abort_task: bool) -> bool {
+    pub(crate) fn cancel(&self, key: &K) -> bool {
         let pending = self
             .in_flight
-            .try_lock()
+            .lock()
             .ok()
             .and_then(|mut in_flight| in_flight.remove(key));
         if let Some(pending) = pending {
-            if abort_task {
-                pending.task.abort();
-            }
+            pending.task.abort();
             true
         } else {
             false
@@ -198,7 +196,10 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::RecvTimeoutError;
     use std::task::{Context, Poll, Wake, Waker};
+    use std::thread;
+    use std::time::Duration;
 
     use super::*;
 
@@ -328,11 +329,56 @@ mod tests {
             OperationAdmission::Saturated
         );
         let aborted = runtime.last_aborted.lock().unwrap().clone().unwrap();
-        assert!(first.cancel(&"first", true));
+        assert!(first.cancel(&"first"));
         assert!(aborted.load(Ordering::Acquire));
         assert_eq!(
             second.admit("second", (), &runtime, || Box::pin(async { 2 })),
             OperationAdmission::Started(())
         );
+    }
+
+    #[test]
+    fn cancellation_always_aborts_the_local_task() {
+        let runtime = InlineSpawner::default();
+        let table = BoundedOperationTable::new(1);
+
+        assert_eq!(
+            table.admit("first", (), &runtime, || Box::pin(async { 1 })),
+            OperationAdmission::Started(())
+        );
+        let aborted = runtime.last_aborted.lock().unwrap().clone().unwrap();
+        assert!(table.cancel(&"first"));
+        assert!(aborted.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn cancellation_waits_for_table_contention() {
+        let runtime = InlineSpawner::default();
+        let table = Arc::new(BoundedOperationTable::new(1));
+        assert_eq!(
+            table.admit("first", (), &runtime, || Box::pin(async { 1 })),
+            OperationAdmission::Started(())
+        );
+
+        let guard = table.in_flight.lock().unwrap();
+        let cancel_table = Arc::clone(&table);
+        let (sender, receiver) = sync_channel(1);
+        let cancellation = thread::spawn(move || {
+            sender
+                .send(cancel_table.cancel(&"first"))
+                .expect("send cancellation outcome");
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(25)),
+            Err(RecvTimeoutError::Timeout)
+        );
+        drop(guard);
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cancellation completes after contention")
+        );
+        cancellation.join().expect("cancellation thread");
     }
 }
