@@ -141,3 +141,32 @@ impl EnrolledRemoteClient {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enrolled_remote_client_requires_https() {
+        let error = EnrolledRemoteClient::new(
+            "http://remote.example",
+            "credential",
+            Duration::from_secs(1),
+        )
+        .expect_err("plaintext endpoint must fail");
+
+        assert!(matches!(error, RemoteClientError::Configuration(_)));
+    }
+
+    #[test]
+    fn enrolled_remote_client_rejects_url_credentials() {
+        let error = EnrolledRemoteClient::new(
+            "https://secret@remote.example",
+            "credential",
+            Duration::from_secs(1),
+        )
+        .expect_err("URL credentials must fail");
+
+        assert!(matches!(error, RemoteClientError::Configuration(_)));
+    }
+}
