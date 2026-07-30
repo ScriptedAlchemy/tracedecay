@@ -217,17 +217,30 @@ describe('shared shell truthfulness', () => {
   });
 
   /**
-   * A project the registry genuinely cannot resolve. `fetchLegacy` does not
-   * carry a non-2xx body, so a 404 for an unheld id and a registry that failed
-   * arrive here identically — and the honest reading of that is "unconfirmed",
-   * not "absent". The supplied name stands, marked, and writability stays
-   * unknown rather than becoming a refusal the dashboard cannot substantiate.
+   * The two ways a deep link fails to resolve, which the route reports with two
+   * different status codes and which the dashboard must not merge.
+   *
+   * They used to be one case here, because `fetchLegacy` discarded every
+   * non-2xx body: a dead link and a registry that could not be opened both
+   * arrived as `HTTP 404`/`HTTP 503` with nothing to tell them apart, so the
+   * only honest reading available was "unconfirmed" for both. That left a stale
+   * bookmark resolving forever — the reader was told the check was still
+   * pending long after it had come back with an answer.
+   *
+   * Now the body is carried, so each says what it is. What must not change is
+   * the label: neither reading renames the project to its id, because neither
+   * one carries a name to replace it with.
    */
-  it('keeps an unresolvable project unconfirmed rather than asserting it is absent', async () => {
+  it('reports a project the registry does not hold as absent, keeping its name', async () => {
     useScope.getState().selectProject('proj-ghost', 'Looks Legitimate', 'unresolved');
-    stubRoutes({ '/api/projects/proj-ghost': { status: 404, body: { status: 'not_found' } } });
+    stubRoutes({
+      '/api/projects/proj-ghost': {
+        status: 404,
+        body: failurePayload('not_found', 'no project registered with id proj-ghost'),
+      },
+    });
 
-    const { findByText } = render(queryWrapper(<ScopeBar />));
+    const { findByText, queryByText } = render(queryWrapper(<ScopeBar />));
 
     expect(await findByText('Looks Legitimate')).toBeTruthy();
     const annotated = await waitFor(() => {
@@ -235,8 +248,53 @@ describe('shared shell truthfulness', () => {
       expect(found).not.toBeNull();
       return found as HTMLElement;
     });
-    expect(annotated.getAttribute('data-scope-label-annotation')).toContain('unconfirmed');
+    // The registry's own discriminant and sentence, not a status code.
+    const annotation = annotated.getAttribute('data-scope-label-annotation') ?? '';
+    expect(annotation).toContain('not in registry');
+    expect(annotation).toContain('no project registered with id proj-ghost');
+    // Never renamed to the raw id, which is a correction no reading supports.
+    expect(queryByText('proj-ghost')).toBeNull();
+
+    // A settled refusal rather than a pending one: there is nothing here to
+    // write to, and saying "not known yet" would be false once the answer is in.
+    await waitFor(() =>
+      expect(useScope.getState().scope).toMatchObject({ activation: 'absent' }),
+    );
+    const writability = scopeWritable(useScope.getState().scope);
+    expect(writability.state).toBe('read_only');
+    if (writability.state !== 'read_only') throw new Error('unreachable');
+    expect(writability.reason).toContain('proj-ghost');
+    expect(writability.reason).not.toContain('not known yet');
+  });
+
+  it('keeps a project unconfirmed when the registry itself is unavailable', async () => {
+    // 503, not 404: the registry could not be read, so it established nothing
+    // about this project. Reporting absence here would discard a good label and
+    // refuse a write that a working registry would have accepted.
+    useScope.getState().selectProject('proj-real', 'Looks Legitimate', 'unresolved');
+    stubRoutes({
+      '/api/projects/proj-real': {
+        status: 503,
+        body: failurePayload('registry_unavailable', 'registry database could not be opened'),
+      },
+    });
+
+    const { findByText, queryByText } = render(queryWrapper(<ScopeBar />));
+
+    expect(await findByText('Looks Legitimate')).toBeTruthy();
+    const annotated = await waitFor(() => {
+      const found = document.querySelector('[data-scope-label-annotation]');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    const annotation = annotated.getAttribute('data-scope-label-annotation') ?? '';
+    expect(annotation).toContain('registry unavailable');
+    expect(annotation).toContain('registry database could not be opened');
+    expect(annotation).not.toContain('not in registry');
+    expect(queryByText('proj-real')).toBeNull();
+
     // Unknown, not read-only: the dashboard has no answer to refuse a write on.
+    expect(useScope.getState().scope).toMatchObject({ activation: 'unresolved' });
     expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
   });
 
@@ -393,6 +451,29 @@ function entryPayload({
 }
 
 /**
+ * The failure bodies `GET /api/projects/{id}` really sends, parsed through the
+ * generated schema so a contract change breaks the fixture rather than being
+ * absorbed by it.
+ *
+ * Copied field for field from `src/dashboard/projects.rs`: both are complete
+ * `ProjectContextPayloadV1` values carrying a non-`ok` status, not the bare
+ * `{status}` stub they were once written as. The distinction is the whole
+ * point of these cases — a hand-shortened body fails schema validation and
+ * arrives as a build mismatch, which is a different reading from the one the
+ * daemon is actually reporting.
+ */
+function failurePayload(status: string, error: string | null = null): ProjectContextPayload {
+  return ProjectContextPayloadSchema.parse({
+    status,
+    error,
+    is_active: null,
+    project: null,
+    aliases: [],
+    stores: [],
+  });
+}
+
+/**
  * A listing that is truncated and does not contain the selected project.
  *
  * The shape the daemon sends for a profile with more projects than the page
@@ -441,7 +522,7 @@ function stubRoutes(routes: Record<string, unknown | { status: number; body: unk
       const url = String(input);
       requestedUrls.push(url);
       const match = routes[url.split('?')[0] ?? url];
-      if (match === undefined) return jsonResponse(404, { status: 'not_found' });
+      if (match === undefined) return jsonResponse(404, failurePayload('not_found'));
       const framed = match as { status?: number; body?: unknown };
       return typeof framed.status === 'number'
         ? jsonResponse(framed.status, framed.body)

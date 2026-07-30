@@ -171,7 +171,17 @@ describe('ScopedBrain', () => {
     expect(screen.getByText('release/2.4')).toBeTruthy();
   });
 
-  it('separates an HTTP-success empty slice from transport failure without claiming zero', async () => {
+  /**
+   * An empty default slice is a measurement, and saying otherwise withheld one.
+   *
+   * `graph_response` maps every read failure to 500 `read_failed`, so a 200
+   * carrying no nodes is the daemon reporting that the unseeded slice found
+   * nothing to draw. The surface used to answer that with "the legacy response
+   * cannot distinguish empty data from query failure" — a claim about the
+   * contract that the contract contradicts, and one that left a genuinely
+   * empty project looking like a broken read forever.
+   */
+  it('reports an empty default slice as an empty graph, not as an unverifiable one', async () => {
     vi.stubGlobal(
       'fetch',
       serve({
@@ -181,13 +191,48 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByText(/graph slice is unverified/i)).toBeTruthy());
+    // Named, so the statement is about this project rather than the surface.
+    await waitFor(() =>
+      expect(screen.getByText(/no symbols are indexed for ai-train/i)).toBeTruthy(),
+    );
+    expect(screen.queryByText(/unverified/i)).toBeNull();
     expect(screen.queryByText(/the read failed/i)).toBeNull();
-    expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
     expect(screen.queryByTestId('graph-canvas')).toBeNull();
   });
 
-  it('does not present collapsed scoped overview zeros as measured graph totals', async () => {
+  /**
+   * The other empty slice the same route can send, which is not the same fact.
+   * A seeded request whose query matched nothing returns `seed_id: null` with
+   * `mode: "seeded"` — that says the search found no symbol, and says nothing
+   * about whether the project is indexed. Reading `mode` is what keeps the two
+   * apart; asserting the empty-graph sentence for both would be a fabrication.
+   */
+  it('does not call a seeded miss an empty graph', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': {
+          status: 200,
+          body: { ...SUBGRAPH_EMPTY, mode: 'seeded', seed_id: null },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByText(/no symbol matched/i)).toBeTruthy());
+    expect(screen.queryByText(/no symbols are indexed/i)).toBeNull();
+  });
+
+  /**
+   * The mirror of the case above, at the readout. Zero totals on a 200 are
+   * counts that were really taken (`get_stats` runs `SELECT COUNT(*)`, and a
+   * failure 500s), so withholding them printed a dash for a project that had
+   * genuinely been measured as empty. The old rule was worse than that: it
+   * blanked all three figures whenever ANY one was zero, so an indexed graph
+   * with no edges lost its node and file counts too.
+   */
+  it('prints measured zero totals rather than withholding all three', async () => {
     vi.stubGlobal(
       'fetch',
       serve({
@@ -202,11 +247,153 @@ describe('ScopedBrain', () => {
     renderScoped();
 
     await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
-    expect(screen.getByText(/graph totals are unverified/i)).toBeTruthy();
-    // The three figures the collapsed overview reported as zero are the claim.
-    expect(readout('nodes')).toBe('—');
-    expect(readout('edges')).toBe('—');
-    expect(readout('files')).toBe('—');
+    expect(screen.queryByText(/graph totals are unverified/i)).toBeNull();
+    expect(readout('nodes')).toBe('0');
+    expect(readout('edges')).toBe('0');
+    expect(readout('files')).toBe('0');
+  });
+
+  it('keeps a real figure when a neighbouring one is zero', async () => {
+    // The specific loss the all-or-nothing rule caused: one zero took the
+    // other two measurements with it.
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/overview': {
+          status: 200,
+          body: graphOverview({ nodes: 1204, edges: 0, files: 88 }),
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    expect(readout('nodes')).toBe('1,204');
+    expect(readout('edges')).toBe('0');
+    expect(readout('files')).toBe('88');
+  });
+
+  /**
+   * The generated `available` and `exists` flags, honoured per source.
+   *
+   * Both payloads carry their counts as required non-nullable integers, so an
+   * absent store answers with zeros — `available: false` and `exists: false`
+   * are the only fields that say those zeros are not measurements. Reading the
+   * numbers without the flags turned "there is no analytics store here" and
+   * "this project has no memory bank" into "nothing has happened here", which
+   * is the one reading the reader cannot tell apart from real quiet.
+   */
+  it('withholds counts a source flagged unavailable, and says why', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/graph/overview': {
+          status: 200,
+          body: graphOverview({ nodes: 1204, edges: 3300, files: 88 }),
+        },
+        '/api/projects/proj_x/plugins/holographic/status': {
+          status: 200,
+          body: {
+            ...MEMORY_STATUS,
+            exists: false,
+            error: 'no memory bank at /store/proj_x/memory.db',
+            memory: { ...(MEMORY_STATUS['memory'] as object), fact_count: 0, entity_count: 0 },
+          },
+        },
+        '/api/projects/proj_x/plugins/analytics/overview': {
+          status: 200,
+          body: {
+            ...ANALYTICS,
+            available: false,
+            usage: { ...(ANALYTICS['usage'] as object), available: false, event_count: 0 },
+          },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    // The graph read is fine and stays measured: unavailability is per source.
+    expect(readout('nodes')).toBe('1,204');
+    expect(readout('files')).toBe('88');
+    // The flagged sources withhold rather than reporting their zeros.
+    expect(readout('facts')).toBe('—');
+    expect(readout('entities')).toBe('—');
+    expect(readout('events')).toBe('—');
+    // And each dash is accounted for, in the source's own words where it sent
+    // any — a withheld figure the reader cannot explain reads as a bug.
+    expect(screen.getByText(/no memory bank at \/store\/proj_x\/memory\.db/)).toBeTruthy();
+    expect(screen.getByText(/no analytics store/i)).toBeTruthy();
+  });
+
+  it('keeps a measured zero from an available source', async () => {
+    // The counterpart, and the reason the flag is read instead of the number:
+    // a store that IS available and counted zero has measured something, and
+    // must not be blanked alongside one that measured nothing.
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x/plugins/holographic/status': {
+          status: 200,
+          body: {
+            ...MEMORY_STATUS,
+            exists: true,
+            error: '',
+            memory: { ...(MEMORY_STATUS['memory'] as object), fact_count: 0, entity_count: 12 },
+          },
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    expect(readout('facts')).toBe('0');
+    expect(readout('entities')).toBe('12');
+    expect(screen.queryByText(/no memory bank/i)).toBeNull();
+  });
+
+  /**
+   * The registry backbone failing, told apart from a project that holds
+   * nothing.
+   *
+   * `projects.rs::context` answers 503 with a complete payload whose `status`
+   * is `registry_unavailable` and whose `stores`/`aliases` are empty — so a
+   * rail that read those arrays without checking `status` drew the exact
+   * picture an empty project draws. The reason it sent is the difference
+   * between "this project has no stores" and "nothing could be read".
+   */
+  it('does not draw an unreadable registry as a project holding nothing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
+        '/api/projects/proj_x': {
+          status: 503,
+          body: {
+            status: 'registry_unavailable',
+            error: 'unable to open /home/x/.tracedecay/global.db',
+            is_active: null,
+            project: null,
+            aliases: [],
+            stores: [],
+          },
+        },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() =>
+      expect(screen.getByText(/registry reported: registry_unavailable/i)).toBeTruthy(),
+    );
+    expect(screen.getByText(/unable to open \/home\/x\/\.tracedecay\/global\.db/)).toBeTruthy();
+    // The store card the successful backbone draws must not be there.
+    expect(screen.queryByText('release/2.4')).toBeNull();
   });
 
   it('prints an em dash rather than a number it was never given', async () => {

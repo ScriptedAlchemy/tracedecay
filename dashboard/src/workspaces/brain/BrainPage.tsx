@@ -43,7 +43,7 @@ export function BrainPage() {
   }
 
   return (
-    <LegacyBoundary title="Brain" pending={projects.isPending} result={projects.data}>
+    <LegacyBoundary title="Brain" pending={projects.isPending} result={projects.data} statusInBody>
       {(data) => {
         switch (data.status) {
           // Each carries the daemon's own `error`, which is the only part that

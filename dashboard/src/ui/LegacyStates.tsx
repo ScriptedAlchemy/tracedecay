@@ -8,16 +8,33 @@ export function LegacyBoundary<T>({
   title,
   pending,
   result,
+  statusInBody,
   children,
 }: {
   title: string;
   pending: boolean;
   result: LegacyResult<T> | undefined;
+  /**
+   * Hand an `unavailable` body to the child instead of rendering the generic
+   * state for it.
+   *
+   * For payloads that carry their own `status` discriminant, where the child
+   * switches on it and has a sentence per condition — "the project registry is
+   * not configured" says what to do about it, and the generic chip cannot,
+   * because it does not know which source this is. Opt-in, because a child
+   * that does not check `status` would otherwise render a failure body as
+   * though the read had succeeded, which is the failure this whole boundary
+   * exists to prevent.
+   */
+  statusInBody?: boolean;
   children: (data: T) => ReactNode;
 }) {
   if (pending) return <CenteredState title={title} kind="loading" />;
   if (!result) return <CenteredState title={title} kind="unknown" />;
   if (result.outcome === 'ok') return <>{children(result.data)}</>;
+  if (statusInBody === true && result.outcome === 'unavailable') {
+    return <>{children(result.data)}</>;
+  }
   return <CenteredState title={title} kind={failureKind(result)} detail={failureDetail(result)} />;
 }
 

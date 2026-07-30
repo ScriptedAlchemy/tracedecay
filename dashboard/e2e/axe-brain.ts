@@ -10,6 +10,7 @@
  * Brain is also the one audited route with no canary, so it carries the matrix
  * for /brain itself; the scenario says why beside the flag.
  */
+import type { Page } from '@playwright/test';
 import { openRow, type Scenario } from './axe-harness.ts';
 
 export const BRAIN_SCENARIOS: readonly Scenario[] = [
@@ -57,14 +58,60 @@ export const BRAIN_SCENARIOS: readonly Scenario[] = [
   {
     id: 'brain-scoped',
     route: '/brain',
-    proves: 'the per-project Brain reached from the registry is also well-formed',
+    proves:
+      'the per-project Brain reached from the registry is well-formed, and its holdings rail takes a tab stop only at the widths where it is really a scroller',
     overrides: {},
     // Scoping to a project swaps in a different set of definition lists, which
     // is why the registry view passing does not vouch for this one.
     drive: (page) => openRow(page, /tracedecay/i),
+    matrix: true,
     assert: async (page) => {
       const dlCount = await page.locator('dl').count();
       if (dlCount === 0) throw new Error('scoped Brain rendered no definition lists at all');
     },
+    assertEachScan: assertHoldingsTabStop,
   },
 ];
+
+/**
+ * The holdings rail is keyboard-reachable exactly when it needs to be.
+ *
+ * A scroll container whose contents hold nothing focusable has to take the tab
+ * stop itself (WCAG 2.1.1) — the rail is read-out text, so there is nothing
+ * inside it to tab to. But its overflow is applied at `lg`, and below that it
+ * is an ordinary block in the page flow: measured at 320 and 768 CSS px it
+ * computes `overflow-y: visible`, and a literal `tabIndex={0}` there put a stop
+ * that does nothing in front of the holdings, on the screens where tabbing is
+ * most of the navigation.
+ *
+ * So the assertion is the correspondence, in both directions, at every width in
+ * the matrix — not the presence or the absence.
+ */
+async function assertHoldingsTabStop(page: Page, tag: string): Promise<void> {
+  const reading = await page.evaluate(() => {
+    const rail = document.querySelector('aside[aria-label^="What TraceDecay holds"]');
+    if (rail === null) return null;
+    return {
+      overflowY: getComputedStyle(rail).overflowY,
+      tabindex: rail.getAttribute('tabindex'),
+    };
+  });
+  if (reading === null) {
+    throw new Error(`${tag}: the scoped Brain rendered no holdings rail`);
+  }
+  const scroller = reading.overflowY === 'auto' || reading.overflowY === 'scroll';
+  const focusable = reading.tabindex === '0';
+  if (scroller && !focusable) {
+    throw new Error(
+      `${tag}: the holdings rail is a scroll container (overflow-y: ${reading.overflowY}) with no ` +
+        `tab stop, so a keyboard reader cannot scroll it — nothing inside it is focusable`,
+    );
+  }
+  if (!scroller && focusable) {
+    throw new Error(
+      `${tag}: the holdings rail is not a scroll container (overflow-y: ${reading.overflowY}) but ` +
+        `still takes a tab stop, so every keyboard reader at this width tabs through a stop that ` +
+        `does nothing`,
+    );
+  }
+}
