@@ -19,7 +19,6 @@ mod ingest_byte_budget;
 mod jsonl_observation_admission;
 pub mod kiro;
 pub mod lcm;
-pub mod providers;
 pub mod session_temporal_benchmark;
 pub mod shared;
 pub(crate) mod snapshot_observation;
@@ -42,8 +41,8 @@ pub(crate) use ingest::{
     try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_home,
 };
 pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
-pub use providers::{ProviderScope, SessionProvider};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+pub use tracedecay_sessions::{ProviderScope, SessionProvider};
 
 /// Search hit for session-message full-text lookup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
