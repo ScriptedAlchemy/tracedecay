@@ -23,6 +23,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const SURFACES = [
   'brain', 'explorer', 'loom', 'sessions', 'agents', 'code',
   'knowledge', 'delivery', 'automations', 'observatory', 'costs', 'settings',
+  'work',
 ] as const;
 
 interface Problem {
