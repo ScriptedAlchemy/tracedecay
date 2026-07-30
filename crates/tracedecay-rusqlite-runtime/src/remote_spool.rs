@@ -4,6 +4,7 @@
 //! those canonical contracts directly; it does not define a second frame DTO.
 
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -13,7 +14,7 @@ use ring::{aead, rand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::{
-    DirectorySyncPolicy, append_durable, file_len, read_bounded,
+    DirectorySyncPolicy, OperationBudgetUsage, append_durable, file_len, read_bounded,
     remote::capture::{
         AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePersistenceErrorV1,
         RemoteCapturePortV1, RemoteCaptureReceiptV1, RemoteCaptureSequenceV1,
@@ -206,6 +207,15 @@ enum DurableSpoolRecordV2 {
     Transition {
         transition: RemoteReplayTransitionV1,
     },
+    ReplayAttempt {
+        event_id: String,
+        replay_attempt: u64,
+        observed_at: UtcMicros,
+    },
+    ReplayAttemptAbandoned {
+        event_id: String,
+        replay_attempt: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,6 +223,8 @@ struct PersistedSpoolEventV2 {
     capture: PersistedRemoteCaptureV2,
     state: RemoteReplayStateV1,
     receipt: Option<RemoteReplayCommitReceiptV1>,
+    last_attempt: u64,
+    active_attempt: Option<u64>,
 }
 
 pub struct RemoteCaptureSpool {
@@ -221,6 +233,7 @@ pub struct RemoteCaptureSpool {
     encryption: Box<dyn RemoteSpoolEncryption>,
     reachability: Box<dyn RemoteAuthorityReachabilityPortV1>,
     write_guard: Mutex<()>,
+    _lease: File,
 }
 
 impl RemoteCaptureSpool {
@@ -237,6 +250,17 @@ impl RemoteCaptureSpool {
         if !encryption.is_available() {
             return Err(RemoteSpoolError::AtRestEncryptionUnavailable);
         }
+        let mut lease_path = path.as_os_str().to_owned();
+        lease_path.push(".lock");
+        let lease = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(PathBuf::from(lease_path))
+            .map_err(RemoteSpoolError::Io)?;
+        lease
+            .try_lock()
+            .map_err(|_| RemoteSpoolError::Unavailable)?;
         if file_len(&path).map_err(RemoteSpoolError::Io)? > config.maximum_file_bytes {
             return Err(RemoteSpoolError::Overflow);
         }
@@ -246,8 +270,10 @@ impl RemoteCaptureSpool {
             encryption,
             reachability,
             write_guard: Mutex::new(()),
+            _lease: lease,
         };
         spool.read_records()?;
+        spool.recover_interrupted_attempts()?;
         Ok(spool)
     }
 
@@ -323,6 +349,8 @@ impl RemoteCaptureSpool {
                                     capture,
                                     state: RemoteReplayStateV1::Pending,
                                     receipt: None,
+                                    last_attempt: 0,
+                                    active_attempt: None,
                                 },
                             )
                             .is_some()
@@ -337,11 +365,58 @@ impl RemoteCaptureSpool {
                     let event = events
                         .get_mut(&transition.event_id)
                         .ok_or(RemoteSpoolError::Corruption)?;
-                    if event.state != transition.from {
+                    if event.state != transition.from
+                        || event.last_attempt != transition.replay_attempt
+                        || event.active_attempt != Some(transition.replay_attempt)
+                    {
                         return Err(RemoteSpoolError::Corruption);
                     }
                     event.state = transition.to;
                     event.receipt = transition.receipt;
+                    if matches!(
+                        event.state,
+                        RemoteReplayStateV1::Acknowledged
+                            | RemoteReplayStateV1::Rejected
+                            | RemoteReplayStateV1::Quarantined
+                            | RemoteReplayStateV1::GarbageCollectionEligible
+                    ) {
+                        event.active_attempt = None;
+                    }
+                }
+                DurableSpoolRecordV2::ReplayAttempt {
+                    event_id,
+                    replay_attempt,
+                    observed_at: _,
+                } => {
+                    let event = events
+                        .get_mut(&event_id)
+                        .ok_or(RemoteSpoolError::Corruption)?;
+                    if event.active_attempt.is_some()
+                        || replay_attempt == 0
+                        || replay_attempt
+                            != event
+                                .last_attempt
+                                .checked_add(1)
+                                .ok_or(RemoteSpoolError::Corruption)?
+                    {
+                        return Err(RemoteSpoolError::Corruption);
+                    }
+                    event.last_attempt = replay_attempt;
+                    event.active_attempt = Some(replay_attempt);
+                }
+                DurableSpoolRecordV2::ReplayAttemptAbandoned {
+                    event_id,
+                    replay_attempt,
+                } => {
+                    let event = events
+                        .get_mut(&event_id)
+                        .ok_or(RemoteSpoolError::Corruption)?;
+                    if event.active_attempt != Some(replay_attempt)
+                        || event.last_attempt != replay_attempt
+                    {
+                        return Err(RemoteSpoolError::Corruption);
+                    }
+                    event.active_attempt = None;
                 }
             }
         }
@@ -384,6 +459,18 @@ impl RemoteCaptureSpool {
             .map(|_| ())
             .map_err(RemoteSpoolError::Io)
     }
+
+    fn recover_interrupted_attempts(&self) -> Result<(), RemoteSpoolError> {
+        for (event_id, event) in self.snapshot()? {
+            if let Some(replay_attempt) = event.active_attempt {
+                self.append(&DurableSpoolRecordV2::ReplayAttemptAbandoned {
+                    event_id,
+                    replay_attempt,
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
@@ -398,6 +485,7 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
         Ok(RemoteReplaySpoolStateV1 {
             state: event.state,
             receipt: event.receipt.clone(),
+            last_attempt: event.last_attempt,
         })
     }
 
@@ -416,7 +504,10 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
         let event = snapshot
             .get(&transition.event_id)
             .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
-        if event.state != transition.from {
+        if event.state != transition.from
+            || event.last_attempt != transition.replay_attempt
+            || event.active_attempt != Some(transition.replay_attempt)
+        {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
         if let Some(receipt) = &transition.receipt {
@@ -431,6 +522,35 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
         }
         self.append(&DurableSpoolRecordV2::Transition { transition })
             .map_err(map_persistence_error)
+    }
+
+    fn begin_replay_attempt(
+        &self,
+        event_id: &str,
+        observed_at: UtcMicros,
+    ) -> Result<u64, RemoteCapturePersistenceErrorV1> {
+        let _guard = self
+            .write_guard
+            .lock()
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Unavailable)?;
+        let snapshot = self.snapshot().map_err(map_persistence_error)?;
+        let event = snapshot
+            .get(event_id)
+            .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
+        if event.active_attempt.is_some() {
+            return Err(RemoteCapturePersistenceErrorV1::Unavailable);
+        }
+        let replay_attempt = event
+            .last_attempt
+            .checked_add(1)
+            .ok_or(RemoteCapturePersistenceErrorV1::Corruption)?;
+        self.append(&DurableSpoolRecordV2::ReplayAttempt {
+            event_id: event_id.to_owned(),
+            replay_attempt,
+            observed_at,
+        })
+        .map_err(map_persistence_error)?;
+        Ok(replay_attempt)
     }
 }
 
@@ -892,6 +1012,7 @@ mod tests {
         assert_eq!(duplicate.event_id, first.event_id);
         let mut bytes = fs::read(&path).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("sanitized-1"));
+        drop(spool);
         assert_eq!(
             RemoteCaptureSpool::open(
                 path.clone(),
@@ -965,7 +1086,19 @@ mod tests {
             event_id: capture_receipt.event_id.clone(),
             writer_fence: capture.writer.authority.fence.clone(),
             commit_sequence: 7,
+            committed_at: UtcMicros(20),
+            budget: OperationBudgetUsage {
+                units_consumed: 1,
+                bytes_consumed: 1,
+                elapsed_micros: 0,
+            },
         };
+        assert_eq!(
+            capture_spool
+                .begin_replay_attempt(&capture_receipt.event_id, UtcMicros(20))
+                .unwrap(),
+            1
+        );
         RemoteReplaySpoolPortV1::transition(
             &capture_spool,
             RemoteReplayTransitionV1 {
@@ -979,6 +1112,7 @@ mod tests {
             },
         )
         .unwrap();
+        drop(capture_spool);
 
         let reopened = spool(&root);
         assert_eq!(
@@ -986,6 +1120,7 @@ mod tests {
             RemoteReplaySpoolStateV1 {
                 state: RemoteReplayStateV1::Admitted,
                 receipt: Some(replay_receipt),
+                last_attempt: 1,
             }
         );
         assert_eq!(
@@ -1012,6 +1147,43 @@ mod tests {
     }
 
     #[test]
+    fn replay_attempts_are_monotonic_across_reopen() {
+        let root = TempDir::new().unwrap();
+        let capture_spool = spool(&root);
+        assert!(matches!(
+            RemoteCaptureSpool::open(
+                root.path().join("remote.spool"),
+                config(),
+                Box::new(XorEncryption(0xA5)),
+                Box::new(Offline),
+            ),
+            Err(RemoteSpoolError::Unavailable)
+        ));
+        let receipt = capture_spool.capture_pending(&command(1, None)).unwrap();
+        assert_eq!(
+            capture_spool
+                .begin_replay_attempt(&receipt.event_id, UtcMicros(20))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            capture_spool.begin_replay_attempt(&receipt.event_id, UtcMicros(21)),
+            Err(RemoteCapturePersistenceErrorV1::Unavailable)
+        );
+        drop(capture_spool);
+
+        let reopened = spool(&root);
+        assert_eq!(reopened.state(&receipt.event_id).unwrap().last_attempt, 1);
+        assert_eq!(
+            reopened
+                .begin_replay_attempt(&receipt.event_id, UtcMicros(21))
+                .unwrap(),
+            2
+        );
+        assert_eq!(reopened.state(&receipt.event_id).unwrap().last_attempt, 2);
+    }
+
+    #[test]
     fn garbage_collection_reclaims_event_capacity_after_reopen() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("remote.spool");
@@ -1030,8 +1202,20 @@ mod tests {
             event_id: first_receipt.event_id.clone(),
             writer_fence: first.writer.authority.fence.clone(),
             commit_sequence: 7,
+            committed_at: UtcMicros(20),
+            budget: OperationBudgetUsage {
+                units_consumed: 1,
+                bytes_consumed: 1,
+                elapsed_micros: 0,
+            },
         };
-        for (from, to) in [
+        assert_eq!(
+            capture_spool
+                .begin_replay_attempt(&first_receipt.event_id, UtcMicros(20))
+                .unwrap(),
+            1
+        );
+        for (index, (from, to)) in [
             (RemoteReplayStateV1::Pending, RemoteReplayStateV1::Admitted),
             (
                 RemoteReplayStateV1::Admitted,
@@ -1041,14 +1225,24 @@ mod tests {
                 RemoteReplayStateV1::Acknowledged,
                 RemoteReplayStateV1::GarbageCollectionEligible,
             ),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let replay_attempt = if index == 2 {
+                capture_spool
+                    .begin_replay_attempt(&first_receipt.event_id, UtcMicros(21))
+                    .unwrap()
+            } else {
+                1
+            };
             RemoteReplaySpoolPortV1::transition(
                 &capture_spool,
                 RemoteReplayTransitionV1 {
                     event_id: first_receipt.event_id.clone(),
                     from,
                     to,
-                    replay_attempt: 1,
+                    replay_attempt,
                     observed_at: UtcMicros(20),
                     finding: None,
                     receipt: Some(replay_receipt.clone()),

@@ -4,11 +4,15 @@
 //! application carries only canonical capture identity and a bounded replay
 //! receipt suitable for validation and status reporting.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, ManifestDigest,
-    RemoteCapabilityV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, UtcMicros,
+    RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, UtcMicros, canonical_sha256,
 };
 
 use super::auth::{
@@ -20,7 +24,17 @@ use super::capture::{
     AdmittedRemoteCaptureV1, RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
 use super::protocol::RemoteProtocolBodyV1;
-use crate::{ApplicationContractError, PolicyDecisionRef, ResolvedScope};
+use super::protocol::{
+    REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
+    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_enrollment_result_contract_v1,
+    remote_protocol_problem,
+};
+use crate::{
+    ApplicationContractError, ApplicationEnvelope, Deadline, EffectId, EffectReceipt, EffectResult,
+    EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt, PolicyDecisionRef,
+    ReconciliationState, ResolvedScope,
+};
+use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 /// Secret-free replay selector. The authority loads the canonical admitted
 /// capture from its encrypted spool; callers cannot resubmit or alter payload.
@@ -203,6 +217,8 @@ pub struct RemoteReplayCommitReceiptV1 {
     pub event_id: String,
     pub writer_fence: RemoteWriterFenceV1,
     pub commit_sequence: u64,
+    pub committed_at: UtcMicros,
+    pub budget: OperationBudgetUsage,
 }
 
 impl RemoteReplayCommitReceiptV1 {
@@ -214,6 +230,9 @@ impl RemoteReplayCommitReceiptV1 {
         if self.event_id != frame.event_id
             || self.writer_fence != current_writer.authority.fence
             || self.commit_sequence == 0
+            || self.committed_at < frame.capture.captured_at
+            || self.budget.units_consumed == 0
+            || self.budget.bytes_consumed == 0
         {
             return Err(RemoteReplayApplicationErrorV1::ReceiptMismatch);
         }
@@ -227,6 +246,7 @@ impl RemoteReplayCommitReceiptV1 {
 pub struct RemoteReplaySpoolStateV1 {
     pub state: RemoteReplayStateV1,
     pub receipt: Option<RemoteReplayCommitReceiptV1>,
+    pub last_attempt: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -270,6 +290,12 @@ pub trait RemoteReplaySpoolPortV1: Send + Sync {
         &self,
         transition: RemoteReplayTransitionV1,
     ) -> Result<(), RemoteCapturePersistenceErrorV1>;
+
+    fn begin_replay_attempt(
+        &self,
+        event_id: &str,
+        observed_at: UtcMicros,
+    ) -> Result<u64, RemoteCapturePersistenceErrorV1>;
 }
 
 pub trait RemoteReplayFrameLookupPortV1: Send + Sync {
@@ -298,31 +324,33 @@ pub struct RemoteReplayServiceOutcomeV1 {
     pub authority: CurrentRemoteAuthorityStateV1,
     pub frame: RemoteReplayFrameV1,
     pub caller_admission: RemoteEnrollmentCommitReceiptV1,
+    pub caller: EnrollmentCredentialRecordV1,
     pub policy: RemoteReplayPolicyEvidenceV1,
+    pub input_digest: ManifestDigest,
 }
 
-pub struct RemoteReplayServiceV1<'a> {
-    authentication: &'a dyn RemoteAuthorityAuthenticationPort,
-    credentials: &'a dyn RemoteEnrollmentCredentialLookupPortV1,
-    frames: &'a dyn RemoteReplayFrameLookupPortV1,
-    current_writer: &'a dyn RemoteReplayCurrentWriterPortV1,
-    policy: &'a dyn RemoteReplayPolicyPortV1,
-    policy_evidence: &'a dyn RemoteReplayPolicyEvidencePortV1,
-    transaction: &'a dyn RemoteReplayTransactionPortV1,
-    spool: &'a dyn RemoteReplaySpoolPortV1,
+pub struct RemoteReplayServiceV1 {
+    authentication: Arc<dyn RemoteAuthorityAuthenticationPort + Send + Sync>,
+    credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
+    frames: Arc<dyn RemoteReplayFrameLookupPortV1>,
+    current_writer: Arc<dyn RemoteReplayCurrentWriterPortV1>,
+    policy: Arc<dyn RemoteReplayPolicyPortV1>,
+    policy_evidence: Arc<dyn RemoteReplayPolicyEvidencePortV1>,
+    transaction: Arc<dyn RemoteReplayTransactionPortV1>,
+    spool: Arc<dyn RemoteReplaySpoolPortV1>,
 }
 
-impl<'a> RemoteReplayServiceV1<'a> {
+impl RemoteReplayServiceV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        authentication: &'a dyn RemoteAuthorityAuthenticationPort,
-        credentials: &'a dyn RemoteEnrollmentCredentialLookupPortV1,
-        frames: &'a dyn RemoteReplayFrameLookupPortV1,
-        current_writer: &'a dyn RemoteReplayCurrentWriterPortV1,
-        policy: &'a dyn RemoteReplayPolicyPortV1,
-        policy_evidence: &'a dyn RemoteReplayPolicyEvidencePortV1,
-        transaction: &'a dyn RemoteReplayTransactionPortV1,
-        spool: &'a dyn RemoteReplaySpoolPortV1,
+        authentication: Arc<dyn RemoteAuthorityAuthenticationPort + Send + Sync>,
+        credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
+        frames: Arc<dyn RemoteReplayFrameLookupPortV1>,
+        current_writer: Arc<dyn RemoteReplayCurrentWriterPortV1>,
+        policy: Arc<dyn RemoteReplayPolicyPortV1>,
+        policy_evidence: Arc<dyn RemoteReplayPolicyEvidencePortV1>,
+        transaction: Arc<dyn RemoteReplayTransactionPortV1>,
+        spool: Arc<dyn RemoteReplaySpoolPortV1>,
     ) -> Self {
         Self {
             authentication,
@@ -338,26 +366,56 @@ impl<'a> RemoteReplayServiceV1<'a> {
 
     pub fn replay(
         &self,
-        request: &RemoteReplayRequestV1,
+        request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         presented_credential: &OpaqueRemoteCredential,
-        replay_attempt: u64,
-        observed_at: UtcMicros,
     ) -> Result<RemoteReplayServiceOutcomeV1, RemoteReplayServiceErrorV1> {
+        if request.protocol_version != REMOTE_PROTOCOL_VERSION_V1 {
+            return Err(RemoteReplayServiceErrorV1::UnsupportedVersion);
+        }
         request
-            .validate()
+            .validate_metadata()
+            .and_then(|()| request.body.validate())
             .map_err(|_| RemoteReplayServiceErrorV1::InvalidRequest)?;
+        let input_digest =
+            canonical_sha256(request).map_err(|_| RemoteReplayServiceErrorV1::InvalidRequest)?;
         let frame = self
             .frames
-            .load_replay_frame(&request.event_id)
-            .map_err(RemoteReplayServiceErrorV1::Persistence)?;
+            .load_replay_frame(&request.body.event_id)
+            .map_err(|error| match error {
+                RemoteCapturePersistenceErrorV1::Corruption
+                | RemoteCapturePersistenceErrorV1::SequenceGap => {
+                    RemoteReplayServiceErrorV1::FrameSelectionRejected
+                }
+                error => RemoteReplayServiceErrorV1::Persistence(error),
+            })?;
         let caller = self
             .credentials
             .enrollment_by_id(&frame.capture.enrollment_id)
             .map_err(RemoteReplayServiceErrorV1::Credential)?;
+        if request.brain_id != caller.brain_id
+            || request.caller_node_id != caller.node_id
+            || request.enrollment_revision != caller.revision
+            || caller.enrollment_id != frame.capture.enrollment_id
+            || caller.node_id != frame.capture.node_id
+            || caller.revision != frame.capture.enrollment_revision
+        {
+            return Err(RemoteReplayServiceErrorV1::RequestBindingMismatch);
+        }
         let caller_admission = self
             .credentials
             .enrollment_commit_receipt(&frame.capture.enrollment_id)
             .map_err(RemoteReplayServiceErrorV1::Credential)?;
+        caller_admission
+            .validate()
+            .map_err(|_| RemoteReplayServiceErrorV1::RequestBindingMismatch)?;
+        if caller_admission.enrollment != caller
+            || caller_admission.admission.scope().project_id != caller.scope.project_id
+            || caller_admission.admission.scope().repository_id != caller.scope.repository_id
+            || caller_admission.admission.scope().worktree_id != caller.scope.worktree_id
+            || caller_admission.admission.scope().reference != caller.scope.reference
+        {
+            return Err(RemoteReplayServiceErrorV1::RequestBindingMismatch);
+        }
         let current = self
             .current_writer
             .current_writer(&frame)
@@ -365,6 +423,11 @@ impl<'a> RemoteReplayServiceV1<'a> {
         let writer = current.writer.as_ref().ok_or_else(|| {
             RemoteReplayServiceErrorV1::AuthorityUnavailable(current.state.clone())
         })?;
+        if request.expected_authority.as_ref() != Some(&writer.authority.fence) {
+            return Err(RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(
+                current.state.clone(),
+            ));
+        }
         let authority_credential = self
             .credentials
             .authority_enrollment(
@@ -375,32 +438,41 @@ impl<'a> RemoteReplayServiceV1<'a> {
             .map_err(RemoteReplayServiceErrorV1::Credential)?;
         let policy = self.policy_evidence.current_policy_evidence(&frame)?;
         let outcome = replay_remote_capture(
-            self.authentication,
-            self.policy,
-            self.transaction,
-            self.spool,
+            self.authentication.as_ref(),
+            self.policy.as_ref(),
+            self.transaction.as_ref(),
+            self.spool.as_ref(),
             &authority_credential,
             &caller,
             presented_credential,
             &frame,
             writer,
-            replay_attempt,
-            observed_at,
+            request.sent_at,
         )?;
         Ok(RemoteReplayServiceOutcomeV1 {
             outcome,
             authority: current.state,
             frame,
             caller_admission,
+            caller,
             policy,
+            input_digest,
         })
     }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RemoteReplayServiceErrorV1 {
+    #[error("remote replay protocol version is unsupported")]
+    UnsupportedVersion,
     #[error("remote replay request is invalid")]
     InvalidRequest,
+    #[error("remote replay frame selection is not authorized")]
+    FrameSelectionRejected,
+    #[error("remote replay request does not match the durable caller enrollment")]
+    RequestBindingMismatch,
+    #[error("remote replay expected authority does not match the current writer")]
+    ExpectedAuthorityMismatch(CurrentRemoteAuthorityStateV1),
     #[error("remote replay credential authority failed")]
     Credential(RemoteEnrollmentAuthorityErrorV1),
     #[error("remote replay authority is unavailable")]
@@ -409,6 +481,256 @@ pub enum RemoteReplayServiceErrorV1 {
     Persistence(RemoteCapturePersistenceErrorV1),
     #[error(transparent)]
     Replay(#[from] RemoteReplayApplicationErrorV1),
+}
+
+pub struct RemoteReplayProtocolAdapterV1 {
+    service: RemoteReplayServiceV1,
+}
+
+impl RemoteReplayProtocolAdapterV1 {
+    pub fn new(service: RemoteReplayServiceV1) -> Self {
+        Self { service }
+    }
+}
+
+impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapterV1 {
+    type Output = RemoteReplayOutcomeV1;
+
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<Self::Output> {
+        let request_id = request.request_id.clone();
+        let observed_at = request.sent_at;
+        let fallback_authority = request.expected_authority.clone().map_or_else(
+            || CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+                observed_at,
+            },
+            |known_fence| CurrentRemoteAuthorityStateV1::Partial {
+                known_fence: Some(known_fence),
+                missing: BTreeSet::from([RemoteAuthorityUnavailableReasonV1::FenceUnverified]),
+                observed_at,
+            },
+        );
+        match self.service.replay(&request, &credential) {
+            Ok(outcome) => {
+                let authority = outcome.authority.clone();
+                let result = replay_effect_envelope(request, outcome).map_err(|failure| {
+                    remote_protocol_problem(
+                        remote_enrollment_result_contract_v1(),
+                        request_id.clone(),
+                        failure,
+                    )
+                });
+                RemoteProtocolResponseV1::new(request_id, authority, result)
+                    .expect("replay adapter preserves validated response identities")
+            }
+            Err(error) => {
+                let authority = match &error {
+                    RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
+                    | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => state.clone(),
+                    _ => fallback_authority,
+                };
+                let failure = replay_protocol_failure(error);
+                RemoteProtocolResponseV1::new(
+                    request_id.clone(),
+                    authority,
+                    Err(remote_protocol_problem(
+                        remote_enrollment_result_contract_v1(),
+                        request_id,
+                        failure,
+                    )),
+                )
+                .expect("replay adapter preserves validated problem identities")
+            }
+        }
+    }
+}
+
+fn replay_effect_envelope(
+    request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    outcome: RemoteReplayServiceOutcomeV1,
+) -> Result<ApplicationEnvelope<RemoteReplayOutcomeV1>, RemoteProtocolFailureV1> {
+    let expected_state = canonical_sha256(&(
+        "tracedecay.remote-capture.v2",
+        &outcome.frame.capture.enrollment_id,
+        outcome.frame.capture.enrollment_revision,
+        &outcome.frame.capture.node_id,
+        &outcome.frame.capture.writer,
+        outcome.frame.capture.policy_revision,
+        &outcome.frame.capture.sequence,
+        &outcome.frame.capture.observation,
+        outcome.frame.capture.captured_at,
+    ))
+    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let committed_state = canonical_sha256(&outcome.outcome)
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let measured_bytes = serde_json::to_vec(&(&request, &outcome.outcome))
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?
+        .len();
+    let (budget, completed_at) = match &outcome.outcome {
+        RemoteReplayOutcomeV1::Acknowledged { receipt, .. } => (
+            receipt.budget,
+            if receipt.committed_at < request.sent_at {
+                request.sent_at
+            } else {
+                receipt.committed_at
+            },
+        ),
+        RemoteReplayOutcomeV1::Rejected | RemoteReplayOutcomeV1::Quarantined => (
+            OperationBudgetUsage {
+                units_consumed: 1,
+                bytes_consumed: u64::try_from(measured_bytes)
+                    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?,
+                elapsed_micros: 0,
+            },
+            request.sent_at,
+        ),
+    };
+    let deadline = Deadline::new(outcome.caller.expires_at)
+        .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
+    let execution = OperationReceipt::completed(request.sent_at, completed_at, deadline, budget)
+        .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
+    let event_digest = canonical_sha256(&(
+        "tracedecay.remote-replay-effect.v1",
+        &outcome.frame.event_id,
+        outcome.caller.revision,
+    ))
+    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let operation = UseCaseId::new("use-case.remote.replay")
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let effect_id = EffectId::new(format!("effect.remote.replay.{}", event_digest.as_str()))
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let idempotency_key = IdempotencyKey::new(format!(
+        "idempotency.remote.replay.{}",
+        event_digest.as_str()
+    ))
+    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let mut authority = outcome.caller_admission.admission.authority().clone();
+    authority.policy = outcome.policy.policy.clone();
+    authority
+        .validate_for(&outcome.policy.scope)
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let receipt = EffectReceipt {
+        operation: operation.clone(),
+        request_id: request.request_id.clone(),
+        actor: outcome.caller_admission.admission.actor().clone(),
+        scope: outcome.policy.scope.clone(),
+        effect_class: EffectClass::Administrative,
+        idempotency_key: idempotency_key.clone(),
+        input_digest: outcome.input_digest,
+        expected_state: expected_state.clone(),
+        policy_digest: outcome.policy.policy.digest.clone(),
+        configuration_digest: outcome.policy.configuration_digest,
+        catalog_digest: outcome.policy.catalog_digest,
+        privacy_digest: outcome.policy.privacy_digest,
+        outcome: EffectTermination::Completed,
+        committed_state: Some(committed_state),
+        external_proof: None,
+    };
+    let effect = EffectResult::new(
+        effect_id,
+        EffectClass::Administrative,
+        idempotency_key,
+        authority,
+        expected_state,
+        execution,
+        ReconciliationState::Reconciled,
+        receipt,
+        Some(outcome.outcome),
+    )
+    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    Ok(ApplicationEnvelope::effect(
+        remote_enrollment_result_contract_v1(),
+        request.request_id,
+        outcome.policy.scope,
+        effect,
+    ))
+}
+
+fn replay_protocol_failure(error: RemoteReplayServiceErrorV1) -> RemoteProtocolFailureV1 {
+    match error {
+        RemoteReplayServiceErrorV1::UnsupportedVersion => {
+            RemoteProtocolFailureV1::UnsupportedVersion
+        }
+        RemoteReplayServiceErrorV1::InvalidRequest
+        | RemoteReplayServiceErrorV1::RequestBindingMismatch => {
+            RemoteProtocolFailureV1::ScopeMismatch
+        }
+        RemoteReplayServiceErrorV1::FrameSelectionRejected => {
+            RemoteProtocolFailureV1::CallerAuthenticationFailed
+        }
+        RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(_) => {
+            RemoteProtocolFailureV1::StaleAuthorityFence
+        }
+        RemoteReplayServiceErrorV1::AuthorityUnavailable(_)
+        | RemoteReplayServiceErrorV1::Persistence(_)
+        | RemoteReplayServiceErrorV1::Credential(
+            RemoteEnrollmentAuthorityErrorV1::Unavailable
+            | RemoteEnrollmentAuthorityErrorV1::IdentityConflict,
+        ) => RemoteProtocolFailureV1::AuthorityUnavailable,
+        RemoteReplayServiceErrorV1::Credential(RemoteEnrollmentAuthorityErrorV1::GrantConsumed) => {
+            RemoteProtocolFailureV1::StaleCredentialRevision
+        }
+        RemoteReplayServiceErrorV1::Credential(RemoteEnrollmentAuthorityErrorV1::GrantNotFound) => {
+            RemoteProtocolFailureV1::CallerAuthenticationFailed
+        }
+        RemoteReplayServiceErrorV1::Replay(replay) => match replay {
+            RemoteReplayApplicationErrorV1::Authentication(authentication) => {
+                match authentication {
+                    RemoteAuthenticationError::Expired => {
+                        RemoteProtocolFailureV1::EnrollmentExpired
+                    }
+                    RemoteAuthenticationError::Revoked => {
+                        RemoteProtocolFailureV1::EnrollmentRevoked
+                    }
+                    RemoteAuthenticationError::InsufficientCapability => {
+                        RemoteProtocolFailureV1::InsufficientCapability
+                    }
+                    RemoteAuthenticationError::StaleRevision
+                    | RemoteAuthenticationError::RevisionOverflow => {
+                        RemoteProtocolFailureV1::StaleCredentialRevision
+                    }
+                    RemoteAuthenticationError::AuthorityAuthenticationFailed
+                    | RemoteAuthenticationError::InvalidAuthorityCredential => {
+                        RemoteProtocolFailureV1::AuthorityAuthenticationFailed
+                    }
+                    RemoteAuthenticationError::InvalidCredential => {
+                        RemoteProtocolFailureV1::CallerAuthenticationFailed
+                    }
+                    RemoteAuthenticationError::IdentityMismatch
+                    | RemoteAuthenticationError::ScopeMismatch
+                    | RemoteAuthenticationError::InvalidEnrollment
+                    | RemoteAuthenticationError::InvalidValidity => {
+                        RemoteProtocolFailureV1::ScopeMismatch
+                    }
+                }
+            }
+            RemoteReplayApplicationErrorV1::FenceMismatch
+            | RemoteReplayApplicationErrorV1::ReceiptMismatch
+            | RemoteReplayApplicationErrorV1::Transaction(
+                RemoteReplayTransactionErrorV1::FenceMismatch,
+            ) => RemoteProtocolFailureV1::StaleAuthorityFence,
+            RemoteReplayApplicationErrorV1::PolicyMismatch => {
+                RemoteProtocolFailureV1::StaleCredentialRevision
+            }
+            RemoteReplayApplicationErrorV1::InvalidFrame
+            | RemoteReplayApplicationErrorV1::Transaction(
+                RemoteReplayTransactionErrorV1::IdempotencyConflict,
+            ) => RemoteProtocolFailureV1::ScopeMismatch,
+            RemoteReplayApplicationErrorV1::InvalidReplayAttempt
+            | RemoteReplayApplicationErrorV1::InvalidSpoolState
+            | RemoteReplayApplicationErrorV1::ReceiptMissing
+            | RemoteReplayApplicationErrorV1::PolicyUnavailable
+            | RemoteReplayApplicationErrorV1::Persistence(_)
+            | RemoteReplayApplicationErrorV1::Transaction(
+                RemoteReplayTransactionErrorV1::CanonicalEffect
+                | RemoteReplayTransactionErrorV1::Unavailable,
+            ) => RemoteProtocolFailureV1::AuthorityUnavailable,
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -447,12 +769,11 @@ pub fn replay_remote_capture(
     presented_caller_credential: &OpaqueRemoteCredential,
     frame: &RemoteReplayFrameV1,
     current_writer: &RemoteWriterAuthorityV1,
-    replay_attempt: u64,
     observed_at: UtcMicros,
 ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
-    if replay_attempt == 0 {
-        return Err(RemoteReplayApplicationErrorV1::InvalidReplayAttempt);
-    }
+    let replay_attempt = spool
+        .begin_replay_attempt(&frame.event_id, observed_at)
+        .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
     validate_scope_and_fence(frame, current_writer, caller_credential)?;
     if let Err(error) = authenticate_remote_request(
         authentication,
@@ -596,7 +917,6 @@ pub fn mark_remote_capture_gc_eligible(
     spool: &dyn RemoteReplaySpoolPortV1,
     frame: &RemoteReplayFrameV1,
     receipt: RemoteReplayCommitReceiptV1,
-    replay_attempt: u64,
     observed_at: UtcMicros,
 ) -> Result<(), RemoteReplayApplicationErrorV1> {
     let state = spool
@@ -606,6 +926,9 @@ pub fn mark_remote_capture_gc_eligible(
     {
         return Err(RemoteReplayApplicationErrorV1::InvalidSpoolState);
     }
+    let replay_attempt = spool
+        .begin_replay_attempt(&frame.event_id, observed_at)
+        .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
     transition(
         spool,
         frame,
@@ -763,6 +1086,26 @@ mod tests {
             }
             .validate()
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn replay_protocol_failures_preserve_concealment_and_staleness() {
+        assert_eq!(
+            replay_protocol_failure(RemoteReplayServiceErrorV1::FrameSelectionRejected),
+            RemoteProtocolFailureV1::CallerAuthenticationFailed
+        );
+        assert_eq!(
+            replay_protocol_failure(RemoteReplayServiceErrorV1::Replay(
+                RemoteReplayApplicationErrorV1::Authentication(RemoteAuthenticationError::Revoked,),
+            )),
+            RemoteProtocolFailureV1::EnrollmentRevoked
+        );
+        assert_eq!(
+            replay_protocol_failure(RemoteReplayServiceErrorV1::Replay(
+                RemoteReplayApplicationErrorV1::Authentication(RemoteAuthenticationError::Expired,),
+            )),
+            RemoteProtocolFailureV1::EnrollmentExpired
         );
     }
 }
