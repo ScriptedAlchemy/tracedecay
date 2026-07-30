@@ -236,7 +236,8 @@ fn array_len(value: &Value) -> Option<usize> {
     value.as_array().map(Vec::len)
 }
 
-pub(crate) fn value_as_usize(value: &Value) -> Option<usize> {
+#[doc(hidden)]
+pub fn value_as_usize(value: &Value) -> Option<usize> {
     value
         .as_u64()
         .and_then(|number| usize::try_from(number).ok())

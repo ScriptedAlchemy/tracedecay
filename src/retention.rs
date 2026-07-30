@@ -14,7 +14,10 @@
 //! an unknown timestamp are always kept. A [dry-run][`RetentionPlan`] counts
 //! what would be removed without mutating anything.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+pub use tracedecay_automation::config::{
+    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS, RetentionConfig,
+};
 
 use crate::db::engine::{Executor, QueryExecutor};
 use crate::errors::{Result, TraceDecayError};
@@ -43,61 +46,6 @@ const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 /// `IS NOT NULL AND < cutoff` predicate so unknown-timestamp rows are kept.
 const TIMESTAMP_COLUMN: &str = "timestamp";
 
-/// Default retention window for `analytics_events`, in days. Analytics rows
-/// are a derived signal, so a generous six-month window loses nothing that
-/// cannot be recomputed from the source transcripts.
-pub const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
-/// Default recovery horizon for legacy session rows.
-pub const DEFAULT_LEGACY_SESSION_RETENTION_DAYS: u32 = 180;
-
-/// Per-table retention windows. A `None` window disables pruning for that
-/// table (unlimited retention).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetentionConfig {
-    /// Retention window for `analytics_events`. Defaults to
-    /// [`DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS`].
-    #[serde(default = "default_analytics_events_days")]
-    pub analytics_events_days: Option<u32>,
-    /// Retention window for legacy `session_messages`.
-    #[serde(default = "default_legacy_session_days")]
-    pub session_messages_days: Option<u32>,
-    /// Retention window for legacy `lcm_raw_messages`.
-    #[serde(default = "default_legacy_session_days")]
-    pub lcm_raw_messages_days: Option<u32>,
-}
-
-// Serde's field default callback must return the field's `Option<u32>` type.
-#[allow(clippy::unnecessary_wraps)]
-fn default_analytics_events_days() -> Option<u32> {
-    Some(DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS)
-}
-
-#[allow(clippy::unnecessary_wraps)]
-fn default_legacy_session_days() -> Option<u32> {
-    Some(DEFAULT_LEGACY_SESSION_RETENTION_DAYS)
-}
-
-impl Default for RetentionConfig {
-    fn default() -> Self {
-        Self {
-            analytics_events_days: default_analytics_events_days(),
-            session_messages_days: default_legacy_session_days(),
-            lcm_raw_messages_days: default_legacy_session_days(),
-        }
-    }
-}
-
-impl RetentionConfig {
-    /// Window configured for `table`, in days (`None` = unlimited).
-    pub fn window_days(&self, table: RetentionTable) -> Option<u32> {
-        match table {
-            RetentionTable::AnalyticsEvents => self.analytics_events_days,
-            RetentionTable::SessionMessages => self.session_messages_days,
-            RetentionTable::LcmRawMessages => self.lcm_raw_messages_days,
-        }
-    }
-}
-
 /// A prunable telemetry table. The variants map to a fixed table/column pair,
 /// so the SQL never interpolates untrusted identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +56,14 @@ pub enum RetentionTable {
     SessionMessages,
     /// `lcm_raw_messages` (per-store LCM DB), pruned by `timestamp`.
     LcmRawMessages,
+}
+
+fn retention_window_days(config: &RetentionConfig, table: RetentionTable) -> Option<u32> {
+    match table {
+        RetentionTable::AnalyticsEvents => config.analytics_events_days,
+        RetentionTable::SessionMessages => config.session_messages_days,
+        RetentionTable::LcmRawMessages => config.lcm_raw_messages_days,
+    }
 }
 
 impl RetentionTable {
@@ -341,7 +297,16 @@ where
 {
     let mut reports = Vec::with_capacity(RetentionTable::GLOBAL_TABLES.len());
     for table in RetentionTable::GLOBAL_TABLES {
-        reports.push(prune_table(conn, table, config.window_days(table), mode, now_secs).await?);
+        reports.push(
+            prune_table(
+                conn,
+                table,
+                retention_window_days(config, table),
+                mode,
+                now_secs,
+            )
+            .await?,
+        );
     }
     Ok(reports)
 }

@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::fs;
 
 use tempfile::tempdir;
@@ -287,5 +288,29 @@ fn validation_rejects_invalid_task_schedule() {
     assert!(
         err.to_string().contains("skill_writer schedule"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn production_automation_contracts_use_leaf_owned_type_identity() {
+    assert_eq!(
+        TypeId::of::<tracedecay::automation::config::AutomationConfig>(),
+        TypeId::of::<tracedecay_automation::config::AutomationConfig>(),
+    );
+    assert_eq!(
+        TypeId::of::<tracedecay::automation::backend::AgentTaskKind>(),
+        TypeId::of::<tracedecay_automation::backend::AgentTaskKind>(),
+    );
+    assert_eq!(
+        TypeId::of::<tracedecay::retention::RetentionConfig>(),
+        TypeId::of::<tracedecay_automation::config::RetentionConfig>(),
+    );
+    assert_eq!(
+        TypeId::of::<tracedecay::automation::managed_skills::ManagedSkillDraft>(),
+        TypeId::of::<tracedecay_automation::managed_skills::ManagedSkillDraft>(),
+    );
+    assert_eq!(
+        TypeId::of::<tracedecay::automation::skill_frontmatter::SkillFrontmatterValue>(),
+        TypeId::of::<tracedecay_automation::skill_frontmatter::SkillFrontmatterValue>(),
     );
 }

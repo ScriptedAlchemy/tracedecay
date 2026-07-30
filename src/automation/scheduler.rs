@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+use tracedecay_automation::config::validate_schedule as validate_leaf_schedule;
+pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
 
 use super::backend::{AgentTaskKind, agent_task_failure_disposition, task_key};
 use super::config::{
@@ -19,106 +21,6 @@ const SCHEDULER_CONTROL_FILENAME: &str = "automation_scheduler_control.json";
 pub struct AutomationSchedulerControl {
     #[serde(default)]
     pub paused: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AutomationSchedule {
-    Manual,
-    ConfiguredInterval,
-    Interval { every_secs: u64 },
-    Cron(CronSchedule),
-}
-
-/// Parsed standard 5-field cron expression (minute hour day-of-month month
-/// day-of-week), evaluated against the wall clock in UTC. Fields are stored
-/// as allow-bitmasks. Numeric values only (no JAN/MON aliases); day-of-week
-/// accepts 0-7 with both 0 and 7 meaning Sunday. Day-of-month and
-/// day-of-week combine with vixie-cron OR semantics when both are
-/// restricted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CronSchedule {
-    minutes: u64,
-    hours: u32,
-    days_of_month: u32,
-    months: u16,
-    days_of_week: u8,
-    dom_is_wildcard: bool,
-    dow_is_wildcard: bool,
-}
-
-/// How far back [`CronSchedule::previous_occurrence`] searches for a match.
-/// A year plus a day covers every satisfiable standard cron expression.
-const CRON_LOOKBACK_DAYS: i64 = 367;
-
-impl CronSchedule {
-    /// Returns whether the UTC minute containing `now_secs` matches.
-    pub fn matches(&self, now_secs: i64) -> bool {
-        let days = now_secs.div_euclid(86_400);
-        let secs_of_day = now_secs.rem_euclid(86_400);
-        let minute = (secs_of_day / 60 % 60) as u32;
-        let hour = (secs_of_day / 3_600) as u32;
-        self.minutes & (1 << minute) != 0 && self.hours & (1 << hour) != 0 && self.day_matches(days)
-    }
-
-    /// Returns the start (unix seconds, UTC) of the most recent matching
-    /// minute at or before `now_secs`, searching back one year.
-    pub fn previous_occurrence(&self, now_secs: i64) -> Option<i64> {
-        let now_minute = now_secs - now_secs.rem_euclid(60);
-        let now_days = now_secs.div_euclid(86_400);
-        for day_offset in 0..CRON_LOOKBACK_DAYS {
-            let days = now_days - day_offset;
-            if !self.day_matches(days) {
-                continue;
-            }
-            let day_start = days * 86_400;
-            for hour in (0..24u32).rev() {
-                if self.hours & (1 << hour) == 0 {
-                    continue;
-                }
-                for minute in (0..60u32).rev() {
-                    if self.minutes & (1 << minute) == 0 {
-                        continue;
-                    }
-                    let candidate = day_start + i64::from(hour) * 3_600 + i64::from(minute) * 60;
-                    if candidate <= now_minute {
-                        return Some(candidate);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn day_matches(&self, days_since_epoch: i64) -> bool {
-        let (_, month, day) = civil_from_days(days_since_epoch);
-        if self.months & (1 << month) == 0 {
-            return false;
-        }
-        // Sunday = 0; 1970-01-01 (day 0) was a Thursday (4).
-        let weekday = ((days_since_epoch + 4).rem_euclid(7)) as u32;
-        let dom_ok = self.days_of_month & (1 << day) != 0;
-        let dow_ok = self.days_of_week & (1 << weekday) != 0;
-        match (self.dom_is_wildcard, self.dow_is_wildcard) {
-            // vixie cron: when both fields are restricted, either may match.
-            (false, false) => dom_ok || dow_ok,
-            _ => dom_ok && dow_ok,
-        }
-    }
-}
-
-/// Converts days since the unix epoch to (year, month 1-12, day 1-31) using
-/// Howard Hinnant's civil-from-days algorithm.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 /// Most recent LCM session ingest activity for the project, in unix seconds.
@@ -477,58 +379,7 @@ pub fn stale_lock_secs(config: &AutomationConfig, task: AgentTaskKind) -> Option
 }
 
 pub fn validate_schedule(schedule: Option<&str>) -> Result<()> {
-    parse_schedule(schedule).map(|_| ())
-}
-
-pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
-    let Some(raw) = schedule.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(AutomationSchedule::Manual);
-    };
-    let normalized = raw.to_ascii_lowercase();
-    match normalized.as_str() {
-        "manual" | "off" | "disabled" => return Ok(AutomationSchedule::Manual),
-        "interval" => return Ok(AutomationSchedule::ConfiguredInterval),
-        "hourly" => {
-            return Ok(AutomationSchedule::Interval {
-                every_secs: 60 * 60,
-            });
-        }
-        "daily" => {
-            return Ok(AutomationSchedule::Interval {
-                every_secs: 24 * 60 * 60,
-            });
-        }
-        "weekly" => {
-            return Ok(AutomationSchedule::Interval {
-                every_secs: 7 * 24 * 60 * 60,
-            });
-        }
-        _ => {}
-    }
-
-    if normalized.split_whitespace().count() == 5 {
-        return parse_cron_expression(&normalized);
-    }
-
-    let duration = normalized
-        .strip_prefix("every ")
-        .or_else(|| normalized.strip_prefix("every:"))
-        .or_else(|| normalized.strip_prefix("interval "))
-        .or_else(|| normalized.strip_prefix("interval:"))
-        .unwrap_or(normalized.as_str());
-    let Some(every_secs) = parse_schedule_duration_secs(duration) else {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "invalid automation schedule '{raw}'; use manual, interval, hourly, daily, weekly, or every <duration>"
-            ),
-        });
-    };
-    if every_secs == 0 {
-        return Err(TraceDecayError::Config {
-            message: "automation schedule interval must be greater than zero".to_string(),
-        });
-    }
-    Ok(AutomationSchedule::Interval { every_secs })
+    Ok(validate_leaf_schedule(schedule)?)
 }
 
 /// User jobs carry their own schedule/enabled state (see
@@ -552,97 +403,6 @@ fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&Automa
         // when the two per-task schedules are both due in the same tick.
         AgentTaskKind::CombinedReview => None,
         AgentTaskKind::UserJob => Some(&USER_JOB_TASK_CONFIG),
-    }
-}
-
-fn parse_cron_expression(raw: &str) -> Result<AutomationSchedule> {
-    let fields: Vec<&str> = raw.split_whitespace().collect();
-    let [minute, hour, dom, month, dow] = fields.as_slice() else {
-        return Err(cron_error(raw, "expected 5 fields"));
-    };
-    let minutes = parse_cron_field(minute, 0, 59, raw)?.0;
-    let hours = parse_cron_field(hour, 0, 23, raw)?.0 as u32;
-    let (dom_bits, dom_is_wildcard) = parse_cron_field(dom, 1, 31, raw)?;
-    let (month_bits, _) = parse_cron_field(month, 1, 12, raw)?;
-    let (dow_bits_raw, dow_is_wildcard) = parse_cron_field(dow, 0, 7, raw)?;
-    // Fold day-of-week 7 (Sunday) onto 0.
-    let mut days_of_week = (dow_bits_raw & 0x7f) as u8;
-    if dow_bits_raw & (1 << 7) != 0 {
-        days_of_week |= 1;
-    }
-    Ok(AutomationSchedule::Cron(CronSchedule {
-        minutes,
-        hours,
-        days_of_month: dom_bits as u32,
-        months: month_bits as u16,
-        days_of_week,
-        dom_is_wildcard,
-        dow_is_wildcard,
-    }))
-}
-
-/// Parses one cron field into an allow-bitmask; returns the mask and whether
-/// the field was an unrestricted wildcard (`*` or `*/1`).
-fn parse_cron_field(field: &str, min: u32, max: u32, raw: &str) -> Result<(u64, bool)> {
-    let mut bits = 0u64;
-    for part in field.split(',') {
-        let (range, step) = match part.split_once('/') {
-            Some((range, step)) => {
-                let step = step
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|step| *step > 0)
-                    .ok_or_else(|| cron_error(raw, "step must be a positive integer"))?;
-                (range, step)
-            }
-            None => (part, 1),
-        };
-        let (start, end) = if range == "*" {
-            (min, max)
-        } else if let Some((start, end)) = range.split_once('-') {
-            let start = parse_cron_value(start, min, max, raw)?;
-            let end = parse_cron_value(end, min, max, raw)?;
-            if start > end {
-                return Err(cron_error(raw, "range start exceeds range end"));
-            }
-            (start, end)
-        } else {
-            let value = parse_cron_value(range, min, max, raw)?;
-            (value, value)
-        };
-        let mut value = start;
-        while value <= end {
-            bits |= 1 << value;
-            value += step;
-        }
-    }
-    if bits == 0 {
-        return Err(cron_error(raw, "field selects no values"));
-    }
-    let wildcard = bits == full_cron_field_mask(min, max);
-    Ok((bits, wildcard))
-}
-
-fn full_cron_field_mask(min: u32, max: u32) -> u64 {
-    (min..=max).fold(0, |bits, value| bits | (1 << value))
-}
-
-fn parse_cron_value(value: &str, min: u32, max: u32, raw: &str) -> Result<u32> {
-    let parsed = value
-        .parse::<u32>()
-        .map_err(|_| cron_error(raw, "values must be integers"))?;
-    if parsed < min || parsed > max {
-        return Err(cron_error(
-            raw,
-            &format!("value {parsed} is outside {min}-{max}"),
-        ));
-    }
-    Ok(parsed)
-}
-
-fn cron_error(raw: &str, detail: &str) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("invalid cron schedule '{raw}': {detail}"),
     }
 }
 
@@ -679,28 +439,6 @@ fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
         return 0;
     }
     (now_secs - completed_at) as u64
-}
-
-fn parse_schedule_duration_secs(value: &str) -> Option<u64> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    let idx = value.find(|c: char| !c.is_ascii_digit())?;
-    let (amount, unit) = value.split_at(idx);
-    let amount = amount.parse::<u64>().ok()?;
-    if amount == 0 {
-        return Some(0);
-    }
-    let unit = unit.trim();
-    let multiplier = match unit {
-        "s" | "sec" | "secs" | "second" | "seconds" => 1,
-        "m" | "min" | "mins" | "minute" | "minutes" => 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => 60 * 60,
-        "d" | "day" | "days" => 24 * 60 * 60,
-        _ => return None,
-    };
-    Some(amount.saturating_mul(multiplier))
 }
 
 async fn create_lock_file(path: &Path, now_secs: i64) -> std::io::Result<()> {
@@ -788,5 +526,28 @@ fn process_is_live(pid: u32) -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_validation_maps_leaf_errors_at_the_runtime_boundary() {
+        assert!(validate_schedule(Some("hourly")).is_ok());
+        assert!(matches!(
+            validate_schedule(Some("after lunch")),
+            Err(TraceDecayError::Automation(_))
+        ));
+    }
+
+    #[test]
+    fn cron_admission_uses_the_leaf_schedule_type() {
+        let AutomationSchedule::Cron(cron) = parse_schedule(Some("*/15 * * * *")).unwrap() else {
+            panic!("expected cron schedule");
+        };
+        assert!(cron_is_due(&cron, Some(3_599), 3_600));
+        assert!(!cron_is_due(&cron, Some(3_600), 3_600));
     }
 }

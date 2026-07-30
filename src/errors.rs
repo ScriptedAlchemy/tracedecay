@@ -59,6 +59,9 @@ pub enum TraceDecayError {
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    Automation(#[from] tracedecay_automation::AutomationError),
 }
 
 /// Convenience alias for results using `TraceDecayError`.
@@ -347,6 +350,23 @@ mod tests {
             message: "bad value".to_string(),
         };
         assert!(err.to_string().contains("bad value"));
+    }
+
+    #[test]
+    fn automation_error_boundary_preserves_type_message_and_classification() {
+        let err = TraceDecayError::from(tracedecay_automation::AutomationError::config(
+            "timed out waiting for backend",
+        ));
+
+        assert!(matches!(&err, TraceDecayError::Automation(_)));
+        assert_eq!(
+            err.to_string(),
+            "config error: timed out waiting for backend"
+        );
+        assert_eq!(
+            tracedecay_automation::backend::classify_agent_task_error_message(&err.to_string()),
+            tracedecay_automation::backend::AgentTaskFailureClass::Timeout,
+        );
     }
 
     #[test]

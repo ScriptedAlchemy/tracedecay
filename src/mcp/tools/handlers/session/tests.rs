@@ -4,6 +4,7 @@ use crate::sessions::lcm::{
     LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryResponse,
     LcmExpandQuerySynthesisPrompt,
 };
+use tracedecay_automation::{AutomationError, Result as AutomationResult};
 
 fn sample_message_search_payload() -> Value {
     json!({
@@ -423,11 +424,11 @@ impl crate::automation::backend::AgentTaskBackend for FakeSynthesisBackend {
     fn run_task(
         &self,
         request: &crate::automation::backend::AgentTaskRequest,
-    ) -> crate::errors::Result<crate::automation::backend::AgentTaskResponse> {
+    ) -> AutomationResult<crate::automation::backend::AgentTaskResponse> {
         if self.fail {
-            return Err(crate::errors::TraceDecayError::Config {
-                message: "synthesis backend permanently unavailable".to_string(),
-            });
+            return Err(AutomationError::config(
+                "synthesis backend permanently unavailable",
+            ));
         }
         Ok(crate::automation::backend::AgentTaskResponse {
             run_id: request.run_id.clone(),

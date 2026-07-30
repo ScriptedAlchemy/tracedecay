@@ -36,8 +36,8 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
         AgentTaskKind::MemoryCurator => TaskArtifactPolicy {
             optimizer_action: "update memory curation evidence or apply policy",
             accepted_next_actions: &[
-                "review accepted memory curation ops",
-                "apply through dashboard or CLI if approved",
+                "inspect accepted memory curation outcomes and the apply-policy receipt",
+                "apply explicitly only when the receipt reports proposal-only behavior",
             ],
             rejected_next_actions: &[
                 "review rejected curation reasons",
@@ -49,8 +49,8 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
         AgentTaskKind::SessionReflector => TaskArtifactPolicy {
             optimizer_action: "update fact proposal evidence or dedupe policy",
             accepted_next_actions: &[
-                "inspect fact automation outcomes",
-                "apply or reject fact records only when explicitly reviewing",
+                "inspect fact automation outcomes and applied canonical fact ids",
+                "review proposal records only when the apply-policy receipt is proposal-only",
             ],
             rejected_next_actions: &[
                 "review rejected fact proposals",
@@ -76,7 +76,7 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
             optimizer_action: "update combined review evidence or per-task validation",
             accepted_next_actions: &[
                 "inspect fact automation outcomes and managed skill drafts",
-                "apply or reject fact records only when explicitly reviewing",
+                "confirm the atomic commit receipt before consuming either proposal set",
             ],
             rejected_next_actions: &[
                 "review rejected fact and skill proposals",

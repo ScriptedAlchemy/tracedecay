@@ -644,6 +644,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Io(_) => "io",
         TraceDecayError::Sqlite(_) => "sqlite",
         TraceDecayError::Json(_) => "json",
+        TraceDecayError::Automation(_) => "automation",
     }
 }
 

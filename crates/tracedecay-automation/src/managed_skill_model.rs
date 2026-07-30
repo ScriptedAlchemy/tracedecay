@@ -516,7 +516,8 @@ impl ManagedSkill {
     }
 }
 
-pub(crate) fn current_metadata_timestamp() -> i64 {
+#[doc(hidden)]
+pub fn current_metadata_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

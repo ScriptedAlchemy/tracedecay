@@ -1193,7 +1193,7 @@ impl AgentTaskBackend for NoSummaryReplayBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay::errors::Result<AgentTaskResponse> {
+    ) -> tracedecay_automation::Result<AgentTaskResponse> {
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         let evidence = &request.context["session_reflection_evidence"];
         assert_eq!(evidence["include_summaries"], json!(false));
