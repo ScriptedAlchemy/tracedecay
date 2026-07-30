@@ -824,6 +824,24 @@ pub struct HostComponentSetJournalV1 {
     pub operation_id: [u8; 16],
     pub host: HostKindV1,
     pub operation: HostBundleLifecycleOpV1,
+    /// Exact operator authority admitted before any lifecycle mutation.
+    ///
+    /// Recovery must replay this value rather than manufacturing confirmation.
+    #[serde(default)]
+    pub explicit_confirmation: bool,
+    /// Exact Hermes profile binding admitted with the original request.
+    #[serde(default)]
+    pub hermes_profile_bindings: u8,
+    /// Canonical configuration/runtime preview authority, when the operation
+    /// was applied through confirmed preview.
+    #[serde(default)]
+    pub confirmed_plan_digest: Option<[u8; 32]>,
+    #[serde(default)]
+    pub base_registration_revision: Option<[u8; 32]>,
+    #[serde(default)]
+    pub current_registration_revision: Option<[u8; 32]>,
+    #[serde(default)]
+    pub artifact_state_revision: Option<[u8; 32]>,
     pub state: HostComponentSetJournalStateV1,
     pub registration_staged: bool,
     pub registration_applied: bool,
