@@ -750,9 +750,16 @@ fn render_python_operations(
          \x20       *,\n\
          \x20       page: PageOptionsLike | None = None,\n\
          \x20   ) -> OperationResponse[ResultT]: ...\n\n\
-         class WorkOperations:\n\
-         \x20   \"\"\"The 17 operations admitted by canonical schema-body authority.\"\"\"\n\n\
-         \x20   def __init__(self, invoke: OperationInvoker) -> None:\n\
+         class WorkOperations:\n",
+    );
+    writeln!(
+        out,
+        "    \"\"\"The {count} operations admitted by canonical schema-body authority.\"\"\"\n",
+        count = operations.len(),
+    )
+    .expect("String writes cannot fail");
+    out.push_str(
+        "    def __init__(self, invoke: OperationInvoker) -> None:\n\
          \x20       self._invoke = invoke\n\n",
     );
     for operation in operations {
