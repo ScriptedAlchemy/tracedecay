@@ -21,12 +21,18 @@ use tracedecay_domain::{
 
 use super::ports::{CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError};
 
+mod execution_authority;
 mod service;
+pub use execution_authority::{
+    ExecutedSemanticCompositionV1, SemanticCompositionAuthorityErrorV1,
+    SemanticCompositionExecutionAuthorityV1, SemanticCompositionExecutionOutcomeV1,
+    SemanticRerankExecutionPortV1, SemanticRerankReadinessV1, restore_frozen_semantic_order,
+};
 pub use service::{
-    CalibratedSemanticQueryService, CompleteSemanticGenerationV1, SemanticAbstentionV1,
-    SemanticCalibrationEvidenceV1, SemanticCalibrationProfileV1, SemanticIndexStateV1,
-    SemanticLaneReadinessV1, SemanticQueryModeV1, SemanticQueryServiceError,
-    SemanticQueryServiceOutcomeV1,
+    CalibratedSemanticQueryService, CompleteSemanticGenerationV1, SemanticAbstentionDispositionV1,
+    SemanticAbstentionV1, SemanticCalibrationEvidenceV1, SemanticCalibrationProfileV1,
+    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticQueryDecisionV1, SemanticQueryModeV1,
+    SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
 };
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;

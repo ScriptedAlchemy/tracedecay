@@ -21,26 +21,14 @@ use tracedecay_domain::{
     SemanticSearchIndexProfileV1, SourceOccurrenceId, UtcMicros, VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
 };
+use tracedecay_policy::retrieval_selection::{
+    RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
+};
 
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::code_index::projection::expected_request_digest;
 use crate::config::SemanticResourceCeilings;
 use crate::db::Database;
-use crate::query::retrieval::AuthorizedPr9FallbackV1;
-use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
-use crate::query::retrieval::graph::production_code_index_freshness;
-use crate::query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
-};
-use crate::query::retrieval::rerank::RerankExecutionControlV1;
-use crate::query::retrieval::semantic::{
-    CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
-    SemanticCalibrationProfileV1, SemanticCodeRetriever, SemanticExecutionControl,
-    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryModeV1,
-    SemanticQueryServiceError, SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1,
-    SemanticSearchKindV1, SemanticVectorReadPort, SemanticVectorReadRequestV1,
-    SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
-};
 use crate::retention::code_index_generations::{
     CodeGenerationRetentionModeV1, CodeGenerationRetentionReceiptV1,
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention,
@@ -76,6 +64,22 @@ use crate::store::vector_generations::{
     DatabaseLegacyVectorInventoryV1, DatabaseVectorEvaluationStoreV1,
     DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
     VectorGenerationPlanV1,
+};
+use tracedecay_query::retrieval::AuthorizedPr9FallbackV1;
+use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+use tracedecay_query::retrieval::graph::production_code_index_freshness;
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
+};
+use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
+use tracedecay_query::retrieval::semantic::{
+    CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
+    SemanticAbstentionDispositionV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
+    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
+    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
+    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
+    SemanticVectorScanSummaryV1,
 };
 
 #[cfg(test)]
@@ -1256,7 +1260,8 @@ impl ProductionSemanticRuntimeV1 {
         {
             Ok(active) => active,
             Err(_) => {
-                return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+                return execute_calibrated_semantic_query(
+                    &NeverCalledSemanticLane,
                     SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Failed),
                     mode,
                     fallback,
@@ -1281,7 +1286,8 @@ impl ProductionSemanticRuntimeV1 {
             }
         }
         let Some(active) = active else {
-            return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+            return execute_calibrated_semantic_query(
+                &NeverCalledSemanticLane,
                 SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Unavailable),
                 mode,
                 fallback,
@@ -2160,6 +2166,44 @@ pub fn current_query_factory(
     Some((pointer, factory))
 }
 
+fn execute_calibrated_semantic_query<'a, L>(
+    lane: &'a L,
+    readiness: SemanticLaneReadinessV1<'a>,
+    mode: SemanticQueryModeV1,
+    fallback: Arc<Pr9FallbackSubpayload>,
+) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
+where
+    L: SemanticLaneRetriever,
+{
+    let availability = match &readiness {
+        SemanticLaneReadinessV1::Ready { .. } => RetrievalAvailabilityV1::Ready,
+        SemanticLaneReadinessV1::Unavailable(state) => match state {
+            SemanticIndexStateV1::Unavailable => RetrievalAvailabilityV1::Unavailable,
+            SemanticIndexStateV1::Indexing => RetrievalAvailabilityV1::Indexing,
+            SemanticIndexStateV1::Degraded => RetrievalAvailabilityV1::Degraded,
+            SemanticIndexStateV1::Failed => RetrievalAvailabilityV1::Failed,
+            SemanticIndexStateV1::Stale => RetrievalAvailabilityV1::Stale,
+            SemanticIndexStateV1::Incompatible => RetrievalAvailabilityV1::Incompatible,
+        },
+    };
+    let requirement = match mode {
+        SemanticQueryModeV1::FallbackAllowed => RetrievalRequirementV1::FallbackAllowed,
+        SemanticQueryModeV1::StrictSemantic => RetrievalRequirementV1::StrictSemantic,
+    };
+    let on_abstention = match mode {
+        SemanticQueryModeV1::FallbackAllowed => SemanticAbstentionDispositionV1::UseFallback,
+        SemanticQueryModeV1::StrictSemantic => SemanticAbstentionDispositionV1::RejectUnavailable,
+    };
+    let decision = match select_retrieval(availability, requirement) {
+        RetrievalSelectionV1::Semantic => {
+            SemanticQueryDecisionV1::ExecuteSemantic { on_abstention }
+        }
+        RetrievalSelectionV1::FrozenFallback => SemanticQueryDecisionV1::UseFallback,
+        RetrievalSelectionV1::Unavailable => SemanticQueryDecisionV1::RejectUnavailable,
+    };
+    CalibratedSemanticQueryService::new(lane).execute(readiness, decision, fallback)
+}
+
 /// Application search composition: admit `SemanticCodeRetriever` only through
 /// [`DaemonSemanticRuntimeHandleV1::query_factory`].
 ///
@@ -2193,7 +2237,8 @@ where
                 request.projection.projection_key(),
             ) else {
                 // Atomically current generation is the only admission path.
-                return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+                return execute_calibrated_semantic_query(
+                    &NeverCalledSemanticLane,
                     SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Incompatible),
                     mode,
                     fallback,
@@ -2201,7 +2246,8 @@ where
             };
             let embedder = factory.create(control);
             let lane = SemanticCodeRetriever::new(&embedder, vectors, control);
-            CalibratedSemanticQueryService::new(&lane).execute(
+            execute_calibrated_semantic_query(
+                &lane,
                 SemanticLaneReadinessV1::Ready {
                     request,
                     generation,
@@ -2212,11 +2258,7 @@ where
             )
         }
         unavailable @ SemanticLaneReadinessV1::Unavailable(_) => {
-            CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
-                unavailable,
-                mode,
-                fallback,
-            )
+            execute_calibrated_semantic_query(&NeverCalledSemanticLane, unavailable, mode, fallback)
         }
     }
 }
@@ -2236,7 +2278,8 @@ where
     C: SemanticExecutionControl + Sync,
 {
     let Some(runtime) = project_semantic_production_runtime(project_root) else {
-        return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+        return execute_calibrated_semantic_query(
+            &NeverCalledSemanticLane,
             SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Unavailable),
             mode,
             fallback,
@@ -3430,7 +3473,7 @@ mod tests {
         assert!(matches!(
             outcome,
             SemanticQueryServiceOutcomeV1::Fallback {
-                abstention: crate::query::retrieval::semantic::SemanticAbstentionV1::Cancelled,
+                abstention: tracedecay_query::retrieval::semantic::SemanticAbstentionV1::Cancelled,
                 ..
             }
         ));
@@ -3541,12 +3584,12 @@ mod tests {
         impl SemanticVectorReadPort for PanicVectors {
             fn scan_exact_flat(
                 &self,
-                _request: crate::query::retrieval::semantic::SemanticVectorReadRequestV1<'_>,
+                _request: tracedecay_query::retrieval::semantic::SemanticVectorReadRequestV1<'_>,
                 _visit: &mut dyn FnMut(
-                    &crate::query::retrieval::semantic::SemanticVectorRecordV1,
+                    &tracedecay_query::retrieval::semantic::SemanticVectorRecordV1,
                 ) -> Result<(), RetrievalPortError>,
             ) -> Result<
-                crate::query::retrieval::semantic::SemanticVectorScanSummaryV1,
+                tracedecay_query::retrieval::semantic::SemanticVectorScanSummaryV1,
                 RetrievalPortError,
             > {
                 panic!("indexing composition must not scan vectors")

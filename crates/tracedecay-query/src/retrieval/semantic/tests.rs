@@ -1012,7 +1012,7 @@ fn calibrated_semantic_service_augments_without_mutating_fallback() {
                 generation: &generation,
                 calibration: Some(&calibration),
             },
-            SemanticQueryModeV1::FallbackAllowed,
+            SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
             Arc::clone(&fallback),
         )
         .expect("calibrated semantic query");
@@ -1057,7 +1057,7 @@ fn admitted_semantic_lane_uses_shared_fusion_cursor_and_hydration_stages() {
                 generation: &generation,
                 calibration: Some(&calibration),
             },
-            SemanticQueryModeV1::FallbackAllowed,
+            SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
             fallback(),
         )
         .expect("semantic lane admission");
@@ -1165,7 +1165,7 @@ fn missing_or_shifted_calibration_abstains_and_preserves_exact_fallback() {
                 generation: &generation,
                 calibration: None,
             },
-            SemanticQueryModeV1::FallbackAllowed,
+            SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
             Arc::clone(&fallback),
         )
         .expect("missing calibration uses the declared fallback");
@@ -1193,7 +1193,7 @@ fn missing_or_shifted_calibration_abstains_and_preserves_exact_fallback() {
                 generation: &generation,
                 calibration: Some(&shifted),
             },
-            SemanticQueryModeV1::StrictSemantic,
+            SemanticQueryDecisionV1::EXECUTE_STRICT,
             fallback,
         ),
         Err(SemanticQueryServiceError::StrictUnavailable(
@@ -1227,7 +1227,7 @@ fn calibrated_distance_and_margin_thresholds_abstain_without_relabeling_scores()
                 generation: &generation,
                 calibration: Some(&calibration),
             },
-            SemanticQueryModeV1::FallbackAllowed,
+            SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
             fallback(),
         )
         .expect("ambiguous semantic result falls back");
@@ -1283,7 +1283,7 @@ fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes()
         let outcome = CalibratedSemanticQueryService::new(&lane)
             .execute(
                 SemanticLaneReadinessV1::Unavailable(state),
-                SemanticQueryModeV1::FallbackAllowed,
+                SemanticQueryDecisionV1::UseFallback,
                 Arc::clone(&fallback),
             )
             .expect("ordinary search bypasses a non-ready semantic lane");
@@ -1298,7 +1298,7 @@ fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes()
         assert!(matches!(
             CalibratedSemanticQueryService::new(&lane).execute(
                 SemanticLaneReadinessV1::Unavailable(state),
-                SemanticQueryModeV1::StrictSemantic,
+                SemanticQueryDecisionV1::RejectUnavailable,
                 Arc::clone(&fallback),
             ),
             Err(SemanticQueryServiceError::StrictUnavailable(ref reason)) if reason == &expected
@@ -1337,7 +1337,7 @@ fn mismatched_complete_generation_bypasses_semantic_authorities() {
                 generation: &generation,
                 calibration: Some(&calibration),
             },
-            SemanticQueryModeV1::FallbackAllowed,
+            SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
             fallback(),
         )
         .expect("ordinary search bypasses a shifted complete generation");
@@ -1406,7 +1406,7 @@ fn partial_cancelled_and_failed_semantic_attempts_preserve_pr9_bytes() {
                     generation: &generation,
                     calibration: Some(&calibration),
                 },
-                SemanticQueryModeV1::FallbackAllowed,
+                SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
                 Arc::clone(&fallback),
             )
             .expect("ordinary search falls back on any incomplete semantic attempt");
