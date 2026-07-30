@@ -1510,8 +1510,11 @@ fn record_union_filters_provider_and_large_fields_before_materialization() {
     }
     assert!(records.contains("json_group_array"));
     let request = record_request();
+    let page_limit = 33_i64;
+    let item_cap = i64::try_from(request.max_item_bytes()).expect("item cap");
     let byte_cap = i64::try_from(request.max_item_bytes().max(1)).expect("byte cap");
     let count_cap = i64::try_from(super::MAX_SUMMARY_SOURCES_PER_RECORD).expect("count cap");
+    let probe_cap = count_cap.saturating_add(1);
     assert!(
         query.sql.contains("ss.source_ordinal < ?") || query.sql.contains("source_ordinal < ?"),
         "summary source fan-in must bind a count cap predicate"
@@ -1520,26 +1523,97 @@ fn record_union_filters_provider_and_large_fields_before_materialization() {
         query.sql.contains("length(CAST(") && query.sql.contains(") <= ?"),
         "summary source fan-in must bind a byte-length cap predicate"
     );
+
+    let placeholder_indices = |needle: &str| -> Vec<usize> {
+        let mut indices = Vec::new();
+        let mut rest = query.sql.as_str();
+        while let Some(offset) = rest.find(needle) {
+            let after = &rest[offset + needle.len()..];
+            let digits: String = after.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            if let Ok(index) = digits.parse::<usize>() {
+                indices.push(index);
+            }
+            rest = &after[digits.len().max(1)..];
+        }
+        indices
+    };
+    // Field length predicates use `AS BLOB)) <= ?N`. Aggregate budget predicates
+    // and the summary-source COUNT gate use bare `) <= ?N` (COUNT binds count_cap).
+    let field_length_indices = placeholder_indices("AS BLOB)) <= ?");
+    let budget_le_indices = placeholder_indices(") <= ?");
+    let limit_indices = placeholder_indices("LIMIT ?");
     assert!(
+        !field_length_indices.is_empty(),
+        "built SQL must contain field length-cap placeholders"
+    );
+    assert!(
+        !limit_indices.is_empty(),
+        "built SQL must contain LIMIT placeholders"
+    );
+
+    let param_at = |index: usize| -> Option<i64> {
         query
             .params
-            .iter()
-            .any(|param| matches!(param, SqlValue::Integer(value) if *value == byte_cap)),
-        "record query must bind the source byte cap"
+            .get(index.saturating_sub(1))
+            .and_then(|param| match param {
+                SqlValue::Integer(value) => Some(*value),
+                _ => None,
+            })
+    };
+    // Param indices whose bound value is a byte budget (item/source caps share a
+    // value today; index placement still distinguishes them from LIMIT slots).
+    let byte_budget_param_indices: Vec<usize> = query
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, param)| match param {
+            SqlValue::Integer(value) if *value == byte_cap || *value == item_cap => {
+                Some(offset + 1)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !byte_budget_param_indices.is_empty(),
+        "built query must bind item/source byte budgets"
     );
     assert!(
-        query
-            .params
+        budget_le_indices
             .iter()
-            .any(|param| matches!(param, SqlValue::Integer(value) if *value == count_cap)),
-        "record query must bind the source count cap"
+            .any(|index| param_at(*index) == Some(byte_cap)),
+        "source byte cap ({byte_cap}) must back a `<= ?` budget predicate; le_indices={budget_le_indices:?}"
     );
-    // Byte caps are length predicates; count/probe caps may use LIMIT, but the
-    // byte budget itself must never become a row LIMIT.
     assert!(
-        !query.sql.contains(&format!("LIMIT {byte_cap}")),
-        "byte cap {byte_cap} must not appear as a LIMIT literal"
+        field_length_indices
+            .iter()
+            .any(|index| param_at(*index) == Some(item_cap)),
+        "item byte cap ({item_cap}) must back a field length predicate; field_indices={field_length_indices:?}"
     );
+    for index in &field_length_indices {
+        let bound = param_at(*index).expect("field length placeholder must resolve");
+        assert!(
+            bound == byte_cap || bound == item_cap,
+            "field length-cap ?{index} must bind an item/source byte budget, got {bound}"
+        );
+    }
+    // Numbered placeholders make literal `LIMIT {byte_cap}` checks vacuous: fail
+    // when a byte-budget param index (or value) backs any LIMIT ?N slot.
+    for index in &limit_indices {
+        let bound = param_at(*index).expect("LIMIT placeholder must resolve");
+        assert!(
+            bound == count_cap || bound == probe_cap || bound == page_limit,
+            "LIMIT ?{index} must bind count/probe/page limits, got {bound} (byte_cap={byte_cap})"
+        );
+        assert!(
+            !byte_budget_param_indices.contains(index),
+            "byte-budget param ?{index} must not back SQL LIMIT (bound={bound})"
+        );
+        if bound == byte_cap || bound == item_cap {
+            panic!(
+                "byte budget value {bound} must not back LIMIT ?{index} (byte_cap={byte_cap}, item_cap={item_cap})"
+            );
+        }
+    }
 }
 
 #[tokio::test]
