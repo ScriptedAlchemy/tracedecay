@@ -1148,6 +1148,7 @@ mod tests {
     use super::{
         LspSemanticRequestError, cancel_request_message, decode_semantic_request,
         encode_semantic_request, file_uri_from_path_text, is_current_diagnostic_publication,
+        lsp_initialization_options,
     };
 
     #[test]
