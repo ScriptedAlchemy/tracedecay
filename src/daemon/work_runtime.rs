@@ -288,9 +288,18 @@ where
         lease: &WorkLeaseFenceV1,
         recovery: WorkRecoveryStateV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let running = self
+        let running = match self
             .execution
-            .start(&self.authority, identity, lease, recovery)?;
+            .start(&self.authority, identity, lease, recovery)
+        {
+            Ok(running) => running,
+            Err(error) => {
+                if self.provider.request_stop(identity).is_ok() {
+                    let _ = self.finish_provider(identity).await;
+                }
+                return Err(error);
+            }
+        };
         self.publish_activity("running").await;
         Ok(running)
     }
@@ -431,16 +440,7 @@ where
             .execution
             .require_recovery(&self.authority, identity, lease, reason)?;
         self.provider.request_stop(identity)?;
-        let provider = self.provider.clone();
-        let identity_for_join = identity.clone();
-        let _ = tokio::task::spawn_blocking(move || provider.finish(&identity_for_join))
-            .await
-            .map_err(|error| {
-                WorkProviderExecutionError::Unavailable(format!(
-                    "Codex Work recovery cleanup failed: {error}"
-                ))
-            })?
-            .map_err(WorkProviderExecutionError::Unavailable)?;
+        self.finish_provider(identity).await?;
         self.publish_activity("recovery_required").await;
         Ok(attempt)
     }
@@ -492,6 +492,23 @@ where
             Some(detail),
         )
         .await;
+    }
+
+    async fn finish_provider(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<(), WorkExecutionError> {
+        let provider = self.provider.clone();
+        let identity_for_join = identity.clone();
+        let _ = tokio::task::spawn_blocking(move || provider.finish(&identity_for_join))
+            .await
+            .map_err(|error| {
+                WorkProviderExecutionError::Unavailable(format!(
+                    "Codex Work execution cleanup failed: {error}"
+                ))
+            })?
+            .map_err(WorkProviderExecutionError::Unavailable)?;
+        Ok(())
     }
 }
 
