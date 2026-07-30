@@ -748,7 +748,6 @@ impl RusqliteRemoteAuthorityStoreV1 {
                 && stored.writer.scope == *scope
                 && stored.writer.authority.fence.brain_id == expected_fence.brain_id
                 && stored.writer.authority.fence.shard_id == expected_fence.shard_id
-                && stored.writer.authority.fence.generation_id == expected_fence.generation_id
             {
                 validate_authority_binding(
                     &stored.writer,

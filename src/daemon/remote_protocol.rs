@@ -176,40 +176,19 @@ impl CanonicalDaemonRemoteProtocolOwnersV1 {
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_registered_enrollment_replay_and_query(
+    pub(crate) fn new_with_registered_enrollment_and_query(
         enrollment_store: MigrationSqlHandle,
         enrollment_configuration_path: &Path,
-        replay_spool: Arc<RemoteCaptureSpool>,
         remote_authority: Arc<RusqliteRemoteAuthorityStoreV1>,
-        replay_transaction: Arc<dyn RemoteReplayTransactionPortV1>,
         repository: Arc<RepositoryRuntimePhysicalAttachment>,
-        backup: Arc<BackupOwnerV1>,
-        restore: Arc<RestoreOwnerV1>,
-        promotion: Arc<PromotionOwnerV1>,
-    ) -> Result<Self, DaemonRemoteRegisteredOwnerErrorV1> {
+    ) -> Result<DaemonRemoteQueryProtocolPortV1, DaemonRemoteRegisteredOwnerErrorV1> {
         let enrollment = DaemonRemoteEnrollmentProvisionerV1::from_registered_configured(
             enrollment_store.clone(),
             enrollment_configuration_path,
         )?;
         let credentials = Arc::new(RegisteredRemoteEnrollmentAuthorityV1::from_registered(
-            enrollment_store.clone(),
-        )?);
-        let policy = Arc::new(RegisteredRemoteReplayPolicyAuthorityV1::from_registered(
             enrollment_store,
         )?);
-        let replay = Arc::new(RemoteReplayProtocolAdapterV1::new(
-            RemoteReplayServiceV1::new(
-                credentials.clone(),
-                credentials.clone(),
-                replay_spool.clone(),
-                remote_authority.clone(),
-                policy.clone(),
-                policy,
-                replay_transaction,
-                replay_spool,
-            ),
-        ));
         let query = Arc::new(RemoteExactObservationQueryProtocolAdapterV1::new(
             RemoteExactObservationQueryServiceV1::new(
                 credentials,
@@ -219,13 +198,9 @@ impl CanonicalDaemonRemoteProtocolOwnersV1 {
                 )),
             ),
         ));
-        Ok(Self::new(
+        Ok(DaemonRemoteQueryProtocolPortV1::new(
             enrollment.protocol_port(),
-            replay,
             query,
-            backup,
-            restore,
-            promotion,
         ))
     }
 
@@ -249,6 +224,42 @@ impl CanonicalDaemonRemoteProtocolOwnersV1 {
 
     pub fn into_protocol_port(self) -> DaemonRemoteProtocolPortV1 {
         DaemonRemoteProtocolPortV1::new(Arc::new(self))
+    }
+}
+
+#[derive(Clone)]
+pub struct DaemonRemoteQueryProtocolPortV1 {
+    enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
+    query: Arc<QueryOwnerV1>,
+}
+
+impl DaemonRemoteQueryProtocolPortV1 {
+    fn new(enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>, query: Arc<QueryOwnerV1>) -> Self {
+        Self { enrollment, query }
+    }
+}
+
+impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteQueryProtocolPortV1 {
+    fn execute_enrollment(
+        &self,
+        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        grant_credential: OpaqueRemoteCredential,
+        enrollment_credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+        self.enrollment
+            .execute_enrollment(request, grant_credential, enrollment_credential)
+    }
+}
+
+impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPortV1 {
+    type Output = RemoteQueryResultV1;
+
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<Self::Output> {
+        self.query.execute(request, credential)
     }
 }
 
