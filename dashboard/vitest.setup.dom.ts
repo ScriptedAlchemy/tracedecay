@@ -39,15 +39,22 @@ if (!('ResizeObserver' in globalThis)) {
   });
 }
 
-// jsdom implements no layout, and therefore no scrolling: `scrollIntoView` is
-// absent from `Element.prototype` rather than present and inert. Any component
-// that keeps a keyboard selection visible calls it, and in a browser it is
-// always there, so a guard in product code would be a branch that can never be
-// taken outside this environment — and one that would silently stop scrolling if
-// it ever were. Declared here as the no-op jsdom would have had, which also
-// gives tests something to spy on when the call itself is the observable.
-if (typeof Element.prototype.scrollIntoView !== 'function') {
-  Element.prototype.scrollIntoView = function scrollIntoView() {};
+// jsdom implements no layout, and therefore none of the element scrolling API:
+// `scrollIntoView` and `scrollTo` are absent from `Element.prototype` rather
+// than present and inert. Both are always there in a browser, so guarding the
+// calls in product code would add branches no browser can take — and ones that
+// would silently stop scrolling if a browser ever did. Declared here as the
+// no-ops jsdom would have had, which also gives tests something to spy on when
+// the call itself is the observable.
+//
+// Their absence is why nothing could cover the two surfaces that scroll: the
+// palette keeping its keyboard selection visible, and the Settings section
+// index jumping to a group. A DOM test of either threw here rather than
+// exercising the behavior.
+for (const name of ['scrollIntoView', 'scrollTo'] as const) {
+  if (typeof Element.prototype[name] !== 'function') {
+    Element.prototype[name] = function scrollNoop() {};
+  }
 }
 
 afterEach(() => {

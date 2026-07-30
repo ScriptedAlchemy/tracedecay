@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
 import { useScope, type ScopeWritability } from '../../data/scope/store.ts';
-import { SettingsPage } from './SettingsPage.tsx';
+import { SettingsPage, findConfigSection } from './SettingsPage.tsx';
 import { applySettingsMutation } from './settingsMutation.ts';
 
 /** The dashboard pointed at the project the daemon has active — the scope every
@@ -627,6 +627,82 @@ describe('Settings response authority', () => {
     expect(await screen.findByText('Automation configuration unavailable')).toBeTruthy();
     expect(screen.getByText('project automation configuration could not be read')).toBeTruthy();
     expect(screen.queryByText('Effective automation config, merged daemon-side')).toBeNull();
+  });
+});
+
+/**
+ * The section index's jump, against ids this dashboard does not choose.
+ *
+ * `buildSettingsModel` takes a section's id straight from the payload's
+ * top-level key — including keys no `GROUP_META` entry names, which is
+ * deliberate, so a group the daemon starts reporting appears rather than
+ * vanishes. Those keys reached a `[data-section="${id}"]` selector, so one
+ * double quote closed the attribute early and `querySelector` threw
+ * `SyntaxError` from inside a click handler: the index stopped navigating, with
+ * nothing on screen to say why.
+ */
+describe('Settings section navigation', () => {
+  /**
+   * The lookup on its own, against ids the payload cannot currently carry.
+   *
+   * Asserted here rather than through the page because it cannot be reached
+   * through the page: the section ids come from the parsed payload's top-level
+   * keys, and `SettingsPayloadV1Schema` is a plain `z.object`, so zod strips
+   * every key the contract does not name. A test that injected `odd"group` into
+   * the fixture would exercise nothing — the key never survives the parse — and
+   * would read as coverage of a live defect that is not live. What is real is the
+   * hazard: `buildSettingsModel` accepts `unknown` and takes ids from whatever
+   * keys it finds, so the selector's safety rests on a parse step outside it.
+   */
+  const AWKWARD = ['odd"group', 'back\\slash', 'has space', "single'quote", '#hash.dot'];
+
+  function sectionsFixture(ids: readonly string[]): HTMLDivElement {
+    const container = document.createElement('div');
+    for (const id of ids) {
+      const section = document.createElement('section');
+      section.dataset['section'] = id;
+      container.append(section);
+    }
+    return container;
+  }
+
+  it('resolves a section id that no selector could carry unescaped', () => {
+    const container = sectionsFixture(AWKWARD);
+
+    for (const id of AWKWARD) {
+      const found = findConfigSection(container, id);
+      expect(found, `no section resolved for ${id}`).toBeDefined();
+      expect(found?.dataset['section']).toBe(id);
+    }
+  });
+
+  it('resolves nothing for an id no section carries, rather than the first one', () => {
+    expect(findConfigSection(sectionsFixture(AWKWARD), 'absent')).toBeUndefined();
+    // Not a prefix or substring match either: `project` must not answer for
+    // `project.sync`.
+    expect(findConfigSection(sectionsFixture(['project']), 'project.sync')).toBeUndefined();
+  });
+
+  /**
+   * The jump end to end, which no test could reach before: jsdom implements no
+   * element scrolling, so `container.scrollTo` threw and the section index's one
+   * behavior went uncovered.
+   */
+  it('jumps to the section the index names', async () => {
+    const user = userEvent.setup();
+    const scrollTo = vi.fn();
+    vi.spyOn(Element.prototype, 'scrollTo').mockImplementation(scrollTo);
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
+
+    renderSettings();
+    const navigation = await screen.findByRole('navigation', { name: 'Configuration groups' });
+
+    await user.click(within(navigation).getByRole('button', { name: /Project/ }));
+
+    // Called rather than skipped: `jumpTo` returns without scrolling when the
+    // lookup finds nothing, so this separates "resolved the section" from
+    // "silently found nothing".
+    expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 });
 
