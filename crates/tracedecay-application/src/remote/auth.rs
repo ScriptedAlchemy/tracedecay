@@ -12,6 +12,8 @@ use tracedecay_domain::{
     RemoteRepositoryScopeV1, UtcMicros, validate_remote_secret_length,
 };
 
+use super::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+
 /// Opaque credential accepted only at an application boundary.
 ///
 /// It is intentionally neither `Clone` nor `Serialize`; debug output is always
@@ -75,6 +77,94 @@ pub enum RemoteAuthenticationError {
     StaleRevision,
     #[error("remote credential validity interval is invalid")]
     InvalidValidity,
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum RemoteEnrollmentAuthorityErrorV1 {
+    #[error("remote enrollment authority is unavailable")]
+    Unavailable,
+    #[error("remote enrollment grant was not found")]
+    GrantNotFound,
+    #[error("remote enrollment grant was already consumed")]
+    GrantConsumed,
+    #[error("remote enrollment identity conflicts with durable state")]
+    IdentityConflict,
+}
+
+/// Durable grant and enrollment authority. Implementations must atomically
+/// consume the exact loaded grant while persisting the issued fingerprint-only
+/// enrollment record.
+pub trait RemoteEnrollmentAuthorityPortV1: Send + Sync {
+    fn load_grant(
+        &self,
+        grant_id: &EntityId,
+    ) -> Result<EnrollmentGrantV1, RemoteEnrollmentAuthorityErrorV1>;
+
+    fn commit_enrollment(
+        &self,
+        grant: &EnrollmentGrantV1,
+        enrollment: &EnrollmentCredentialRecordV1,
+        consumed_at: UtcMicros,
+    ) -> Result<(), RemoteEnrollmentAuthorityErrorV1>;
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum RemoteEnrollmentServiceErrorV1 {
+    #[error("remote enrollment request is invalid")]
+    InvalidRequest,
+    #[error(transparent)]
+    Authentication(#[from] RemoteAuthenticationError),
+    #[error(transparent)]
+    Authority(#[from] RemoteEnrollmentAuthorityErrorV1),
+}
+
+pub struct RemoteEnrollmentServiceV1<A> {
+    authority: A,
+}
+
+impl<A> RemoteEnrollmentServiceV1<A>
+where
+    A: RemoteEnrollmentAuthorityPortV1,
+{
+    pub const fn new(authority: A) -> Self {
+        Self { authority }
+    }
+
+    pub fn enroll(
+        &self,
+        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        grant_credential: &OpaqueRemoteCredential,
+        enrollment_credential: &OpaqueRemoteCredential,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentServiceErrorV1> {
+        request
+            .validate_initial_enrollment_metadata()
+            .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
+        request
+            .body
+            .validate(request.sent_at)
+            .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
+        if request.brain_id != request.body.brain_id
+            || request.caller_node_id != request.body.node_id
+        {
+            return Err(RemoteEnrollmentServiceErrorV1::InvalidRequest);
+        }
+        let grant = self.authority.load_grant(&request.body.grant_id)?;
+        let issue = EnrollmentIssueRequestV1 {
+            grant_id: request.body.grant_id,
+            grant_revision: request.body.grant_revision,
+            enrollment_id: request.body.enrollment_id,
+            brain_id: request.body.brain_id,
+            node_id: request.body.node_id,
+            issued_at: request.sent_at,
+            expires_at: request.body.expires_at,
+            capabilities: request.body.capabilities,
+            scope: request.body.scope,
+        };
+        let enrollment = issue_enrollment(&grant, grant_credential, issue, enrollment_credential)?;
+        self.authority
+            .commit_enrollment(&grant, &enrollment, request.sent_at)?;
+        Ok(enrollment)
+    }
 }
 
 /// Metadata used to issue an enrollment. The secret remains a separate opaque
@@ -367,6 +457,10 @@ fn fingerprints_equal(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use crate::RequestId;
+
     use super::*;
     use tracedecay_domain::{
         AuthorityEpoch, ProjectId, ProjectionGenerationId, RefId, RemotePlacementRevisionV1,
@@ -425,6 +519,174 @@ mod tests {
             enrollment_credential,
         )
         .unwrap()
+    }
+
+    struct TestEnrollmentAuthority {
+        grant: EnrollmentGrantV1,
+        committed: Mutex<Option<EnrollmentCredentialRecordV1>>,
+    }
+
+    impl RemoteEnrollmentAuthorityPortV1 for TestEnrollmentAuthority {
+        fn load_grant(
+            &self,
+            grant_id: &EntityId,
+        ) -> Result<EnrollmentGrantV1, RemoteEnrollmentAuthorityErrorV1> {
+            if &self.grant.grant_id != grant_id {
+                return Err(RemoteEnrollmentAuthorityErrorV1::GrantNotFound);
+            }
+            if self.committed.lock().unwrap().is_some() {
+                return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+            }
+            Ok(self.grant.clone())
+        }
+
+        fn commit_enrollment(
+            &self,
+            grant: &EnrollmentGrantV1,
+            enrollment: &EnrollmentCredentialRecordV1,
+            _consumed_at: UtcMicros,
+        ) -> Result<(), RemoteEnrollmentAuthorityErrorV1> {
+            if grant != &self.grant {
+                return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
+            }
+            let mut committed = self.committed.lock().unwrap();
+            if committed.is_some() {
+                return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+            }
+            *committed = Some(enrollment.clone());
+            Ok(())
+        }
+    }
+
+    fn enrollment_service(
+        grant_credential: &OpaqueRemoteCredential,
+    ) -> RemoteEnrollmentServiceV1<TestEnrollmentAuthority> {
+        RemoteEnrollmentServiceV1::new(TestEnrollmentAuthority {
+            grant: EnrollmentGrantV1 {
+                grant_id: EntityId::new("grant.remote").unwrap(),
+                brain_id: BrainId::new("brain.remote").unwrap(),
+                node_id: BrainNodeId::new("node.remote").unwrap(),
+                fingerprint: fingerprint(grant_credential).unwrap(),
+                revision: 1,
+                issued_at: UtcMicros(1),
+                expires_at: UtcMicros(100),
+                revoked_at: None,
+                capabilities: BTreeSet::from([RemoteCapabilityV1::Query]),
+                scope: scope(),
+            },
+            committed: Mutex::new(None),
+        })
+    }
+
+    fn protocol_enrollment_request(node_id: &str) -> RemoteProtocolRequestV1<EnrollmentRequestV1> {
+        let brain_id = BrainId::new("brain.remote").unwrap();
+        RemoteProtocolRequestV1::new_initial_enrollment(
+            RequestId::new("request.remote.enrollment").unwrap(),
+            brain_id.clone(),
+            BrainNodeId::new(node_id).unwrap(),
+            UtcMicros(10),
+            EnrollmentRequestV1 {
+                grant_id: EntityId::new("grant.remote").unwrap(),
+                grant_revision: 1,
+                enrollment_id: EntityId::new("enrollment.remote").unwrap(),
+                brain_id,
+                node_id: BrainNodeId::new(node_id).unwrap(),
+                expires_at: UtcMicros(90),
+                capabilities: BTreeSet::from([RemoteCapabilityV1::Query]),
+                scope: scope(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn enrollment_service_consumes_grant_once_and_persists_only_fingerprint() {
+        let grant_credential = credential(b'g');
+        let enrollment_credential = credential(b'e');
+        let service = enrollment_service(&grant_credential);
+
+        let enrollment = service
+            .enroll(
+                protocol_enrollment_request("node.remote"),
+                &grant_credential,
+                &enrollment_credential,
+            )
+            .unwrap();
+        assert_eq!(
+            enrollment.fingerprint,
+            fingerprint(&enrollment_credential).unwrap()
+        );
+        assert_eq!(
+            service.enroll(
+                protocol_enrollment_request("node.remote"),
+                &grant_credential,
+                &enrollment_credential,
+            ),
+            Err(RemoteEnrollmentServiceErrorV1::Authority(
+                RemoteEnrollmentAuthorityErrorV1::GrantConsumed
+            ))
+        );
+        let persisted = service.authority.committed.lock().unwrap();
+        assert_eq!(persisted.as_ref(), Some(&enrollment));
+        assert!(!format!("{persisted:?}").contains(&"e".repeat(32)));
+    }
+
+    #[test]
+    fn enrollment_service_rejects_wrong_secret_and_node_identity() {
+        let grant_credential = credential(b'g');
+        let enrollment_credential = credential(b'e');
+        let service = enrollment_service(&grant_credential);
+        assert_eq!(
+            service.enroll(
+                protocol_enrollment_request("node.remote"),
+                &credential(b'x'),
+                &enrollment_credential,
+            ),
+            Err(RemoteEnrollmentServiceErrorV1::Authentication(
+                RemoteAuthenticationError::InvalidCredential
+            ))
+        );
+        assert_eq!(
+            service.enroll(
+                protocol_enrollment_request("node.other"),
+                &grant_credential,
+                &enrollment_credential,
+            ),
+            Err(RemoteEnrollmentServiceErrorV1::Authentication(
+                RemoteAuthenticationError::IdentityMismatch
+            ))
+        );
+    }
+
+    #[test]
+    fn enrollment_service_rejects_expired_and_revoked_grants() {
+        let grant_credential = credential(b'g');
+        let enrollment_credential = credential(b'e');
+        let mut expired = enrollment_service(&grant_credential);
+        expired.authority.grant.expires_at = UtcMicros(10);
+        assert_eq!(
+            expired.enroll(
+                protocol_enrollment_request("node.remote"),
+                &grant_credential,
+                &enrollment_credential,
+            ),
+            Err(RemoteEnrollmentServiceErrorV1::Authentication(
+                RemoteAuthenticationError::Expired
+            ))
+        );
+
+        let mut revoked = enrollment_service(&grant_credential);
+        revoked.authority.grant.revoked_at = Some(UtcMicros(5));
+        assert_eq!(
+            revoked.enroll(
+                protocol_enrollment_request("node.remote"),
+                &grant_credential,
+                &enrollment_credential,
+            ),
+            Err(RemoteEnrollmentServiceErrorV1::Authentication(
+                RemoteAuthenticationError::Revoked
+            ))
+        );
     }
 
     #[test]
