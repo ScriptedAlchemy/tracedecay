@@ -8,6 +8,7 @@ use crate::errors::{Result, TraceDecayError};
 use super::SOCKET_ENV;
 
 pub(crate) mod invocation;
+mod multi_root;
 mod probe;
 mod runner;
 mod unit_file;
