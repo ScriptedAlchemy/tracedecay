@@ -7,6 +7,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tracedecay_lsp::analyzer::activity::{active_languages_for_files, documents_for_adapter};
+use tracedecay_lsp::analyzer::broker::{
+    CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity, NodeSpan,
+    enclosing_node_for_line,
+};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -599,7 +604,8 @@ async fn unused_imports_in_file(
     let Ok(source) = std::fs::read_to_string(project_root.join(file_path)) else {
         return Ok(Vec::new());
     };
-    let spans = identifier_spans(&crate::extraction::source_mask::masked_rust_source(&source));
+    let spans =
+        identifier_spans(&tracedecay_code_extraction::source_mask::masked_rust_source(&source));
 
     let mut unused = Vec::new();
     for use_node in use_nodes {
@@ -1082,9 +1088,9 @@ fn cached_lines<'a>(
         // grammar would mis-tokenise them).
         let lines = std::fs::read_to_string(abs).ok().map(|content| {
             let scanned = if path_is_rust(file_path) {
-                crate::extraction::source_mask::masked_rust_source_with(
+                tracedecay_code_extraction::source_mask::masked_rust_source_with(
                     &content,
-                    crate::extraction::source_mask::MaskOptions::CODE_SCAN,
+                    tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
                 )
             } else {
                 content
@@ -1601,9 +1607,9 @@ pub(super) async fn handle_unsafe_patterns(
         // the original line is kept for the emitted snippet. Non-Rust files are
         // scanned raw (the Rust grammar would mis-tokenise them).
         let masked = if path_is_rust(&file.path) {
-            crate::extraction::source_mask::masked_rust_source_with(
+            tracedecay_code_extraction::source_mask::masked_rust_source_with(
                 &source,
-                crate::extraction::source_mask::MaskOptions::CODE_SCAN,
+                tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
             )
         } else {
             source.clone()
@@ -1697,11 +1703,10 @@ fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Re
 
 async fn enclosing_diagnostic_node(
     cg: &TraceDecay,
-    spans_by_file: &mut HashMap<String, Vec<crate::diagnostics::lsp::broker::NodeSpan>>,
+    spans_by_file: &mut HashMap<String, Vec<NodeSpan>>,
     file: &str,
     line_start: u32,
 ) -> Result<Option<String>> {
-    use crate::diagnostics::lsp::broker::{NodeSpan, enclosing_node_for_line};
     if !spans_by_file.contains_key(file) {
         let spans = cg
             .get_nodes_by_file(file)
@@ -1804,7 +1809,7 @@ pub(super) async fn handle_diagnostics(
     cg: &TraceDecay,
     args: Value,
     diagnostics_cache: Option<&crate::diagnostics::DiagnosticsCache>,
-    diagnostics_lsp: Option<&tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    diagnostics_lsp: Option<&tokio::sync::Mutex<DiagnosticBroker>>,
     session_db: Option<&crate::global_db::RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
     use crate::diagnostics::run_all;
@@ -1840,8 +1845,7 @@ pub(super) async fn handle_diagnostics(
     let mut entries: Vec<Value> = Vec::with_capacity(diagnostics.len());
     let mut error_count = 0u64;
     let mut warning_count = 0u64;
-    let mut spans_by_file: HashMap<String, Vec<crate::diagnostics::lsp::broker::NodeSpan>> =
-        HashMap::new();
+    let mut spans_by_file: HashMap<String, Vec<NodeSpan>> = HashMap::new();
 
     for diag in &diagnostics {
         match diag.level.as_str() {
@@ -1887,7 +1891,7 @@ pub(super) async fn handle_diagnostics(
 async fn lsp_file_diagnostics(
     cg: &TraceDecay,
     scope: &crate::diagnostics::Scope,
-    diagnostics_lsp: Option<&tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    diagnostics_lsp: Option<&tokio::sync::Mutex<DiagnosticBroker>>,
 ) -> Result<Option<Vec<crate::diagnostics::Diagnostic>>> {
     let crate::diagnostics::Scope::File { path } = scope else {
         return Ok(None);
@@ -1904,7 +1908,7 @@ async fn lsp_file_diagnostics(
             .into_iter()
             .filter_map(|engine| broker.adapter_for(&engine.language))
             .find(|adapter| {
-                crate::diagnostics::lsp::activity::active_languages_for_files(
+                active_languages_for_files(
                     cg.project_root(),
                     std::slice::from_ref(adapter),
                     std::slice::from_ref(path),
@@ -1916,12 +1920,7 @@ async fn lsp_file_diagnostics(
         return Ok(None);
     };
     let language = adapter.language.clone();
-    let documents = crate::diagnostics::lsp::activity::documents_for_adapter(
-        cg.project_root(),
-        &adapter,
-        vec![path.clone()],
-    )
-    .await?;
+    let documents = documents_for_adapter(cg.project_root(), &adapter, vec![path.clone()]).await?;
     if documents.is_empty() {
         return Ok(None);
     }
@@ -1949,17 +1948,17 @@ async fn lsp_file_diagnostics(
 }
 
 fn lsp_diagnostic_to_compiler_diagnostic(
-    diagnostic: crate::diagnostics::lsp::broker::CodeDiagnostic,
+    diagnostic: CodeDiagnostic,
 ) -> crate::diagnostics::Diagnostic {
     crate::diagnostics::Diagnostic {
         file: diagnostic.file,
         line_start: diagnostic.line_start,
         line_end: diagnostic.line_end,
         level: match diagnostic.severity {
-            crate::diagnostics::lsp::broker::DiagnosticSeverity::Error => "error",
-            crate::diagnostics::lsp::broker::DiagnosticSeverity::Warning => "warning",
-            crate::diagnostics::lsp::broker::DiagnosticSeverity::Information => "information",
-            crate::diagnostics::lsp::broker::DiagnosticSeverity::Hint => "hint",
+            BrokerDiagnosticSeverity::Error => "error",
+            BrokerDiagnosticSeverity::Warning => "warning",
+            BrokerDiagnosticSeverity::Information => "information",
+            BrokerDiagnosticSeverity::Hint => "hint",
         }
         .to_string(),
         code: diagnostic.code.unwrap_or_default(),
