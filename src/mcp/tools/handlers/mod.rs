@@ -253,8 +253,9 @@ impl<'a> SessionAuthorities<'a> {
     }
 }
 
-use super::dispatch_policy::{
-    tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
+use super::binding::{
+    McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
+    tool_dispatches_registered_project_reader,
 };
 use super::render;
 use super::{LegacyToolCompatibilityOwner, ToolResult};
@@ -814,21 +815,6 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum McpToolDispatchGroup {
-    ApplicationSurface,
-    Graph,
-    Info,
-    Admin,
-    Analysis,
-    Git,
-    Edit,
-    Health,
-    RetainedApplication,
-    Memory,
-    SessionWorkflow,
-}
-
 fn expect_classified_dispatch(
     tool_name: &str,
     result: Option<Result<ToolResult>>,
@@ -844,101 +830,10 @@ fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGr
     if ApplicationSurfaceOperation::from_tool_name(tool_name).is_some() {
         return Some(McpToolDispatchGroup::ApplicationSurface);
     }
-    match tool_name {
-        "tracedecay_search"
-        | "tracedecay_grep"
-        | "tracedecay_ast_grep_search"
-        | "tracedecay_retrieve"
-        | "tracedecay_context"
-        | "tracedecay_callers"
-        | "tracedecay_callees"
-        | "tracedecay_impact"
-        | "tracedecay_node"
-        | "tracedecay_similar"
-        | "tracedecay_rename_preview"
-        | "tracedecay_implementations"
-        | "tracedecay_callers_for"
-        | "tracedecay_find_exact_symbol"
-        | "tracedecay_by_qualified_name"
-        | "tracedecay_signature"
-        | "tracedecay_impls"
-        | "tracedecay_derives" => Some(McpToolDispatchGroup::Graph),
-        "tracedecay_status"
-        | "tracedecay_active_project"
-        | "tracedecay_project_list"
-        | "tracedecay_project_search"
-        | "tracedecay_project_context"
-        | "tracedecay_files"
-        | "tracedecay_admin_sync"
-        | "tracedecay_port_status"
-        | "tracedecay_port_order"
-        | "tracedecay_simplify_scan"
-        | "tracedecay_type_hierarchy"
-        | "tracedecay_body"
-        | "tracedecay_todos"
-        | "tracedecay_read"
-        | "tracedecay_outline"
-        | "tracedecay_config"
-        | "tracedecay_signature_search" => Some(McpToolDispatchGroup::Info),
-        "tracedecay_hook_runtime" | "tracedecay_admin_cli" | "tracedecay_admin_project" => {
-            Some(McpToolDispatchGroup::Admin)
-        }
-        "tracedecay_dead_code"
-        | "tracedecay_circular"
-        | "tracedecay_hotspots"
-        | "tracedecay_unused_imports"
-        | "tracedecay_rank"
-        | "tracedecay_largest"
-        | "tracedecay_coupling"
-        | "tracedecay_inheritance_depth"
-        | "tracedecay_distribution"
-        | "tracedecay_recursion"
-        | "tracedecay_complexity"
-        | "tracedecay_doc_coverage"
-        | "tracedecay_god_class"
-        | "tracedecay_unsafe_patterns"
-        | "tracedecay_constructors"
-        | "tracedecay_field_sites" => Some(McpToolDispatchGroup::Analysis),
-        "tracedecay_admin_branch_add"
-        | "tracedecay_affected"
-        | "tracedecay_diff_context"
-        | "tracedecay_changelog"
-        | "tracedecay_commit_context"
-        | "tracedecay_pr_context"
-        | "tracedecay_branch_search"
-        | "tracedecay_branch_diff"
-        | "tracedecay_branch_list" => Some(McpToolDispatchGroup::Git),
-        "tracedecay_str_replace"
-        | "tracedecay_multi_str_replace"
-        | "tracedecay_insert_at"
-        | "tracedecay_ast_grep_rewrite"
-        | "tracedecay_replace_symbol"
-        | "tracedecay_insert_at_symbol"
-        | "tracedecay_move_symbol"
-        | "tracedecay_api_migration_plan"
-        | "tracedecay_api_migration_apply"
-        | "tracedecay_source_edit_reconcile" => Some(McpToolDispatchGroup::Edit),
-        "tracedecay_test_map"
-        | "tracedecay_gini"
-        | "tracedecay_dependency_depth"
-        | "tracedecay_health"
-        | "tracedecay_redundancy"
-        | "tracedecay_runtime"
-        | "tracedecay_dsm"
-        | "tracedecay_test_risk" => Some(McpToolDispatchGroup::Health),
-        _ if RetainedSurfaceOperation::from_name(tool_name).is_some() => {
-            Some(McpToolDispatchGroup::RetainedApplication)
-        }
-        "tracedecay_automation_run_artifact_view"
-        | "tracedecay_analytics"
-        | "tracedecay_skill_list"
-        | "tracedecay_skill_view"
-        | "tracedecay_hermes_skill_bridge" => Some(McpToolDispatchGroup::Memory),
-        "tracedecay_diagnose" | "tracedecay_run_affected_tests" | "tracedecay_dashboard" => {
-            Some(McpToolDispatchGroup::SessionWorkflow)
-        }
-        _ => None,
+    if let Some(group) = dispatch_group_for_tool(tool_name) {
+        return Some(group);
     }
+    RetainedSurfaceOperation::from_name(tool_name).map(|_| McpToolDispatchGroup::RetainedApplication)
 }
 
 #[cfg(test)]
