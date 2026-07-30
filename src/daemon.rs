@@ -6163,7 +6163,6 @@ impl ProductionProjectCompositionHarnessV1 {
                 client_instance_id: format!("production-composition-harness-{index}"),
                 client_identity: client_identity.clone(),
                 scope_prefix: None,
-                attested_scope: None,
                 project_path: Some(project_root.clone()),
                 timings: false,
                 allow_init: true,
@@ -6560,27 +6559,23 @@ async fn serve_broker_socket_client(
     } else {
         None
     };
-    if let Some(request) = doctor_runtime_request(&first_request_line) {
-        let report_ready = if request.doctor_report_requested() {
-            engine
+    let Some(setup_activity) = serve_core_doctor_runtime_request(
+        &mut transport,
+        &handshake,
+        &engine.store_administration,
+        setup_activity,
+        &first_request_line,
+        || async {
+            Ok(engine
                 .cached_project_server(&handshake)
                 .await?
-                .is_some_and(|server| server.doctor_report_ready())
-        } else {
-            false
-        };
-        if request.should_serve_from_core(report_ready) {
-            drop(setup_activity);
-            write_doctor_runtime_response(
-                &mut transport,
-                &handshake,
-                &engine.store_administration,
-                request,
-            )
-            .await?;
-            return Ok(());
-        }
-    }
+                .is_some_and(|server| server.doctor_report_ready()))
+        },
+    )
+    .await?
+    else {
+        return Ok(());
+    };
     engine.log_client_version_skew(&handshake).await;
     ensure_user_profile_host_admission_replay_for_identity(
         &engine.store_administration,
@@ -6922,32 +6917,28 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     } else {
         None
     };
-    if let Some(request) = doctor_runtime_request(&first_request_line) {
-        let report_ready = if request.doctor_report_requested() {
+    let Some(setup_activity) = serve_core_doctor_runtime_request(
+        &mut transport,
+        &handshake,
+        &store_administration,
+        setup_activity,
+        &first_request_line,
+        || async {
             let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
-            portable_cached_project_server(
+            Ok(portable_cached_project_server(
                 &store_administration,
                 &canonical_project_path,
                 &handshake,
                 ProjectServerRequirement::Core,
             )
             .await?
-            .is_some_and(|server| server.doctor_report_ready())
-        } else {
-            false
-        };
-        if request.should_serve_from_core(report_ready) {
-            drop(setup_activity);
-            write_doctor_runtime_response(
-                &mut transport,
-                &handshake,
-                &store_administration,
-                request,
-            )
-            .await?;
-            return Ok(());
-        }
-    }
+            .is_some_and(|server| server.doctor_report_ready()))
+        },
+    )
+    .await?
+    else {
+        return Ok(());
+    };
     ensure_user_profile_host_admission_replay_for_identity(
         &store_administration,
         &handshake.client_identity,

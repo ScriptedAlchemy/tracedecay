@@ -1,11 +1,11 @@
 //! Read-only doctor runtime telemetry: cold store probes and typed
 //! `tracedecay_runtime` responses served without opening project stores.
 
-use std::path::{Path, PathBuf};
-
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use tokio::time::{Duration, timeout};
 
+use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
 use crate::application::semantic_runtime::{
     SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
@@ -509,6 +509,41 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
 }
 
+/// Serve a Doctor runtime request from the daemon core while the routed
+/// project owner has not published its Doctor report. Both broker paths share
+/// this route; only the cached-server fetch differs, so the caller supplies it
+/// as a probe. Returns the activity guard when the request falls through to
+/// the broker's regular routing, or `None` once the core response has been
+/// written and the connection is complete.
+pub(crate) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
+    transport: &mut T,
+    handshake: &DaemonHandshake,
+    store_administration: &super::StoreAdministration,
+    setup_activity: DaemonActivity,
+    first_request_line: &str,
+    doctor_report_ready: Probe,
+) -> Result<Option<DaemonActivity>>
+where
+    T: McpTransport,
+    Probe: FnOnce() -> ProbeFuture,
+    ProbeFuture: std::future::Future<Output = Result<bool>>,
+{
+    let Some(request) = doctor_runtime_request(first_request_line) else {
+        return Ok(Some(setup_activity));
+    };
+    let report_ready = if request.doctor_report_requested() {
+        doctor_report_ready().await?
+    } else {
+        false
+    };
+    if !request.should_serve_from_core(report_ready) {
+        return Ok(Some(setup_activity));
+    }
+    drop(setup_activity);
+    write_doctor_runtime_response(transport, handshake, store_administration, request).await?;
+    Ok(None)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod doctor_runtime_route_tests {
@@ -520,13 +555,41 @@ mod doctor_runtime_route_tests {
 
     use super::{
         cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
-        doctor_runtime_store_paths,
+        doctor_runtime_store_paths, serve_core_doctor_runtime_request,
     };
     use crate::client_identity::DaemonClientIdentity;
-    use crate::daemon::DaemonHandshake;
+    use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
+    use crate::mcp::McpTransport;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+
+    struct DoctorRouteTransport {
+        lifecycle: DaemonLifecycle,
+        output: String,
+        idle_before_write: bool,
+    }
+
+    impl McpTransport for DoctorRouteTransport {
+        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.idle_before_write = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                self.lifecycle.wait_for_idle(),
+            )
+            .await
+            .is_ok();
+            self.output.push_str(line);
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     async fn registered_project_session_database(
         profile_root: &Path,
@@ -607,7 +670,6 @@ mod doctor_runtime_route_tests {
         DaemonHandshake {
             project_path: Some(project_path),
             scope_prefix: None,
-            attested_scope: None,
             timings: false,
             allow_init: false,
             allow_initialize_root_routing: false,
@@ -620,6 +682,24 @@ mod doctor_runtime_route_tests {
             tool_list_changed_capable: false,
             catalog_version: String::new(),
         }
+    }
+
+    fn doctor_report_request_line() -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_runtime",
+                "arguments": {
+                    "format": "json",
+                    "authority_audit": true,
+                    "doctor_report": true,
+                    "session_ingest_health": false,
+                },
+            },
+        })
+        .to_string()
     }
 
     fn filesystem_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
@@ -735,26 +815,86 @@ mod doctor_runtime_route_tests {
 
     #[test]
     fn requested_doctor_report_uses_core_only_until_the_ready_owner_is_published() {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 9,
-            "method": "tools/call",
-            "params": {
-                "name": "tracedecay_runtime",
-                "arguments": {
-                    "format": "json",
-                    "authority_audit": true,
-                    "doctor_report": true,
-                    "session_ingest_health": false,
-                },
-            },
-        })
-        .to_string();
+        let request = doctor_report_request_line();
         let parsed = doctor_runtime_request(&request).expect("Doctor report request");
 
         assert!(parsed.doctor_report_requested());
         assert!(parsed.should_serve_from_core(false));
         assert!(!parsed.should_serve_from_core(true));
+    }
+
+    #[tokio::test]
+    async fn unix_doctor_probe_drops_activity_before_core_response_write() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let mut handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        handshake.project_path = None;
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        lifecycle.begin_draining();
+        let mut transport = DoctorRouteTransport {
+            lifecycle,
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            setup_activity,
+            &doctor_report_request_line(),
+            || async { Ok(false) },
+        )
+        .await
+        .expect("serve core Doctor response");
+
+        assert!(outcome.is_none());
+        assert!(transport.idle_before_write);
+        assert!(!transport.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn portable_doctor_probe_preserves_activity_for_ready_owner_fallthrough() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let profile = root.path().join("profile");
+        let handshake = handshake(
+            root.path().join("project"),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let lifecycle = DaemonLifecycle::default();
+        let setup_activity = lifecycle.try_enter().expect("setup activity");
+        let mut transport = DoctorRouteTransport {
+            lifecycle: lifecycle.clone(),
+            output: String::new(),
+            idle_before_write: false,
+        };
+        let store_administration = StoreAdministration::default();
+
+        let outcome = serve_core_doctor_runtime_request(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            setup_activity,
+            &doctor_report_request_line(),
+            || async { Ok(true) },
+        )
+        .await
+        .expect("fall through to ready owner");
+
+        assert!(outcome.is_some());
+        assert!(transport.output.is_empty());
+        drop(outcome);
+        lifecycle.begin_draining();
+        tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.wait_for_idle())
+            .await
+            .expect("fallthrough activity drops with caller ownership");
     }
 
     #[test]

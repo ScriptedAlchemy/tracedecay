@@ -127,7 +127,6 @@ fn test_handshake_defaults() -> DaemonHandshake {
     DaemonHandshake {
         project_path: None,
         scope_prefix: None,
-        attested_scope: None,
         timings: false,
         allow_init: false,
         allow_initialize_root_routing: false,
