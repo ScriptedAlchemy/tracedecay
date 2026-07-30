@@ -6,7 +6,11 @@ use std::io::{BufReader, ErrorKind, Write as IoWrite};
 #[cfg(windows)]
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -33,6 +37,49 @@ static ACTIVE_CODEX_CHILDREN: OnceLock<Mutex<ActiveCodexChildren>> = OnceLock::n
 
 fn active_codex_children() -> &'static Mutex<ActiveCodexChildren> {
     ACTIVE_CODEX_CHILDREN.get_or_init(|| Mutex::new(ActiveCodexChildren::default()))
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CodexAppServerCancellation {
+    cancelled: Arc<AtomicBool>,
+    process_group: Arc<Mutex<Option<u32>>>,
+}
+
+impl CodexAppServerCancellation {
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(process_group) = *self
+            .process_group
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            terminate_process_tree(process_group);
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn register(&self, process_group: u32) {
+        *self
+            .process_group
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(process_group);
+        if self.is_cancelled() {
+            terminate_process_tree(process_group);
+        }
+    }
+
+    fn unregister(&self, process_group: u32) {
+        let mut registered = self
+            .process_group
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *registered == Some(process_group) {
+            *registered = None;
+        }
+    }
 }
 
 #[cfg_attr(
@@ -138,6 +185,24 @@ pub fn run_prompt_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
 ) -> Result<CodexAppServerSummary> {
+    run_prompt_with_optional_cancellation(prompt, config, thread_source, None)
+}
+
+pub(crate) fn run_prompt_with_codex_app_server_cancellable(
+    prompt: &str,
+    config: &CodexAppServerSummaryConfig,
+    thread_source: &str,
+    cancellation: &CodexAppServerCancellation,
+) -> Result<CodexAppServerSummary> {
+    run_prompt_with_optional_cancellation(prompt, config, thread_source, Some(cancellation))
+}
+
+fn run_prompt_with_optional_cancellation(
+    prompt: &str,
+    config: &CodexAppServerSummaryConfig,
+    thread_source: &str,
+    cancellation: Option<&CodexAppServerCancellation>,
+) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
     let mut command = codex_app_server_command(&config.codex_bin);
     command
@@ -146,7 +211,14 @@ pub fn run_prompt_with_codex_app_server(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let child = spawn_codex_app_server(&mut command, &config.codex_bin)?;
-    let mut child = ChildGuard { child };
+    let process_group = child.id();
+    let mut child = ChildGuard {
+        child,
+        cancellation: cancellation.cloned(),
+    };
+    if let Some(cancellation) = cancellation {
+        cancellation.register(process_group);
+    }
 
     let stdout = child
         .child
@@ -156,7 +228,7 @@ pub fn run_prompt_with_codex_app_server(
             message: "codex app-server stdout was not available".to_string(),
         })?;
     let (line_tx, line_rx) = mpsc::channel::<std::io::Result<String>>();
-    std::thread::spawn(move || {
+    let stdout_reader = std::thread::spawn(move || {
         let mut frames = RawJsonlFrameReader::new(BufReader::new(stdout), MAX_WIRE_MESSAGE_BYTES);
         loop {
             let line = match frames.next_frame() {
@@ -177,6 +249,20 @@ pub fn run_prompt_with_codex_app_server(
         }
     });
 
+    let outcome = run_codex_protocol(&mut child, &line_rx, prompt, config, thread_source, model);
+    drop(child);
+    let _ = stdout_reader.join();
+    outcome
+}
+
+fn run_codex_protocol(
+    child: &mut ChildGuard,
+    line_rx: &mpsc::Receiver<std::io::Result<String>>,
+    prompt: &str,
+    config: &CodexAppServerSummaryConfig,
+    thread_source: &str,
+    model: Option<&str>,
+) -> Result<CodexAppServerSummary> {
     let mut stdin = child
         .child
         .stdin
@@ -324,6 +410,7 @@ fn build_ephemeral_thread_start_params(model: Option<&str>, thread_source: &str)
 
 struct ChildGuard {
     child: Child,
+    cancellation: Option<CodexAppServerCancellation>,
 }
 
 impl Drop for ChildGuard {
@@ -337,6 +424,9 @@ impl Drop for ChildGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .process_groups
             .remove(&process_group);
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.unregister(process_group);
+        }
     }
 }
 
@@ -671,7 +761,10 @@ mod tests {
             .args(["-c", "sleep 30 & echo $! > \"$1\"; wait", "sh"])
             .arg(&descendant_pid_path);
         let child = spawn_codex_app_server(&mut command, "sh").expect("spawn child");
-        let mut child = ChildGuard { child };
+        let mut child = ChildGuard {
+            child,
+            cancellation: None,
+        };
         let deadline = Instant::now() + Duration::from_secs(1);
         while !descendant_pid_path.is_file() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
