@@ -1,6 +1,6 @@
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
-    application, domain, operation, remote,
+    application, domain, operation, remote, work,
 };
 
 #[test]
@@ -46,6 +46,31 @@ fn remote_outcomes_are_the_canonical_application_types() {
     let outcome = remote::replay::RemoteReplayOutcomeV1::Rejected;
     let canonical: application::remote::replay::RemoteReplayOutcomeV1 = outcome;
     let _: remote::replay::RemoteReplayOutcomeV1 = canonical;
+}
+
+#[test]
+fn work_inventory_preserves_executable_and_unavailable_authority() {
+    let registry = work::executable_binding_registry().expect("canonical Work registry");
+    let available = registry
+        .iter()
+        .filter(|availability| availability.binding().is_some())
+        .count();
+    let unavailable = registry
+        .iter()
+        .filter(|availability| availability.binding().is_none())
+        .count();
+
+    assert_eq!(available, 9);
+    assert_eq!(unavailable, 8);
+    let snapshot = registry
+        .get(&operation::OperationId::new("operation.work.snapshot").unwrap())
+        .and_then(operation::ExecutableBindingAvailabilityV1::binding)
+        .expect("snapshot executable binding");
+    assert!(matches!(
+        snapshot.exposure(),
+        operation::RouteExposureV1::Public { route_path, .. }
+            if route_path == "/application/work/snapshot"
+    ));
 }
 
 #[test]
