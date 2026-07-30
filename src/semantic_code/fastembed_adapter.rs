@@ -557,10 +557,6 @@ impl AdmittedProjectionArtifactV1 {
         self.runtime_artifact.max_batch_bytes()
     }
 
-    pub(super) fn max_batch_texts(&self) -> u32 {
-        self.runtime_artifact.max_batch_texts()
-    }
-
     #[cfg(test)]
     pub(super) fn with_test_max_batch_bytes(mut self, max_batch_bytes: u32) -> Self {
         self.runtime_artifact.max_batch_bytes = max_batch_bytes;
@@ -1049,33 +1045,37 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
         let artifact = self.authority.runtime_artifact();
         validate_batch_limits(batch, artifact)?;
 
-        if cancel.cancelled() {
-            return Err(EmbedError::Cancelled);
-        }
-        // FastEmbed/ORT inference is synchronous. Keep batches small at the
-        // projector boundary, then perform one tensor invocation per admitted
-        // batch instead of one invocation per text.
-        let embedded = self
-            .embedding
-            .embed(batch.texts(), Some(batch.len()))
-            .map_err(|error| {
-                fastembed_error(
-                    RuntimeFailureKindV1::EmbedFailed,
-                    "FastEmbed inference failed for the verified artifact",
-                    &error,
-                )
-            })?;
-        if cancel.cancelled() {
-            return Err(EmbedError::Cancelled);
-        }
-        if embedded.len() != batch.len() {
-            return Err(fastembed_failure(
-                RuntimeFailureKindV1::EmbedFailed,
-                "FastEmbed returned an unexpected embedding count",
-            ));
-        }
         let mut vectors = Vec::with_capacity(batch.len());
-        for mut values in embedded {
+        for text in batch.texts() {
+            if cancel.cancelled() {
+                return Err(EmbedError::Cancelled);
+            }
+
+            // FastEmbed/ORT inference is synchronous. One-text calls make
+            // cancellation observable between inputs and ensure a cancelled
+            // request never returns a partial batch.
+            let mut embedded = self
+                .embedding
+                .embed(std::slice::from_ref(text), Some(1))
+                .map_err(|error| {
+                    fastembed_error(
+                        RuntimeFailureKindV1::EmbedFailed,
+                        "FastEmbed inference failed for the verified artifact",
+                        &error,
+                    )
+                })?;
+            if cancel.cancelled() {
+                return Err(EmbedError::Cancelled);
+            }
+            if embedded.len() != 1 {
+                return Err(fastembed_failure(
+                    RuntimeFailureKindV1::EmbedFailed,
+                    "FastEmbed returned an unexpected embedding count",
+                ));
+            }
+            let mut values = embedded
+                .pop()
+                .unwrap_or_else(|| panic!("embedding count was checked"));
             // Canonicalize IEEE negative zero before vector hashing and
             // exact-flat comparison. FastEmbed remains the sole producer;
             // this changes no distance while removing signed-zero drift.

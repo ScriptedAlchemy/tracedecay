@@ -30,6 +30,7 @@ pub mod retrieval;
 pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
+pub mod work;
 
 mod error;
 
@@ -202,3 +203,4 @@ pub use storage::{
     incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
     stale_branch_dbs_finding,
 };
+pub use work::*;

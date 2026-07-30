@@ -677,8 +677,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             options.session_authorities.project_retrieval,
         );
         // Classify before moving `args` so large payloads are not cloned into every
-        // group probe. Application-surface tools still run before catalog checks.
-        let dispatch_group = classify_mcp_tool_dispatch_group(tool_name);
+        // group probe. Application-surface tools still run before catalog checks;
+        // diagnostics_read without an executor falls through to analysis.
+        let dispatch_group = classify_mcp_tool_dispatch_group(tool_name, &options);
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
             return expect_classified_dispatch(
                 tool_name,
@@ -840,9 +841,17 @@ fn expect_classified_dispatch(
     })
 }
 
-fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGroup> {
-    if ApplicationSurfaceOperation::from_tool_name(tool_name).is_some() {
-        return Some(McpToolDispatchGroup::ApplicationSurface);
+fn classify_mcp_tool_dispatch_group(
+    tool_name: &str,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<McpToolDispatchGroup> {
+    if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
+        let defer_diagnostics_without_executor = operation
+            == ApplicationSurfaceOperation::DiagnosticsRead
+            && options.application_invocation_executor.is_none();
+        if !defer_diagnostics_without_executor {
+            return Some(McpToolDispatchGroup::ApplicationSurface);
+        }
     }
     match tool_name {
         "tracedecay_search"
@@ -898,7 +907,8 @@ fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGr
         | "tracedecay_god_class"
         | "tracedecay_unsafe_patterns"
         | "tracedecay_constructors"
-        | "tracedecay_field_sites" => Some(McpToolDispatchGroup::Analysis),
+        | "tracedecay_field_sites"
+        | "tracedecay_diagnostics" => Some(McpToolDispatchGroup::Analysis),
         "tracedecay_admin_branch_add"
         | "tracedecay_affected"
         | "tracedecay_diff_context"
@@ -939,15 +949,6 @@ fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGr
         }
         _ => None,
     }
-}
-
-#[cfg(test)]
-#[test]
-fn diagnostics_without_an_executor_stays_on_the_read_only_application_surface() {
-    assert_eq!(
-        classify_mcp_tool_dispatch_group("tracedecay_diagnostics"),
-        Some(McpToolDispatchGroup::ApplicationSurface)
-    );
 }
 
 #[derive(Debug)]
@@ -1317,6 +1318,11 @@ async fn dispatch_application_surface_tools(
     options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    if operation == ApplicationSurfaceOperation::DiagnosticsRead
+        && options.application_invocation_executor.is_none()
+    {
+        return None;
+    }
     let normalized_args =
         match crate::application_surface::normalize_application_tool_args(tool_name, args) {
             Ok(args) => args,
