@@ -5,11 +5,6 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const HOOK_V2_SOURCE: &str = include_str!("../src/hooks/v2.rs");
-const HOOK_DAEMON_PORTS_SOURCE: &str = include_str!("../src/hooks/daemon_ports.rs");
-const ADVISORY_HOST_DELIVERY_SOURCE: &str =
-    include_str!("../src/application/advisory/host_delivery.rs");
-
 use serde_json::{Value, json};
 use tracedecay::application::advisory::ci_runtime::{
     CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
@@ -609,8 +604,12 @@ async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     );
 }
 
+/// Authentic Cursor and Codex hook packets must cross the packaged CLI,
+/// daemon-owned Hook V2 admission/delivery ports, and the registered PR13
+/// advisory owner. A committed ingest alone is insufficient: the same process
+/// must then return a non-vacuous typed four-pillar terminal cycle.
 #[tokio::test]
-async fn production_host_ingest_uses_registered_project_runtime() {
+async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     let (environment, project) = common::IsolatedEnv::acquire().await;
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join("src/lib.rs"), "pub fn shared_edit() {}\n").unwrap();
@@ -970,23 +969,4 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
             .and_then(find_advisory_cycle),
         _ => None,
     }
-}
-
-/// PR13 content-free hook notices must keep one synchronous delivery owner and
-/// one asynchronous Hook V2 delivery adapter. Declaration only — execution is
-/// covered by host-delivery unit coverage and the registered daemon path above.
-#[test]
-fn source_pr13_hook_notice_delivery_keeps_typed_ports() {
-    assert!(
-        ADVISORY_HOST_DELIVERY_SOURCE.contains("Pr13AdvisoryHookDeliveryPortV1")
-            && ADVISORY_HOST_DELIVERY_SOURCE.contains("deliver_feedback_with_rollback"),
-        "advisory host delivery must retain the sync HookFeedbackDeliveryPortV1 path"
-    );
-    assert!(
-        HOOK_V2_SOURCE.contains("deliver_hook_feedback")
-            && HOOK_V2_SOURCE.contains("DaemonFeedbackNoticeDeliveryPort")
-            && HOOK_DAEMON_PORTS_SOURCE.contains("AsyncHookFeedbackDeliveryPortV1")
-            && HOOK_DAEMON_PORTS_SOURCE.contains("hook_v2_feedback_notice_delivery"),
-        "Hook V2 must deliver PR13 notices through the async typed daemon port"
-    );
 }
