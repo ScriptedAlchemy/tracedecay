@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, RemoteCapabilityV1,
-    RemoteWriterFenceV1, UtcMicros,
+    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, ManifestDigest,
+    RemoteCapabilityV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, UtcMicros,
 };
 
 use super::auth::{
@@ -20,7 +20,7 @@ use super::capture::{
     AdmittedRemoteCaptureV1, RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
 use super::protocol::RemoteProtocolBodyV1;
-use crate::ApplicationContractError;
+use crate::{ApplicationContractError, PolicyDecisionRef, ResolvedScope};
 
 /// Secret-free replay selector. The authority loads the canonical admitted
 /// capture from its encrypted spool; callers cannot resubmit or alter payload.
@@ -82,11 +82,71 @@ impl RemoteReplayFrameV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RemoteReplayPolicyDecisionV1 {
     Admit,
     Reject,
     Quarantine,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteReplayPolicyEvidenceV1 {
+    pub scope: ResolvedScope,
+    pub repository_scope: RemoteRepositoryScopeV1,
+    pub policy_revision: u64,
+    pub decision: RemoteReplayPolicyDecisionV1,
+    pub policy: PolicyDecisionRef,
+    pub configuration_digest: ManifestDigest,
+    pub catalog_digest: ManifestDigest,
+    pub privacy_digest: ManifestDigest,
+    pub revalidated_at: UtcMicros,
+}
+
+impl RemoteReplayPolicyEvidenceV1 {
+    pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
+        self.repository_scope
+            .validate()
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        if self.scope.project_id != self.repository_scope.project_id
+            || self.scope.repository_id != self.repository_scope.repository_id
+            || self.scope.worktree_id != self.repository_scope.worktree_id
+            || self.scope.reference != self.repository_scope.reference
+            || self.policy_revision == 0
+            || self.policy_revision != self.policy.revision
+        {
+            return Err(RemoteReplayApplicationErrorV1::PolicyMismatch);
+        }
+        self.scope
+            .validate()
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        self.policy
+            .validate()
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        self.configuration_digest
+            .validate()
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        self.catalog_digest
+            .validate()
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)?;
+        self.privacy_digest
+            .validate()
+            .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)
+    }
+
+    pub fn validate_for(
+        &self,
+        frame: &RemoteReplayFrameV1,
+    ) -> Result<(), RemoteReplayApplicationErrorV1> {
+        self.validate()?;
+        if self.repository_scope != frame.capture.writer.scope
+            || self.policy_revision < frame.capture.policy_revision
+        {
+            return Err(RemoteReplayApplicationErrorV1::PolicyMismatch);
+        }
+        Ok(())
+    }
 }
 
 pub trait RemoteReplayPolicyPortV1: Send + Sync {
@@ -95,6 +155,13 @@ pub trait RemoteReplayPolicyPortV1: Send + Sync {
         frame: &RemoteReplayFrameV1,
         observed_at: UtcMicros,
     ) -> Result<RemoteReplayPolicyDecisionV1, RemoteReplayApplicationErrorV1>;
+}
+
+pub trait RemoteReplayPolicyEvidencePortV1: RemoteReplayPolicyPortV1 {
+    fn current_policy_evidence(
+        &self,
+        frame: &RemoteReplayFrameV1,
+    ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1>;
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -231,6 +298,7 @@ pub struct RemoteReplayServiceOutcomeV1 {
     pub authority: CurrentRemoteAuthorityStateV1,
     pub frame: RemoteReplayFrameV1,
     pub caller_admission: RemoteEnrollmentCommitReceiptV1,
+    pub policy: RemoteReplayPolicyEvidenceV1,
 }
 
 pub struct RemoteReplayServiceV1<'a> {
@@ -239,6 +307,7 @@ pub struct RemoteReplayServiceV1<'a> {
     frames: &'a dyn RemoteReplayFrameLookupPortV1,
     current_writer: &'a dyn RemoteReplayCurrentWriterPortV1,
     policy: &'a dyn RemoteReplayPolicyPortV1,
+    policy_evidence: &'a dyn RemoteReplayPolicyEvidencePortV1,
     transaction: &'a dyn RemoteReplayTransactionPortV1,
     spool: &'a dyn RemoteReplaySpoolPortV1,
 }
@@ -251,6 +320,7 @@ impl<'a> RemoteReplayServiceV1<'a> {
         frames: &'a dyn RemoteReplayFrameLookupPortV1,
         current_writer: &'a dyn RemoteReplayCurrentWriterPortV1,
         policy: &'a dyn RemoteReplayPolicyPortV1,
+        policy_evidence: &'a dyn RemoteReplayPolicyEvidencePortV1,
         transaction: &'a dyn RemoteReplayTransactionPortV1,
         spool: &'a dyn RemoteReplaySpoolPortV1,
     ) -> Self {
@@ -260,6 +330,7 @@ impl<'a> RemoteReplayServiceV1<'a> {
             frames,
             current_writer,
             policy,
+            policy_evidence,
             transaction,
             spool,
         }
@@ -302,6 +373,7 @@ impl<'a> RemoteReplayServiceV1<'a> {
                 writer.authority.credential_revision,
             )
             .map_err(RemoteReplayServiceErrorV1::Credential)?;
+        let policy = self.policy_evidence.current_policy_evidence(&frame)?;
         let outcome = replay_remote_capture(
             self.authentication,
             self.policy,
@@ -320,6 +392,7 @@ impl<'a> RemoteReplayServiceV1<'a> {
             authority: current.state,
             frame,
             caller_admission,
+            policy,
         })
     }
 }
@@ -643,6 +716,10 @@ pub enum RemoteReplayApplicationErrorV1 {
     ReceiptMissing,
     #[error("remote replay durable receipt is mismatched")]
     ReceiptMismatch,
+    #[error("remote replay policy evidence is unavailable")]
+    PolicyUnavailable,
+    #[error("remote replay policy evidence does not match the canonical frame")]
+    PolicyMismatch,
     #[error(transparent)]
     Authentication(RemoteAuthenticationError),
     #[error(transparent)]
