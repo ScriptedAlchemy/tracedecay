@@ -450,9 +450,13 @@ pub fn execute_final_v2_migration_with_faults(
                 .map_err(FinalV2ExecutionError::Runtime)?;
         }
         FinalV2ExecutionPhase::Prepared => {
-            let recovered_publication = runtime
-                .recover_publication_boundary(&journal.source)
-                .map_err(FinalV2ExecutionError::Runtime)?;
+            let recovered_publication = if resuming_prepared {
+                runtime
+                    .recover_publication_boundary(&journal.source)
+                    .map_err(FinalV2ExecutionError::Runtime)?
+            } else {
+                None
+            };
             if let Some(receipt) = recovered_publication {
                 receipt
                     .validate_for_grant(&journal.publication_grant)
@@ -988,7 +992,7 @@ mod tests {
         let locator = VerifiedStoreLocatorV1::new(
             shard_id,
             incarnation,
-            LocatorDigest::new(&format!("{material:064x}")).unwrap(),
+            LocatorDigest::new(format!("sha256:{material:064x}")).unwrap(),
         );
         ExactMigrationSourceIdentity::new(
             "project.release",
@@ -1237,8 +1241,8 @@ mod tests {
 
         assert_eq!(
             error.contract_error(),
-            Some(&MigrationContractError::IdentityMismatch)
+            Some(&MigrationContractError::BackupNotVerified)
         );
-        assert_eq!(*resumed.calls.borrow(), ["rollback"]);
+        assert!(resumed.calls.borrow().is_empty());
     }
 }

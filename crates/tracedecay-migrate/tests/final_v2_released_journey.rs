@@ -259,7 +259,7 @@ fn source_identity(fixture: &ReleasedV0067Fixture) -> ExactMigrationSourceIdenti
     let locator = VerifiedStoreLocatorV1::new(
         shard_id,
         incarnation,
-        LocatorDigest::new(&"3".repeat(64)).unwrap(),
+        LocatorDigest::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
     );
     ExactMigrationSourceIdentity::new(
         fixture.profile_id(),
