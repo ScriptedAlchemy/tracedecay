@@ -18,9 +18,6 @@ const HEADER: &str = concat!(
     "// Authority: tracedecay-application catalog/schema contracts, ",
     "and tracedecay-tool-catalog executable bindings.\n\n",
 );
-const WORK_APPLICATION_ROUTES_MOUNTED: bool = false;
-const WORK_ATTEMPT_ROUTES_MOUNTED: bool = false;
-
 struct Operation {
     name: String,
     operation_id: String,
@@ -71,10 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn canonical_application_registry() -> Result<ExecutableBindingRegistryV1, Box<dyn Error>> {
-    Ok(work_executable_binding_registry(
-        WORK_APPLICATION_ROUTES_MOUNTED,
-        WORK_ATTEMPT_ROUTES_MOUNTED,
-    )?)
+    Ok(work_executable_binding_registry()?)
 }
 
 fn canonical_operations(
@@ -684,20 +678,20 @@ mod tests {
     }
 
     #[test]
-    fn work_registry_withholds_every_unverified_route() {
+    fn work_registry_exports_every_mounted_route() {
         let registry = super::canonical_application_registry().unwrap();
         let operations = canonical_operations(&registry).unwrap();
         let unavailable = canonical_unavailable_operations(&registry);
 
-        assert!(operations.is_empty());
-        assert_eq!(unavailable.len(), 17);
+        assert_eq!(operations.len(), 17);
+        assert!(unavailable.is_empty());
         let generated = render_operations(&operations, &unavailable).unwrap();
-        assert!(!generated.contains("route: \"/application/work/snapshot\""));
-        assert!(!generated.contains("route: \"/application/work/attempt/acquire-lease\""));
-        assert!(generated.contains("operation: \"work_snapshot\""));
-        assert!(generated.contains("operation: \"work_attempt_acquire_lease\""));
-        assert!(generated.contains("availability: \"unavailable\""));
-        assert!(generated.contains("disposition: \"route_unavailable\""));
+        assert!(generated.contains("route: \"/application/work/snapshot\""));
+        assert!(generated.contains("route: \"/application/work/attempt/acquire-lease\""));
+        assert!(generated.contains(
+            "export const UNAVAILABLE_OPERATIONS = [\n] as const satisfies readonly \
+             UnavailableOperationCapability[];"
+        ));
     }
 
     #[test]
@@ -716,8 +710,8 @@ mod tests {
         let unavailable = canonical_unavailable_operations(&registry);
         let generated = super::render_python_operations(&operations, &unavailable);
 
-        assert_eq!(generated.matches("\": \"/application/").count(), 64);
-        assert!(generated.contains("\"work_attempt_start\": \"route_unavailable\""));
-        assert!(generated.contains("\"work_snapshot\": \"route_unavailable\""));
+        assert_eq!(generated.matches("\": \"/application/").count(), 81);
+        assert!(generated.contains("\"work_attempt_start\": \"/application/work/attempt/start\""));
+        assert!(generated.contains("\"work_snapshot\": \"/application/work/snapshot\""));
     }
 }
