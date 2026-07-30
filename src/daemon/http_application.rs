@@ -165,6 +165,7 @@ async fn dispatch_project_application(
         return StatusCode::BAD_REQUEST.into_response();
     };
     *request.uri_mut() = uri;
+    request.extensions_mut().clear();
     match router.oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
