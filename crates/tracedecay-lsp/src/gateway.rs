@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use tracedecay_domain::ManifestDigest;
 use url::Url;
 
 use crate::capabilities::{
@@ -37,15 +38,35 @@ use crate::session::{LspRequestFailure, LspRequestId, MAX_PENDING_REQUESTS};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedRoot {
     uri: String,
+    scope_digest: Option<ManifestDigest>,
 }
 
 impl AdmittedRoot {
     pub fn new(uri: impl Into<String>) -> Self {
-        Self { uri: uri.into() }
+        Self {
+            uri: uri.into(),
+            scope_digest: None,
+        }
+    }
+
+    /// Bind a presentation URI to an exact application-resolved scope.
+    pub fn authorized(uri: impl Into<String>, scope_digest: ManifestDigest) -> Self {
+        Self {
+            uri: uri.into(),
+            scope_digest: Some(scope_digest),
+        }
     }
 
     pub fn uri(&self) -> &str {
         &self.uri
+    }
+
+    pub fn scope_digest(&self) -> Option<&ManifestDigest> {
+        self.scope_digest.as_ref()
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        strict_file_uri_path(&self.uri).is_some()
     }
 
     pub(crate) fn matches_root_uri(&self, candidate: &str) -> bool {

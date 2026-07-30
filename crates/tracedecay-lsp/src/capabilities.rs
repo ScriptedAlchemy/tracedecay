@@ -117,6 +117,7 @@ pub struct ClientCapabilities {
     pub publish_diagnostics_data: bool,
     pub supports_document_diagnostics: bool,
     pub workspace_diagnostic_refresh_support: bool,
+    pub supports_workspace_folders: bool,
     pub semantic: BTreeSet<SemanticCapability>,
     pub context_projections: BTreeMap<ContextProjectionKind, u32>,
     pub supports_context_expansion: bool,
@@ -181,12 +182,12 @@ impl ClientCapabilities {
         // support only. Optional fields on the shared `Diagnostic` shape are
         // negotiated by `textDocument.publishDiagnostics`; accepting invented
         // fields under `diagnostic` would overstate a real client's support.
-        capabilities.workspace_diagnostic_refresh_support = root
-            .get("workspace")
-            .and_then(Value::as_object)
+        let workspace = root.get("workspace").and_then(Value::as_object);
+        capabilities.workspace_diagnostic_refresh_support = workspace
             .and_then(|workspace| workspace.get("diagnostic"))
             .and_then(Value::as_object)
             .is_some_and(|diagnostic| bool_at(Some(diagnostic), "refreshSupport"));
+        capabilities.supports_workspace_folders = bool_at(workspace, "workspaceFolders");
 
         for (key, capability) in [
             ("declaration", SemanticCapability::Declaration),
@@ -274,6 +275,8 @@ pub struct GatewayCapabilities {
     /// Whether the daemon can answer from canonical `TraceDecay` diagnostics
     /// when an upstream analyzer does not provide diagnostics.
     pub supports_managed_diagnostics: bool,
+    /// True only when the daemon mounted an exact authorized scope set.
+    pub supports_workspace_folders: bool,
     pub semantic: BTreeSet<SemanticCapability>,
     pub context_projections: BTreeMap<ContextProjectionKind, u32>,
     pub supports_context_expansion: bool,
@@ -285,6 +288,7 @@ impl Default for GatewayCapabilities {
             supports_publish_diagnostics: true,
             supports_document_diagnostics: true,
             supports_managed_diagnostics: true,
+            supports_workspace_folders: false,
             semantic: SemanticCapability::ALL.into_iter().collect(),
             context_projections: BTreeMap::new(),
             supports_context_expansion: true,
@@ -358,7 +362,11 @@ impl EffectiveCapabilities {
         );
         capabilities.insert(
             "workspace".into(),
-            json!({ "workspaceFolders": { "supported": false } }),
+            json!({
+                "workspaceFolders": {
+                    "supported": self.workspace_folders_supported
+                }
+            }),
         );
         if self.supports_document_diagnostics {
             capabilities.insert(
@@ -479,8 +487,8 @@ pub struct CapabilityUnavailable {
 }
 
 /// Computes the bounded intersection without advertising deferred
-/// capabilities such as multi-root, rename, code actions, workspace
-/// diagnostics, or execute-command.
+/// capabilities such as rename, code actions, workspace diagnostics, or
+/// execute-command.
 pub fn negotiate_capabilities(
     client: &ClientCapabilities,
     gateway: &GatewayCapabilities,
@@ -551,7 +559,8 @@ pub fn negotiate_capabilities(
         semantic,
         context_projections,
         supports_context_expansion,
-        workspace_folders_supported: false,
+        workspace_folders_supported: client.supports_workspace_folders
+            && gateway.supports_workspace_folders,
         workspace_diagnostics_supported: false,
         rename_supported: false,
         general_code_actions_supported: false,
@@ -581,6 +590,7 @@ mod tests {
             publish_diagnostics_code_description: true,
             publish_diagnostics_data: true,
             supports_document_diagnostics: true,
+            supports_workspace_folders: true,
             semantic: SemanticCapability::ALL.into_iter().collect(),
             ..ClientCapabilities::default()
         }
@@ -626,6 +636,20 @@ mod tests {
         assert!(
             !effective.supports_semantic(SemanticCapability::RenameCandidate),
             "graph-only sessions cannot claim analyzer-derived rename evidence"
+        );
+    }
+
+    #[test]
+    fn workspace_folders_require_both_client_and_exact_gateway_authority() {
+        let mut gateway = GatewayCapabilities::default();
+        gateway.supports_workspace_folders = true;
+        let effective =
+            negotiate_capabilities(&full_client(), &gateway, &UpstreamCapabilities::default());
+
+        assert!(effective.workspace_folders_supported);
+        assert_eq!(
+            effective.to_lsp_server_capabilities()["workspace"]["workspaceFolders"]["supported"],
+            true
         );
     }
 

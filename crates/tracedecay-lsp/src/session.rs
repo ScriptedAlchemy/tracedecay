@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use tracedecay_domain::ContentDigest;
+use tracedecay_domain::{ContentDigest, ManifestDigest};
 
 use crate::gateway::AdmittedRoot;
 
@@ -15,6 +15,8 @@ pub const MAX_PENDING_REQUESTS: usize = 64;
 pub const MAX_PUBLICATION_BYTES: usize = 256 * 1024;
 /// Maximum number of live bridge sessions in one daemon process.
 pub const MAX_LSP_SESSIONS: usize = 64;
+/// Maximum roots admitted into one exact workspace-folder set.
+pub const MAX_LSP_WORKSPACE_ROOTS: usize = 64;
 /// Detached session state is deterministically discarded after this TTL.
 pub const LSP_SESSION_TTL_MS: u64 = 15 * 60 * 1_000;
 
@@ -103,12 +105,87 @@ pub struct LspSessionOpenRequest {
     pub client_revision: String,
 }
 
+/// Exact workspace-folder authority returned by daemon admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedLspWorkspace {
+    scope_set_digest: Option<ManifestDigest>,
+    roots: Vec<AdmittedRoot>,
+}
+
+impl AuthorizedLspWorkspace {
+    pub fn single(root: AdmittedRoot) -> Self {
+        Self {
+            scope_set_digest: None,
+            roots: vec![root],
+        }
+    }
+
+    pub fn new(
+        scope_set_digest: Option<ManifestDigest>,
+        mut roots: Vec<AdmittedRoot>,
+    ) -> Result<Self, LspEndpointError> {
+        if roots.is_empty() || roots.len() > MAX_LSP_WORKSPACE_ROOTS {
+            return Err(LspEndpointError::AdmissionRejected);
+        }
+        if roots.len() > 1
+            && (scope_set_digest.is_none()
+                || roots.iter().any(|root| root.scope_digest().is_none()))
+        {
+            return Err(LspEndpointError::AdmissionRejected);
+        }
+        if roots.iter().any(|root| !root.is_valid()) {
+            return Err(LspEndpointError::AdmissionRejected);
+        }
+        roots.sort_by(|left, right| {
+            left.scope_digest()
+                .cmp(&right.scope_digest())
+                .then_with(|| left.uri().cmp(right.uri()))
+        });
+        for (index, root) in roots.iter().enumerate() {
+            if roots[..index].iter().any(|candidate| {
+                candidate.scope_digest().is_some()
+                    && candidate.scope_digest() == root.scope_digest()
+                    || candidate.matches_root_uri(root.uri())
+            }) {
+                return Err(LspEndpointError::AdmissionRejected);
+            }
+        }
+        Ok(Self {
+            scope_set_digest,
+            roots,
+        })
+    }
+
+    pub fn roots(&self) -> &[AdmittedRoot] {
+        &self.roots
+    }
+
+    pub fn scope_set_digest(&self) -> Option<&ManifestDigest> {
+        self.scope_set_digest.as_ref()
+    }
+
+    fn primary(&self) -> &AdmittedRoot {
+        &self.roots[0]
+    }
+
+    fn matches_multi_root_hints(&self, requested: &[String]) -> bool {
+        requested.len() == self.roots.len()
+            && requested.iter().all(|uri| {
+                self.roots
+                    .iter()
+                    .filter(|root| root.matches_root_uri(uri))
+                    .count()
+                    == 1
+            })
+    }
+}
+
 /// Session result authorized by the daemon admission boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizedLspSession {
     pub session_id: LspSessionId,
     pub credential: LspSessionCredential,
-    pub root: AdmittedRoot,
+    pub workspace: AuthorizedLspWorkspace,
     pub expires_at_ms: u64,
 }
 
@@ -616,7 +693,7 @@ impl LspSessionControl {
 #[derive(Debug)]
 struct RegisteredLspSession {
     credential: LspSessionCredential,
-    root: AdmittedRoot,
+    workspace: AuthorizedLspWorkspace,
     expires_at_ms: u64,
     control: LspSessionControl,
 }
@@ -663,7 +740,7 @@ impl LspSessionRegistry {
             authorized.session_id,
             RegisteredLspSession {
                 credential: authorized.credential,
-                root: authorized.root,
+                workspace: authorized.workspace,
                 expires_at_ms: authorized.expires_at_ms,
                 control: LspSessionControl::default(),
             },
@@ -707,7 +784,19 @@ impl LspSessionRegistry {
         self.authenticate(access, now_ms)?;
         self.sessions
             .get(access.session_id())
-            .map(|session| &session.root)
+            .map(|session| session.workspace.primary())
+            .ok_or(LspEndpointError::AuthenticationFailed)
+    }
+
+    pub fn workspace(
+        &mut self,
+        access: &LspSessionAccess,
+        now_ms: u64,
+    ) -> Result<&AuthorizedLspWorkspace, LspEndpointError> {
+        self.authenticate(access, now_ms)?;
+        self.sessions
+            .get(access.session_id())
+            .map(|session| &session.workspace)
             .ok_or(LspEndpointError::AuthenticationFailed)
     }
 
@@ -824,10 +913,14 @@ where
         request: LspSessionOpenRequest,
         now_ms: u64,
     ) -> Result<LspSessionAccess, LspEndpointError> {
-        if request.workspace_folders.len() > 1 {
-            return Err(LspEndpointError::MultipleRootsUnsupported);
-        }
         let authorized = self.admission.admit_lsp_session(&request, now_ms)?;
+        if request.workspace_folders.len() > 1
+            && !authorized
+                .workspace
+                .matches_multi_root_hints(&request.workspace_folders)
+        {
+            return Err(LspEndpointError::AdmissionRejected);
+        }
         self.registry.register(authorized, now_ms)
     }
 
@@ -1010,31 +1103,62 @@ mod tests {
     impl LspSessionAdmissionPort for Admission {
         fn admit_lsp_session(
             &self,
-            _request: &LspSessionOpenRequest,
+            request: &LspSessionOpenRequest,
             now_ms: u64,
         ) -> Result<AuthorizedLspSession, LspEndpointError> {
+            let workspace = if request.workspace_folders.len() > 1 {
+                AuthorizedLspWorkspace::new(
+                    Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
+                    request
+                        .workspace_folders
+                        .iter()
+                        .enumerate()
+                        .map(|(index, uri)| {
+                            AdmittedRoot::authorized(
+                                uri,
+                                ManifestDigest::new(format!(
+                                    "sha256:{}",
+                                    if index == 0 { "b" } else { "c" }.repeat(64)
+                                ))
+                                .unwrap(),
+                            )
+                        })
+                        .collect(),
+                )?
+            } else {
+                AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///admitted"))
+            };
             Ok(AuthorizedLspSession {
                 session_id: LspSessionId::new("daemon-session-1").unwrap(),
                 credential: LspSessionCredential::new(vec![7; 16]).unwrap(),
-                root: AdmittedRoot::new("file:///admitted"),
+                workspace,
                 expires_at_ms: now_ms + LSP_SESSION_TTL_MS,
             })
         }
     }
 
     #[test]
-    fn endpoint_admits_one_project_root_only() {
+    fn endpoint_admits_an_exact_authorized_workspace_set() {
         let mut endpoint = DaemonLspSessionEndpoint::new(Admission);
-        assert_eq!(
-            endpoint.open(
+        let multi = endpoint
+            .open(
                 LspSessionOpenRequest {
                     workspace_folders: vec!["file:///one".into(), "file:///two".into()],
                     ..LspSessionOpenRequest::default()
                 },
                 10,
-            ),
-            Err(LspEndpointError::MultipleRootsUnsupported)
+            )
+            .unwrap();
+        assert_eq!(
+            endpoint
+                .registry_mut()
+                .workspace(&multi, 11)
+                .unwrap()
+                .roots()
+                .len(),
+            2
         );
+        endpoint.registry_mut().close(&multi, 11).unwrap();
 
         let access = endpoint
             .open(
@@ -1086,7 +1210,9 @@ mod tests {
                 AuthorizedLspSession {
                     session_id: LspSessionId::new("expired").unwrap(),
                     credential: LspSessionCredential::new(vec![1; 16]).unwrap(),
-                    root: AdmittedRoot::new("file:///admitted"),
+                    workspace: AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                        "file:///admitted",
+                    )),
                     expires_at_ms: 10,
                 },
                 0,
@@ -1098,7 +1224,9 @@ mod tests {
                     AuthorizedLspSession {
                         session_id: LspSessionId::new("replacement").unwrap(),
                         credential: LspSessionCredential::new(vec![2; 16]).unwrap(),
-                        root: AdmittedRoot::new("file:///admitted"),
+                        workspace: AuthorizedLspWorkspace::single(AdmittedRoot::new(
+                            "file:///admitted",
+                        )),
                         expires_at_ms: 20,
                     },
                     10,
