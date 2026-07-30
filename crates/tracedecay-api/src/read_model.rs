@@ -35,6 +35,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+pub mod multi_root;
+
 /// Schema revision of the envelope contract. The frontend refuses to decode a
 /// higher revision it was not generated against and renders `unsupported_schema`.
 pub const DASHBOARD_SCHEMA_REVISION_V1: u32 = 1;
