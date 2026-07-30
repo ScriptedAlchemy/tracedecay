@@ -1175,14 +1175,17 @@ mod durable_inventory {
     use super::*;
 
     fn manifest_bytes(graph_db_relpath: &str) -> Vec<u8> {
+        let project_root = PathBuf::from("/definitely/not/here/gone");
         let manifest = StoreManifest {
             schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-            project_id: "proj_inventory".to_string(),
-            project_root: PathBuf::from("/definitely/not/here/gone"),
-            store_kind: StoreKind::Graph,
+            project_id: Some("proj_inventory".to_string()),
+            store_kind: StoreKind::CodeProject,
             storage_mode: StorageMode::ProfileSharded,
+            project_root: project_root.clone(),
+            data_root: project_root,
             graph_db_relpath: PathBuf::from(graph_db_relpath),
-            ..Default::default()
+            sessions_db_relpath: PathBuf::from("sessions.db"),
+            branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
         };
         serde_json::to_vec(&manifest).unwrap()
     }

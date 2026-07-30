@@ -364,7 +364,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
