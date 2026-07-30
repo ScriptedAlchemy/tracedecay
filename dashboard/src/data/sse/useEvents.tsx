@@ -16,7 +16,14 @@ import {
   type SseConnectionState,
 } from './connect.ts';
 import type { SseBatch, SseReducerStats } from './types.ts';
-import { projectRegistryInvalidationKey } from '../query/projectRegistry.ts';
+import {
+  projectRegistryInvalidationKey,
+  useProjectRegistry,
+} from '../query/projectRegistry.ts';
+import {
+  workProjectInvalidationKeys,
+  workScopeInvalidationKeys,
+} from '../query/work.ts';
 
 /**
  * Period of the render clock. The plan bounds SSE-driven work at "at most ten
@@ -71,6 +78,11 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
   const connection = useMemo(() => connectEvents(url), [url]);
   const clock = useMemo(() => createRenderClock(connection), [connection]);
   const queryClient = useQueryClient();
+  const registry = useProjectRegistry();
+  const activeProjectId =
+    registry.data?.outcome === 'ok' && registry.data.data.status === 'ok'
+      ? registry.data.data.active_project_id
+      : null;
   useEffect(
     () => () => {
       clock.stop();
@@ -119,7 +131,7 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
     }
 
     function applyTargeted(batch: SseBatch): void {
-      for (const pending of invalidate(targetedInvalidationKeys(batch))) {
+      for (const pending of invalidate(targetedInvalidationKeys(batch, activeProjectId))) {
         void pending.catch(() => {
           // A targeted refresh that rejected leaves its slice unfresh. Escalate
           // to the canonical path rather than leaving the rejection unobserved.
@@ -150,7 +162,7 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
       stopped = true;
       unsubscribe();
     };
-  }, [clock, connection, queryClient]);
+  }, [activeProjectId, clock, connection, queryClient]);
   return (
     <EventsContext.Provider value={connection}>
       <RenderClockContext.Provider value={clock}>{children}</RenderClockContext.Provider>
@@ -177,13 +189,19 @@ export function invalidationKeysForBatch(
  */
 export function targetedInvalidationKeys(
   batch: SseBatch,
+  activeProjectId: string | null = null,
 ): ReadonlyArray<ReadonlyArray<string>> {
   let storage = false;
   let projects = false;
+  const workProjects = new Set<string>();
   for (const event of batch.events) {
     if (!isRecord(event.payload)) continue;
     if (event.payload['family'] === 'storage_telemetry_invalidated') storage = true;
     if (event.payload['family'] === 'project_registry_changed') projects = true;
+    if (event.payload['family'] === 'task_activity') {
+      const projectId = exactProjectId(event.scope);
+      if (projectId !== null) workProjects.add(projectId);
+    }
   }
   const keys: string[][] = [];
   if (storage) keys.push(['storage', 'telemetry']);
@@ -193,7 +211,24 @@ export function targetedInvalidationKeys(
   // and silently missed the rest — including the scope bar's, which is where
   // activation is reconciled.
   if (projects) keys.push([...projectRegistryInvalidationKey]);
+  for (const projectId of workProjects) {
+    for (const key of workProjectInvalidationKeys(projectId)) keys.push([...key]);
+    if (projectId === activeProjectId) {
+      for (const key of workScopeInvalidationKeys('all')) keys.push([...key]);
+    }
+  }
   return keys;
+}
+
+function exactProjectId(scope: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(scope);
+    if (!isRecord(parsed)) return null;
+    const projectId = parsed['project_id'];
+    return typeof projectId === 'string' && projectId.length > 0 ? projectId : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

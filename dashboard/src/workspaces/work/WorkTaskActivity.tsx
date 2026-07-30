@@ -7,10 +7,10 @@ import type { SseConnectionState } from '../../data/sse/connect.ts';
  *
  * The daemon enumerates a `task_activity` family and emits it under that stream
  * name, and the dashboard subscribes to it, so unlike every other row on this
- * page there is a live signal here. What there is not is anywhere to send it: a
- * task-activity frame is an invalidation telling a client to refetch canonical
- * generation-bound projections, and no projection route exists to refetch from.
- * So the row reports the subscription truthfully and refetches nothing.
+ * page there is a live signal here. Each frame also invalidates the snapshot
+ * and delta query prefixes for the exact project in its event scope; mounted
+ * Work reads refetch from the canonical projection routes instead of treating
+ * this pulse window as projection data.
  *
  * Its own component, and the only one on the page that subscribes, so a burst of
  * frames re-renders this cell rather than the sixteen-row ledger around it.

@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import type { SseEventEnvelope } from "./types.ts";
 import { invalidationKeysForBatch, targetedInvalidationKeys } from "./useEvents.tsx";
 
-function event(family: string): SseEventEnvelope<Record<string, unknown>> {
+function event(
+  family: string,
+  projectId?: string,
+): SseEventEnvelope<Record<string, unknown>> {
   return {
     stream: { stream_id: family, generation: 1 },
     event_id: `${family}:1`,
     revision: { event_revision: 1, entity_revision: 1 },
-    scope: "scope",
+    scope: projectId === undefined ? "scope" : JSON.stringify({ project_id: projectId }),
     observation_time: "1",
     watermark: "1",
     coverage: {},
@@ -57,5 +60,75 @@ describe("SSE query invalidation", () => {
     };
     expect(invalidationKeysForBatch(batch)).toEqual([[]]);
     expect(targetedInvalidationKeys(batch)).toEqual([["projects"]]);
+  });
+
+  it("targets exact Work keys and the default alias for active-project activity", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [event("task_activity", "project.alpha")],
+          refetch: false,
+          stale: false,
+        },
+        "project.alpha",
+      ),
+    ).toEqual([
+      ["work", "snapshot", "project:project.alpha"],
+      ["work", "delta", "project:project.alpha"],
+      ["work", "snapshot", "all"],
+      ["work", "delta", "all"],
+    ]);
+  });
+
+  it("targets a selected project without refreshing the active-project alias", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [event("task_activity", "project.beta")],
+          refetch: false,
+          stale: false,
+        },
+        "project.alpha",
+      ),
+    ).toEqual([
+      ["work", "snapshot", "project:project.beta"],
+      ["work", "delta", "project:project.beta"],
+    ]);
+  });
+
+  it("keeps unrelated project invalidations project-exact", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [
+            event("task_activity", "project.alpha"),
+            event("task_activity", "project.beta"),
+            event("task_activity", "project.alpha"),
+            event("heartbeat", "project.gamma"),
+          ],
+          refetch: false,
+          stale: false,
+        },
+        "project.gamma",
+      ),
+    ).toEqual([
+      ["work", "snapshot", "project:project.alpha"],
+      ["work", "delta", "project:project.alpha"],
+      ["work", "snapshot", "project:project.beta"],
+      ["work", "delta", "project:project.beta"],
+    ]);
+  });
+
+  it("does not invent a Work target for task activity without a project", () => {
+    expect(
+      targetedInvalidationKeys(
+        {
+          events: [event("task_activity")],
+          refetch: false,
+          stale: false,
+        },
+        "project.alpha",
+      ),
+    ).toEqual([]);
   });
 });

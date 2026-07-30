@@ -17,6 +17,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useScope } from '../../data/scope/store.ts';
 import { WorkPage } from './WorkPage.tsx';
 
 function projection(overrides: Record<string, unknown> = {}) {
@@ -101,6 +102,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  useScope.setState({ scope: { kind: 'all' } });
   vi.unstubAllGlobals();
 });
 
@@ -108,6 +110,48 @@ describe('the Work page over mounted routes', () => {
   it('reads the snapshot and names the task it returned', async () => {
     renderPage();
     expect(await screen.findByText('Alpha task')).toBeTruthy();
+  });
+
+  it('labels the default Work view as the active project', async () => {
+    renderPage();
+    expect(
+      await screen.findByText('canonical task graph · the active project · nine mounted routes'),
+    ).toBeTruthy();
+  });
+
+  it('labels an exact selected project without claiming it is active', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'project-beta',
+        label: 'Beta',
+        activation: 'selected',
+      },
+    });
+    renderPage();
+
+    const provenance = await screen.findByText(
+      'canonical task graph · Beta (project-beta) · selected project · nine mounted routes',
+    );
+    expect(provenance.textContent).not.toContain('active project');
+  });
+
+  it('labels an explicitly selected active project from reconciled scope state', async () => {
+    useScope.setState({
+      scope: {
+        kind: 'project',
+        projectId: 'project-alpha',
+        label: 'Alpha',
+        activation: 'active',
+      },
+    });
+    renderPage();
+
+    expect(
+      await screen.findByText(
+        'canonical task graph · Alpha (project-alpha) · selected active project · nine mounted routes',
+      ),
+    ).toBeTruthy();
   });
 
   it('leaves the shell its own main landmark and scrolls inside a named region', async () => {

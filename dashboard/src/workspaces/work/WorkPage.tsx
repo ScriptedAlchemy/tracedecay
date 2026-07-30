@@ -1,5 +1,6 @@
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Corners, Legend, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
+import { type DashboardScope, useScope } from '../../data/scope/store.ts';
 import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
 import { WorkTaskActivity } from './WorkTaskActivity.tsx';
@@ -40,7 +41,36 @@ const WITHHELD_ATTEMPT_OPERATIONS = [
   'terminalize',
 ] as const;
 
+export function workScopeProvenance(scope: DashboardScope): string {
+  switch (scope.kind) {
+    case 'all':
+      return 'canonical task graph · the active project · nine mounted routes';
+    case 'project': {
+      const identity = `${scope.label} (${scope.projectId})`;
+      switch (scope.activation) {
+        case 'active':
+          return `canonical task graph · ${identity} · selected active project · nine mounted routes`;
+        case 'selected':
+          return `canonical task graph · ${identity} · selected project · nine mounted routes`;
+        case 'unresolved':
+          return `canonical task graph · ${identity} · selected project, registry unresolved · nine mounted routes`;
+        case 'absent':
+          return `canonical task graph · ${identity} · selected project absent from registry · nine mounted routes`;
+        default: {
+          const exhaustive: never = scope.activation;
+          return exhaustive;
+        }
+      }
+    }
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
+}
+
 export function WorkPage() {
+  const scope = useScope((state) => state.scope);
   const [selected, setSelected] = useSelectedTask();
   const snapshot = useWorkSnapshot();
   const result = snapshot.data;
@@ -62,11 +92,7 @@ export function WorkPage() {
       <WorkspaceHeader
         path="work"
         title="Work"
-        // Whose work this is, said outright. The routes answer for the active
-        // project whatever the scope bar is set to, so a board captioned only
-        // "Work" would be an aggregate everywhere else in this dashboard and is
-        // one project's here.
-        note="canonical task graph · the active project · nine mounted routes"
+        note={workScopeProvenance(scope)}
       />
 
       <div

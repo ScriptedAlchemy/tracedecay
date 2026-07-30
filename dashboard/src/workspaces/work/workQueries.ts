@@ -12,6 +12,7 @@ import {
   scopeWritable,
   useScope,
 } from "../../data/scope/store.ts";
+import { workQueryKey } from "../../data/query/work.ts";
 import { callWork, type WorkResult, type WorkRoute } from "./workApi.ts";
 import { WORK_DELTA_ROUTE, WORK_SNAPSHOT_ROUTE } from "./workRoutes.ts";
 
@@ -33,14 +34,6 @@ import { WORK_DELTA_ROUTE, WORK_SNAPSHOT_ROUTE } from "./workRoutes.ts";
 /** How many projections a page asks for. The daemon decides what it can
  * actually return and says so in `coverage`; this is a request, not a promise. */
 export const WORK_PAGE_SIZE = 100;
-
-export function workQueryKey(
-  scope: string,
-  part: string,
-  ...rest: readonly unknown[]
-) {
-  return ["work", part, scope, ...rest] as const;
-}
 
 /** The resume cursor a coverage reading carries, or `undefined` when it carries
  * none.
