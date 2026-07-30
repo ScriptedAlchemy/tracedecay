@@ -62,6 +62,106 @@ pub trait DaemonRemoteProtocolOwnersV1: Send + Sync {
     ) -> RemoteProtocolResponseV1<PromotionCasReceiptV1>;
 }
 
+pub type ReplayOwnerV1 =
+    dyn RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1> + Send + Sync;
+pub type QueryOwnerV1 =
+    dyn RemoteProtocolPortV1<RemoteQueryRequestV1, Output = RemoteQueryResultV1> + Send + Sync;
+pub type BackupOwnerV1 =
+    dyn RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1> + Send + Sync;
+pub type RestoreOwnerV1 = dyn RemoteProtocolPortV1<StagedRestoreConfirmationV1, Output = StagedRestoreProgressV1>
+    + Send
+    + Sync;
+pub type PromotionOwnerV1 =
+    dyn RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1> + Send + Sync;
+
+/// Production aggregate of the six canonical operation owners. It introduces
+/// no state or fallback behavior: each operation is delegated to the authority
+/// that owns its typed application service.
+pub struct CanonicalDaemonRemoteProtocolOwnersV1 {
+    enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
+    replay: Arc<ReplayOwnerV1>,
+    query: Arc<QueryOwnerV1>,
+    backup: Arc<BackupOwnerV1>,
+    restore: Arc<RestoreOwnerV1>,
+    promotion: Arc<PromotionOwnerV1>,
+}
+
+impl CanonicalDaemonRemoteProtocolOwnersV1 {
+    pub fn new(
+        enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
+        replay: Arc<ReplayOwnerV1>,
+        query: Arc<QueryOwnerV1>,
+        backup: Arc<BackupOwnerV1>,
+        restore: Arc<RestoreOwnerV1>,
+        promotion: Arc<PromotionOwnerV1>,
+    ) -> Self {
+        Self {
+            enrollment,
+            replay,
+            query,
+            backup,
+            restore,
+            promotion,
+        }
+    }
+
+    pub fn into_protocol_port(self) -> DaemonRemoteProtocolPortV1 {
+        DaemonRemoteProtocolPortV1::new(Arc::new(self))
+    }
+}
+
+impl DaemonRemoteProtocolOwnersV1 for CanonicalDaemonRemoteProtocolOwnersV1 {
+    fn enroll(
+        &self,
+        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        grant_credential: OpaqueRemoteCredential,
+        enrollment_credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+        self.enrollment
+            .execute_enrollment(request, grant_credential, enrollment_credential)
+    }
+
+    fn replay(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<RemoteReplayOutcomeV1> {
+        self.replay.execute(request, credential)
+    }
+
+    fn query(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<RemoteQueryResultV1> {
+        self.query.execute(request, credential)
+    }
+
+    fn backup(
+        &self,
+        request: RemoteProtocolRequestV1<BackupRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<BackupOperationStateV1> {
+        self.backup.execute(request, credential)
+    }
+
+    fn restore(
+        &self,
+        request: RemoteProtocolRequestV1<StagedRestoreConfirmationV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<StagedRestoreProgressV1> {
+        self.restore.execute(request, credential)
+    }
+
+    fn promote(
+        &self,
+        request: RemoteProtocolRequestV1<PromotionConfirmationV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<PromotionCasReceiptV1> {
+        self.promotion.execute(request, credential)
+    }
+}
+
 /// Concrete daemon-owned protocol port mounted by
 /// [`super::remote_https::RemoteBrainHttpsService::bind_protocol`].
 #[derive(Clone)]
