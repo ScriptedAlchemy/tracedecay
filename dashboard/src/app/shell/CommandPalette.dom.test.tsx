@@ -18,7 +18,7 @@
  *     leave the scope unresolved rather than reading absence as "not active".
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, waitFor } from '@testing-library/react';
+import { act, render, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,7 +29,8 @@ import {
   type ProjectRegistryEntry,
   type ProjectsPayload,
 } from '../../contracts/wire.ts';
-import { scopeWritable, useScope } from '../../data/scope/store.ts';
+import { projectRegistryListKey } from '../../data/query/projectRegistry.ts';
+import { UNSCOPED_CACHE_KEY, scopeWritable, useScope } from '../../data/scope/store.ts';
 
 /**
  * A registry entry as the daemon sends it.
@@ -42,8 +43,9 @@ function registryEntry(
   projectId: string,
   label: string,
   isActive: boolean | null | undefined,
+  canonicalRoot = `/repos/${projectId}`,
 ): ProjectRegistryEntry {
-  return entryAt(projectId, label, isActive, `/repos/${projectId}`);
+  return entryAt(projectId, label, isActive, canonicalRoot);
 }
 
 function entryAt(
@@ -121,10 +123,19 @@ function renderPalette() {
   };
 }
 
-/** The row the input currently points at, by its rendered label. */
+function combobox(): HTMLElement {
+  const input = document.querySelector<HTMLElement>('input[role="combobox"]');
+  if (!input) throw new Error('the palette rendered no combobox');
+  return input;
+}
+
+/** The row the input currently points at, by its rendered label.
+ *
+ * Resolved with `getElementById`, exactly as an assistive technology resolves
+ * an IDREF — so an `aria-activedescendant` that names no element reports "the
+ * active id names no row" rather than quietly passing. */
 function activeOptionLabel(): string {
-  const input = document.querySelector('input[role="combobox"]');
-  const id = input?.getAttribute('aria-activedescendant');
+  const id = combobox().getAttribute('aria-activedescendant');
   if (!id) return '(nothing is announced as active)';
   const option = document.getElementById(id);
   return option?.querySelector('span')?.textContent ?? '(the active id names no row)';
@@ -150,6 +161,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('CommandPalette keyboard operation', () => {
@@ -363,5 +375,152 @@ describe('CommandPalette keyboard operation', () => {
 
     expect(useScope.getState().scope).toMatchObject({ activation: 'unresolved' });
     expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
+  });
+});
+
+/**
+ * The option ids themselves, which are what the announcement is made of.
+ *
+ * `aria-activedescendant` holds an IDREF, and IDREFs are whitespace-delimited.
+ * Option ids were built from `entry.id` — `scope:{project_id}:{canonical_root}`
+ * — so a project checked out under a path containing a space produced a value
+ * naming two ids, neither of which existed, and the row a keyboard user had just
+ * moved to was announced as nothing. Every fixture above uses `/repos/{id}`,
+ * which is why the suite never saw it.
+ */
+describe('CommandPalette option identity', () => {
+  it('announces a row whose project path contains spaces', async () => {
+    const user = userEvent.setup();
+    stubListing(
+      listing([
+        registryEntry('proj-spaced', 'My Documents Repo', true, '/Users/me/My Documents/repo'),
+      ]),
+    );
+    const { findByText } = renderPalette();
+    await findByText('My Documents Repo');
+
+    await user.keyboard('My Documents');
+    await waitFor(() => expect(activeOptionLabel()).toBe('My Documents Repo'));
+
+    // The stronger statement: the reference resolves to exactly one element, the
+    // way an assistive technology resolves it.
+    const id = combobox().getAttribute('aria-activedescendant') ?? '';
+    expect(id).not.toBe('');
+    expect(id).not.toMatch(/\s/);
+    expect(document.getElementById(id)).not.toBeNull();
+    expect(document.querySelectorAll(`[id="${id}"]`).length).toBe(1);
+  });
+
+  /**
+   * Quotes and backslashes are legal in a POSIX path, and unlike a space they do
+   * not break `getElementById` — so asserting only that the reference resolves
+   * would pass with the ids built from the path. What has to hold is that no path
+   * character reaches the id at all: the announcement must be a bare token,
+   * whatever the project is checked out under.
+   */
+  it('keeps the announced id free of path characters entirely', async () => {
+    const user = userEvent.setup();
+    stubListing(
+      listing([registryEntry('proj-odd', 'Odd Path', true, '/repos/a"b\\c d/repo')]),
+    );
+    const { findByText } = renderPalette();
+    await findByText('Odd Path');
+
+    await user.keyboard('Odd');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Odd Path'));
+
+    const id = combobox().getAttribute('aria-activedescendant') ?? '';
+    expect(document.getElementById(id)).not.toBeNull();
+    // No whitespace (an IDREF is whitespace-delimited, so a space names two ids
+    // and resolves to neither) and nothing that would need escaping in a
+    // selector either.
+    expect(id).not.toMatch(/[\s"'\\/]/);
+  });
+});
+
+/**
+ * The two ways the active index can stop describing a row.
+ *
+ * The list scrolls past about eight rows and the project rows come after every
+ * workspace, so arrowing into the registry moved a selection off screen. And
+ * `active` was reset only by a query change or a reopen, while the list has a
+ * second input — the registry read — so a listing that shrank left the index
+ * past the end: `aria-activedescendant` referring to nothing, and Enter firing
+ * nothing, on a palette that still looked navigable.
+ */
+describe('CommandPalette long and shrinking lists', () => {
+  const MANY = Array.from({ length: 24 }, (_, i) =>
+    registryEntry(`proj-${i}`, `Project ${String(i).padStart(2, '0')}`, false),
+  );
+
+  it('scrolls the active row into view as the keyboard moves past the fold', async () => {
+    const user = userEvent.setup();
+    // jsdom implements no scrolling, so the call is the observable: what is
+    // asserted is that the row the reader moved to was asked to become visible.
+    const scrollIntoView = vi.fn();
+    vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(scrollIntoView);
+    stubListing(listing(MANY));
+    const { findByText } = renderPalette();
+    await findByText('Project 23');
+
+    scrollIntoView.mockClear();
+    await user.keyboard('{ArrowDown}'.repeat(12));
+
+    expect(scrollIntoView).toHaveBeenCalled();
+    // `nearest` rather than a jump: a row already on screen must not move the
+    // list under the reader.
+    expect(scrollIntoView.mock.calls.at(-1)?.[0]).toEqual({ block: 'nearest' });
+    // And the row it scrolled to is the announced one.
+    const active = document.getElementById(
+      combobox().getAttribute('aria-activedescendant') ?? '',
+    );
+    expect(active).not.toBeNull();
+    expect(active?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('clamps the active row when the listing shrinks, and Enter still fires', async () => {
+    const user = userEvent.setup();
+    stubListing(listing(MANY));
+    const { findByText, client } = renderPalette();
+    await findByText('Project 23');
+
+    // Arrow deep into the project rows, well past anything a short list holds.
+    await user.keyboard('{ArrowDown}'.repeat(26));
+    const deep = activeOptionLabel();
+    expect(deep).not.toContain('names no row');
+
+    // The registry answers with fewer projects than before — a refetch after a
+    // project was removed. Every row past the new end disappears at once.
+    act(() => {
+      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {
+        outcome: 'ok',
+        data: listing([registryEntry('proj-0', 'Project 00', false)]),
+      });
+    });
+
+    await waitFor(() => expect(activeOptionLabel()).not.toContain('names no row'));
+    expect(activeOptionLabel()).not.toContain('nothing is announced');
+    // Enter reaches the clamped row rather than falling into the gap the stale
+    // index left.
+    await user.keyboard('{Enter}');
+    expect(useScope.getState().scope.kind).toBe('project');
+  });
+
+  /** The same clamp from the other direction: a registry read that stops being
+   * `ok` drops every project row in one step. */
+  it('clamps when a failed registry read removes every project row', async () => {
+    const user = userEvent.setup();
+    stubListing(listing(MANY));
+    const { findByText, client } = renderPalette();
+    await findByText('Project 23');
+
+    await user.keyboard('{ArrowDown}'.repeat(26));
+    act(() => {
+      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], { outcome: 'offline' });
+    });
+
+    await waitFor(() => expect(activeOptionLabel()).not.toContain('names no row'));
+    const id = combobox().getAttribute('aria-activedescendant') ?? '';
+    expect(document.getElementById(id)).not.toBeNull();
   });
 });

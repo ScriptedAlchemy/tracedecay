@@ -27,7 +27,7 @@ interface PaletteEntry {
  * between them. The position is the only part of a row that is guaranteed to
  * be a valid identifier, and it is exactly what the reference needs to name.
  */
-function optionDomId(index: number): string {
+function optionId(index: number): string {
   return `td-palette-option-${index}`;
 }
 
@@ -108,35 +108,50 @@ export function CommandPalette({
     if (open) setQuery('');
   }, [open]);
 
-  // The result list can shrink under a stationary cursor: the registry read
-  // lands (or a `project_registry_changed` invalidation returns fewer rows)
-  // without the query changing, so nothing resets the index. Left past the end,
-  // `aria-activedescendant` points at no element and Enter activates nothing —
-  // a palette that looks focused and does nothing when pressed.
-  useEffect(() => {
-    setActive((current) => Math.min(current, Math.max(filtered.length - 1, 0)));
-  }, [filtered.length]);
+  /**
+   * The row actually being pointed at, which is not always the one `active`
+   * holds.
+   *
+   * `active` is only reset by a query change or a reopen, and the list has a
+   * second input: the registry read behind the project rows. A listing that
+   * shrinks — a refetch returning fewer projects, or an `ok` result becoming a
+   * failure, which drops every project row at once — leaves the stored index
+   * past the end. That row does not exist, so `aria-activedescendant` referred
+   * to nothing and Enter fired nothing: a palette that looked navigable and was
+   * inert. Clamped on read rather than corrected in an effect, so there is no
+   * render in which the index is out of range.
+   */
+  const activeIndex = filtered.length === 0 ? 0 : Math.min(active, filtered.length - 1);
+  const activeEntry = filtered[activeIndex];
 
-  // Keyboard navigation has to move the viewport too. The list is a fixed-height
-  // scroller, so arrowing past the last visible row moved the highlight out of
-  // sight and the reader lost track of what Enter would do.
   const listRef = useRef<HTMLUListElement>(null);
   useEffect(() => {
-    listRef.current
-      ?.querySelector(`#${optionDomId(active)}`)
-      ?.scrollIntoView({ block: 'nearest' });
-  }, [active, filtered.length]);
+    // The list scrolls at `max-h-72` — about eight rows — and the project rows
+    // sit after every workspace, so on a real registry the keyboard selection
+    // left the viewport almost immediately and moved something the reader could
+    // not see. `nearest` keeps the list still when the row is already visible.
+    //
+    // Reached by position rather than by a selector built from the id: one row
+    // per filtered entry, in order, so the index that names the option names the
+    // child. Nothing here has to be escaped, which is the same reason the ids
+    // themselves are positional.
+    if (!open || filtered.length === 0) return;
+    const row = listRef.current?.children.item(activeIndex);
+    if (row instanceof HTMLElement) row.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex, open, filtered.length]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setActive((a) => Math.min(a + 1, filtered.length - 1));
+      // From the clamped index, so a shrunk list steps from its last real row
+      // rather than from a stale index further down.
+      setActive(Math.min(activeIndex + 1, filtered.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setActive((a) => Math.max(a - 1, 0));
+      setActive(Math.max(activeIndex - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      filtered[active]?.action();
+      activeEntry?.action();
     }
   };
 
@@ -164,15 +179,15 @@ export function CommandPalette({
               role="combobox"
               aria-expanded="true"
               aria-controls="td-palette-list"
-              aria-activedescendant={filtered[active] ? optionDomId(active) : undefined}
+              aria-activedescendant={activeEntry ? optionId(activeIndex) : undefined}
             />
             <kbd className="flex items-center gap-0.5 text-2xs text-text-muted">
               <CommandIcon aria-hidden size={10} />K
             </kbd>
           </div>
           <ul
-            id="td-palette-list"
             ref={listRef}
+            id="td-palette-list"
             role="listbox"
             className="max-h-72 overflow-auto p-1"
           >
@@ -182,20 +197,20 @@ export function CommandPalette({
               filtered.map((entry, i) => (
                 <li
                   key={entry.id}
-                  id={optionDomId(i)}
+                  id={optionId(i)}
                   role="option"
-                  aria-selected={i === active}
+                  aria-selected={i === activeIndex}
                   onMouseEnter={() => setActive(i)}
                   onClick={entry.action}
                   className={cn(
                     'flex h-9 cursor-pointer items-center justify-between rounded-[var(--radius-chip)] px-2.5 text-sm',
-                    i === active ? 'bg-surface-2 text-text-primary' : 'text-text-secondary',
+                    i === activeIndex ? 'bg-surface-2 text-text-primary' : 'text-text-secondary',
                   )}
                 >
                   <span>{entry.label}</span>
                   <span className="flex items-center gap-2 text-2xs text-text-muted">
                     {entry.hint}
-                    {i === active ? <CornerDownLeft aria-hidden size={11} /> : null}
+                    {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
                   </span>
                 </li>
               ))

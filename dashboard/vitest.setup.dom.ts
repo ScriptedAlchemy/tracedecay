@@ -39,6 +39,17 @@ if (!('ResizeObserver' in globalThis)) {
   });
 }
 
+// jsdom implements no layout, and therefore no scrolling: `scrollIntoView` is
+// absent from `Element.prototype` rather than present and inert. Any component
+// that keeps a keyboard selection visible calls it, and in a browser it is
+// always there, so a guard in product code would be a branch that can never be
+// taken outside this environment — and one that would silently stop scrolling if
+// it ever were. Declared here as the no-op jsdom would have had, which also
+// gives tests something to spy on when the call itself is the observable.
+if (typeof Element.prototype.scrollIntoView !== 'function') {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}
+
 afterEach(() => {
   cleanup();
 });
