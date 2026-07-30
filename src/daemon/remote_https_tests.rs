@@ -103,8 +103,13 @@ fn configured_remote_brain_listener_loads_exact_tls_paths() {
     let binding = config.validate_enabled().unwrap();
     assert_eq!(
         binding.client_ca_bundle_path,
-        std::path::PathBuf::from("client-ca.pem")
+        root.path().join("client-ca.pem")
     );
+    assert_eq!(
+        binding.certificate_chain_path,
+        root.path().join("server.pem")
+    );
+    assert_eq!(binding.private_key_path, root.path().join("server-key.pem"));
 }
 
 #[test]
@@ -126,6 +131,49 @@ fn disabled_remote_brain_config_rejects_ignored_tls_fields() {
         RemoteBrainHttpsConfigV1::load_optional(Some(&path)),
         Err(RemoteBrainHttpsError::InvalidConfiguration)
     ));
+}
+
+#[test]
+fn remote_brain_config_read_is_bounded_after_open() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("remote-brain-https.json");
+    std::fs::write(&path, vec![b' '; 64 * 1024 + 1]).unwrap();
+
+    assert!(matches!(
+        RemoteBrainHttpsConfigV1::load_optional(Some(&path)),
+        Err(RemoteBrainHttpsError::InvalidConfiguration)
+    ));
+}
+
+#[test]
+fn absolute_remote_brain_tls_paths_are_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("remote-brain-https.json");
+    let server = root.path().join("absolute-server.pem");
+    let key = root.path().join("absolute-server-key.pem");
+    let client_ca = root.path().join("absolute-client-ca.pem");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "version": 1,
+            "enablement": "enabled",
+            "bind_address": "127.0.0.1:0",
+            "advertised_endpoint": "https://remote.example",
+            "certificate_chain_path": server.clone(),
+            "private_key_path": key.clone(),
+            "client_ca_bundle_path": client_ca.clone()
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let binding = RemoteBrainHttpsConfigV1::load_optional(Some(&path))
+        .unwrap()
+        .validate_enabled()
+        .unwrap();
+    assert_eq!(binding.certificate_chain_path, server);
+    assert_eq!(binding.private_key_path, key);
+    assert_eq!(binding.client_ca_bundle_path, client_ca);
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use std::io::{BufReader, ErrorKind};
+use std::io::{BufReader, ErrorKind, Read};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,15 +75,33 @@ impl RemoteBrainHttpsConfigV1 {
         let Some(path) = path else {
             return Ok(Self::default());
         };
-        let metadata = std::fs::metadata(path).map_err(RemoteBrainHttpsError::ConfigIo)?;
-        if metadata.len() > MAX_REMOTE_CONFIG_BYTES {
+        let file = std::fs::File::open(path).map_err(RemoteBrainHttpsError::ConfigIo)?;
+        let mut bytes = Vec::with_capacity(MAX_REMOTE_CONFIG_BYTES as usize);
+        file.take(MAX_REMOTE_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(RemoteBrainHttpsError::ConfigIo)?;
+        if bytes.len() as u64 > MAX_REMOTE_CONFIG_BYTES {
             return Err(RemoteBrainHttpsError::InvalidConfiguration);
         }
-        let bytes = std::fs::read(path).map_err(RemoteBrainHttpsError::ConfigIo)?;
-        let config: Self = serde_json::from_slice(&bytes)
+        let mut config: Self = serde_json::from_slice(&bytes)
             .map_err(|_| RemoteBrainHttpsError::InvalidConfiguration)?;
+        config.resolve_relative_tls_paths(path.parent().unwrap_or_else(|| Path::new(".")));
         config.validate()?;
         Ok(config)
+    }
+
+    fn resolve_relative_tls_paths(&mut self, config_directory: &Path) {
+        for path in [
+            &mut self.certificate_chain_path,
+            &mut self.private_key_path,
+            &mut self.client_ca_bundle_path,
+        ] {
+            if let Some(path) = path
+                && path.is_relative()
+            {
+                *path = config_directory.join(&*path);
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<(), RemoteBrainHttpsError> {
