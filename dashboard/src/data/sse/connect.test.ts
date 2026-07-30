@@ -207,6 +207,53 @@ describe("dashboard SSE wire bridge", () => {
     connection.close();
   });
 
+  /**
+   * The shape the activity lane actually puts on the wire.
+   *
+   * Every fixture above is a poll-lane frame: a `run-<n>-<micros>` run id and a
+   * stream id of its own. The activity lane emits neither. It publishes on the
+   * single shared `dashboard_activity` stream under the constant run id
+   * `registered-observability-v1` (`src/application/event_lane.rs`), which
+   * `activity_event` copies to the wire verbatim
+   * (`src/dashboard/events_api.rs`), and it carries its monotone row id in
+   * `event_revision`.
+   *
+   * Decoding it is what makes the subscription worth having. A decoder that
+   * only accepts the poll shape drops every hook, session-ingest, code-index,
+   * tool-call and task frame the daemon sends — and still reports the link as
+   * live, because the state flips before the frame is parsed. That failure is
+   * invisible to every other test here, so it is pinned against the real
+   * constant rather than a plausible one.
+   */
+  it("accepts the activity lane's own run id and shared stream", () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const connection = connectEvents("/api/events");
+    const source = FakeEventSource.instances[0]!;
+
+    source.emit("task_activity", {
+      stream: "dashboard_activity",
+      run_id: "registered-observability-v1",
+      event_revision: 4711,
+      entity_revision: 4711,
+      coverage: { completeness: "complete", denominator: 3 },
+      scope: {
+        project_id: "project.alpha",
+        storage_mode: "profile_sharded",
+        store_root: "/stores/profile",
+      },
+      observation_time_micros: 1700000000000000,
+      source_watermark: { source: "dashboard_activity_lane", watermark: "4711" },
+      kind: { family: "task_activity", count: 3, tasks: 5, detail: null },
+    });
+
+    expect(
+      connection.activity(),
+      "the activity lane's own run id must decode, or every live family is dropped",
+    ).toMatchObject([{ projectId: "project.alpha", family: "task_activity" }]);
+    expect(connection.reducer.takeBatch().events).toHaveLength(1);
+    connection.close();
+  });
+
   it("keeps the pulse ring bounded so a long-lived tab cannot grow it", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const connection = connectEvents("/api/events");
