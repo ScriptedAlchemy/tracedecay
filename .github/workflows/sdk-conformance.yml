@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/sdk-conformance.yml"
+      - ".github/workflows/sdk-publish.yml"
       - "crates/tracedecay-api/**"
       - "crates/tracedecay-application/**"
       - "crates/tracedecay-domain/**"
@@ -11,6 +12,7 @@ on:
       - "crates/tracedecay-tool-catalog/**"
       - "sdks/**"
       - "scripts/check-sdk-codegen.sh"
+      - "scripts/check-sdk-publish-workflow.py"
       - "src/application_surface.rs"
   push:
     branches: [master]
@@ -19,6 +21,28 @@ permissions:
   contents: read
 
 jobs:
+  publish-workflow-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install pyyaml
+      - name: Structural authority-separation gate
+        run: python3 scripts/check-sdk-publish-workflow.py
+      - name: Install pinned actionlint
+        run: |
+          set -euo pipefail
+          version="1.7.12"
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          expected="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl -sSLO "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
+          actual="$(sha256sum "$archive" | cut -d' ' -f1)"
+          test "$actual" = "$expected"
+          tar xzf "$archive" actionlint
+      - name: actionlint
+        run: ./actionlint .github/workflows/sdk-publish.yml .github/workflows/sdk-conformance.yml .github/workflows/release.yml .github/workflows/release-beta.yml .github/workflows/release-plz.yml
   packages:
     runs-on: ubuntu-latest
     steps:
