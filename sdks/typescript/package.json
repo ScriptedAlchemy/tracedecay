@@ -38,6 +38,7 @@
     "test": "vitest run --exclude test/installed-package.test.ts",
     "test:installed": "vitest run test/installed-package.test.ts",
     "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run test:installed",
     "pack": "npm pack --dry-run --ignore-scripts"
   },
   "devDependencies": {
