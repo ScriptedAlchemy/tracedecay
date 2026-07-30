@@ -43,7 +43,10 @@ fn binding() -> ExecutableBindingV1 {
         request_schema,
         result_schema,
         CodecBindingKey::new("codec.source-read.json.v1").unwrap(),
-        RouteExposureV1::Public { binding_id },
+        RouteExposureV1::Public {
+            binding_id,
+            route_path: "/application/source/read".to_owned(),
+        },
     )
     .unwrap()
 }
@@ -93,7 +96,7 @@ fn executable_binding_wire_is_deterministic_and_keeps_stable_names() {
             r#""body":{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"contents":{"type":"string"}},"required":["contents"],"title":"ReadResult","type":"object"},"#,
             r#""digest":"sha256:db8f100ea56f9e38862213e6a50d28e8747ee74877db4664aa40050e3bb50fc0"},"#,
             r#""codec":{"codec":"json","binding_key":"codec.source-read.json.v1"},"#,
-            r#""exposure":{"visibility":"public","binding_id":"binding.http.source-read"},"#,
+            r#""exposure":{"visibility":"public","binding_id":"binding.http.source-read","route_path":"/application/source/read"},"#,
             r#""cancellation":{"mode":"cooperative","points":["before_admission","before_read","during_read"]}}"#
         )
     );
@@ -150,6 +153,7 @@ fn manifest_schema_or_route_mismatch_is_rejected() {
             CodecBindingKey::new("codec.source-read.json.v1").unwrap(),
             RouteExposureV1::Public {
                 binding_id: BindingId::new("binding.http.undeclared").unwrap(),
+                route_path: "/application/source/read".to_owned(),
             },
         )
         .is_err()

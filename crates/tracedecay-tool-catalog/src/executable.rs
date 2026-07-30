@@ -101,7 +101,10 @@ impl ExecutableCodecV1 {
 #[serde(rename_all = "snake_case", tag = "visibility")]
 pub enum RouteExposureV1 {
     Internal,
-    Public { binding_id: BindingId },
+    Public {
+        binding_id: BindingId,
+        route_path: String,
+    },
 }
 
 /// Fully executable metadata for one catalog capability.
@@ -175,13 +178,23 @@ impl ExecutableBindingV1 {
                 reason: "executable binding schema bodies do not match the manifest",
             });
         }
-        if let RouteExposureV1::Public { binding_id } = &exposure
-            && manifest.binding_ids().binary_search(binding_id).is_err()
+        if let RouteExposureV1::Public {
+            binding_id,
+            route_path,
+        } = &exposure
         {
-            return Err(CatalogValidationError::InvalidCapability {
-                capability_id: manifest.capability_id().clone(),
-                reason: "public executable route is not declared by the manifest",
-            });
+            if manifest.binding_ids().binary_search(binding_id).is_err() {
+                return Err(CatalogValidationError::InvalidCapability {
+                    capability_id: manifest.capability_id().clone(),
+                    reason: "public executable route is not declared by the manifest",
+                });
+            }
+            if !route_path.starts_with('/') || route_path.contains(['?', '#']) {
+                return Err(CatalogValidationError::InvalidCapability {
+                    capability_id: manifest.capability_id().clone(),
+                    reason: "public executable route path must be canonical and absolute",
+                });
+            }
         }
 
         Ok(Self {
