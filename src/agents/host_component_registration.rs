@@ -136,6 +136,11 @@ impl HostComponentRegistrationDelegate {
             .join(format!("registration-{index}.missing"))
     }
 
+    fn registration_path_marker(&self, operation_id: [u8; 16], index: usize) -> PathBuf {
+        self.backup_dir(operation_id)
+            .join(format!("registration-{index}.path.json"))
+    }
+
     fn apply_marker_path(&self, operation_id: [u8; 16]) -> PathBuf {
         self.backup_dir(operation_id).join("apply")
     }
@@ -421,6 +426,13 @@ impl HostComponentRegistrationDelegate {
         )
         .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
         for (index, path) in self.registration_paths(component_set).iter().enumerate() {
+            let path_bytes = serde_json::to_vec(path)
+                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            fs::write(
+                self.registration_path_marker(operation_id, index),
+                path_bytes,
+            )
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
             match fs::symlink_metadata(path) {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                     return Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath);
@@ -449,7 +461,27 @@ impl HostComponentRegistrationDelegate {
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         operation_id: [u8; 16],
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        for (index, path) in self.registration_paths(component_set).iter().enumerate() {
+        let mut persisted_paths = Vec::new();
+        for index in 0.. {
+            match fs::read(self.registration_path_marker(operation_id, index)) {
+                Ok(bytes) => {
+                    let path = serde_json::from_slice::<PathBuf>(&bytes).map_err(|_| {
+                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?;
+                    persisted_paths.push(path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => {
+                    return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                }
+            }
+        }
+        let registration_paths = if persisted_paths.is_empty() {
+            self.registration_paths(component_set)
+        } else {
+            persisted_paths
+        };
+        for (index, path) in registration_paths.iter().enumerate() {
             let backup = self.backup_path(operation_id, index);
             let missing = self.missing_marker_path(operation_id, index);
             if backup.is_file() {

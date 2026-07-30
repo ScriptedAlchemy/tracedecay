@@ -90,6 +90,24 @@ pub fn remove_managed_agents(agents_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Every generated-agent path that a Codex lifecycle operation may mutate.
+///
+/// This includes both the current bundle's exports and safe direct-child
+/// entries from the previous ownership manifest so aggregate transactions can
+/// restore stale exports removed during an update.
+pub fn managed_agent_transaction_paths(home: &Path) -> Vec<PathBuf> {
+    let agents_dir = agents_dir(home);
+    let mut paths = agents()
+        .iter()
+        .map(|agent| agents_dir.join(agent.relative))
+        .chain([agents_dir.join(MANIFEST_FILE)])
+        .collect::<BTreeSet<_>>();
+    if let Ok(previous_paths) = manifest_paths(&agents_dir) {
+        paths.extend(previous_paths);
+    }
+    paths.into_iter().collect()
+}
+
 pub fn managed_agent_label(agent_id: &str) -> Option<&'static str> {
     let normalized = agent_id.strip_prefix("tracedecay-").unwrap_or(agent_id);
     agents()

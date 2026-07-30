@@ -320,6 +320,18 @@ impl AgentIntegration for CodexIntegration {
         ))
     }
 
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        let mut paths = self.host_registration_paths(home);
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+            paths.extend(crate::automation::agent_targets::managed_agent_transaction_paths(home));
+        }
+        paths
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
         !codex_plugin_cached_install_dirs(home).is_empty()
             || codex_plugin_manifest_path(home).exists()

@@ -2359,6 +2359,10 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
+    use tracedecay::agents::host_bundle_v2::{
+        CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
+        HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
+    };
     use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
 
     use super::{
@@ -2374,6 +2378,90 @@ mod tests {
     const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
 "#;
     static HOST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct VerifyFailureRegistration {
+        inner: CompatibilityAgentRegistrationDelegate,
+        expected_removed_path: PathBuf,
+        injected_after_apply: bool,
+    }
+
+    impl HostComponentSetRegistrationV1 for VerifyFailureRegistration {
+        fn current_revision(
+            &self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<[u8; 32], HostBundleError> {
+            self.inner.current_revision(component_set, request)
+        }
+
+        fn discover_competing_extension_claims(
+            &self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<Vec<CompetingHostExtensionClaimV1>, HostBundleError> {
+            self.inner
+                .discover_competing_extension_claims(component_set, request)
+        }
+
+        fn confirm_preview(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+            preview: &HostComponentSetLifecyclePreviewV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.confirm_preview(component_set, request, preview)
+        }
+
+        fn preflight(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.preflight(component_set, request)
+        }
+
+        fn stage(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.stage(component_set, request)
+        }
+
+        fn apply(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.apply(component_set, request)
+        }
+
+        fn verify(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.verify(component_set, request)?;
+            self.injected_after_apply = !self.expected_removed_path.exists();
+            Err(HostBundleError::StorageFailure)
+        }
+
+        fn commit(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.commit(component_set, request)
+        }
+
+        fn rollback(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.rollback(component_set, request)
+        }
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -2874,6 +2962,99 @@ mod tests {
         assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
         assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
         assert_eq!(std::fs::read(&targets_path).unwrap(), original_targets);
+    }
+
+    #[test]
+    fn codex_core_rollback_restores_generated_agent_exports_byte_for_byte() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let agents_dir = home.path().join(".codex/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let stale_path = agents_dir.join("tracedecay-legacy.toml");
+        let user_path = agents_dir.join("user-agent.toml");
+        let manifest_path = agents_dir.join(".tracedecay-managed-agents.json");
+        let stale_bytes = b"model = \"legacy\"\n";
+        let user_bytes = b"model = \"user\"\n";
+        let manifest_bytes = format!(
+            "{{\"version\":1,\"exported\":[{{\"id\":\"legacy\",\"path\":{}}}]}}\n",
+            serde_json::to_string(&stale_path).unwrap()
+        );
+        std::fs::write(&stale_path, stale_bytes).unwrap();
+        std::fs::write(&user_path, user_bytes).unwrap();
+        std::fs::write(&manifest_path, manifest_bytes.as_bytes()).unwrap();
+
+        let component_set = canonical_host_component_set(
+            "codex",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Repair, true).unwrap();
+        let mut registration = VerifyFailureRegistration {
+            inner: CompatibilityAgentRegistrationDelegate::new(
+                "codex",
+                home.path(),
+                lifecycle.path(),
+                request.lifecycle.operation,
+            )
+            .unwrap(),
+            expected_removed_path: stale_path.clone(),
+            injected_after_apply: false,
+        };
+        let mut writer =
+            tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+        let mut transaction =
+            tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
+        let preview = transaction
+            .preview(
+                &component_set.component_set,
+                &request,
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+        let result = transaction.execute_confirmed(
+            &component_set.component_set,
+            &request,
+            &preview,
+            &component_set,
+            &mut registration,
+        );
+
+        assert!(
+            result.is_err(),
+            "the injected post-apply verification failure must abort the transaction"
+        );
+        assert!(
+            registration.injected_after_apply,
+            "the failure must be injected after stale export replacement"
+        );
+
+        assert_eq!(
+            std::fs::read(&manifest_path).unwrap(),
+            manifest_bytes.as_bytes()
+        );
+        assert_eq!(std::fs::read(&stale_path).unwrap(), stale_bytes);
+        assert_eq!(std::fs::read(&user_path).unwrap(), user_bytes);
+        let mut remaining = std::fs::read_dir(&agents_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            vec![
+                ".tracedecay-managed-agents.json",
+                "tracedecay-legacy.toml",
+                "user-agent.toml",
+            ]
+        );
     }
 
     #[test]
