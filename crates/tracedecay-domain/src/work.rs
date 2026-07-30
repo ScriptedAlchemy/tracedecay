@@ -45,6 +45,8 @@ pub enum WorkContractError {
     TooMuchRuntimeEvidence,
     #[error("runtime evidence repeats a run identity")]
     DuplicateRuntimeEvidence,
+    #[error("work projection history does not match its version")]
+    InvalidProjectionHistory,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -469,5 +471,76 @@ impl WorkProjection {
 
     pub const fn history_len(&self) -> usize {
         self.history_len
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkProjection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            task_id: TaskId,
+            version: WorkVersion,
+            authority: WorkAuthority,
+            title: String,
+            dependencies: BTreeSet<TaskId>,
+            accepted_proposal: Option<ProposalId>,
+            execution_admitted: bool,
+            runtime_evidence: Vec<RuntimeEvidenceRef>,
+            task_accepted: bool,
+            history_len: usize,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.title.is_empty()
+            || wire.title.trim() != wire.title
+            || wire.title.len() > MAX_WORK_TITLE_BYTES
+            || wire.title.chars().any(char::is_control)
+        {
+            return Err(serde::de::Error::custom(WorkContractError::InvalidTitle));
+        }
+        if wire.dependencies.len() > MAX_WORK_DEPENDENCIES {
+            return Err(serde::de::Error::custom(
+                WorkContractError::TooManyDependencies,
+            ));
+        }
+        if wire.dependencies.contains(&wire.task_id) {
+            return Err(serde::de::Error::custom(WorkContractError::SelfDependency));
+        }
+        if wire.runtime_evidence.len() > MAX_WORK_RUNTIME_EVIDENCE {
+            return Err(serde::de::Error::custom(
+                WorkContractError::TooMuchRuntimeEvidence,
+            ));
+        }
+        let mut run_ids = BTreeSet::new();
+        if wire
+            .runtime_evidence
+            .iter()
+            .any(|evidence| !run_ids.insert(evidence.run_id().clone()))
+        {
+            return Err(serde::de::Error::custom(
+                WorkContractError::DuplicateRuntimeEvidence,
+            ));
+        }
+        if usize::try_from(wire.version.get()).ok() != Some(wire.history_len) {
+            return Err(serde::de::Error::custom(
+                WorkContractError::InvalidProjectionHistory,
+            ));
+        }
+
+        Ok(Self {
+            task_id: wire.task_id,
+            version: wire.version,
+            authority: wire.authority,
+            title: wire.title,
+            dependencies: wire.dependencies,
+            accepted_proposal: wire.accepted_proposal,
+            execution_admitted: wire.execution_admitted,
+            runtime_evidence: wire.runtime_evidence,
+            task_accepted: wire.task_accepted,
+            history_len: wire.history_len,
+        })
     }
 }
