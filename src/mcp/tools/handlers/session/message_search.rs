@@ -19,14 +19,14 @@ use super::*;
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
-use crate::query::temporal::context::ContextBudget;
-use crate::query::temporal::ports::{
-    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
-};
-use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
+use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ports::{
+    TemporalCandidateFilterV1, TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
+};
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 pub(super) struct MessageSearchRequest<'a> {
     pub(super) query: &'a str,
@@ -1228,7 +1228,7 @@ mod cutover_tests {
     use crate::application::session::{
         SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
     };
-    use crate::query::temporal::ports::{
+    use tracedecay_temporal_query::ports::{
         TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
     };
 
