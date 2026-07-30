@@ -16,9 +16,30 @@ export function assertNever(value: never): never {
 
 export const WIRE_SCHEMA_REVISION = 1 as const;
 
+export const AcceptProposalCommandSchema = z.object({
+  review: z.lazy(() => ReviewProposalCommandSchema),
+});
+export type AcceptProposalCommand = z.infer<typeof AcceptProposalCommandSchema>;
+
+export const AcceptTaskCommandSchema = z.object({
+  command_id: z.lazy(() => WorkCommandIdSchema),
+  expected_version: z.number().int(),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type AcceptTaskCommand = z.infer<typeof AcceptTaskCommandSchema>;
+
 /** Strongly typed canonical identity: `ActorId`. */
 export const ActorIdSchema = z.string();
 export type ActorId = z.infer<typeof ActorIdSchema>;
+
+export const AdmitExecutionCommandSchema = z.object({
+  command_id: z.lazy(() => WorkCommandIdSchema),
+  expected_version: z.number().int(),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type AdmitExecutionCommand = z.infer<typeof AdmitExecutionCommandSchema>;
 
 export const AnalyticsOverviewPayloadV1Schema = z.object({
   agents: z.unknown(),
@@ -48,6 +69,15 @@ export const AnalyticsUsageSummaryV1Schema = z.object({
   source: z.string().nullable(),
 });
 export type AnalyticsUsageSummaryV1 = z.infer<typeof AnalyticsUsageSummaryV1Schema>;
+
+export const AttachRuntimeEvidenceCommandSchema = z.object({
+  command_id: z.lazy(() => WorkCommandIdSchema),
+  evidence: z.lazy(() => RuntimeEvidenceRefSchema),
+  expected_version: z.number().int(),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type AttachRuntimeEvidenceCommand = z.infer<typeof AttachRuntimeEvidenceCommandSchema>;
 
 /** Authoritative scope of a source binding. A mutable path, label, or host
 profile cannot be represented as authority. */
@@ -288,6 +318,15 @@ export const CoveringTestV1Schema = z.object({
   start_line: z.number().int(),
 });
 export type CoveringTestV1 = z.infer<typeof CoveringTestV1Schema>;
+
+export const CreateWorkCommandSchema = z.object({
+  command_id: z.lazy(() => WorkCommandIdSchema),
+  dependencies: z.array(z.lazy(() => TaskIdSchema)),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+  title: z.string(),
+});
+export type CreateWorkCommand = z.infer<typeof CreateWorkCommandSchema>;
 
 export const CrossMergeModeV1Schema = z.enum(["cherry_pick_exact_commits", "disabled", "fast_forward_only", "manual_receipt_only", "merge_commit"]);
 export type CrossMergeModeV1 = z.infer<typeof CrossMergeModeV1Schema>;
@@ -817,6 +856,9 @@ to the correct surface; it never dispatches itself. */
 export const DoctorOwningSurfaceV1Schema = z.union([z.literal("configuration_control_plane"), z.literal("storage_runtime"), z.literal("daemon_runtime"), z.literal("host_integration"), z.literal("semantic_index_runtime")]);
 export type DoctorOwningSurfaceV1 = z.infer<typeof DoctorOwningSurfaceV1Schema>;
 
+/** Request DTO for a confirmed remediation apply. The executable supplies the
+owner-specific target type while the preview and idempotency contracts stay
+canonical application values. */
 export const DoctorRemediationApplyRequestV1Schema = z.object({
   confirmed: z.boolean(),
   idempotency_key: z.string(),
@@ -854,6 +896,7 @@ export const DoctorRemediationOperationV1Schema = z.object({
 });
 export type DoctorRemediationOperationV1 = z.infer<typeof DoctorRemediationOperationV1Schema>;
 
+/** Wire payload for one remediation response. */
 export const DoctorRemediationPayloadV1Schema = z.discriminatedUnion("status", [z.object({
   operation: z.lazy(() => DoctorRemediationOperationV1Schema),
   status: z.literal("operation"),
@@ -863,6 +906,8 @@ export const DoctorRemediationPayloadV1Schema = z.discriminatedUnion("status", [
 })]);
 export type DoctorRemediationPayloadV1 = z.infer<typeof DoctorRemediationPayloadV1Schema>;
 
+/** Request DTO for a remediation preview. The executable supplies the
+owner-specific target type while this crate owns the stable outer shape. */
 export const DoctorRemediationPreviewRequestV1Schema = z.object({
   operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
   target: z.lazy(() => DoctorRemediationTargetV1Schema),
@@ -1955,6 +2000,10 @@ export type ProjectEditableSettingsV1 = z.infer<typeof ProjectEditableSettingsV1
 export const ProjectIdSchema = z.string();
 export type ProjectId = z.infer<typeof ProjectIdSchema>;
 
+/** Strongly typed canonical identity: `ProjectionGenerationId`. */
+export const ProjectionGenerationIdSchema = z.string();
+export type ProjectionGenerationId = z.infer<typeof ProjectionGenerationIdSchema>;
+
 export const ProjectRegistryEntrySchema = z.object({
   alias_count: z.number().int(),
   artifact_count: z.number().int(),
@@ -1988,16 +2037,17 @@ export const ProjectRepoGroupSchema = z.object({
 });
 export type ProjectRepoGroup = z.infer<typeof ProjectRepoGroupSchema>;
 
+/** Project-scoped settings patch accepted by `PATCH /api/settings/project`. */
 export const ProjectSettingsPatchSchema = z.object({
-  exclude: z.array(z.string()).nullable(),
+  exclude: z.array(z.string()).nullable().optional(),
   expected_revision_id: z.string(),
-  extract_docstrings: z.boolean().nullable(),
-  git_ignore: z.boolean().nullable(),
-  include: z.array(z.string()).nullable(),
-  max_file_size: z.number().int().nullable(),
-  sync: z.union([z.lazy(() => SyncSettingsPatchSchema), z.null()]),
-  telemetry: z.union([z.lazy(() => TelemetrySettingsPatchSchema), z.null()]),
-  track_call_sites: z.boolean().nullable(),
+  extract_docstrings: z.boolean().nullable().optional(),
+  git_ignore: z.boolean().nullable().optional(),
+  include: z.array(z.string()).nullable().optional(),
+  max_file_size: z.number().int().nullable().optional(),
+  sync: z.union([z.lazy(() => SyncSettingsPatchSchema), z.null()]).optional(),
+  telemetry: z.union([z.lazy(() => TelemetrySettingsPatchSchema), z.null()]).optional(),
+  track_call_sites: z.boolean().nullable().optional(),
 });
 export type ProjectSettingsPatch = z.infer<typeof ProjectSettingsPatchSchema>;
 
@@ -2032,6 +2082,10 @@ export const ProjectStoreContextSchema = z.object({
   store: z.lazy(() => StoreInstanceRecordSchema),
 });
 export type ProjectStoreContext = z.infer<typeof ProjectStoreContextSchema>;
+
+/** Strongly typed canonical identity: `ProposalId`. */
+export const ProposalIdSchema = z.string();
+export type ProposalId = z.infer<typeof ProposalIdSchema>;
 
 /** The protected configuration operation set. Ordinary scalar mutations are
 intentionally absent; they activate directly after validation. */
@@ -2098,6 +2152,15 @@ export type PublicCodeProject = z.infer<typeof PublicCodeProjectSchema>;
 export const RefIdSchema = z.string();
 export type RefId = z.infer<typeof RefIdSchema>;
 
+export const ReplanDependenciesCommandSchema = z.object({
+  command_id: z.lazy(() => WorkCommandIdSchema),
+  dependencies: z.array(z.lazy(() => TaskIdSchema)),
+  expected_version: z.number().int(),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type ReplanDependenciesCommand = z.infer<typeof ReplanDependenciesCommandSchema>;
+
 /** Strongly typed canonical identity: `RepositoryId`. */
 export const RepositoryIdSchema = z.string();
 export type RepositoryId = z.infer<typeof RepositoryIdSchema>;
@@ -2136,6 +2199,28 @@ export type ResolvedScope = z.infer<typeof ResolvedScopeSchema>;
 export const RetrievalAnchorIdSchema = z.string();
 export type RetrievalAnchorId = z.infer<typeof RetrievalAnchorIdSchema>;
 
+export const ReviewProposalCommandSchema = z.object({
+  command_id: z.lazy(() => WorkCommandIdSchema),
+  expected_version: z.number().int(),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  proposal_digest: z.lazy(() => ManifestDigestSchema),
+  proposal_id: z.lazy(() => ProposalIdSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type ReviewProposalCommand = z.infer<typeof ReviewProposalCommandSchema>;
+
+/** A proposal review records a non-accepting disposition. Acceptance remains a
+separate command so callers cannot accidentally collapse review into
+approval. */
+export const ReviewProposalDispositionV1Schema = z.enum(["rejected", "superseded"]);
+export type ReviewProposalDispositionV1 = z.infer<typeof ReviewProposalDispositionV1Schema>;
+
+export const ReviewProposalRequestV1Schema = z.object({
+  disposition: z.lazy(() => ReviewProposalDispositionV1Schema),
+  review: z.lazy(() => ReviewProposalCommandSchema),
+});
+export type ReviewProposalRequestV1 = z.infer<typeof ReviewProposalRequestV1Schema>;
+
 export const ReviewRequirementV1Schema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("code_owner_and_independent_review"),
 }), z.object({
@@ -2157,6 +2242,17 @@ export type ReviewTopologyPolicyV1 = z.infer<typeof ReviewTopologyPolicyV1Schema
 
 export const RuleEffectSchema = z.enum(["allow", "deny"]);
 export type RuleEffect = z.infer<typeof RuleEffectSchema>;
+
+/** Strongly typed canonical identity: `RunId`. */
+export const RunIdSchema = z.string();
+export type RunId = z.infer<typeof RunIdSchema>;
+
+export const RuntimeEvidenceRefSchema = z.object({
+  evidence_digest: z.lazy(() => ManifestDigestSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  terminal: z.boolean(),
+});
+export type RuntimeEvidenceRef = z.infer<typeof RuntimeEvidenceRefSchema>;
 
 export const SavingsAccountingSummaryV1Schema = z.object({
   available: z.boolean(),
@@ -2680,9 +2776,10 @@ export const StructureReadV15Schema = z.discriminatedUnion("status", [z.object({
 })]);
 export type StructureReadV15 = z.infer<typeof StructureReadV15Schema>;
 
+/** Nested synchronization settings patch. */
 export const SyncSettingsPatchSchema = z.object({
-  auto_track_pr_branches: z.boolean().nullable(),
-  auto_track_pr_poll_secs: z.number().int().nullable(),
+  auto_track_pr_branches: z.boolean().nullable().optional(),
+  auto_track_pr_poll_secs: z.number().int().nullable().optional(),
 });
 export type SyncSettingsPatch = z.infer<typeof SyncSettingsPatchSchema>;
 
@@ -2749,8 +2846,13 @@ export const TableGrowthThresholdV1Schema = z.object({
 });
 export type TableGrowthThresholdV1 = z.infer<typeof TableGrowthThresholdV1Schema>;
 
+/** Strongly typed canonical identity: `TaskId`. */
+export const TaskIdSchema = z.string();
+export type TaskId = z.infer<typeof TaskIdSchema>;
+
+/** Nested telemetry settings patch. */
 export const TelemetrySettingsPatchSchema = z.object({
-  timings: z.boolean().nullable(),
+  timings: z.boolean().nullable().optional(),
 });
 export type TelemetrySettingsPatch = z.infer<typeof TelemetrySettingsPatchSchema>;
 
@@ -2823,11 +2925,12 @@ export type TurnsSummaryV1 = z.infer<typeof TurnsSummaryV1Schema>;
 export const UseCaseIdSchema = z.string();
 export type UseCaseId = z.infer<typeof UseCaseIdSchema>;
 
+/** Profile-scoped settings patch accepted by `PATCH /api/settings/user`. */
 export const UserSettingsPatchSchema = z.object({
   expected_revision_id: z.string(),
-  extraction_timeout_secs: z.number().int().nullable(),
-  upload_enabled: z.boolean().nullable(),
-  watcher_debounce: z.string().nullable(),
+  extraction_timeout_secs: z.number().int().nullable().optional(),
+  upload_enabled: z.boolean().nullable().optional(),
+  watcher_debounce: z.string().nullable().optional(),
 });
 export type UserSettingsPatch = z.infer<typeof UserSettingsPatchSchema>;
 
@@ -2851,6 +2954,97 @@ export const VersionSettingsPayloadV1Schema = z.object({
   version: z.string(),
 });
 export type VersionSettingsPayloadV1 = z.infer<typeof VersionSettingsPayloadV1Schema>;
+
+export const WorkAuthoritySchema = z.object({
+  actor_id: z.lazy(() => ActorIdSchema),
+  policy_digest: z.lazy(() => ManifestDigestSchema),
+  project_id: z.lazy(() => ProjectIdSchema),
+  repository_id: z.lazy(() => RepositoryIdSchema),
+  worktree_id: z.lazy(() => WorktreeIdSchema),
+});
+export type WorkAuthority = z.infer<typeof WorkAuthoritySchema>;
+
+/** Strongly typed canonical identity: `WorkCommandId`. */
+export const WorkCommandIdSchema = z.string();
+export type WorkCommandId = z.infer<typeof WorkCommandIdSchema>;
+
+export const WorkProjectionSchema = z.object({
+  accepted_proposal: z.union([z.lazy(() => ProposalIdSchema), z.null()]),
+  authority: z.lazy(() => WorkAuthoritySchema),
+  dependencies: z.array(z.lazy(() => TaskIdSchema)),
+  execution_admitted: z.boolean(),
+  history_len: z.number().int(),
+  runtime_evidence: z.array(z.lazy(() => RuntimeEvidenceRefSchema)),
+  task_accepted: z.boolean(),
+  task_id: z.lazy(() => TaskIdSchema),
+  title: z.string(),
+  version: z.number().int(),
+});
+export type WorkProjection = z.infer<typeof WorkProjectionSchema>;
+
+export const WorkProjectionCoverageV1Schema = z.discriminatedUnion("state", [z.object({
+  cap: z.number().int(),
+  cursor: z.lazy(() => WorkProjectionResumeCursorV1Schema),
+  range: z.lazy(() => WorkProjectionSequenceRangeV1Schema),
+  returned: z.number().int(),
+  state: z.literal("capped"),
+  total: z.number().int(),
+}), z.object({
+  returned: z.number().int(),
+  state: z.literal("complete"),
+  total: z.number().int(),
+}), z.object({
+  cursor: z.lazy(() => WorkProjectionResumeCursorV1Schema),
+  range: z.lazy(() => WorkProjectionSequenceRangeV1Schema),
+  returned: z.number().int(),
+  state: z.literal("partial"),
+  total: z.number().int(),
+})]);
+export type WorkProjectionCoverageV1 = z.infer<typeof WorkProjectionCoverageV1Schema>;
+
+export const WorkProjectionDeltaRequestV1Schema = z.object({
+  cursor: z.lazy(() => WorkProjectionResumeCursorV1Schema),
+  page_size: z.number().int(),
+});
+export type WorkProjectionDeltaRequestV1 = z.infer<typeof WorkProjectionDeltaRequestV1Schema>;
+
+export const WorkProjectionDeltaV1Schema = z.object({
+  changed: z.array(z.lazy(() => WorkProjectionSchema)),
+  coverage: z.lazy(() => WorkProjectionCoverageV1Schema),
+  from_sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
+  generation_id: z.lazy(() => ProjectionGenerationIdSchema),
+  removed: z.array(z.lazy(() => TaskIdSchema)),
+  to_sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
+});
+export type WorkProjectionDeltaV1 = z.infer<typeof WorkProjectionDeltaV1Schema>;
+
+export const WorkProjectionResumeCursorV1Schema = z.object({
+  generation_id: z.lazy(() => ProjectionGenerationIdSchema),
+  token: z.string(),
+});
+export type WorkProjectionResumeCursorV1 = z.infer<typeof WorkProjectionResumeCursorV1Schema>;
+
+export const WorkProjectionSequenceRangeV1Schema = z.object({
+  end_inclusive: z.lazy(() => WorkProjectionSequenceV1Schema),
+  start_exclusive: z.lazy(() => WorkProjectionSequenceV1Schema),
+});
+export type WorkProjectionSequenceRangeV1 = z.infer<typeof WorkProjectionSequenceRangeV1Schema>;
+
+export const WorkProjectionSequenceV1Schema = z.number().int();
+export type WorkProjectionSequenceV1 = z.infer<typeof WorkProjectionSequenceV1Schema>;
+
+export const WorkProjectionSnapshotRequestV1Schema = z.object({
+  page_size: z.number().int(),
+});
+export type WorkProjectionSnapshotRequestV1 = z.infer<typeof WorkProjectionSnapshotRequestV1Schema>;
+
+export const WorkProjectionSnapshotV1Schema = z.object({
+  coverage: z.lazy(() => WorkProjectionCoverageV1Schema),
+  generation_id: z.lazy(() => ProjectionGenerationIdSchema),
+  projections: z.array(z.lazy(() => WorkProjectionSchema)),
+  sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
+});
+export type WorkProjectionSnapshotV1 = z.infer<typeof WorkProjectionSnapshotV1Schema>;
 
 /** Complete V1 policy. Partial values are intentionally impossible: callers
 must provide the entire policy and validation rejects adapter-local defaults. */
@@ -3271,6 +3465,10 @@ export const RequiredCheckExpectationSchema = RequiredCheckExpectationV1Schema;
 export type RequiredCheckExpectation = RequiredCheckExpectationV1;
 export const RequiredCheckSchema = RequiredCheckV1Schema;
 export type RequiredCheck = RequiredCheckV1;
+export const ReviewProposalDispositionSchema = ReviewProposalDispositionV1Schema;
+export type ReviewProposalDisposition = ReviewProposalDispositionV1;
+export const ReviewProposalRequestSchema = ReviewProposalRequestV1Schema;
+export type ReviewProposalRequest = ReviewProposalRequestV1;
 export const ReviewRequirementSchema = ReviewRequirementV1Schema;
 export type ReviewRequirement = ReviewRequirementV1;
 export const ReviewTopologyKindSchema = ReviewTopologyKindV1Schema;
@@ -3381,6 +3579,22 @@ export const UserSettingsPayloadSchema = UserSettingsPayloadV1Schema;
 export type UserSettingsPayload = UserSettingsPayloadV1;
 export const VersionSettingsPayloadSchema = VersionSettingsPayloadV1Schema;
 export type VersionSettingsPayload = VersionSettingsPayloadV1;
+export const WorkProjectionCoverageSchema = WorkProjectionCoverageV1Schema;
+export type WorkProjectionCoverage = WorkProjectionCoverageV1;
+export const WorkProjectionDeltaRequestSchema = WorkProjectionDeltaRequestV1Schema;
+export type WorkProjectionDeltaRequest = WorkProjectionDeltaRequestV1;
+export const WorkProjectionDeltaSchema = WorkProjectionDeltaV1Schema;
+export type WorkProjectionDelta = WorkProjectionDeltaV1;
+export const WorkProjectionResumeCursorSchema = WorkProjectionResumeCursorV1Schema;
+export type WorkProjectionResumeCursor = WorkProjectionResumeCursorV1;
+export const WorkProjectionSequenceRangeSchema = WorkProjectionSequenceRangeV1Schema;
+export type WorkProjectionSequenceRange = WorkProjectionSequenceRangeV1;
+export const WorkProjectionSequenceSchema = WorkProjectionSequenceV1Schema;
+export type WorkProjectionSequence = WorkProjectionSequenceV1;
+export const WorkProjectionSnapshotRequestSchema = WorkProjectionSnapshotRequestV1Schema;
+export type WorkProjectionSnapshotRequest = WorkProjectionSnapshotRequestV1;
+export const WorkProjectionSnapshotSchema = WorkProjectionSnapshotV1Schema;
+export type WorkProjectionSnapshot = WorkProjectionSnapshotV1;
 export const WorkTopologyPolicySchema = WorkTopologyPolicyV1Schema;
 export type WorkTopologyPolicy = WorkTopologyPolicyV1;
 export const WorktreeCleanlinessRequirementSchema = WorktreeCleanlinessRequirementV1Schema;

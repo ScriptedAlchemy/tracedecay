@@ -2,7 +2,13 @@
 
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
-use tracedecay_application::{CostsReadModelV1, ObservatoryReadModelV1};
+use tracedecay_application::{
+    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
+    CostsReadModelV1, CreateWorkCommand, ObservatoryReadModelV1, ReplanDependenciesCommand,
+    ReviewProposalCommand, ReviewProposalRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1,
+};
+use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 
 use super::analytics_api::AnalyticsOverviewPayloadV1;
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
@@ -32,6 +38,7 @@ use super::savings_api::{SavingsOverviewPayloadV1, SavingsSessionsPayloadV1};
 use super::settings_api::{ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch};
 use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
+use super::work_api::registered_route_contracts as registered_work_route_contracts;
 use crate::application::feedback::observations::FeedbackObservationReadModelV1;
 
 #[derive(JsonSchema)]
@@ -77,6 +84,19 @@ struct DashboardContractCatalogV1 {
     graph_fact_matches: StructureReadV1<FactMatchesMeasurementV1>,
     graph_test_map: StructureReadV1<TestMapMeasurementV1>,
     graph_node_sessions: StructureReadV1<NodeSessionsMeasurementV1>,
+    work_projection_snapshot_request: WorkProjectionSnapshotRequestV1,
+    work_projection_snapshot: WorkProjectionSnapshotV1,
+    work_projection_delta_request: WorkProjectionDeltaRequestV1,
+    work_projection_delta: WorkProjectionDeltaV1,
+    work_create_command: CreateWorkCommand,
+    work_replan_dependencies_command: ReplanDependenciesCommand,
+    work_review_proposal_request: ReviewProposalRequestV1,
+    work_review_proposal_command: ReviewProposalCommand,
+    work_accept_proposal_command: AcceptProposalCommand,
+    work_admit_execution_command: AdmitExecutionCommand,
+    work_attach_runtime_evidence_command: AttachRuntimeEvidenceCommand,
+    work_accept_task_command: AcceptTaskCommand,
+    work_projection: WorkProjection,
     /// Served identically by `GET /api/automation/scheduler/status` and by the
     /// `pause`/`resume` controls, which re-read rather than acknowledge.
     automation_scheduler_status: AutomationSchedulerStatusV1,
@@ -93,6 +113,7 @@ pub fn render_dashboard_contract_schema() -> Result<String, serde_json::Error> {
         serde_json::to_value(generator.into_root_schema_for::<DashboardContractCatalogV1>())?;
     schema["schemaRevision"] = serde_json::json!(DASHBOARD_SCHEMA_REVISION_V1);
     assert_registered_route_responses_are_contracted(&schema);
+    assert_registered_work_route_payloads_are_contracted(&schema);
     serde_json::to_string_pretty(&schema).map(|rendered| format!("{rendered}\n"))
 }
 
@@ -111,6 +132,25 @@ fn assert_registered_route_responses_are_contracted(schema: &serde_json::Value) 
     }
 }
 
+fn assert_registered_work_route_payloads_are_contracted(schema: &serde_json::Value) {
+    let Some(definitions) = schema["$defs"].as_object() else {
+        panic!("dashboard contracts must expose schema definitions");
+    };
+    for route in registered_work_route_contracts() {
+        for (direction, schema_name) in [
+            ("request", (route.request_schema_name)()),
+            ("response", (route.response_schema_name)()),
+        ] {
+            assert!(
+                definitions.contains_key(schema_name.as_ref()),
+                "{} {} {direction} {schema_name} is registered but absent from the dashboard contract catalog",
+                route.method,
+                route.path,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::render_dashboard_contract_schema;
@@ -118,6 +158,60 @@ mod tests {
     #[test]
     fn registered_dashboard_route_responses_are_contracted() {
         render_dashboard_contract_schema().expect("render validated dashboard contracts");
+    }
+
+    #[test]
+    fn registered_dashboard_work_route_payloads_are_contracted() {
+        render_dashboard_contract_schema().expect("render validated dashboard Work contracts");
+    }
+
+    #[test]
+    fn canonical_work_contracts_are_registered() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        for (field, contract) in [
+            (
+                "work_projection_snapshot_request",
+                "WorkProjectionSnapshotRequestV1",
+            ),
+            ("work_projection_snapshot", "WorkProjectionSnapshotV1"),
+            (
+                "work_projection_delta_request",
+                "WorkProjectionDeltaRequestV1",
+            ),
+            ("work_projection_delta", "WorkProjectionDeltaV1"),
+            ("work_create_command", "CreateWorkCommand"),
+            (
+                "work_replan_dependencies_command",
+                "ReplanDependenciesCommand",
+            ),
+            ("work_review_proposal_request", "ReviewProposalRequestV1"),
+            ("work_review_proposal_command", "ReviewProposalCommand"),
+            ("work_accept_proposal_command", "AcceptProposalCommand"),
+            ("work_admit_execution_command", "AdmitExecutionCommand"),
+            (
+                "work_attach_runtime_evidence_command",
+                "AttachRuntimeEvidenceCommand",
+            ),
+            ("work_accept_task_command", "AcceptTaskCommand"),
+            ("work_projection", "WorkProjection"),
+        ] {
+            assert!(
+                definitions.contains_key(contract),
+                "canonical Work contract {contract} is absent from the dashboard catalog"
+            );
+            assert_eq!(
+                schema["properties"][field]["$ref"],
+                format!("#/$defs/{contract}"),
+                "dashboard catalog field {field} must directly register {contract}"
+            );
+        }
     }
 
     #[test]
