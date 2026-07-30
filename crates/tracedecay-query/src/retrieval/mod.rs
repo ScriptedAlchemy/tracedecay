@@ -15,6 +15,7 @@
 pub mod dedupe;
 pub mod diversity;
 pub mod exact;
+pub mod execution;
 pub mod fusion;
 pub mod graph;
 pub mod hydrate;
@@ -26,6 +27,11 @@ pub mod request;
 pub mod rerank;
 pub mod semantic;
 
+pub use self::execution::{
+    AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
+    NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
+    NativeSemanticRecordV1, NativeSymbolRecordV1, QueryExecutionContractErrorV1,
+};
 pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
 };
