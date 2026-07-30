@@ -11,6 +11,7 @@ use super::{
     observation_projection, project_registry, session_temporal,
 };
 use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
 
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
@@ -277,6 +278,10 @@ pub(crate) async fn ensure_registered_schema_for_admission(
             .execute_batch(TRANSCRIPT_SCHEMA)
             .await
             .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
+        transaction
+            .execute_batch(WORK_SCHEMA_V1)
+            .await
+            .map_err(|error| global_db_operation_error("initialize Work schema", error))?;
         ensure_session_parent_columns(&transaction)
             .await
             .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
