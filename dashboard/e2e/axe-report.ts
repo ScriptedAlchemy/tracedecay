@@ -21,6 +21,8 @@ import {
   MIN_TOUCH_TARGET_PX,
   PLAN_VIEWPORTS,
   type ForcedColorsOptOut,
+  type HeaderBoxReport,
+  type HeaderOverflowChild,
   type MediaMode,
   type ReflowReport,
   type Theme,
@@ -52,6 +54,8 @@ export interface ShotRecord {
   reflow?: ReflowReport;
   /** Operable targets measured, and those under 44x44 CSS pixels. */
   targets?: TouchTargetReport;
+  /** Workspace-header children measured against their header's padding box. */
+  headerBox?: HeaderBoxReport;
   /** Forced-colors mode only: elements declining the forced palette. */
   forcedColorOptOuts?: ForcedColorsOptOut[];
   /** Rules switched off for this mode, so the artifact never implies a scan
@@ -78,7 +82,7 @@ export interface PlanFailure {
   scenario: string;
   route: string;
   tag: string;
-  check: 'horizontal-scroll' | 'clipped-content' | 'touch-target';
+  check: 'horizontal-scroll' | 'clipped-content' | 'touch-target' | 'header-overflow';
   detail: string;
 }
 
@@ -111,6 +115,15 @@ export function summarise(run: RunTotals): Record<string, unknown> {
   const overflowing = new Map<string, { kind: string; clipper: string; where: string[] }>();
   const unlabelledScrollers = new Map<string, string[]>();
   const optOuts = new Map<string, ForcedColorsOptOut & { where: string[] }>();
+  const headerOverflow = new Map<
+    string,
+    HeaderOverflowChild & { scans: number; where: string[] }
+  >();
+  // Counted so a clean header verdict is readable: zero offenders out of zero
+  // children measured proves nothing, and this gate has already been fooled
+  // once by a measurement that could not see the defect.
+  let headerScans = 0;
+  let headerChildrenExamined = 0;
 
   for (const record of run.records) {
     for (const shot of record.shots) {
@@ -151,6 +164,19 @@ export function summarise(run: RunTotals): Record<string, unknown> {
         if (seen === undefined) optOuts.set(o.selector, { ...o, where: [where] });
         else if (seen.where.length < 4) seen.where.push(where);
       }
+      if (shot.headerBox !== undefined) {
+        if (shot.headerBox.headers > 0) headerScans += 1;
+        headerChildrenExamined += shot.headerBox.examined;
+        for (const o of shot.headerBox.offenders) {
+          const seen = headerOverflow.get(o.selector);
+          if (seen === undefined) {
+            headerOverflow.set(o.selector, { ...o, scans: 1, where: [where] });
+          } else {
+            seen.scans += 1;
+            if (seen.where.length < 4) seen.where.push(where);
+          }
+        }
+      }
     }
   }
 
@@ -180,6 +206,13 @@ export function summarise(run: RunTotals): Record<string, unknown> {
     seededDetectionsByRule: seededByRule,
     planFailures: run.planFailures,
     undersizedTargets: [...undersized.entries()].map(([selector, v]) => ({ selector, ...v })),
+    // Every child measured out of its header's box, gated or not. "Inside its
+    // own container" needs no judgement about what the element carries, which is
+    // exactly what kept the reflow heuristics from being able to fail on it;
+    // `HeaderOverflowChild.gated` carries why only state chips fail the build.
+    headerScans,
+    headerChildrenExamined,
+    headerOverflowChildren: [...headerOverflow.values()],
     // Diagnostics rather than gates. `clipped` content is a strong signal of
     // the plan's "clipped truth state", and an unlabelled internal scroller is
     // outside the plan's "labeled ... regions may scroll internally" licence —
@@ -209,6 +242,7 @@ export function reportRun(run: RunTotals, findingsPath: string): boolean {
   const reflowFailed = run.planFailures.filter((f) => f.check === 'horizontal-scroll');
   const clippedFailed = run.planFailures.filter((f) => f.check === 'clipped-content');
   const targetFailed = run.planFailures.filter((f) => f.check === 'touch-target');
+  const headerFailed = run.planFailures.filter((f) => f.check === 'header-overflow');
   const undersized = list<{
     selector: string;
     width: number;
@@ -257,6 +291,32 @@ export function reportRun(run: RunTotals, findingsPath: string): boolean {
         (t.name === '' ? '' : `  "${t.name}"`) +
         `  in ${t.scans} scan(s), e.g. ${t.where[0]}`,
     );
+  }
+  console.log(
+    `[axe] workspace header box (every width, state chips gated): ${headerFailed.length} scan(s) ` +
+      `put a state chip outside its header, from ${n('headerChildrenExamined')} child element(s) ` +
+      `measured across ${n('headerScans')} scan(s) that rendered one`,
+  );
+  for (const f of [...new Map(headerFailed.map((f) => [f.detail, f])).values()].slice(0, 8)) {
+    console.log(`         ${f.detail}`);
+  }
+  const headerReported = list<HeaderOverflowChild & { scans: number; where: string[] }>(
+    'headerOverflowChildren',
+  ).filter((o) => !o.gated);
+  if (headerReported.length > 0) {
+    console.log(
+      `[axe] diagnostic: ${headerReported.length} non-chip header child(ren) render outside their ` +
+        `workspace header — same defect class, reported rather than gated`,
+    );
+    for (const o of headerReported.slice(0, 8)) {
+      console.log(
+        `         ${o.selector} ${o.width}x${o.height} is ${o.pastRight}px past the right edge of ` +
+          `${o.contentWidth}px of content box` +
+          (o.viewportSlack < 0 ? `, ${Math.round(-o.viewportSlack)}px off-screen` : '') +
+          `  in ${o.scans} scan(s), e.g. ${o.where[0]}` +
+          (o.text === '' ? '' : `  "${o.text}"`),
+      );
+    }
   }
   const optOuts = list<ForcedColorsOptOut & { where: string[] }>('forcedColorOptOuts');
   console.log(

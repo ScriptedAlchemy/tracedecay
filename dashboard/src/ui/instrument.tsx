@@ -438,14 +438,27 @@ export function WorkspaceHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="flex h-9 shrink-0 items-center gap-3 border-b border-edge-subtle bg-surface-1 px-3">
+    // The gate's handle on this one line. Every workspace's header is this
+    // element, so the clipping assertion in `e2e/responsive.ts` can hold all of
+    // them to the same invariant — nothing placed here may render outside this
+    // element's padding box — without each surface growing a marker of its own.
+    <header
+      data-workspace-header
+      className="flex h-9 shrink-0 items-center gap-3 border-b border-edge-subtle bg-surface-1 px-3"
+    >
       <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
         {channelNumber(path)}
       </span>
       <h1 className="shrink-0 text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
         {title}
       </h1>
-      <span aria-hidden className="td-rule" />
+      {/* Withdrawn below `sm`, where the line has no width to spend on filler.
+       * Decorative and `aria-hidden`, this hairline was nonetheless the whole
+       * overflow at 320 CSS px: its 8px box plus one 10.5px gap took a header
+       * offering 254px of content box to 273px of children, pushing the state
+       * chip 19px outside that box with its label flush against the screen
+       * edge. Above `sm` the rule earns its width, so wide layout is unchanged. */}
+      <span aria-hidden className="td-rule max-sm:hidden" />
       {note ? (
         <span className="min-w-0 truncate text-3xs tracking-[0.04em] text-text-muted">
           {note}
