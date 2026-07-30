@@ -5552,6 +5552,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-code-extraction"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tokensave-large-treesitters",
+ "tokensave-medium-treesitters",
+ "tracedecay-domain",
+ "tree-sitter",
+ "tree-sitter-hlsl",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tracedecay-code-index"
 version = "0.1.0"
 dependencies = [
@@ -5613,8 +5626,12 @@ dependencies = [
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
+ "lsp-types",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracedecay-domain",
  "url",
 ]
@@ -5650,6 +5667,7 @@ dependencies = [
  "sha2 0.11.0",
  "static_assertions",
  "thiserror",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-policy",
@@ -5690,8 +5708,11 @@ dependencies = [
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "regex",
  "serde",
+ "serde_json",
+ "tracedecay-domain",
 ]
 
 [[package]]
