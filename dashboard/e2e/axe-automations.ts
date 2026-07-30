@@ -192,11 +192,16 @@ export const AUTOMATION_SCHEDULER_SCENARIOS: readonly Scenario[] = [
     assert: async (page) => {
       const tiles = await reviewTiles(page);
       // The whole defect, asserted directly: a failed read must not print a 0.
-      expectEqual(tiles['pending proposals'], '—', 'unreadable proposals tile');
-      expectEqual(tiles['pending skills'], '—', 'unreadable skills tile');
-      if (tiles['pending proposals'] === '0' || tiles['pending skills'] === '0') {
-        throw new Error('FALSIFIED: a failed governance read rendered as a measured zero');
-      }
+      expectEqual(
+        tiles['pending proposals'],
+        '—',
+        'unreadable proposals tile, which a measured zero would falsify',
+      );
+      expectEqual(
+        tiles['pending skills'],
+        '—',
+        'unreadable skills tile, which a measured zero would falsify',
+      );
       await expectVisibleText(page, 'unknown', 'unknown evidence pattern');
       await expectVisibleText(
         page,

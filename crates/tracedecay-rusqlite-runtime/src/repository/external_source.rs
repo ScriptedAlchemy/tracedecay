@@ -3,8 +3,9 @@
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{SourceBindingIdentityV1, SourceBindingOwnerV1};
 use tracedecay_store::{
-    ExternalSourceReadOperationV1, ExternalSourceReadResultV1, SourceCommitApplyOutcomeV1,
-    SourceCommitV1, SourceStoreStateV1, apply_source_commit,
+    ExternalSourceReadOperationV1, ExternalSourceReadResultV1, SourceAuthorityPublicationV1,
+    SourceCommitApplyOutcomeV1, SourceCommitV1, SourceStoreStateV1,
+    apply_source_authority_publication, apply_source_commit,
 };
 
 use super::support::{decode, encode, invalid};
@@ -24,6 +25,39 @@ CREATE TABLE IF NOT EXISTS external_source_states_v1 (
 );
 CREATE INDEX IF NOT EXISTS idx_external_source_states_owner_v1
     ON external_source_states_v1(owner_kind, owner_id, source_id);
+CREATE TABLE IF NOT EXISTS external_source_definition_revisions_v1 (
+    source_id TEXT NOT NULL,
+    definition_revision INTEGER NOT NULL CHECK (definition_revision > 0),
+    definition_digest TEXT NOT NULL,
+    definition_json TEXT NOT NULL,
+    PRIMARY KEY (source_id, definition_revision)
+);
+CREATE TABLE IF NOT EXISTS external_source_binding_revisions_v1 (
+    binding_id TEXT NOT NULL,
+    binding_revision INTEGER NOT NULL CHECK (binding_revision > 0),
+    definition_revision INTEGER NOT NULL CHECK (definition_revision > 0),
+    binding_digest TEXT NOT NULL,
+    binding_json TEXT NOT NULL,
+    PRIMARY KEY (binding_id, binding_revision)
+);
+CREATE TABLE IF NOT EXISTS external_source_authority_receipts_v1 (
+    binding_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    definition_digest TEXT NOT NULL,
+    binding_digest TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    PRIMARY KEY (binding_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS external_source_projection_publications_v1 (
+    binding_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    frontier_digest TEXT NOT NULL,
+    projection_digest TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    PRIMARY KEY (binding_id, idempotency_key)
+);
 ";
 
 #[derive(Clone, Default)]
@@ -44,6 +78,34 @@ impl ExternalSourceExecutor {
                 persist_state(savepoint, state.as_ref())
             }
         }
+    }
+
+    pub fn execute_authority_publication(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        publication: &SourceAuthorityPublicationV1,
+    ) -> rusqlite::Result<()> {
+        publication.validate().map_err(invalid)?;
+        let binding = publication
+            .binding()
+            .immutable_identity()
+            .map_err(invalid)?;
+        let current = load_state(savepoint, &binding)?
+            .ok_or_else(|| invalid("external source authority publication has no source state"))?;
+        let revised =
+            apply_source_authority_publication(&current, publication.clone()).map_err(invalid)?;
+        persist_state(savepoint, &revised)
+    }
+
+    pub fn rebuild_projection_publications(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        binding: &SourceBindingIdentityV1,
+    ) -> rusqlite::Result<()> {
+        binding.validate().map_err(invalid)?;
+        let state = load_state(savepoint, binding)?
+            .ok_or_else(|| invalid("external source projection rebuild has no source state"))?;
+        persist_state(savepoint, &state)
     }
 
     pub fn execute_read(
@@ -92,6 +154,122 @@ fn persist_state(savepoint: &Savepoint<'_>, state: &SourceStoreStateV1) -> rusql
     state.validate().map_err(invalid)?;
     let binding = state.binding().immutable_identity().map_err(invalid)?;
     let (owner_kind, owner_id) = owner_key(&binding.owner);
+    for definition in state.definition_history().values() {
+        let definition_revision = i64::try_from(definition.revision)
+            .map_err(|_| invalid("external source definition revision exceeds SQLite INTEGER"))?;
+        let encoded = encode(definition)?;
+        savepoint.execute(
+            "INSERT OR IGNORE INTO external_source_definition_revisions_v1 (
+                source_id, definition_revision, definition_digest, definition_json
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                definition.source_id.as_str(),
+                definition_revision,
+                definition.definition_digest.as_str(),
+                encoded,
+            ],
+        )?;
+        let stored: String = savepoint.query_row(
+            "SELECT definition_json
+             FROM external_source_definition_revisions_v1
+             WHERE source_id = ?1 AND definition_revision = ?2",
+            params![definition.source_id.as_str(), definition_revision],
+            |row| row.get(0),
+        )?;
+        if stored != encode(definition)? {
+            return Err(invalid("external source definition revision collision"));
+        }
+    }
+    for revision in state.binding_history().values() {
+        let binding_revision = i64::try_from(revision.binding_revision)
+            .map_err(|_| invalid("external source binding revision exceeds SQLite INTEGER"))?;
+        let definition_revision = i64::try_from(revision.definition_revision)
+            .map_err(|_| invalid("external source definition revision exceeds SQLite INTEGER"))?;
+        let encoded = encode(revision)?;
+        savepoint.execute(
+            "INSERT OR IGNORE INTO external_source_binding_revisions_v1 (
+                binding_id, binding_revision, definition_revision,
+                binding_digest, binding_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                revision.binding_id.as_str(),
+                binding_revision,
+                definition_revision,
+                revision.binding_digest.as_str(),
+                encoded,
+            ],
+        )?;
+        let stored: String = savepoint.query_row(
+            "SELECT binding_json
+             FROM external_source_binding_revisions_v1
+             WHERE binding_id = ?1 AND binding_revision = ?2",
+            params![revision.binding_id.as_str(), binding_revision],
+            |row| row.get(0),
+        )?;
+        if stored != encode(revision)? {
+            return Err(invalid("external source binding revision collision"));
+        }
+    }
+    for receipt in state.authority_receipts().values() {
+        let encoded = encode(receipt)?;
+        savepoint.execute(
+            "INSERT OR IGNORE INTO external_source_authority_receipts_v1 (
+                binding_id, idempotency_key, request_digest,
+                definition_digest, binding_digest, receipt_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                binding.binding_id.as_str(),
+                receipt.idempotency_key().as_str(),
+                receipt.request_digest().as_str(),
+                receipt.definition_digest().as_str(),
+                receipt.binding_digest().as_str(),
+                encoded,
+            ],
+        )?;
+        let stored: String = savepoint.query_row(
+            "SELECT receipt_json
+             FROM external_source_authority_receipts_v1
+             WHERE binding_id = ?1 AND idempotency_key = ?2",
+            params![
+                binding.binding_id.as_str(),
+                receipt.idempotency_key().as_str()
+            ],
+            |row| row.get(0),
+        )?;
+        if stored != encode(receipt)? {
+            return Err(invalid("external source authority receipt collision"));
+        }
+    }
+    for receipt in state.commit_receipts().values() {
+        let encoded = encode(receipt)?;
+        savepoint.execute(
+            "INSERT OR IGNORE INTO external_source_projection_publications_v1 (
+                binding_id, idempotency_key, request_digest,
+                frontier_digest, projection_digest, receipt_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                binding.binding_id.as_str(),
+                receipt.idempotency_key().as_str(),
+                receipt.request_digest().as_str(),
+                receipt.source_frontier().digest().as_str(),
+                receipt.projection().receipt_digest().as_str(),
+                encoded,
+            ],
+        )?;
+        let stored: String = savepoint.query_row(
+            "SELECT receipt_json
+             FROM external_source_projection_publications_v1
+             WHERE binding_id = ?1 AND idempotency_key = ?2",
+            params![
+                binding.binding_id.as_str(),
+                receipt.idempotency_key().as_str()
+            ],
+            |row| row.get(0),
+        )?;
+        if stored != encode(receipt)? {
+            return Err(invalid("external source projection receipt collision"));
+        }
+    }
     savepoint.execute(
         "INSERT INTO external_source_states_v1 (
             binding_id, source_id, owner_kind, owner_id,
@@ -148,7 +326,8 @@ mod tests {
         SourceSnapshotIdV1,
     };
     use tracedecay_store::{
-        SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
+        SourceAuthorityPublicationV1, SourceObjectMutationV1, SourceObjectTransitionV1,
+        SourceObservationEvidenceV1,
     };
 
     use super::*;
@@ -337,5 +516,168 @@ mod tests {
             .unwrap();
         assert!(!state_json.contains("secret"));
         assert!(!state_json.contains("https://"));
+    }
+
+    #[test]
+    fn authority_and_projection_histories_survive_restart_and_rollback() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database_path = temporary.path().join("external-source-history.sqlite");
+        let (commit, _) = fixture();
+        let definition_v1 = commit.definition().clone();
+        let binding_v1 = commit.binding().clone();
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
+            let mut transaction = connection.transaction().unwrap();
+            let savepoint = transaction.savepoint().unwrap();
+            ExternalSourceExecutor
+                .execute_write(&savepoint, &commit)
+                .unwrap();
+            savepoint.commit().unwrap();
+            transaction.commit().unwrap();
+        }
+        let definition_v2 = SourceDefinitionV1::new(
+            definition_v1.source_id.clone(),
+            2,
+            SourceAcquisitionContractV1::new(
+                definition_v1.provider.clone(),
+                definition_v1.acquisition_capabilities.clone(),
+            )
+            .unwrap(),
+            definition_v1.capture_mode,
+            definition_v1.refetch_strategy,
+            definition_v1.deletion_semantics,
+            definition_v1.max_partitions,
+        )
+        .unwrap();
+        let binding_v2 = SourceBindingV1::new(
+            &definition_v2,
+            binding_v1.owner.clone(),
+            binding_v1.privacy_domain.clone(),
+            binding_v1.native_root.clone(),
+            2,
+        )
+        .unwrap();
+        let publication = SourceAuthorityPublicationV1::new(
+            &definition_v2,
+            &binding_v2,
+            definition_v1.definition_digest.clone(),
+            binding_v1.binding_digest.clone(),
+            digest('7'),
+            digest('8'),
+        )
+        .unwrap();
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+            let mut interrupted = connection.transaction().unwrap();
+            let savepoint = interrupted.savepoint().unwrap();
+            ExternalSourceExecutor
+                .execute_authority_publication(&savepoint, &publication)
+                .unwrap();
+            savepoint.commit().unwrap();
+            drop(interrupted);
+        }
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM external_source_definition_revisions_v1",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+            let mut transaction = connection.transaction().unwrap();
+            let savepoint = transaction.savepoint().unwrap();
+            ExternalSourceExecutor
+                .execute_authority_publication(&savepoint, &publication)
+                .unwrap();
+            savepoint.commit().unwrap();
+            transaction.commit().unwrap();
+        }
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+            let mut transaction = connection.transaction().unwrap();
+            let savepoint = transaction.savepoint().unwrap();
+            ExternalSourceExecutor
+                .execute_authority_publication(&savepoint, &publication)
+                .unwrap();
+            savepoint.commit().unwrap();
+            transaction.commit().unwrap();
+        }
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM external_source_definition_revisions_v1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM external_source_binding_revisions_v1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM external_source_authority_receipts_v1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM external_source_projection_publications_v1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        connection
+            .execute("DELETE FROM external_source_projection_publications_v1", [])
+            .unwrap();
+        drop(connection);
+        {
+            let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+            let mut transaction = connection.transaction().unwrap();
+            let savepoint = transaction.savepoint().unwrap();
+            ExternalSourceExecutor
+                .rebuild_projection_publications(
+                    &savepoint,
+                    &binding_v2.immutable_identity().unwrap(),
+                )
+                .unwrap();
+            savepoint.commit().unwrap();
+            transaction.commit().unwrap();
+        }
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM external_source_projection_publications_v1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
     }
 }

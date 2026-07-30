@@ -1,5 +1,9 @@
 use serde::Serialize;
 use tracedecay_domain::ObservationSourceRangeV1;
+use tracedecay_sessions::{
+    ProviderRunFailure, ProviderRunFold as GenericProviderRunFold,
+    ProviderRunOutcome as GenericProviderRunOutcome,
+};
 
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::{claude_observation, source};
@@ -71,125 +75,14 @@ impl TranscriptCatchUpFailure {
     }
 }
 
-/// One provider adapter's bounded contribution to a catch-up pass.
-///
-/// Adapters describe what happened; [`ProviderRunFold`] is the sole authority
-/// that combines provider results into pass-level stats and unit accounting.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ProviderRunOutcome {
-    pub stats: TranscriptIngestStats,
-    pub failures: Vec<TranscriptCatchUpFailure>,
-    pub bytes_consumed: u64,
-    pub deferred_units: u64,
-    pub byte_bounds_enforced: bool,
-    admitted: bool,
-}
-
-impl ProviderRunOutcome {
-    pub(super) fn bounded(
-        stats: TranscriptIngestStats,
-        bytes_consumed: u64,
-        deferred_by_byte_cap: bool,
-    ) -> Self {
-        Self {
-            stats,
-            failures: Vec::new(),
-            bytes_consumed,
-            deferred_units: u64::from(deferred_by_byte_cap),
-            byte_bounds_enforced: true,
-            admitted: true,
-        }
-    }
-
-    pub(super) fn skipped() -> Self {
-        Self {
-            stats: TranscriptIngestStats::default(),
-            failures: Vec::new(),
-            bytes_consumed: 0,
-            deferred_units: 0,
-            byte_bounds_enforced: true,
-            admitted: false,
-        }
-    }
-
-    pub(super) fn failed(failure: TranscriptCatchUpFailure, bytes_consumed: u64) -> Self {
-        let mut outcome = Self::bounded(TranscriptIngestStats::default(), bytes_consumed, false);
-        outcome.failures.push(failure);
-        outcome
-    }
-
-    pub(super) fn add_failure(&mut self, failure: TranscriptCatchUpFailure) {
-        self.failures.push(failure);
-    }
-
-    pub(super) fn add_stats(&mut self, stats: TranscriptIngestStats) {
-        self.stats = self.stats.merge(stats);
-    }
-
-    pub(super) fn add_deferred_units(&mut self, deferred_units: u64) {
-        self.deferred_units = self.deferred_units.saturating_add(deferred_units);
-    }
-
-    pub(super) fn retryable(&self) -> bool {
-        self.failures
-            .last()
-            .is_some_and(|failure| failure.retryable)
-    }
-
-    pub(super) fn succeeded(&self) -> bool {
-        self.failures.is_empty()
+impl ProviderRunFailure for TranscriptCatchUpFailure {
+    fn retryable(&self) -> bool {
+        self.retryable
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ProviderRunFold {
-    pub stats: TranscriptIngestStats,
-    pub failures: Vec<TranscriptCatchUpFailure>,
-    pub units_admitted: u64,
-    pub units_completed: u64,
-    pub units_failed: u64,
-    pub deferred_units: u64,
-    pub byte_bounds_enforced: bool,
-}
-
-impl Default for ProviderRunFold {
-    fn default() -> Self {
-        Self {
-            stats: TranscriptIngestStats::default(),
-            failures: Vec::new(),
-            units_admitted: 0,
-            units_completed: 0,
-            units_failed: 0,
-            deferred_units: 0,
-            byte_bounds_enforced: true,
-        }
-    }
-}
-
-impl ProviderRunFold {
-    pub(super) fn record_retry(&mut self, outcome: &ProviderRunOutcome) {
-        self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
-        self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
-    }
-
-    pub(super) fn record(&mut self, outcome: ProviderRunOutcome) {
-        if !outcome.admitted {
-            return;
-        }
-        self.units_admitted = self.units_admitted.saturating_add(1);
-        if outcome.failures.is_empty() {
-            if outcome.deferred_units == 0 {
-                self.units_completed = self.units_completed.saturating_add(1);
-            }
-        } else {
-            self.units_failed = self.units_failed.saturating_add(1);
-        }
-        self.stats = self.stats.merge(outcome.stats);
-        self.failures.extend(outcome.failures);
-        self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
-        self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
-    }
-}
+pub(super) type ProviderRunOutcome = GenericProviderRunOutcome<TranscriptCatchUpFailure>;
+pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailure>;
 
 /// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

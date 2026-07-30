@@ -1,18 +1,18 @@
 use crate::db::engine::{Value, params};
 
 use crate::db::engine;
-use crate::query::temporal::candidates::{CandidateChannel, CandidatePlan};
-use crate::query::temporal::ports::{
+use tracedecay_domain::{
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
+    CanonicalWorkflowSemanticKindV1, DurableObservationV1,
+};
+use tracedecay_temporal_query::candidates::{CandidateChannel, CandidatePlan};
+use tracedecay_temporal_query::ports::{
     CandidatePageSink, MeasuredTemporalValue, PageRequest, PageStatus, PortFuture,
     TemporalCandidateFilterV1, TemporalExecutionSnapshot, TemporalMessageTypeFilterV1,
     TemporalPortError, TemporalReadPort, TemporalRecordPageSink, TemporalRetrievalScope,
     TemporalSessionScopeFilterV1,
 };
-use crate::query::temporal::ranking::RankingCandidate;
-use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
-    CanonicalWorkflowSemanticKindV1, DurableObservationV1,
-};
+use tracedecay_temporal_query::ranking::RankingCandidate;
 
 mod candidates;
 mod cursors;
@@ -416,15 +416,15 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         let caps = request.candidate_field_caps();
         let metadata_cap = caps.map_or(
             request.max_item_bytes(),
-            crate::query::temporal::ports::CandidateFieldCaps::metadata_field_bytes,
+            tracedecay_temporal_query::ports::CandidateFieldCaps::metadata_field_bytes,
         );
         let stable_cap = caps.map_or(
             request.max_item_bytes(),
-            crate::query::temporal::ports::CandidateFieldCaps::stable_id_bytes,
+            tracedecay_temporal_query::ports::CandidateFieldCaps::stable_id_bytes,
         );
         let anchor_cap = caps.map_or(
             request.max_item_bytes(),
-            crate::query::temporal::ports::CandidateFieldCaps::anchor_id_bytes,
+            tracedecay_temporal_query::ports::CandidateFieldCaps::anchor_id_bytes,
         );
         let provider = snapshot
             .provider_scope()

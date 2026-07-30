@@ -36,6 +36,17 @@ pub enum SessionAccess {
     Hydrate,
 }
 
+impl SessionAccess {
+    pub const fn matches_requested_access(self, requested: Self) -> bool {
+        matches!(
+            (self, requested),
+            (Self::Read, Self::Read)
+                | (Self::Search, Self::Search)
+                | (Self::Hydrate, Self::Hydrate)
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SessionRetrievalScope {
     Session(SessionId),
@@ -55,6 +66,22 @@ impl SessionRetrievalScope {
             Self::Session(session_id) => Some(session_id),
             Self::AllSessionsInAuthorizedRoot => None,
         }
+    }
+
+    pub fn matches_requested_scope(&self, requested: &Self) -> bool {
+        match (self, requested) {
+            (Self::Session(granted), Self::Session(requested)) => granted == requested,
+            (Self::AllSessionsInAuthorizedRoot, Self::AllSessionsInAuthorizedRoot) => true,
+            _ => false,
+        }
+    }
+
+    pub fn matches_session_target(&self, requested: &SessionId) -> bool {
+        matches!(self, Self::Session(granted) if granted == requested)
+    }
+
+    pub const fn matches_authorized_root_target(&self) -> bool {
+        matches!(self, Self::AllSessionsInAuthorizedRoot)
     }
 }
 
@@ -102,7 +129,11 @@ impl std::error::Error for SessionAuthorizationError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthorizationGrantId, SessionAuthorizationError, SessionRetrievalScope};
+    use tracedecay_domain::SessionId;
+
+    use super::{
+        AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionRetrievalScope,
+    };
 
     #[test]
     fn grant_id_rejects_non_canonical_values() {
@@ -127,5 +158,53 @@ mod tests {
         let scope = SessionRetrievalScope::AllSessionsInAuthorizedRoot;
         assert_eq!(scope.kind(), "all_sessions_in_authorized_root");
         assert_eq!(scope.session_id(), None);
+    }
+
+    #[test]
+    fn access_matches_only_the_exact_requested_access() {
+        for granted in [
+            SessionAccess::Read,
+            SessionAccess::Search,
+            SessionAccess::Hydrate,
+        ] {
+            for requested in [
+                SessionAccess::Read,
+                SessionAccess::Search,
+                SessionAccess::Hydrate,
+            ] {
+                assert_eq!(
+                    granted.matches_requested_access(requested),
+                    granted == requested
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retrieval_scope_matches_only_the_exact_requested_scope() {
+        let session = SessionId::new("session.one").expect("canonical session");
+        let other_session = SessionId::new("session.two").expect("canonical session");
+        let scoped = SessionRetrievalScope::Session(session.clone());
+        let root = SessionRetrievalScope::AllSessionsInAuthorizedRoot;
+
+        assert!(scoped.matches_requested_scope(&SessionRetrievalScope::Session(session.clone())));
+        assert!(!scoped.matches_requested_scope(&SessionRetrievalScope::Session(other_session)));
+        assert!(!scoped.matches_requested_scope(&root));
+        assert!(root.matches_requested_scope(&SessionRetrievalScope::AllSessionsInAuthorizedRoot));
+        assert!(!root.matches_requested_scope(&SessionRetrievalScope::Session(session)));
+    }
+
+    #[test]
+    fn retrieval_scope_matches_only_its_typed_target_kind() {
+        let session = SessionId::new("session.one").expect("canonical session");
+        let other_session = SessionId::new("session.two").expect("canonical session");
+        let scoped = SessionRetrievalScope::Session(session.clone());
+        let root = SessionRetrievalScope::AllSessionsInAuthorizedRoot;
+
+        assert!(scoped.matches_session_target(&session));
+        assert!(!scoped.matches_session_target(&other_session));
+        assert!(!scoped.matches_authorized_root_target());
+        assert!(root.matches_authorized_root_target());
+        assert!(!root.matches_session_target(&session));
     }
 }

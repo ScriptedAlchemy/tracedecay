@@ -12,8 +12,10 @@ use tracedecay_domain::{
     SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1,
 };
 use tracedecay_store::{
-    SourceCommitApplyOutcomeV1, SourceCommitV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, SourceStoreErrorV1, SourceStoreStateV1, apply_source_commit,
+    SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitV1,
+    SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
+    SourceStoreErrorV1, SourceStoreStateV1, apply_source_authority_publication,
+    apply_source_commit,
 };
 
 fn digest(seed: char) -> ManifestDigest {
@@ -34,6 +36,25 @@ fn definition_with_max(max_partitions: u16) -> SourceDefinitionV1 {
     SourceDefinitionV1::new(
         SourceInstanceId::new("source.github-review").unwrap(),
         1,
+        SourceAcquisitionContractV1::new(ProviderId::new("github").unwrap(), capabilities).unwrap(),
+        SourceCaptureModeV1::Poll,
+        SourceRefetchStrategyV1::WholeRoot,
+        SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
+        max_partitions,
+    )
+    .unwrap()
+}
+
+fn revised_definition(revision: u64, max_partitions: u16) -> SourceDefinitionV1 {
+    let capabilities = SourceAcquisitionCapabilitiesV1::new(
+        BTreeSet::from([SourceCaptureModeV1::Poll]),
+        BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
+        BTreeSet::from([SourceDeletionSemanticsV1::CompleteSnapshotAbsence]),
+    )
+    .unwrap();
+    SourceDefinitionV1::new(
+        SourceInstanceId::new("source.github-review").unwrap(),
+        revision,
         SourceAcquisitionContractV1::new(ProviderId::new("github").unwrap(), capabilities).unwrap(),
         SourceCaptureModeV1::Poll,
         SourceRefetchStrategyV1::WholeRoot,
@@ -695,4 +716,66 @@ fn stale_binding_revision_cannot_replay_or_advance_source_state() {
         apply_source_commit(Some(&state), advance),
         Err(SourceStoreErrorV1::BindingConflict)
     ));
+}
+
+#[test]
+fn sequential_definition_and_binding_revisions_preserve_immutable_history() {
+    let definition_v1 = definition();
+    let binding_v1 = binding(&definition_v1);
+    let first = commit(
+        &definition_v1,
+        &binding_v1,
+        None,
+        SourceCoverageV1::Partial,
+        vec![mutation(
+            &binding_v1,
+            &partition(),
+            object(),
+            None,
+            SourceObjectTransitionV1::Initial,
+            '2',
+        )],
+        None,
+        '2',
+    );
+    let state = committed(apply_source_commit(None, first).unwrap());
+    let definition_v2 = revised_definition(2, 8);
+    let binding_v2 = SourceBindingV1::new(
+        &definition_v2,
+        binding_v1.owner.clone(),
+        binding_v1.privacy_domain.clone(),
+        binding_v1.native_root.clone(),
+        2,
+    )
+    .unwrap();
+    let publication = SourceAuthorityPublicationV1::new(
+        &definition_v2,
+        &binding_v2,
+        definition_v1.definition_digest.clone(),
+        binding_v1.binding_digest.clone(),
+        digest('3'),
+        digest('4'),
+    )
+    .unwrap();
+
+    let revised = apply_source_authority_publication(&state, publication).unwrap();
+
+    assert_eq!(
+        revised
+            .definition_history()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        revised
+            .binding_history()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(revised.definition(), &definition_v2);
+    assert_eq!(revised.binding(), &binding_v2);
 }

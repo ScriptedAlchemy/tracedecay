@@ -1028,7 +1028,7 @@ fn code_index_search_executor(
                     }
                 };
             let mut source = CodeIndexSearchHydrationSourceV1::new(authorize, preflight, hydrate);
-            let hydrated = match crate::query::retrieval::hydrate::DeterministicLateHydration::new(
+            let hydrated = match crate::query::retrieval::hydrate::CanonicalLateHydration::new(
                 &mut source,
             )
             .hydrate_with_control(
@@ -5371,7 +5371,7 @@ async fn production_project_server(
     // the broker instead (same pattern as
     // `application::dashboard_diagnostics::open_diagnostic_broker`).
     let diagnostic_broker =
-        match crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
+        match tracedecay_lsp::analyzer::settings::load_settings(&cg.store_layout().dashboard_root)
             .await
         {
             Ok(settings) => Arc::new(tokio::sync::Mutex::new(
@@ -5388,7 +5388,7 @@ async fn production_project_server(
                 );
                 let mut broker = crate::application::dashboard_diagnostics::diagnostic_broker(
                     canonical_project_path.to_path_buf(),
-                    crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+                    tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings::default(),
                 );
                 broker.record_settings_unavailable(error.to_string());
                 Arc::new(tokio::sync::Mutex::new(broker))
@@ -5841,10 +5841,7 @@ async fn production_project_server(
                         .await;
                     let mut fields = vec![
                         ("project", code_index_project.display().to_string()),
-                        (
-                            "elapsed_ms",
-                            started.elapsed().as_millis().to_string(),
-                        ),
+                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
                     ];
                     match outcome {
                         Ok(()) => fields.push(("phase", "code_index_mounted".to_owned())),

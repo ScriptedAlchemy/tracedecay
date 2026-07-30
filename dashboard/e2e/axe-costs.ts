@@ -34,11 +34,8 @@ export const COSTS_SCENARIOS: readonly Scenario[] = [
       // Prices are recorded at ingest. Turns counted without a pricing
       // revision have no cost — which is an accounting state, not $0.00.
       const cost = await plateReading(page, 'provider_cost');
-      expectEqual(cost.figure, '—', 'an unpriced cost');
+      expectEqual(cost.figure, '—', 'an unpriced cost, which a zero bill would falsify');
       expectEqual(cost.available, 'false', 'the unpriced cost is marked unavailable');
-      if (cost.figure.includes('0')) {
-        throw new Error('FALSIFIED: an unpriced turn ledger rendered as a zero bill');
-      }
       await expectVisibleText(page, 'pricing_revision_unavailable', 'the pricing failure reason');
       await expectVisibleText(
         page,

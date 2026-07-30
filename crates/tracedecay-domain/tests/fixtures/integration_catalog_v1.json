@@ -16,7 +16,7 @@
           "availability_states": [
             {"status": "supported"},
             {"status": "degraded", "reason_code": "spool_record_too_large"},
-            {"status": "unavailable", "reason_code": "authority_unavailable"}
+            {"status": "unavailable", "reason_code": "project_authority_unbound"}
           ]
         },
         {
@@ -25,7 +25,7 @@
           "availability_states": [
             {"status": "supported"},
             {"status": "degraded", "reason_code": "spool_record_too_large"},
-            {"status": "unavailable", "reason_code": "authority_unavailable"}
+            {"status": "unavailable", "reason_code": "project_authority_unbound"}
           ]
         },
         {
@@ -34,7 +34,7 @@
           "availability_states": [
             {"status": "supported"},
             {"status": "degraded", "reason_code": "spool_record_too_large"},
-            {"status": "unavailable", "reason_code": "authority_unavailable"}
+            {"status": "unavailable", "reason_code": "project_authority_unbound"}
           ]
         },
         {
@@ -43,7 +43,7 @@
           "availability_states": [
             {"status": "supported"},
             {"status": "degraded", "reason_code": "spool_record_too_large"},
-            {"status": "unavailable", "reason_code": "authority_unavailable"}
+            {"status": "unavailable", "reason_code": "project_authority_unbound"}
           ]
         },
         {
@@ -52,7 +52,7 @@
           "availability_states": [
             {"status": "supported"},
             {"status": "degraded", "reason_code": "spool_record_too_large"},
-            {"status": "unavailable", "reason_code": "authority_unavailable"}
+            {"status": "unavailable", "reason_code": "project_authority_unbound"}
           ]
         }
       ]

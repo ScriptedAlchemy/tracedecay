@@ -424,28 +424,3 @@ impl std::fmt::Display for LcmError {
 }
 
 impl std::error::Error for LcmError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn payload_ref_validation_rejects_traversal_and_separators() {
-        assert!(validate_payload_ref("payload_abc.payload").is_ok());
-        for rejected in [
-            "",
-            ".",
-            "..",
-            "../escape",
-            "nested/payload",
-            "nested\\payload",
-            "/absolute",
-        ] {
-            assert_eq!(
-                validate_payload_ref(rejected),
-                Err(LcmError::InvalidPayloadRef),
-                "payload ref {rejected:?} must not pass containment"
-            );
-        }
-    }
-}

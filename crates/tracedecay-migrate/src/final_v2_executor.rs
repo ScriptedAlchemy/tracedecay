@@ -1,9 +1,12 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{
     CutoverPublicationReceipt, DurableMigrationCheckpoint, ExactMigrationSourceIdentity,
     MigrationContractError, ReleasedSchemaEvidence, ReleasedStoreKind, VerifiedBackupIdentity,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FinalV2ExecutionPhase {
     Prepared,
     Published,
@@ -19,7 +22,8 @@ pub struct FinalV2ExecutionRequest {
     pub prepared_at: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FinalV2ExecutionJournal {
     pub migration_id: String,
     pub source: ExactMigrationSourceIdentity,
@@ -445,5 +449,21 @@ mod tests {
         );
         assert!(runtime.calls.borrow().is_empty());
         assert!(journal.0.borrow().is_none());
+    }
+
+    #[test]
+    fn execution_journal_roundtrips_without_losing_boundary_identity() {
+        let journal = MemoryJournal::default();
+        execute_final_v2_migration(&RecordingRuntime::default(), &journal, request()).unwrap();
+        let expected = journal.0.borrow().clone().unwrap();
+
+        let encoded = serde_json::to_vec(&expected).unwrap();
+        let decoded: FinalV2ExecutionJournal = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded, expected);
+        assert_eq!(
+            decoded.checkpoint.publication.unwrap().source,
+            decoded.source
+        );
     }
 }
