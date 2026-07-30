@@ -235,9 +235,12 @@ export function NavRail() {
       className="group/rail relative flex w-48 shrink-0 flex-col border-r border-edge-subtle bg-surface-1 max-md:w-[calc(var(--touch-target-min)+1px)]"
       data-collapsed="false"
     >
-      {/* Matches the `ScopeBar` height beside it, which is sized from the same
-        * token so its stretched controls clear the minimum. */}
-      <div className="flex h-[calc(var(--touch-target-min)+1px)] shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3 max-md:justify-center max-md:px-0">
+      {/* Matches the `ScopeBar` floor beside it, which is sized from the same
+        * token so its stretched controls clear the minimum. A floor rather than
+        * a height for the same reason: the bar grows under text-only zoom rather
+        * than clipping its scope, and a fixed brand block would hold this
+        * hairline at 45px while the one beside it moved. */}
+      <div className="flex min-h-[calc(var(--touch-target-min)+1px)] shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3 max-md:justify-center max-md:px-0">
         <span aria-hidden className="relative size-3 shrink-0 border border-accent">
           <span className="absolute inset-[3px] bg-accent" />
         </span>
