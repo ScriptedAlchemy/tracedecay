@@ -527,3 +527,161 @@ export function touchTargetFailures(report: TouchTargetReport, tag: string): str
       `${MIN_TOUCH_TARGET_PX}x${MIN_TOUCH_TARGET_PX} CSS pixels: ${listed.join('; ')}`,
   ];
 }
+
+/* ==========================================================================
+ * The workspace header's one line: does anything on it render outside the box.
+ * ========================================================================== */
+
+export interface HeaderOverflowChild {
+  readonly header: string;
+  readonly selector: string;
+  readonly text: string;
+  /**
+   * Whether this offender fails the build.
+   *
+   * Only state chips are gated. A chip is a fixed-size indicator whose entire
+   * job is to be read at a glance, so one rendering outside its header is a
+   * defect with no judgement required — and it is the regression this check
+   * exists for. Everything else on the line is reported instead, because the
+   * full 564-scan sweep found a pre-existing 494.8px snapshot/revision strip in
+   * the `/settings` header rendering up to 356.9px outside it (276px of that
+   * off-screen) at 320 and 390 CSS px. That is the same defect class on a
+   * surface this change does not own, and gating it here would convert a
+   * hand-off into a red build for someone else's bug. It is printed with its
+   * measurements so it gets fixed rather than forgotten.
+   */
+  readonly gated: boolean;
+  /** CSS pixels past each edge of the header's padding box. 0 means inside. */
+  readonly pastRight: number;
+  readonly pastLeft: number;
+  readonly pastTop: number;
+  readonly pastBottom: number;
+  readonly width: number;
+  readonly height: number;
+  readonly headerWidth: number;
+  readonly contentWidth: number;
+  /** Distance from the child's right edge to the viewport's. Negative means the
+   * child is painted off-screen entirely. */
+  readonly viewportSlack: number;
+}
+
+export interface HeaderBoxReport {
+  /** Workspace headers on the page. Zero is legitimate — not every route
+   * renders one — which is why this is reported rather than asserted. */
+  readonly headers: number;
+  readonly examined: number;
+  readonly offenders: readonly HeaderOverflowChild[];
+}
+
+/**
+ * Every rendered child of a workspace header, measured against that header's
+ * padding box.
+ *
+ * This exists because `document.scrollWidth` cannot see the defect it is named
+ * for. The state chip on `/work` rendered 19 CSS pixels outside its header at
+ * 320px and at 400% zoom — bezel sheared, label flush against the screen edge —
+ * through 78 clean scans, because the shell clips instead of scrolling, so the
+ * document never widened and the reflow gate never fired. The two heuristics
+ * either side of it missed it for reasons worth recording, since both are still
+ * in place:
+ *
+ *   - `REFLOW_PROBE` skips anything whose `rect.right <= clientWidth + 1`, and
+ *     the chip's LABEL ended at exactly 320 of 320. One pixel of luck.
+ *   - It also skips elements carrying no text of their own, and the chip's text
+ *     lives in child spans, so the chip's own box was never a candidate.
+ *
+ * Measuring against the container instead of the viewport closes both gaps: a
+ * child that overruns its header is a defect at any width, whether or not the
+ * viewport happens to be wider, and it needs no judgement about what the
+ * element carries.
+ *
+ * Out-of-flow children are excluded. An absolutely positioned overlay does not
+ * spend the line's width budget and is routinely meant to escape it; only
+ * elements laid out IN the header are held to the header's box.
+ */
+export const HEADER_BOX_PROBE = `(function () {${PROBE_PRELUDE}
+  var headers = document.querySelectorAll('[data-workspace-header]');
+  var examined = 0;
+  var offenders = [];
+  var seen = {};
+  var round = function (n) { return Math.round(n * 10) / 10; };
+  for (var h = 0; h < headers.length; h += 1) {
+    var header = headers[h];
+    var hs = getComputedStyle(header);
+    if (hs.display === 'none' || hs.visibility === 'hidden') continue;
+    var hb = header.getBoundingClientRect();
+    var innerLeft = hb.left + (parseFloat(hs.paddingLeft) || 0);
+    var innerRight = hb.right - (parseFloat(hs.paddingRight) || 0);
+    for (var i = 0; i < header.children.length; i += 1) {
+      var el = header.children[i];
+      var style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      if (style.position === 'absolute' || style.position === 'fixed') continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 1 && r.height < 1) continue;
+      examined += 1;
+      var pastRight = r.right - innerRight;
+      var pastLeft = innerLeft - r.left;
+      var pastTop = hb.top - r.top;
+      var pastBottom = r.bottom - hb.bottom;
+      if (pastRight <= 0.5 && pastLeft <= 0.5 && pastTop <= 0.5 && pastBottom <= 0.5) continue;
+      var key = describe(el);
+      if (seen[key]) continue;
+      seen[key] = 1;
+      offenders.push({
+        header: describe(header),
+        selector: key,
+        gated: el.matches('[data-state]'),
+        text: (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 60),
+        pastRight: round(Math.max(0, pastRight)),
+        pastLeft: round(Math.max(0, pastLeft)),
+        pastTop: round(Math.max(0, pastTop)),
+        pastBottom: round(Math.max(0, pastBottom)),
+        width: round(r.width),
+        height: round(r.height),
+        headerWidth: Math.round(hb.width),
+        contentWidth: Math.round(innerRight - innerLeft),
+        viewportSlack: round(window.innerWidth - r.right),
+      });
+    }
+  }
+  return { headers: headers.length, examined: examined, offenders: offenders.slice(0, 12) };
+})()`;
+
+/**
+ * Gated at every width, unlike reflow.
+ *
+ * Reflow is gated only at 320 and 400% zoom because the plan's sentence is
+ * about those two sizes. This is a different claim with no width in it: content
+ * placed inside a container must render inside that container. A wide layout
+ * that pushes its own header content out of the box is the same defect with a
+ * bigger budget, so narrowing this to the reflow-gated viewports would only
+ * hide the easier half.
+ *
+ * Returns the gated offenders only. `HeaderOverflowChild.gated` carries why the
+ * rest are reported instead; `axe-report.ts` prints them either way, so nothing
+ * measured here goes unsaid.
+ */
+export function headerBoxFailures(report: HeaderBoxReport, tag: string): string[] {
+  return report.offenders
+    .filter((o) => o.gated)
+    .map((o) => {
+      const past = [
+        o.pastRight > 0 ? `${o.pastRight}px past its right edge` : '',
+        o.pastLeft > 0 ? `${o.pastLeft}px past its left edge` : '',
+        o.pastTop > 0 ? `${o.pastTop}px above it` : '',
+        o.pastBottom > 0 ? `${o.pastBottom}px below it` : '',
+      ].filter((part) => part !== '');
+      return (
+        `${tag}: ${o.selector} renders outside ${o.header} — ${past.join(', ')}. ` +
+        `The child is ${o.width}x${o.height} CSS px and the header offers ` +
+        `${o.contentWidth}px of content box within ${o.headerWidth}px` +
+        (o.viewportSlack < 0 ? `; ${round1(-o.viewportSlack)}px of it is off-screen` : '') +
+        (o.text === '' ? '' : `. Carrying: "${o.text}"`)
+      );
+    });
+}
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}

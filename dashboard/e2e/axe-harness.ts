@@ -82,16 +82,19 @@ import {
 } from './visibility.ts';
 import {
   FORCED_COLORS_PROBE,
+  HEADER_BOX_PROBE,
   REFLOW_PROBE,
   RESPONSIVE_MATRIX,
   SHOWCASE_VIEWPORTS,
   TOUCH_TARGET_PROBE,
   clippedContentFailures,
   combinationTag,
+  headerBoxFailures,
   reflowFailures,
   touchTargetFailures,
   type Combination,
   type ForcedColorsOptOut,
+  type HeaderBoxReport,
   type MediaMode,
   type ReflowReport,
   type Theme,
@@ -578,6 +581,7 @@ async function captureAndScan(
   const { real: violations, seeded } = partitionViolations(scanned, scenario.expectViolations, tag);
   const reflow = (await page.evaluate(REFLOW_PROBE)) as ReflowReport;
   const targets = (await page.evaluate(TOUCH_TARGET_PROBE)) as TouchTargetReport;
+  const headerBox = (await page.evaluate(HEADER_BOX_PROBE)) as HeaderBoxReport;
   const optOuts =
     media === 'forced-colors'
       ? ((await page.evaluate(FORCED_COLORS_PROBE)) as ForcedColorsOptOut[])
@@ -616,6 +620,18 @@ async function captureAndScan(
         detail,
       }),
     ),
+    // Not gated on `viewport.reflowGated`: a child rendering outside its own
+    // container is a defect at 1440 as much as at 320, and this is the one
+    // measurement that catches it when the shell clips rather than scrolls.
+    ...headerBoxFailures(headerBox, tag).map(
+      (detail): PlanFailure => ({
+        scenario: scenario.id,
+        route: scenario.route,
+        tag,
+        check: 'header-overflow',
+        detail,
+      }),
+    ),
   ];
   run.planFailures.push(...failures);
   run.record.shots.push({
@@ -629,6 +645,7 @@ async function captureAndScan(
     violations,
     reflow,
     targets,
+    headerBox,
     ...(optOuts.length ? { forcedColorOptOuts: optOuts } : {}),
     ...(disabledRules(media).length ? { disabledRules: disabledRules(media) } : {}),
     ...(seeded.length ? { seeded } : {}),
@@ -638,6 +655,7 @@ async function captureAndScan(
       (violations.length ? ` (${violations.map((v) => v.id).join(', ')})` : '') +
       `  reflow=${reflow.scrollWidth}/${reflow.clientWidth}` +
       `  targets=${targets.undersized.length}/${targets.examined} under 44px` +
+      `  header=${headerBox.offenders.length}/${headerBox.examined} outside box` +
       (seeded.length ? `  seeded-detected=${seeded.map((v) => v.id).join(', ')}` : ''),
   );
   for (const v of violations) {
