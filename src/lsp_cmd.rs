@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, interval};
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::{DaemonInvocationClient, DaemonLspSessionClient};
-use tracedecay::diagnostics::lsp::{adapters as lsp_adapters, broker as lsp_broker};
+use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
 use tracedecay_lsp::{ContentLengthCodec, FramePoll, FrameSend};
 
 use crate::cli::LspAction;

@@ -6,25 +6,21 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::AbortHandle;
-use tracedecay_lsp::analyzer::client::decode_semantic_request;
-use tracedecay_lsp::{
-    AdmittedRoot, CanonicalDiagnosticRefreshRequest, DiagnosticSource, GatewayDiagnostic,
-    GenerationDiagnostics, LspPosition, LspRange, LspRequestId, LspRuntimeSpawner, LspRuntimeTask,
-    LspSemanticRequest, SemanticProviderAdapter, SemanticProviderOutcome, SemanticProviderPort,
-    SemanticRequest, SemanticResponse,
-};
-
-pub use tracedecay_lsp::{
-    CanonicalContextProjectionAuthority, CanonicalDiagnosticSnapshotAuthority,
-    FeedbackCycleRuntimePort, LspAnalyzerCancellationAuthority, LspRuntimeFailure,
-    LspRuntimeFuture, LspSemanticOperationOutcome, MAX_FEEDBACK_CYCLES, ManagedDiagnosticSnapshot,
-    ManagedDiagnosticSnapshotPort,
-};
-
-use crate::diagnostics::lsp::broker::{
+use tracedecay_lsp::analyzer::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
 };
-use crate::diagnostics::lsp::client::{LspDocument, LspSemanticRequest as AnalyzerSemanticRequest};
+use tracedecay_lsp::analyzer::client::{
+    LspDocument, LspSemanticRequest as AnalyzerSemanticRequest, decode_semantic_request,
+};
+use tracedecay_lsp::{
+    AdmittedRoot, CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
+    DiagnosticSource, GatewayDiagnostic, GenerationDiagnostics, LspAnalyzerCancellationAuthority,
+    LspPosition, LspRange, LspRequestId, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner,
+    LspRuntimeTask, LspSemanticOperationOutcome, LspSemanticRequest,
+    LspSemanticRequestAuthority as ProtocolSemanticRequestAuthority, ManagedDiagnosticSnapshotPort,
+    SemanticProviderAdapter, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
+    SemanticResponse,
+};
 
 #[derive(Clone)]
 struct TokioLspRuntime {
@@ -219,11 +215,11 @@ impl tracedecay_lsp::LspSemanticRequestAuthority for SemanticAuthorityAdapter {
     }
 }
 
-pub struct Pr12SemanticProviderAdapter {
+pub struct DaemonSemanticProviderAdapter {
     inner: Arc<SemanticProviderAdapter>,
 }
 
-impl Pr12SemanticProviderAdapter {
+impl DaemonSemanticProviderAdapter {
     pub fn new(runtime: Handle, authority: Arc<dyn LspSemanticRequestAuthority>) -> Self {
         Self {
             inner: SemanticProviderAdapter::shared(
@@ -237,12 +233,21 @@ impl Pr12SemanticProviderAdapter {
         Arc::new(Self::new(runtime, authority))
     }
 
+    pub fn shared_protocol(
+        runtime: Handle,
+        authority: Arc<dyn ProtocolSemanticRequestAuthority>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner: SemanticProviderAdapter::shared(runtime_spawner(runtime), authority),
+        })
+    }
+
     pub fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
         self.inner.cancel_request(root, request_id)
     }
 }
 
-impl SemanticProviderPort for Pr12SemanticProviderAdapter {
+impl SemanticProviderPort for DaemonSemanticProviderAdapter {
     fn request(
         &self,
         root: &AdmittedRoot,
@@ -253,8 +258,8 @@ impl SemanticProviderPort for Pr12SemanticProviderAdapter {
     }
 }
 
-impl LspAnalyzerCancellationAuthority for Pr12SemanticProviderAdapter {
+impl LspAnalyzerCancellationAuthority for DaemonSemanticProviderAdapter {
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        Pr12SemanticProviderAdapter::cancel_request(self, root, request_id)
+        DaemonSemanticProviderAdapter::cancel_request(self, root, request_id)
     }
 }

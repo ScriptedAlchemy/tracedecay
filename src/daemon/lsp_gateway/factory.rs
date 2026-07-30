@@ -6,14 +6,10 @@ use tokio::runtime::Handle;
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerCancellationAdapter, AnalyzerCancellationPort,
     CanonicalContextProjectionAuthority, CanonicalDiagnosticSnapshotAuthority,
-    ContextProjectionAdapter, ContextProjectionPort, DiagnosticSnapshotAdapter,
-    DiagnosticSnapshotPort, FeedbackCycleAdapter, FeedbackCyclePort, FeedbackCycleRuntimePort,
-    GatewayCapabilities, LspAnalyzerCancellationAuthority, SemanticProviderPort,
-    UpstreamCapabilities,
-};
-
-pub use tracedecay_lsp::{
-    DaemonLspProviderBundle, DaemonLspProviderFactory, DaemonLspRuntimeSession,
+    ContextProjectionAdapter, ContextProjectionPort, DaemonLspProviderBundle,
+    DaemonLspRuntimeSession, DiagnosticSnapshotAdapter, DiagnosticSnapshotPort,
+    FeedbackCycleAdapter, FeedbackCyclePort, FeedbackCycleRuntimePort, GatewayCapabilities,
+    LspAnalyzerCancellationAuthority, SemanticProviderPort, UpstreamCapabilities,
 };
 
 use super::runtime_adapters::runtime_spawner;
@@ -84,6 +80,3 @@ impl DaemonLspSessionFactory {
         self.provider_bundle().into_session(root)
     }
 }
-
-/// Compatibility name retained for existing daemon/application call sites.
-pub type Pr12LspSessionFactory = DaemonLspSessionFactory;

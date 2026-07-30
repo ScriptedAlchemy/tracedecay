@@ -13,7 +13,7 @@
 
 mod cache;
 mod fingerprint;
-pub mod lsp;
+pub(crate) mod lsp;
 pub mod python;
 pub mod rust;
 pub mod typescript;
