@@ -1400,30 +1400,12 @@ async fn migrate_v8(conn: &Transaction) -> Result<()> {
 ///    The column is backfilled from existing `Contains` rows, then those
 ///    rows are deleted. After v9, the truth for "who contains node X" is
 ///    `nodes.parent_id`, not the edges table — readers should prefer it.
+///
+/// Precreated `read_cache` objects and V9 indexes are never accepted via
+/// `IF NOT EXISTS`. Exact column, primary-key, and index SQL contracts must
+/// match before user_version advances to 9.
 async fn migrate_v9(conn: &Transaction) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS read_cache (
-            project_id   TEXT NOT NULL,
-            session_id   TEXT NOT NULL,
-            file_path    TEXT NOT NULL,
-            mtime_ns     INTEGER NOT NULL,
-            mode         TEXT NOT NULL,
-            args_hash    TEXT NOT NULL,
-            digest       TEXT NOT NULL,
-            body         BLOB NOT NULL,
-            token_count  INTEGER NOT NULL,
-            created_at   INTEGER NOT NULL,
-            PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_read_cache_session
-            ON read_cache(session_id, created_at);",
-    )
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("v9: failed to create read_cache table: {e}"),
-        operation: "migrate_v9".to_string(),
-    })?;
+    ensure_exact_v9_read_cache(conn).await?;
 
     // V9 and its user_version publication execute in one immediate
     // transaction. A valid V8 source therefore always lacks this column;
@@ -1459,17 +1441,298 @@ async fn migrate_v9(conn: &Transaction) -> Result<()> {
             operation: "migrate_v9".to_string(),
         })?;
 
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id)",
-        (),
+    ensure_exact_schema_object(
+        conn,
+        "index",
+        "idx_nodes_parent_id",
+        V9_NODES_PARENT_INDEX_SQL,
     )
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("v9: failed to create idx_nodes_parent_id: {e}"),
-        operation: "migrate_v9".to_string(),
-    })?;
+    .await?;
 
     Ok(())
+}
+
+const V9_READ_CACHE_TABLE_SQL: &str = "CREATE TABLE read_cache (
+            project_id   TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            file_path    TEXT NOT NULL,
+            mtime_ns     INTEGER NOT NULL,
+            mode         TEXT NOT NULL,
+            args_hash    TEXT NOT NULL,
+            digest       TEXT NOT NULL,
+            body         BLOB NOT NULL,
+            token_count  INTEGER NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
+        )";
+
+const V9_READ_CACHE_SESSION_INDEX_SQL: &str =
+    "CREATE INDEX idx_read_cache_session ON read_cache(session_id, created_at)";
+
+const V9_NODES_PARENT_INDEX_SQL: &str = "CREATE INDEX idx_nodes_parent_id ON nodes(parent_id)";
+
+const V9_READ_CACHE_COLUMNS: &[(&str, &str)] = &[
+    ("project_id", "TEXT"),
+    ("session_id", "TEXT"),
+    ("file_path", "TEXT"),
+    ("mtime_ns", "INTEGER"),
+    ("mode", "TEXT"),
+    ("args_hash", "TEXT"),
+    ("digest", "TEXT"),
+    ("body", "BLOB"),
+    ("token_count", "INTEGER"),
+    ("created_at", "INTEGER"),
+];
+
+const V9_READ_CACHE_PRIMARY_KEY: &[&str] = &[
+    "project_id",
+    "session_id",
+    "file_path",
+    "mode",
+    "args_hash",
+];
+
+async fn ensure_exact_v9_read_cache(conn: &Transaction) -> Result<()> {
+    match schema_object_sql(conn, "table", "read_cache").await? {
+        Some(sql) => validate_exact_v9_read_cache(conn, &sql).await?,
+        None => {
+            conn.execute(V9_READ_CACHE_TABLE_SQL, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("v9: failed to create read_cache table: {e}"),
+                    operation: "migrate_v9".to_string(),
+                })?;
+            let sql = schema_object_sql(conn, "table", "read_cache")
+                .await?
+                .ok_or_else(|| TraceDecayError::Database {
+                    message: "v9: read_cache table missing after create".to_string(),
+                    operation: "migrate_v9".to_string(),
+                })?;
+            validate_exact_v9_read_cache(conn, &sql).await?;
+        }
+    }
+    ensure_exact_schema_object(
+        conn,
+        "index",
+        "idx_read_cache_session",
+        V9_READ_CACHE_SESSION_INDEX_SQL,
+    )
+    .await
+}
+
+async fn validate_exact_v9_read_cache(conn: &Transaction, sql: &str) -> Result<()> {
+    if normalize_schema_sql(sql) != normalize_schema_sql(V9_READ_CACHE_TABLE_SQL) {
+        return Err(TraceDecayError::Database {
+            message: "v9: precreated read_cache table SQL does not match the exact contract"
+                .to_string(),
+            operation: "migrate_v9".to_string(),
+        });
+    }
+
+    let mut rows = conn
+        .query("PRAGMA table_info(read_cache)", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache table_info: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+        message: format!("v9: failed to iterate read_cache table_info: {e}"),
+        operation: "migrate_v9".to_string(),
+    })? {
+        let name = row.get::<String>(1).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache column name: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        let col_type = row.get::<String>(2).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache column type: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        let notnull = row.get::<i64>(3).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache column nullability: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        if notnull != 1 {
+            return Err(TraceDecayError::Database {
+                message: format!("v9: read_cache column '{name}' must be NOT NULL"),
+                operation: "migrate_v9".to_string(),
+            });
+        }
+        columns.push((name, col_type.to_ascii_uppercase()));
+    }
+    let expected = V9_READ_CACHE_COLUMNS
+        .iter()
+        .map(|(name, col_type)| ((*name).to_owned(), (*col_type).to_owned()))
+        .collect::<Vec<_>>();
+    if columns != expected {
+        return Err(TraceDecayError::Database {
+            message: "v9: precreated read_cache columns do not match the exact contract"
+                .to_string(),
+            operation: "migrate_v9".to_string(),
+        });
+    }
+
+    let mut pk_rows = conn
+        .query("PRAGMA index_list(read_cache)", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache index_list: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    let mut pk_index = None;
+    while let Some(row) = pk_rows
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to iterate read_cache index_list: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?
+    {
+        let name = row.get::<String>(1).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache index name: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        let unique = row.get::<i64>(2).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache index uniqueness: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        let origin = row.get::<String>(3).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache index origin: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        if origin == "pk" {
+            if unique != 1 {
+                return Err(TraceDecayError::Database {
+                    message: "v9: read_cache primary key must be unique".to_string(),
+                    operation: "migrate_v9".to_string(),
+                });
+            }
+            pk_index = Some(name);
+            break;
+        }
+    }
+    let Some(pk_index) = pk_index else {
+        return Err(TraceDecayError::Database {
+            message: "v9: read_cache primary key is missing".to_string(),
+            operation: "migrate_v9".to_string(),
+        });
+    };
+
+    let pk_index_literal = pk_index.replace('\'', "''");
+    let mut pk_info = conn
+        .query(&format!("PRAGMA index_info('{pk_index_literal}')"), ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache primary key columns: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    let mut pk_columns = Vec::new();
+    while let Some(row) = pk_info
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to iterate read_cache primary key columns: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?
+    {
+        pk_columns.push(row.get::<String>(2).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read read_cache primary key column: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?);
+    }
+    if pk_columns != V9_READ_CACHE_PRIMARY_KEY {
+        return Err(TraceDecayError::Database {
+            message: "v9: read_cache primary key columns do not match the exact contract"
+                .to_string(),
+            operation: "migrate_v9".to_string(),
+        });
+    }
+    Ok(())
+}
+
+async fn ensure_exact_schema_object(
+    conn: &Transaction,
+    object_type: &str,
+    name: &str,
+    expected_sql: &str,
+) -> Result<()> {
+    match schema_object_sql(conn, object_type, name).await? {
+        Some(sql) => {
+            if normalize_schema_sql(&sql) != normalize_schema_sql(expected_sql) {
+                return Err(TraceDecayError::Database {
+                    message: format!(
+                        "v9: precreated {object_type} '{name}' SQL does not match the exact contract"
+                    ),
+                    operation: "migrate_v9".to_string(),
+                });
+            }
+            Ok(())
+        }
+        None => {
+            conn.execute(expected_sql, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("v9: failed to create {object_type} '{name}': {e}"),
+                    operation: "migrate_v9".to_string(),
+                })?;
+            let sql = schema_object_sql(conn, object_type, name)
+                .await?
+                .ok_or_else(|| TraceDecayError::Database {
+                    message: format!("v9: {object_type} '{name}' missing after create"),
+                    operation: "migrate_v9".to_string(),
+                })?;
+            if normalize_schema_sql(&sql) != normalize_schema_sql(expected_sql) {
+                return Err(TraceDecayError::Database {
+                    message: format!(
+                        "v9: created {object_type} '{name}' SQL does not match the exact contract"
+                    ),
+                    operation: "migrate_v9".to_string(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn schema_object_sql(
+    conn: &Transaction,
+    object_type: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            (object_type, name),
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to probe sqlite_master for {object_type} '{name}': {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+        message: format!("v9: failed to read sqlite_master row for {object_type} '{name}': {e}"),
+        operation: "migrate_v9".to_string(),
+    })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(row.get::<String>(0).map_err(|e| TraceDecayError::Database {
+        message: format!("v9: failed to decode sqlite_master sql for {object_type} '{name}': {e}"),
+        operation: "migrate_v9".to_string(),
+    })?))
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    let collapsed = sql
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    collapsed
+        .replace("createtableifnotexists", "createtable")
+        .replace("createindexifnotexists", "createindex")
+        .replace("createuniqueindexifnotexists", "createuniqueindex")
 }
 
 // ---------------------------------------------------------------------------

@@ -159,6 +159,117 @@ async fn v8_to_v9_rejects_preadded_parent_column_and_rolls_back() {
     );
 }
 
+#[tokio::test]
+async fn v8_to_v9_rejects_malformed_precreated_read_cache_table() {
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
+        .await
+        .expect("build real v8 schema");
+    conn.execute_batch(
+        "CREATE TABLE read_cache (
+            project_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            PRIMARY KEY (project_id, session_id)
+        );",
+    )
+    .await
+    .expect("plant malformed read_cache");
+
+    let error = crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
+        .await
+        .expect_err("malformed read_cache must fail closed");
+
+    assert!(
+        error.to_string().contains("read_cache"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(
+        get_user_version(&conn).await,
+        8,
+        "failed v9 migration must not publish its version"
+    );
+    assert!(
+        !column_exists(&conn, "nodes", "parent_id").await,
+        "failed v9 migration must not leave parent_id behind"
+    );
+}
+
+#[tokio::test]
+async fn v8_to_v9_rejects_wrong_read_cache_session_index() {
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
+        .await
+        .expect("build real v8 schema");
+    conn.execute_batch(
+        "CREATE TABLE read_cache (
+            project_id   TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            file_path    TEXT NOT NULL,
+            mtime_ns     INTEGER NOT NULL,
+            mode         TEXT NOT NULL,
+            args_hash    TEXT NOT NULL,
+            digest       TEXT NOT NULL,
+            body         BLOB NOT NULL,
+            token_count  INTEGER NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
+        );
+        CREATE INDEX idx_read_cache_session ON read_cache(file_path);",
+    )
+    .await
+    .expect("plant wrong read_cache index");
+
+    let error = crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
+        .await
+        .expect_err("wrong read_cache index must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("idx_read_cache_session"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(get_user_version(&conn).await, 8);
+}
+
+#[tokio::test]
+async fn v8_to_v9_rejects_wrong_nodes_parent_index() {
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
+        .await
+        .expect("build real v8 schema");
+    conn.execute_batch(
+        "CREATE TABLE read_cache (
+            project_id   TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            file_path    TEXT NOT NULL,
+            mtime_ns     INTEGER NOT NULL,
+            mode         TEXT NOT NULL,
+            args_hash    TEXT NOT NULL,
+            digest       TEXT NOT NULL,
+            body         BLOB NOT NULL,
+            token_count  INTEGER NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
+        );
+        CREATE INDEX idx_read_cache_session ON read_cache(session_id, created_at);
+        CREATE INDEX idx_nodes_parent_id ON nodes(id);",
+    )
+    .await
+    .expect("plant wrong parent index before v9 column exists");
+
+    let error = crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
+        .await
+        .expect_err("wrong parent index must fail closed");
+
+    assert!(
+        error.to_string().contains("idx_nodes_parent_id")
+            || error.to_string().contains("parent_id"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(get_user_version(&conn).await, 8);
+}
+
 /// migrate returns false when already at the latest version.
 #[tokio::test]
 async fn test_migrate_already_latest_returns_false() {
