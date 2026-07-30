@@ -175,6 +175,39 @@ fn initial_authority_publication_does_not_require_an_old_writer_fence() {
 }
 
 #[test]
+fn exact_query_snapshot_is_atomic_and_publication_gated() {
+    let store = RusqliteRemoteAuthorityStoreV1::open_in_memory().unwrap();
+    let binding = binding(4);
+    let writer = writer(4, 11);
+    let frontier = watermark(&binding, 9);
+    store
+        .initialize_authority(&writer, &binding, 11, &frontier)
+        .unwrap();
+
+    let (state, stored_binding, stored_frontier) = store.query_authority_snapshot(&writer).unwrap();
+    assert!(matches!(
+        state,
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Partial { .. }
+    ));
+    assert_eq!(stored_binding, binding);
+    assert_eq!(stored_frontier, Some(frontier.clone()));
+
+    store
+        .install_fence("writer", &writer, &binding, 11)
+        .unwrap();
+    store
+        .publish_and_enable_serving(&binding, &writer, 11, &frontier, &["writer"])
+        .unwrap();
+    let (state, stored_binding, stored_frontier) = store.query_authority_snapshot(&writer).unwrap();
+    assert_eq!(
+        state,
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone())
+    );
+    assert_eq!(stored_binding, binding);
+    assert_eq!(stored_frontier, Some(frontier));
+}
+
+#[test]
 fn publication_waits_for_every_durable_fence_and_rejects_old_epochs() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("remote-authority.sqlite");
