@@ -104,3 +104,13 @@ fn remote_query_request_rejects_invalid_shard_identifiers() {
     invalid.generation_id = " generation.remote-query ".to_owned();
     assert!(request(vec![invalid]).validate().is_err());
 }
+
+#[test]
+fn remote_query_request_rejects_unknown_wire_fields() {
+    let mut json = serde_json::to_value(request(vec![shard(1)])).expect("serialize request");
+    json.as_object_mut()
+        .expect("object request")
+        .insert("unexpected".to_owned(), serde_json::Value::Null);
+
+    assert!(serde_json::from_value::<RemoteQueryRequestV1>(json).is_err());
+}
