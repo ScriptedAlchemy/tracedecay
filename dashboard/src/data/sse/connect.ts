@@ -146,8 +146,7 @@ function decodeDashboardEvent(value: unknown): SseEventEnvelope | null {
   ) {
     return null;
   }
-  const generation = Number(value.run_id.split('-').at(-1));
-  if (!Number.isSafeInteger(generation) || generation < 0) return null;
+  const generation = streamGeneration(value.run_id);
   const watermark = value.source_watermark;
   let watermarkValue = '';
   if (
@@ -175,6 +174,27 @@ function decodeDashboardEvent(value: unknown): SseEventEnvelope | null {
     coverage: value.coverage,
     payload: value.kind,
   };
+}
+
+/**
+ * The stream epoch a run id carries, or zero when it carries none.
+ *
+ * Poll lanes mint a run id per connection (`run-<pid>-<micros>`) and its tail is
+ * the epoch: a reconnect raises it and the reducer reseeds against the new one.
+ * The durable activity lane has no epoch to raise. It publishes under one
+ * constant run id and orders itself by the monotone row id it puts in
+ * `event_revision`, so its tail is not a number.
+ *
+ * Refusing those frames is not a stricter check, it is a silent outage: it drops
+ * every hook, session-ingest, code-index, tool-call and task frame the daemon
+ * sends, while `receive` has already reported the link as live. A run id with no
+ * epoch is a lane that never rotates one, which is generation zero — and the
+ * reducer still orders the lane by revision, so nothing is loosened by saying
+ * so. Malformation is caught by the field checks above, which this never was.
+ */
+function streamGeneration(runId: string): number {
+  const epoch = Number(runId.split('-').at(-1));
+  return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
