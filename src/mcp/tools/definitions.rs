@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension};
 
 use super::ToolDefinition;
-use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
+use super::binding::registered_project_reader_tool_names;
 
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
@@ -690,7 +690,7 @@ fn matching_tool_definitions_mut<'a>(
 
 fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]) {
     for definition in
-        matching_tool_definitions_mut(definitions, REGISTERED_PROJECT_READER_TOOL_NAMES)
+        matching_tool_definitions_mut(definitions, &registered_project_reader_tool_names())
     {
         let Some(properties) = definition.input_schema.get_mut("properties") else {
             continue;

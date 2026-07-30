@@ -4,9 +4,9 @@
 //! - `definitions`: JSON Schema tool descriptors (`def_*` functions)
 //! - `handlers`: tool call implementations (`handle_*` functions)
 
+mod binding;
 mod definitions;
 pub mod dispatch;
-mod dispatch_policy;
 pub(crate) mod handlers;
 pub(crate) mod render;
 pub(crate) mod renderers;
@@ -26,7 +26,7 @@ pub use definitions::{
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };
-pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
+pub(crate) use binding::tool_dispatches_registered_project_reader;
 pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;
 pub(crate) use handlers::hook_runtime::structured_hook_error_data;
 pub(crate) use handlers::memory::handle_user_memory_tool;
