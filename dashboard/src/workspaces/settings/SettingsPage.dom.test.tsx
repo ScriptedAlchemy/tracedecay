@@ -644,6 +644,46 @@ describe('Settings responsive controls', () => {
     expect(within(navigation).getByRole('button', { name: /User/ })).toBeTruthy();
     expect(within(navigation).getByRole('button', { name: /Environment/ })).toBeTruthy();
   });
+
+  /**
+   * The premise that keeps section ids safe to put in a selector.
+   *
+   * `jumpTo` builds `[data-section=…]` out of a section id, which is only safe
+   * because the ids are the keys of `SettingsPayloadV1Schema` — a closed
+   * `z.object` over Rust field names, which strips everything else before the
+   * surface sees it. So the reviewed concern (a daemon-chosen key containing a
+   * quote or a backslash) is unreachable today, and this pins the reason
+   * rather than staging a payload production cannot produce: if the generated
+   * schema ever stops stripping, or grows a map-valued section, this fails.
+   *
+   * Pinned here rather than defended with `CSS.escape` at the call site,
+   * because escaping would buy nothing against a closed contract and would
+   * introduce a real dependency on a global jsdom does not define.
+   */
+  it('admits no section id that a selector could not hold', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const envelope = settings();
+        const body = settingsBody(envelope);
+        body['weird"key'] = { enabled: true };
+        body['back\\slash'] = { enabled: true };
+        return jsonResponse(envelope);
+      }),
+    );
+    renderSettings();
+    await screen.findByRole('navigation', { name: 'Configuration groups' });
+
+    const ids = [...document.querySelectorAll('[data-section]')].map(
+      (node) => node.getAttribute('data-section') ?? '',
+    );
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      // A CSS identifier, so the selector `jumpTo` builds around it parses.
+      expect(id).toMatch(/^[a-z_][a-z0-9_]*$/i);
+      expect(() => document.querySelector(`[data-section="${id}"]`)).not.toThrow();
+    }
+  });
 });
 
 function renderSettings() {

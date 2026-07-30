@@ -354,7 +354,13 @@ export function AutomationsPage() {
     // when a queue is unreadable and the reason paragraph appears. The column
     // takes the tab stop itself, the same remedy Explorer's filter rail uses.
     <div tabIndex={0} className="flex h-full flex-col overflow-auto">
-      <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
+      {/* `flex-wrap`, because the scheduler control carries a sentence rather
+        * than a chip: under a read-only scope it explains which project a
+        * write would reach and how to reach it, and that runs to two lines of
+        * prose. Held on one row it laid the remedy out past the right edge at
+        * 320 CSS px and at 400% zoom — the reader saw a disabled button and
+        * the first few words of the way to enable it. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Automations</h1>
         {scheduler.data?.outcome === 'ok' ? (
           <>
@@ -708,7 +714,7 @@ function SchedulerControl({
   // a disabled button with the explanation elsewhere reads as a broken button.
   const blocked = writability.state !== 'writable';
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       <button
         type="button"
         disabled={pending || blocked}
@@ -737,7 +743,9 @@ function SchedulerControl({
       <span
         id="scheduler-control-scope"
         data-scope-writability={writability.state}
-        className="text-2xs text-text-secondary"
+        // `min-w-0`: the sentence is the widest thing on this row and has to
+        // be allowed to wrap inside it rather than push itself off the edge.
+        className="min-w-0 text-2xs text-text-secondary"
       >
         {scopeControlReason(writability)}
       </span>

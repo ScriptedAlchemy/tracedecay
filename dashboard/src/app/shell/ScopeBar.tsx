@@ -54,11 +54,19 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
     // taken out — and put the palette, scope and theme controls under the
     // minimum together. Sized from the token plus that hairline, so the
     // content box lands exactly on 44. `NavRail`'s brand block matches it.
-    <header className="flex h-[calc(var(--touch-target-min)+1px)] shrink-0 items-stretch border-b border-edge-subtle bg-surface-1">
-      <div
-        className="flex min-w-0 flex-1 items-stretch overflow-hidden"
-        aria-label="Active scope"
-      >
+    //
+    // A minimum rather than a height: every cell here stacks a legend over a
+    // value, so at 200% text zoom the pair is taller than 44px. Pinned to
+    // exactly 44 the bar could not take them, and the clip below finished the
+    // job — the project name and its `unverified`/`not in registry` caveat
+    // were cut off at precisely the zoom level someone would be using in order
+    // to read them.
+    <header className="flex min-h-[calc(var(--touch-target-min)+1px)] shrink-0 items-stretch border-b border-edge-subtle bg-surface-1">
+      {/* `min-w-0` without `overflow-hidden`: the horizontal containment comes
+        * from `truncate` on the label itself, which shortens the name and
+        * leaves the caveat beside it readable. The clip did the same job
+        * vertically, where nothing wants it. */}
+      <div className="flex min-w-0 flex-1 items-stretch" aria-label="Active scope">
         {scope.kind === 'project' ? (
           <button
             type="button"

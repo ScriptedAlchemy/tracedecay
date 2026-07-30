@@ -150,6 +150,13 @@ function SettingsSurface({
 
   const jumpTo = useCallback((id: string) => {
     const container = scrollRef.current;
+    // Interpolated unescaped, which is safe for a reason worth writing down:
+    // section ids are the keys of `SettingsPayloadV1Schema`, a closed
+    // `z.object` over Rust field names, so Zod has already stripped anything
+    // that is not one of them. Were that not so, a daemon-chosen key holding a
+    // quote would build a selector that does not parse, and `querySelector`
+    // answers an unparseable selector by throwing — inside this handler.
+    // `SettingsPage.dom.test.tsx` pins the premise rather than this line.
     const target = container?.querySelector<HTMLElement>(`[data-section="${id}"]`);
     if (!container || !target) return;
     container.scrollTo({ top: target.offsetTop - 4, behavior: 'auto' });

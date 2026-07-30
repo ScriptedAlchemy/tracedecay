@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
@@ -12,6 +12,23 @@ interface PaletteEntry {
   label: string;
   hint: string;
   action: () => void;
+}
+
+/**
+ * The DOM id of one option row, by position.
+ *
+ * Positional rather than derived from the entry, because a project entry's id
+ * carries its `canonical_root` — a filesystem path, which routinely contains
+ * spaces and may contain quotes or `#`. Interpolated into an `id`, that
+ * produced an attribute HTML forbids whitespace in, and
+ * `aria-activedescendant` is an IDREF: a screen reader could not resolve the
+ * active option for any project checked out under a path with a space in it,
+ * which is the population most likely to be using the palette to switch
+ * between them. The position is the only part of a row that is guaranteed to
+ * be a valid identifier, and it is exactly what the reference needs to name.
+ */
+function optionDomId(index: number): string {
+  return `td-palette-option-${index}`;
 }
 
 /** Command palette (plan 11a): scope-aware search across workspaces (and,
@@ -91,6 +108,25 @@ export function CommandPalette({
     if (open) setQuery('');
   }, [open]);
 
+  // The result list can shrink under a stationary cursor: the registry read
+  // lands (or a `project_registry_changed` invalidation returns fewer rows)
+  // without the query changing, so nothing resets the index. Left past the end,
+  // `aria-activedescendant` points at no element and Enter activates nothing —
+  // a palette that looks focused and does nothing when pressed.
+  useEffect(() => {
+    setActive((current) => Math.min(current, Math.max(filtered.length - 1, 0)));
+  }, [filtered.length]);
+
+  // Keyboard navigation has to move the viewport too. The list is a fixed-height
+  // scroller, so arrowing past the last visible row moved the highlight out of
+  // sight and the reader lost track of what Enter would do.
+  const listRef = useRef<HTMLUListElement>(null);
+  useEffect(() => {
+    listRef.current
+      ?.querySelector(`#${optionDomId(active)}`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [active, filtered.length]);
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -128,20 +164,25 @@ export function CommandPalette({
               role="combobox"
               aria-expanded="true"
               aria-controls="td-palette-list"
-              aria-activedescendant={filtered[active] ? `td-palette-${filtered[active].id}` : undefined}
+              aria-activedescendant={filtered[active] ? optionDomId(active) : undefined}
             />
             <kbd className="flex items-center gap-0.5 text-2xs text-text-muted">
               <CommandIcon aria-hidden size={10} />K
             </kbd>
           </div>
-          <ul id="td-palette-list" role="listbox" className="max-h-72 overflow-auto p-1">
+          <ul
+            id="td-palette-list"
+            ref={listRef}
+            role="listbox"
+            className="max-h-72 overflow-auto p-1"
+          >
             {filtered.length === 0 ? (
               <li className="px-3 py-6 text-center text-sm text-text-muted">No matches</li>
             ) : (
               filtered.map((entry, i) => (
                 <li
                   key={entry.id}
-                  id={`td-palette-${entry.id}`}
+                  id={optionDomId(i)}
                   role="option"
                   aria-selected={i === active}
                   onMouseEnter={() => setActive(i)}
