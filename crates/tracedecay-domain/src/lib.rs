@@ -21,6 +21,7 @@ pub mod retrieval;
 pub mod session;
 pub mod session_derived;
 pub mod work;
+pub mod work_read;
 pub mod workflow;
 
 pub use code_intelligence::*;
@@ -41,4 +42,5 @@ pub use retrieval::*;
 pub use session::*;
 pub use session_derived::*;
 pub use work::*;
+pub use work_read::*;
 pub use workflow::*;
