@@ -94,6 +94,7 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::Codex
         | HostKindV1::CursorDesktop
         | HostKindV1::Hermes
+        | HostKindV1::Kiro
         | HostKindV1::KimiCode
         | HostKindV1::OpenCode => None,
         // Cursor cloud exposes no host registration API to install into. Its
@@ -103,9 +104,7 @@ pub fn unsupported_host_component_set_reason(
         HostKindV1::CursorCloud => {
             Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
         }
-        // Kiro's hook route is degraded by its own native fixture, and the
-        // Cline family has no checked-in evidence admitting a packaged route.
-        HostKindV1::Kiro => Some(HostCapabilityUnavailableReasonV1::NativeFixtureLimited),
+        // The Cline family has no checked-in evidence admitting a packaged route.
         HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
             Some(HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing)
         }
@@ -130,8 +129,10 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         HostKindV1::Hermes | HostKindV1::KimiCode => {
             vec![HostBundleComponentV1::Core]
         }
+        // Kiro's production integration owns a supported MCP registration.
+        // Its hook route stays degraded and therefore is not part of Core.
+        HostKindV1::Kiro => vec![HostBundleComponentV1::ContextMcp],
         HostKindV1::CursorCloud
-        | HostKindV1::Kiro
         | HostKindV1::ClineFamily
         | HostKindV1::Cline
         | HostKindV1::RooCode
@@ -586,6 +587,13 @@ fn component_assets(
             ".cursor/extensions/tracedecay.cursor-native-0.0.0",
             super::plugin_bundle::cursor_native_extension_files(),
         ),
+        (HostKindV1::Kiro, HostBundleComponentV1::ContextMcp) => (
+            ".kiro",
+            vec![(
+                "settings/mcp.json",
+                r#"{"mcpServers":{"tracedecay":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}}"#,
+            )],
+        ),
         (HostKindV1::Kiro, HostBundleComponentV1::Core) => (
             ".kiro/tracedecay",
             vec![(
@@ -638,22 +646,18 @@ fn component_assets(
         .map(|(path, body)| {
             (
                 format!("{prefix}/{path}"),
-                render_compiled_asset(body).into_bytes(),
+                render_compiled_asset(body, tracedecay_bin).into_bytes(),
             )
         })
         .collect())
 }
 
-fn render_compiled_asset(body: &str) -> String {
-    let executable = std::env::current_exe().ok().map_or_else(
-        || "tracedecay".to_string(),
-        |path| path.to_string_lossy().into_owned(),
-    );
+fn render_compiled_asset(body: &str, tracedecay_bin: &str) -> String {
     let encoded =
-        serde_json::to_string(&executable).unwrap_or_else(|_| "\"tracedecay\"".to_string());
-    let sync = serde_json::to_string(&super::hook_command(&executable, "hook-kimi-event"))
+        serde_json::to_string(tracedecay_bin).unwrap_or_else(|_| "\"tracedecay\"".to_string());
+    let sync = serde_json::to_string(&super::hook_command(tracedecay_bin, "hook-kimi-event"))
         .unwrap_or_else(|_| encoded.clone());
-    let stop = serde_json::to_string(&super::hook_command(&executable, "hook-kimi-event"))
+    let stop = serde_json::to_string(&super::hook_command(tracedecay_bin, "hook-kimi-event"))
         .unwrap_or_else(|_| encoded.clone());
     body.replace("\"__TRACEDECAY_BIN__\"", &encoded)
         .replace("\"__TRACEDECAY_SYNC__\"", &sync)
@@ -720,6 +724,58 @@ mod tests {
                     .contents
                     .iter()
                     .all(|asset| !asset.relative_path.contains("host-components"))
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_native_diagnostics_render_the_resolved_installed_binary() {
+        let installed = "/opt/tracedecay-distinct/bin/tracedecay";
+        let assets = component_assets(
+            HostKindV1::CursorDesktop,
+            HostBundleComponentV1::Agent,
+            installed,
+        )
+        .unwrap();
+        let extension = assets
+            .iter()
+            .find(|(path, _)| path.ends_with("/dist/extension.js"))
+            .expect("Cursor native diagnostics extension is packaged");
+        let body = String::from_utf8(extension.1.clone()).unwrap();
+
+        assert!(body.contains(&serde_json::to_string(installed).unwrap()));
+        assert!(!body.contains("__TRACEDECAY_BIN__"));
+        if let Ok(running) = std::env::current_exe() {
+            let running = running.to_string_lossy();
+            assert!(
+                !body.contains(running.as_ref()),
+                "compiled Cursor assets must not embed the running test executable"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_context_mcp_renders_the_resolved_installed_binary() {
+        let installed = "/opt/tracedecay-distinct/bin/tracedecay";
+        let assets = component_assets(
+            HostKindV1::OpenCode,
+            HostBundleComponentV1::ContextMcp,
+            installed,
+        )
+        .unwrap();
+        let registration = assets
+            .iter()
+            .find(|(path, _)| path.ends_with("opencode.registration.json"))
+            .expect("OpenCode Context MCP registration is packaged");
+        let body = String::from_utf8(registration.1.clone()).unwrap();
+
+        assert!(body.contains(&serde_json::to_string(installed).unwrap()));
+        assert!(!body.contains("__TRACEDECAY_BIN__"));
+        if let Ok(running) = std::env::current_exe() {
+            let running = running.to_string_lossy();
+            assert!(
+                !body.contains(running.as_ref()),
+                "compiled OpenCode assets must not embed the running test executable"
             );
         }
     }
@@ -1052,18 +1108,36 @@ mod tests {
     }
 
     #[test]
-    fn kiro_degraded_hook_route_is_not_packaged_as_supported() {
-        assert!(default_components(HostKindV1::Kiro).is_empty());
+    fn kiro_packages_only_its_supported_mcp_registration() {
+        assert_eq!(
+            unsupported_host_component_set_reason(HostKindV1::Kiro),
+            None
+        );
+        assert_eq!(
+            default_components(HostKindV1::Kiro),
+            vec![HostBundleComponentV1::ContextMcp]
+        );
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::Kiro,
+            HostBundleComponentV1::ContextMcp,
+            0,
+            "/opt/tracedecay-distinct/bin/tracedecay",
+        )
+        .unwrap();
+        assert_eq!(bundle.contents.len(), 1);
+        assert_eq!(bundle.contents[0].relative_path, ".kiro/settings/mcp.json");
+        let mcp: serde_json::Value = serde_json::from_slice(&bundle.contents[0].bytes).unwrap();
+        assert_eq!(
+            mcp["mcpServers"]["tracedecay"]["command"],
+            "/opt/tracedecay-distinct/bin/tracedecay"
+        );
         assert_eq!(
             verified_embedded_host_component_set(
                 HostKindV1::Kiro,
                 &[HostBundleComponentV1::Core],
                 0
             ),
-            Err(HostBundleRegistryError::HostComponentSetUnavailable {
-                host: HostKindV1::Kiro,
-                reason: HostCapabilityUnavailableReasonV1::NativeFixtureLimited,
-            })
+            Err(HostBundleRegistryError::Incompatible)
         );
     }
 
