@@ -392,6 +392,16 @@ impl ExactMigrationSourceIdentity {
         }
         Ok(identity)
     }
+
+    pub fn validate(&self) -> Result<(), MigrationContractError> {
+        if self.project_id.is_empty()
+            || self.source_generation.is_empty()
+            || self.schema_id != LAST_RELEASED_SCHEMA_ID
+        {
+            return Err(MigrationContractError::SourceSchemaMismatch);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -428,6 +438,18 @@ impl VerifiedBackupIdentity {
         }
         Ok(backup)
     }
+
+    pub fn validate(&self) -> Result<(), MigrationContractError> {
+        self.source.validate()?;
+        if self.backup_id.is_empty()
+            || self.archive_id.is_empty()
+            || self.digest == [0; 32]
+            || self.verified_at <= 0
+        {
+            return Err(MigrationContractError::BackupNotVerified);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -463,6 +485,18 @@ impl CutoverPublicationReceipt {
             return Err(MigrationContractError::PublicationInvalid);
         }
         Ok(receipt)
+    }
+
+    pub fn validate(&self) -> Result<(), MigrationContractError> {
+        self.source.validate()?;
+        if self.receipt_id.is_empty()
+            || self.target_schema_id != FINAL_V2_SCHEMA_ID
+            || self.authority_cas_receipt_id.is_empty()
+            || self.published_at <= 0
+        {
+            return Err(MigrationContractError::PublicationInvalid);
+        }
+        Ok(())
     }
 }
 
@@ -584,6 +618,11 @@ impl DurableMigrationCheckpoint {
     }
 
     pub fn validate(&self) -> Result<(), MigrationContractError> {
+        self.source.validate()?;
+        self.backup.validate()?;
+        if let Some(publication) = &self.publication {
+            publication.validate()?;
+        }
         if self.checkpoint_id.is_empty()
             || self.migration_id.is_empty()
             || self.prepared_at <= self.backup.verified_at
