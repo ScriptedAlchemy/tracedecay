@@ -317,12 +317,12 @@ mod config_backend_tests {
         RetrievalRuntimeCompatibilityV1, SemanticCompatibilityPinsV1,
         SemanticResourceRequirementV1,
     };
-    use crate::query::retrieval::semantic::SemanticCalibrationProfileV1;
     use crate::search_eval::{
         DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
         DirectQualityMetricsV1, DirectRatioMetricV1, OptionalStageMeasurementV1,
         OptionalStageMeasurementsV1,
     };
+    use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 
     fn typed_id<T>(value: &str) -> T
     where
