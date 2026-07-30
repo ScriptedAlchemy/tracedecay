@@ -239,6 +239,23 @@ class SampleSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(SchemaValidationError, "consumer"):
             validate_sample(sample)
 
+    def test_unavailable_incident_can_record_no_daemon_to_survive(self) -> None:
+        sample = valid_sample()
+        sample["availability"] = {
+            "state": "unavailable",
+            "detail": "daemon socket is absent",
+        }
+        sample["lifecycle"]["daemon_survived"] = None
+        sample["outcome"] = {
+            "status": "error",
+            "expected_digest": "a" * 64,
+            "actual_digest": "a" * 64,
+            "result_digest": "a" * 64,
+            "error": "expected daemon unavailable",
+        }
+
+        self.assertIs(validate_sample(sample), sample)
+
     def test_stable_workload_identity_supports_every_crate_lane_and_state(self) -> None:
         for crate_id in CRATE_LANES:
             with self.subTest(crate_id=crate_id):

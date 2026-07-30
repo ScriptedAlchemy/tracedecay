@@ -291,13 +291,20 @@ def incident_catalog_document() -> dict[str, Any]:
                 "required_observations": list(workload.required_observations),
                 "sample_count": workload.sample_count,
                 "slo_gate": workload.slo_gate,
-                "availability": {
-                    "state": "unavailable",
-                    "detail": (
-                        "baseline/treatment capture waits for committed product "
-                        "fix and mounted production route"
-                    ),
-                },
+                "availability": (
+                    {
+                        "state": "available",
+                        "detail": "wired product command: hook-cursor-after-shell",
+                    }
+                    if workload.id == "missing-daemon-after-shell"
+                    else {
+                        "state": "unavailable",
+                        "detail": (
+                            "baseline/treatment capture waits for committed "
+                            "product fix and mounted production route"
+                        ),
+                    }
+                ),
             }
             for workload in validate_incident_workloads()
         ],

@@ -108,9 +108,17 @@ class IncidentWorkloadCatalogTest(unittest.TestCase):
             {"p95_minimum_samples": 40, "p99_minimum_samples": 100},
         )
         self.assertEqual(document["evidence_class"], "n=1_regression_only")
+        availability = {
+            item["id"]: item["availability"]["state"]
+            for item in document["workloads"]
+        }
+        self.assertEqual(availability["missing-daemon-after-shell"], "available")
         self.assertTrue(
-            all(item["availability"]["state"] == "unavailable"
-                for item in document["workloads"])
+            all(
+                state == "unavailable"
+                for workload, state in availability.items()
+                if workload != "missing-daemon-after-shell"
+            )
         )
         self.assertTrue(
             all(item["slo_gate"] is False for item in document["workloads"])

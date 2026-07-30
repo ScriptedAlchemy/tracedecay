@@ -68,6 +68,10 @@ without reading real host data.
   capture for development and CI wiring.
 - `incidents --output REPORT` writes the machine-readable final incident
   catalog. Pending product routes remain explicitly unavailable.
+- `incident --binary BIN --workload missing-daemon-after-shell --samples N
+  --output REPORT` invokes the committed `hook-cursor-after-shell` product
+  command against an intentionally absent disposable socket, retaining typed
+  unavailable samples and process-tree cleanup evidence.
 
 All output paths are explicit. Existing output must fail safely rather than be
 overwritten or receive another capture. Runner-generated capture identifiers
@@ -154,11 +158,13 @@ The final incident catalog additionally covers missing-daemon after-shell
 failure and descendant reaping, sustained edit/commit indexing coalescence,
 foreground work under maintenance, diagnostic deduplication/batching, daemon
 steady-state CPU/memory/WAL/I/O/queue/generation, and renderer-consumer event
-counts. Entries remain `n=1` and non-gating until their committed production
-routes are mounted. The paired executable driver currently records the
-integrated CLI exact-query lane; MCP, dashboard, host, storage, maintenance,
-and renderer-consumer entries remain truthfully unavailable until their real
-driver and authoritative evidence are observable.
+counts. The missing-daemon after-shell driver is available through the
+committed product command; the remaining entries stay `n=1`, unavailable, and
+non-gating until their production routes are mounted. The paired executable
+driver currently records the integrated CLI exact-query lane; MCP, dashboard,
+storage, maintenance, diagnostic-flood, and renderer-consumer entries remain
+truthfully unavailable until their real driver and authoritative evidence are
+observable.
 
 Correctness is part of every performance sample. Stable expected-result digests
 ignore explicitly volatile timing metadata while preserving each workload's

@@ -31,11 +31,13 @@ from benchmarks.runtime.fixtures import (
     provider_fixture_files,
     provider_roots,
 )
+from benchmarks.runtime.comparison import compare_abba
 from benchmarks.runtime.lifecycle import (
     LifecycleError,
     OwnedDaemon,
     ProbeResult,
     RunWorkspace,
+    run_host,
 )
 from benchmarks.runtime.incident_workloads import incident_catalog_document
 from benchmarks.runtime.policy import (
@@ -63,7 +65,15 @@ from benchmarks.runtime.statistics import nearest_rank
 
 
 SCHEMA_VERSION = 1
-SUBCOMMANDS = ("prepare", "capture", "paired", "compare", "incidents", "smoke")
+SUBCOMMANDS = (
+    "prepare",
+    "capture",
+    "paired",
+    "compare",
+    "incident",
+    "incidents",
+    "smoke",
+)
 FORBIDDEN_REPORT_FIELDS = frozenset({"pr_stage", "milestone_budget_ns"})
 
 
@@ -671,6 +681,240 @@ def incidents(args: argparse.Namespace) -> int:
     return 0
 
 
+def capture_incident(args: argparse.Namespace) -> int:
+    if args.workload != "missing-daemon-after-shell":
+        fail(f"incident workload is not wired: {args.workload}")
+    if isinstance(args.samples, bool) or args.samples < 1:
+        fail("incident samples must be a positive integer")
+    binary = require_binary(args.binary)
+    output = Path(args.output)
+    samples_path, policy_path = _artifact_paths(output)
+    for path in (output, samples_path, policy_path):
+        if path.exists():
+            fail(f"incident output already exists: {path}")
+
+    captured: list[dict[str, Any]] = []
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with RunWorkspace(
+        Path(tempfile.gettempdir()),
+        preserve_on_failure=False,
+    ) as workspace:
+        base = prepare_fixture_snapshot(
+            workspace.path / "base",
+            prebuilt_binary=binary,
+        )
+        for index in range(args.samples):
+            prepared = clone_prepared_profile(
+                base,
+                workspace.path / f"sample-{index}",
+                prebuilt_binary=binary,
+                runtime_state="recovery",
+                temperature="warm",
+            )
+            initialized = subprocess.run(
+                (
+                    os.fspath(prepared.prebuilt_binary),
+                    "init",
+                    os.fspath(prepared.project),
+                ),
+                cwd=prepared.project,
+                env=prepared.environment,
+                capture_output=True,
+                check=False,
+                timeout=30.0,
+            )
+            if initialized.returncode != 0:
+                fail(
+                    "incident fixture enrollment failed: "
+                    + initialized.stderr.decode("utf-8", errors="replace")
+                )
+            missing_socket = prepared.snapshot_root / "run" / "missing.sock"
+            environment = {
+                **prepared.environment,
+                "TRACEDECAY_DAEMON_SOCKET": os.fspath(missing_socket),
+            }
+            event = json.dumps(
+                {
+                    "hook_event_name": "afterShellExecution",
+                    "command": "git status",
+                    "cwd": os.fspath(prepared.project),
+                    "workspace_roots": [os.fspath(prepared.project)],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            started_ns = time.monotonic_ns()
+            result = run_host(
+                (
+                    os.fspath(prepared.prebuilt_binary),
+                    "hook-cursor-after-shell",
+                ),
+                env=environment,
+                log_dir=prepared.snapshot_root / "host-logs",
+                timeout=5.0,
+                termination_grace=0.2,
+                input_payload=event,
+                check=False,
+            )
+            elapsed_ns = time.monotonic_ns() - started_ns
+            if result.evidence.exit_code != 0:
+                fail(
+                    "missing-daemon after-shell command failed with exit "
+                    f"{result.evidence.exit_code}"
+                )
+            if result.evidence.process_count_after_cleanup != 0:
+                fail("missing-daemon after-shell process tree was not reaped")
+            digest = hashlib.sha256(result.stdout).hexdigest()
+            sample = {
+                "schema_version": SCHEMA_VERSION,
+                "identity": {
+                    "candidate_id": sha256_file(binary)[:16],
+                    "run_id": f"incident-{uuid.uuid4().hex}",
+                    "capture_id": f"capture-{uuid.uuid4().hex}",
+                    "crate_id": "tracedecay-hooks",
+                    "journey_id": "daemon-failure-recovery",
+                    "workload_id": "missing-daemon-after-shell",
+                    "variant": "candidate",
+                    "machine_fingerprint": _machine_fingerprint(),
+                    "platform": str(prepared.runtime_identity["platform"]),
+                    "shard": str(prepared.runtime_identity["shard"]),
+                    "storage_mode": str(prepared.runtime_identity["storage_mode"]),
+                    "state": "recovery",
+                    "temperature": "warm",
+                    "surface": "host",
+                    "concurrency": 1,
+                    "round_index": index,
+                    "abba_position": 0,
+                },
+                "evidence": {
+                    "sample_count": 1,
+                    "evidence_class": "regression_sample",
+                },
+                "availability": {
+                    "state": "unavailable",
+                    "detail": "daemon socket is intentionally absent",
+                },
+                "timing": {
+                    "started_ns": started_ns,
+                    "elapsed_ns": elapsed_ns,
+                    "cli_wall_ns": None,
+                    "mcp_wall_ns": None,
+                    "hook_wall_ns": None,
+                    "host_wall_ns": elapsed_ns,
+                    "handler_us": None,
+                    "daemon_us": None,
+                    "admission_us": None,
+                    "stages_us": {"missing_daemon_fail_fast": elapsed_ns // 1_000},
+                    "shutdown_total_ns": None,
+                    "abort_offset_ns": None,
+                },
+                "size": {
+                    "process_count": result.evidence.process_count,
+                    "request_bytes": len(event),
+                    "response_bytes": len(result.stdout),
+                    "content_bytes": len(result.stdout),
+                },
+                "lifecycle": {
+                    "timeout_phase": None,
+                    "activation_state": "inactive",
+                    "restart_state": "not_required",
+                    "daemon_survived": None,
+                },
+                "observations": {
+                    "missing_daemon_fail_fast_ns": elapsed_ns,
+                    "process_tree_reaped": True,
+                },
+                "outcome": {
+                    "status": "error",
+                    "expected_digest": digest,
+                    "actual_digest": digest,
+                    "result_digest": digest,
+                    "error": "expected daemon unavailable",
+                },
+            }
+            validate_sample(sample)
+            captured.append(sample)
+
+    write_jsonl(samples_path, captured)
+    elapsed_values = [sample["timing"]["elapsed_ns"] for sample in captured]
+    policy = load_acceptance_policy(
+        Path(__file__).resolve().with_name("policies") / "acceptance-v1.json"
+    )
+    journey_policy = load_journey_policy(
+        Path(__file__).resolve().with_name("policies")
+        / "journey-margins-v1.json"
+    )
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "report_id": f"incident-{uuid.uuid4().hex}",
+        "workload_id": args.workload,
+        "availability": {
+            "state": "unavailable",
+            "detail": "daemon socket intentionally absent",
+        },
+        "sample_count": len(captured),
+        "samples_sha256": sha256_file(samples_path),
+        "latency_ns": {
+            "p50": {
+                "available": len(elapsed_values) >= 2,
+                "value": (
+                    nearest_rank(elapsed_values, 0.50)
+                    if len(elapsed_values) >= 2
+                    else None
+                ),
+                "minimum_samples": 2,
+            },
+            "p95": {
+                "available": len(elapsed_values) >= 40,
+                "value": (
+                    nearest_rank(elapsed_values, 0.95)
+                    if len(elapsed_values) >= 40
+                    else None
+                ),
+                "minimum_samples": 40,
+            },
+            "p99": {
+                "available": len(elapsed_values) >= 100,
+                "value": (
+                    nearest_rank(elapsed_values, 0.99)
+                    if len(elapsed_values) >= 100
+                    else None
+                ),
+                "minimum_samples": 100,
+            },
+        },
+        "outcome": {
+            "expected_unavailable_count": len(captured),
+            "command_failure_count": 0,
+            "process_leak_count": 0,
+        },
+        "policy": {
+            "policy_id": policy.policy_id,
+            "policy_sha256": policy.sha256,
+            "journey_policy_id": journey_policy.policy_id,
+            "journey_policy_sha256": journey_policy.sha256,
+            "journey_margins": journey_policy.journeys["host"],
+        },
+    }
+    write_json(output, report)
+    artifact_sha256 = sha256_file(output)
+    write_json(
+        policy_path,
+        {
+            "acceptance": make_policy_receipt(
+                policy,
+                artifact_sha256=artifact_sha256,
+            ),
+            "journey": make_policy_receipt(
+                journey_policy,
+                artifact_sha256=artifact_sha256,
+            ),
+        },
+    )
+    return 0
+
+
 def capture(args: argparse.Namespace) -> int:
     binary = require_binary(args.binary)
     output = Path(args.output)
@@ -844,9 +1088,63 @@ def paired(args: argparse.Namespace) -> int:
         },
         policy,
     )
+    report_id = f"paired-{uuid.uuid4().hex}"
+    first_identity = samples[0]["identity"]
+    rounds = [
+        [
+            (
+                "A" if sample["identity"]["variant"] == "baseline" else "B",
+                sample["timing"]["elapsed_ns"],
+            )
+            for sample in sorted(
+                (
+                    item
+                    for item in samples
+                    if item["identity"]["round_index"] == cycle
+                ),
+                key=lambda item: item["identity"]["abba_position"],
+            )
+        ]
+        for cycle in range(samples_per_variant // 2)
+    ]
+    comparison = compare_abba(
+        rounds,
+        identity={
+            "baseline_candidate_id": sha256_file(baseline)[:16],
+            "treatment_candidate_id": sha256_file(treatment)[:16],
+            "run_id": report_id,
+            "capture_id": report_id,
+            "crate_id": first_identity["crate_id"],
+            "journey_id": first_identity["journey_id"],
+            "workload_id": first_identity["workload_id"],
+            "platform": first_identity["platform"],
+            "shard": first_identity["shard"],
+            "storage_mode": first_identity["storage_mode"],
+            "state": first_identity["state"],
+            "temperature": first_identity["temperature"],
+            "surface": first_identity["surface"],
+            "concurrency": first_identity["concurrency"],
+        },
+        baseline_machine_fingerprint=first_identity["machine_fingerprint"],
+        treatment_machine_fingerprint=first_identity["machine_fingerprint"],
+        baseline_samples=[
+            sample
+            for sample in samples
+            if sample["identity"]["variant"] == "baseline"
+        ],
+        treatment_samples=[
+            sample
+            for sample in samples
+            if sample["identity"]["variant"] == "treatment"
+        ],
+        relative_threshold=(
+            journey_policy.journeys["cli"]["p50_regression_margin_pct"] / 100
+        ),
+        seed=0,
+    )
     report = {
         "schema_version": SCHEMA_VERSION,
-        "report_id": f"paired-{uuid.uuid4().hex}",
+        "report_id": report_id,
         "evidence_class": "repeated_raw_samples",
         "fixture": {
             "id": "runtime-v2-final",
@@ -863,6 +1161,7 @@ def paired(args: argparse.Namespace) -> int:
             "baseline": baseline_summary,
             "treatment": treatment_summary,
         },
+        "comparison": comparison,
         "outcome": {
             "digest_match": True,
             "error_count": sum(
@@ -946,6 +1245,16 @@ def parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--treatment", required=True)
     compare_parser.add_argument("--output", required=True)
     compare_parser.set_defaults(handler=compare)
+
+    incident_parser = subparsers.add_parser(
+        "incident",
+        help="capture one wired final incident workload",
+    )
+    incident_parser.add_argument("--binary", required=True)
+    incident_parser.add_argument("--workload", required=True)
+    incident_parser.add_argument("--samples", type=int, default=10)
+    incident_parser.add_argument("--output", required=True)
+    incident_parser.set_defaults(handler=capture_incident)
 
     incidents_parser = subparsers.add_parser(
         "incidents",

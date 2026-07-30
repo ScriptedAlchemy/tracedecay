@@ -192,6 +192,12 @@ def _boolean(value: Any, path: str) -> bool:
     return value
 
 
+def _optional_boolean(value: Any, path: str) -> bool | None:
+    if value is None:
+        return None
+    return _boolean(value, path)
+
+
 def _number(value: Any, path: str) -> float | int:
     if (
         isinstance(value, bool)
@@ -471,7 +477,7 @@ def validate_sample(document: Any) -> Document:
         "sample.lifecycle.restart_state",
         RESTART_STATES,
     )
-    daemon_survived = _boolean(
+    daemon_survived = _optional_boolean(
         lifecycle["daemon_survived"], "sample.lifecycle.daemon_survived"
     )
 
