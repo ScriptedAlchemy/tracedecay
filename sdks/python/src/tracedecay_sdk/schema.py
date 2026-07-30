@@ -65,6 +65,14 @@ def _validate(value: object, schema: JsonSchema, root: JsonSchema, path: str) ->
     elif schema_type == "integer":
         if not isinstance(value, int) or isinstance(value, bool):
             raise TypeError(f"{path}: expected integer")
+        integer_format = schema.get("format")
+        bounds = {
+            "uint32": (0, 2**32 - 1),
+            "uint64": (0, 2**64 - 1),
+            "int64": (-(2**63), 2**63 - 1),
+        }.get(integer_format if isinstance(integer_format, str) else "")
+        if bounds is not None and not bounds[0] <= value <= bounds[1]:
+            raise TypeError(f"{path}: integer is outside canonical {integer_format}")
         _validate_number(value, schema, path)
     elif schema_type == "number":
         if not isinstance(value, (int, float)) or isinstance(value, bool):

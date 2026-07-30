@@ -28,6 +28,42 @@ ResultT = TypeVar("ResultT")
 _MAX_PAGE_SIZE: Final = 1_000
 _MAX_OPAQUE_BYTES: Final = 4_096
 _MAX_REQUEST_ID_BYTES: Final = 512
+_MAX_RETRY_DELAY_MILLIS: Final = 30_000
+_RETRY_DIRECTIVES: Final = frozenset(
+    {"never", "same_request", "after_delay", "after_revalidate", "after_reconcile"}
+)
+_RETRY_SCOPE_BY_DIRECTIVE: Final = {
+    "never": None,
+    "same_request": "same_request",
+    "after_delay": "same_request",
+    "after_revalidate": "fresh_request",
+    "after_reconcile": "same_operation",
+}
+_OWNING_LAYERS: Final = frozenset({"adapter", "application", "runtime", "port"})
+_TERMINALITIES: Final = frozenset({"pre_admission", "admitted_terminal"})
+_LEGAL_ACTIONS: Final = frozenset(
+    {
+        "correct_request",
+        "reauthorize",
+        "refresh",
+        "retry",
+        "reconcile",
+        "contact_administrator",
+    }
+)
+_PROBLEM_KINDS: Final = frozenset(
+    {
+        "invalid_request",
+        "not_found_or_not_authorized",
+        "conflict",
+        "stale",
+        "unsupported",
+        "unavailable",
+        "saturated",
+        "cancelled",
+        "timed_out",
+    }
+)
 _TERMINAL_EVENTS: Final = frozenset(
     {"completed", "cancelled", "timed_out", "failed", "partial", "effect_unknown"}
 )
@@ -61,17 +97,14 @@ class TraceDecayProblemError(TraceDecayError):
     """A canonical application problem returned by the daemon."""
 
     def __init__(self, status: int, envelope: JsonObject) -> None:
-        problem = _object(envelope.get("problem"), "problem")
-        kind = _string(problem.get("kind"), "problem.kind")
-        code = _string(problem.get("code"), "problem.code")
-        message = _string(problem.get("message"), "problem.message")
+        problem, kind, code, message, retry = _validate_problem_envelope(envelope)
         super().__init__(f"{kind}/{code}: {message}")
         self.status = status
         self.envelope = envelope
         self.problem = problem
         self.kind = kind
         self.code = code
-        self.retry = problem.get("retry")
+        self.retry = retry
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +138,7 @@ class StreamEvent:
     event: str
     event_id: str | None
     data: JsonObject
+    retry_delay_millis: int | None = None
 
     @property
     def terminal(self) -> bool:
@@ -135,8 +169,10 @@ class TraceDecayClient:
             raise TraceDecayProtocolError("base_url must be an absolute HTTP URL")
         if parsed.query or parsed.fragment:
             raise TraceDecayProtocolError("base_url must not contain query or fragment")
-        _opaque(project_id, _MAX_REQUEST_ID_BYTES, "project_id")
-        _opaque(token, _MAX_OPAQUE_BYTES, "token")
+        if parsed.username is not None or parsed.password is not None:
+            raise TraceDecayProtocolError("base_url must not contain credentials")
+        _path_opaque(project_id, _MAX_REQUEST_ID_BYTES, "project_id")
+        _query_opaque(token, _MAX_OPAQUE_BYTES, "token")
         normalized = urlunsplit(
             (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "")
         ).rstrip("/")
@@ -244,7 +280,7 @@ class TraceDecayClient:
 
     def cancel_operation(self, operation_id: str) -> OperationCancellation:
         """Request cancellation of an accepted operation."""
-        _opaque(operation_id, _MAX_REQUEST_ID_BYTES, "operation_id")
+        _path_opaque(operation_id, _MAX_REQUEST_ID_BYTES, "operation_id")
         url = self._lifecycle_url(operation_id, "cancel")
         status, value = self._json_request(url, method="POST")
         if value.get("kind") == "problem":
@@ -267,14 +303,15 @@ class TraceDecayClient:
         self, operation_id: str, options: StreamOptions = StreamOptions()
     ) -> Iterator[StreamEvent]:
         """Stream operation events with bounded opt-in resume."""
-        _opaque(operation_id, _MAX_REQUEST_ID_BYTES, "operation_id")
+        _path_opaque(operation_id, _MAX_REQUEST_ID_BYTES, "operation_id")
         if options.max_reconnects < 0:
             raise TraceDecayProtocolError("max_reconnects must be non-negative")
         next_sequence = options.resume.next_sequence if options.resume else None
         resume_token = options.resume.token if options.resume else None
         if resume_token is not None:
-            _opaque(resume_token, _MAX_OPAQUE_BYTES, "resume token")
+            _query_opaque(resume_token, _MAX_OPAQUE_BYTES, "resume token")
         reconnects = 0
+        reconnect_delay_millis = 0
         while True:
             query: dict[str, str] = {}
             if next_sequence is not None:
@@ -288,7 +325,14 @@ class TraceDecayClient:
                 with self._open(url, method="GET", accept="text/event-stream") as response:
                     media_type = response.headers.get_content_type()
                     if response.status >= 400 and media_type == "application/json":
-                        value = _object(json.load(response), "stream problem")
+                        try:
+                            raw_problem = json.load(response)
+                        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                            raise TraceDecayProtocolError(
+                                "daemon returned malformed stream problem JSON",
+                                status=response.status,
+                            ) from error
+                        value = _object(raw_problem, "stream problem")
                         if value.get("kind") == "problem":
                             raise TraceDecayProblemError(
                                 response.status,
@@ -301,12 +345,28 @@ class TraceDecayClient:
                         )
                     terminal = False
                     for event in _sse_events(response):
+                        if event.retry_delay_millis is not None:
+                            reconnect_delay_millis = min(
+                                event.retry_delay_millis, _MAX_RETRY_DELAY_MILLIS
+                            )
                         if event.event == "open":
+                            if event.event_id is not None:
+                                raise TraceDecayProtocolError(
+                                    "SSE open event must not carry an ID"
+                                )
+                            open_data = _object(event.data.get("data"), "open.data")
+                            if (
+                                _string(
+                                    open_data.get("correlation_id"),
+                                    "open.correlation_id",
+                                )
+                                != operation_id
+                            ):
+                                raise TraceDecayProtocolError(
+                                    "SSE open correlation identity does not match operation"
+                                )
                             frontier = _object(
-                                _object(event.data.get("data"), "open.data").get(
-                                    "frontier"
-                                ),
-                                "open.frontier",
+                                open_data.get("frontier"), "open.frontier"
                             )
                             next_sequence = _integer(
                                 frontier.get("next_sequence"),
@@ -316,9 +376,21 @@ class TraceDecayClient:
                             resume_token = (
                                 None
                                 if token_value is None
-                                else _string(token_value, "frontier.resume_token")
+                                else _query_opaque(
+                                    _string(token_value, "frontier.resume_token"),
+                                    _MAX_OPAQUE_BYTES,
+                                    "frontier.resume_token",
+                                )
                             )
-                        elif event.event_id is not None:
+                            _integer(
+                                frontier.get("retained_from_sequence"),
+                                "frontier.retained_from_sequence",
+                            )
+                        else:
+                            if event.event_id is None:
+                                raise TraceDecayProtocolError(
+                                    "SSE event is missing its canonical ID"
+                                )
                             sequence = _integer(
                                 _object(event.data.get("data"), "event.data").get(
                                     "sequence"
@@ -330,6 +402,8 @@ class TraceDecayClient:
                                     "SSE ID disagrees with canonical sequence"
                                 )
                             next_sequence = sequence + 1
+                            if event.terminal:
+                                _validate_terminal_event(event)
                         yield event
                         if event.terminal:
                             terminal = True
@@ -350,7 +424,7 @@ class TraceDecayClient:
                     "event stream ended without a resumable frontier"
                 )
             reconnects += 1
-            time.sleep(0)
+            time.sleep(reconnect_delay_millis / 1_000)
 
     @property
     def _project_root(self) -> str:
@@ -412,6 +486,7 @@ def _sse_events(response: Any) -> Iterator[StreamEvent]:
     event_name = "message"
     event_id: str | None = None
     data: list[str] = []
+    retry_delay_millis: int | None = None
     for raw_line in response:
         try:
             line = raw_line.decode("utf-8").rstrip("\r\n")
@@ -430,7 +505,7 @@ def _sse_events(response: Any) -> Iterator[StreamEvent]:
                 raise TraceDecayProtocolError(
                     "SSE event name disagrees with JSON payload"
                 )
-            yield StreamEvent(event_name, event_id, payload)
+            yield StreamEvent(event_name, event_id, payload, retry_delay_millis)
             event_name = "message"
             event_id = None
             data.clear()
@@ -445,6 +520,8 @@ def _sse_events(response: Any) -> Iterator[StreamEvent]:
             event_id = field_value
         elif field == "data":
             data.append(field_value)
+        elif field == "retry" and field_value.isascii() and field_value.isdigit():
+            retry_delay_millis = min(int(field_value), _MAX_RETRY_DELAY_MILLIS)
     if data:
         raise TraceDecayTransportError("event stream ended inside an SSE frame")
 
@@ -460,22 +537,127 @@ def _page_query(page: PageOptionsLike | None) -> str:
             )
         query["page_size"] = str(page.size)
     if page.cursor is not None:
-        _opaque(page.cursor, _MAX_OPAQUE_BYTES, "page cursor")
+        _query_opaque(page.cursor, _MAX_OPAQUE_BYTES, "page cursor")
         query["cursor"] = page.cursor
     return urlencode(query)
 
 
-def _opaque(value: str, maximum: int, field: str) -> str:
+def _query_opaque(value: str, maximum: int, field: str) -> str:
     encoded = value.encode("utf-8")
     if (
         not value
         or value.strip() != value
         or len(encoded) > maximum
-        or "/" in value
         or any(unicodedata.category(character) == "Cc" for character in value)
     ):
         raise TraceDecayProtocolError(f"{field} is not a canonical opaque value")
     return value
+
+
+def _path_opaque(value: str, maximum: int, field: str) -> str:
+    result = _query_opaque(value, maximum, field)
+    if "/" in result:
+        raise TraceDecayProtocolError(f"{field} is not a canonical path identifier")
+    return result
+
+
+def _validate_problem_envelope(
+    envelope: JsonObject,
+) -> tuple[JsonObject, str, str, str, str]:
+    contract = _object(envelope.get("contract"), "problem contract")
+    _string(contract.get("schema_id"), "problem contract.schema_id")
+    revision = _integer(
+        contract.get("schema_revision"), "problem contract.schema_revision"
+    )
+    if revision < 1:
+        raise TraceDecayProtocolError("problem contract revision must be positive")
+    request_id = _string(envelope.get("request_id"), "problem request_id")
+    problem = _object(envelope.get("problem"), "problem")
+    problem_revision = _integer(problem.get("revision"), "problem.revision")
+    if problem_revision < 1:
+        raise TraceDecayProtocolError("problem revision must be positive")
+    kind = _string(problem.get("kind"), "problem.kind")
+    if kind not in _PROBLEM_KINDS:
+        raise TraceDecayProtocolError("problem.kind is not canonical")
+    code = _string(problem.get("code"), "problem.code")
+    message = _string(problem.get("message"), "problem.message")
+    _nullable_diagnostic(problem.get("diagnostic"), "problem.diagnostic")
+    owning_layer = _string(problem.get("owning_layer"), "problem.owning_layer")
+    if owning_layer not in _OWNING_LAYERS:
+        raise TraceDecayProtocolError("problem.owning_layer is not canonical")
+    terminality = _string(problem.get("terminality"), "problem.terminality")
+    if terminality not in _TERMINALITIES:
+        raise TraceDecayProtocolError("problem.terminality is not canonical")
+    retryable = problem.get("retryable")
+    if not isinstance(retryable, bool):
+        raise TraceDecayProtocolError("problem.retryable must be a boolean")
+    retry = _string(problem.get("retry"), "problem.retry")
+    if retry not in _RETRY_DIRECTIVES:
+        raise TraceDecayProtocolError("problem.retry is not canonical")
+    retry_scope = problem.get("retry_scope")
+    if retry_scope is not None:
+        _string(retry_scope, "problem.retry_scope")
+    if retry_scope != _RETRY_SCOPE_BY_DIRECTIVE[retry]:
+        raise TraceDecayProtocolError("problem.retry_scope is inconsistent with retry")
+    retry_after = problem.get("retry_after_millis")
+    if retry_after is not None:
+        if retry != "after_delay":
+            raise TraceDecayProtocolError(
+                "retry_after_millis is only valid for after_delay"
+            )
+        _integer(retry_after, "problem.retry_after_millis")
+    cancellation_stage = problem.get("cancellation_stage")
+    if cancellation_stage is not None:
+        _string(cancellation_stage, "problem.cancellation_stage")
+    if _string(problem.get("request_id"), "problem.request_id") != request_id:
+        raise TraceDecayProtocolError("problem request identity is inconsistent")
+    _string(problem.get("trace_id"), "problem.trace_id")
+    details = problem.get("details")
+    if not isinstance(details, list):
+        raise TraceDecayProtocolError("problem.details must be an array")
+    for index, detail in enumerate(cast(list[object], details)):
+        _nullable_diagnostic(detail, f"problem.details[{index}]")
+    legal_actions = problem.get("legal_actions")
+    if not isinstance(legal_actions, list) or not all(
+        isinstance(action, str) for action in cast(list[object], legal_actions)
+    ):
+        raise TraceDecayProtocolError("problem.legal_actions must be a string array")
+    for action in cast(list[str], legal_actions):
+        if action not in _LEGAL_ACTIONS:
+            raise TraceDecayProtocolError("problem.legal_actions is not canonical")
+    if "coverage" not in problem:
+        raise TraceDecayProtocolError("problem.coverage is required")
+    if retryable != (retry != "never"):
+        raise TraceDecayProtocolError("problem retryable and retry are inconsistent")
+    return problem, kind, code, message, retry
+
+
+def _nullable_diagnostic(value: object, field: str) -> None:
+    if value is None:
+        return
+    diagnostic = _object(value, field)
+    _string(diagnostic.get("code"), f"{field}.code")
+    _string(diagnostic.get("message"), f"{field}.message")
+
+
+def _validate_terminal_event(event: StreamEvent) -> None:
+    event_data = _object(event.data.get("data"), "terminal.data")
+    terminal = _object(event_data.get("terminal"), "terminal")
+    termination = _string(terminal.get("termination"), "terminal.termination")
+    receipt = _object(terminal.get("receipt"), "terminal.receipt")
+    _integer(receipt.get("started_at"), "terminal.receipt.started_at")
+    _integer(receipt.get("ended_at"), "terminal.receipt.ended_at")
+    if "effective_deadline" not in receipt or "cancellation" not in receipt:
+        raise TraceDecayProtocolError("terminal receipt lifecycle fields are required")
+    budget = _object(receipt.get("budget"), "terminal.receipt.budget")
+    _integer(budget.get("units_consumed"), "terminal.receipt.budget.units_consumed")
+    _integer(budget.get("bytes_consumed"), "terminal.receipt.budget.bytes_consumed")
+    _integer(budget.get("elapsed_micros"), "terminal.receipt.budget.elapsed_micros")
+    receipt_termination = _string(
+        receipt.get("termination"), "terminal.receipt.termination"
+    )
+    if termination != event.event or receipt_termination != event.event:
+        raise TraceDecayProtocolError("terminal event termination is inconsistent")
 
 
 def _object(value: object, field: str) -> JsonObject:
