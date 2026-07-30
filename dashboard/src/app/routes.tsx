@@ -16,9 +16,11 @@ function page<T extends string>(path: T, label: string, load: () => Promise<{ de
 }
 
 // The thirteen workspaces, each its own lazy code-split chunk: the shell stays
-// light and a surface loads on first navigation. Twelve are wired to real reads.
-// Work stays an explicit contract-gated surface until its generated read model
-// lands; it never substitutes fixture or browser-owned state for one.
+// light and a surface loads on first navigation. All thirteen read real routes;
+// Work was the last gated one, and its nine routes are mounted. What has not
+// changed is the rule the gate enforced: a surface renders what its contract
+// answered, and never substitutes fixture or browser-owned state for a read
+// that did not land.
 export const WORKSPACES = [
   page('brain', 'Brain', () =>
     import('../workspaces/brain/BrainPage.tsx').then((m) => ({ default: m.BrainPage }))),
