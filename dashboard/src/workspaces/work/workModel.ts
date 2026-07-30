@@ -103,6 +103,44 @@ export type WorkCommandKind =
   | 'attach_runtime_evidence';
 
 /**
+ * Whether this build can assemble a command, as distinct from whether the
+ * daemon would accept one.
+ *
+ * `availableCommands` answers the domain question: has the task reached the
+ * gate this command acts on. This answers the dashboard's own question: are the
+ * command's inputs anywhere in a generated read model.
+ *
+ * Three of the seven fail that test, and they fail it the same way. Reviewing a
+ * proposal needs `proposal_id` and `proposal_digest`; accepting one needs the
+ * same; attaching evidence needs `run_id` and `evidence_digest`. `WorkProjection`
+ * carries `accepted_proposal` — the proposal already chosen — and a list of
+ * evidence already attached, and no contract in this build enumerates the
+ * pending proposals or the runs. A control for them could only ask an operator
+ * to type an opaque digest, or mint one, and a minted digest is a fabricated
+ * authority record aimed at the daemon's own audit trail.
+ *
+ * So they are named and explained rather than drawn. The gap is in the read
+ * model, not in the command surface, and saying which is what lets it be closed.
+ */
+export function commandBlocked(kind: WorkCommandKind): string | undefined {
+  switch (kind) {
+    case 'review_proposal':
+    case 'accept_proposal':
+      return 'no generated contract lists the pending proposals, so this build has no proposal identity or digest to send';
+    case 'attach_runtime_evidence':
+      return 'no generated contract lists runs or their evidence digests, so this build has nothing to attach';
+    case 'replan_dependencies':
+    case 'accept_task':
+    case 'admit_execution':
+      return undefined;
+    default: {
+      const unhandled: never = kind;
+      return unhandled;
+    }
+  }
+}
+
+/**
  * How much of the board this page is actually showing.
  *
  * `returned` and `total` come from the daemon. A capped or partial reading is
