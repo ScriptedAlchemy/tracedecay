@@ -320,6 +320,9 @@ impl RusqliteRemoteAuthorityStoreV1 {
                 return Err(RemoteAuthorityStorageErrorV1::StaleFence);
             }
         }
+        if current.old_writer.is_some() && !current.old_authority_read_only {
+            return Err(RemoteAuthorityStorageErrorV1::OldAuthorityStillWritable);
+        }
         transaction
             .execute(
                 "INSERT INTO remote_publication_v1 (
@@ -339,14 +342,27 @@ impl RusqliteRemoteAuthorityStoreV1 {
                 ],
             )
             .map_err(storage)?;
-        transaction
+        let changed = transaction
             .execute(
                 "UPDATE remote_authority_v1
                  SET frontier_json = ?2, serving = 1
-                 WHERE shard_key = ?1",
-                params![shard_key, encode(frontier)?],
+                 WHERE shard_key = ?1
+                   AND writer_json = ?3
+                   AND binding_json = ?4
+                   AND placement_revision = ?5
+                   AND (old_writer_json IS NULL OR old_authority_read_only = 1)",
+                params![
+                    shard_key,
+                    encode(frontier)?,
+                    encode(writer)?,
+                    encode(binding)?,
+                    sqlite_u64(placement_revision)?,
+                ],
             )
             .map_err(storage)?;
+        if changed != 1 {
+            return Err(RemoteAuthorityStorageErrorV1::StaleFence);
+        }
         transaction.commit().map_err(storage)?;
         Ok(RemotePublicationReceiptV1 {
             writer: writer.clone(),
@@ -402,6 +418,8 @@ struct StoredAuthorityV1 {
     writer: RemoteWriterAuthorityV1,
     binding: StoreRuntimeBindingV1,
     placement_revision: u64,
+    old_writer: Option<RemoteWriterAuthorityV1>,
+    old_authority_read_only: bool,
 }
 
 fn read_authority(
@@ -410,25 +428,38 @@ fn read_authority(
 ) -> Result<Option<StoredAuthorityV1>, RemoteAuthorityStorageErrorV1> {
     connection
         .query_row(
-            "SELECT writer_json, binding_json, placement_revision
+            "SELECT writer_json, binding_json, placement_revision,
+                    old_writer_json, old_authority_read_only
              FROM remote_authority_v1 WHERE shard_key = ?1",
             [shard_key],
             |row| {
                 let writer_json: String = row.get(0)?;
                 let binding_json: String = row.get(1)?;
                 let placement_revision: i64 = row.get(2)?;
-                Ok((writer_json, binding_json, placement_revision))
+                let old_writer_json: Option<String> = row.get(3)?;
+                let old_authority_read_only: bool = row.get(4)?;
+                Ok((
+                    writer_json,
+                    binding_json,
+                    placement_revision,
+                    old_writer_json,
+                    old_authority_read_only,
+                ))
             },
         )
         .optional()
         .map_err(storage)?
-        .map(|(writer, binding, placement)| {
-            Ok(StoredAuthorityV1 {
-                writer: decode(&writer)?,
-                binding: decode(&binding)?,
-                placement_revision: decode_u64(placement)?,
-            })
-        })
+        .map(
+            |(writer, binding, placement, old_writer, old_authority_read_only)| {
+                Ok(StoredAuthorityV1 {
+                    writer: decode(&writer)?,
+                    binding: decode(&binding)?,
+                    placement_revision: decode_u64(placement)?,
+                    old_writer: old_writer.as_deref().map(decode).transpose()?,
+                    old_authority_read_only,
+                })
+            },
+        )
         .transpose()
 }
 
@@ -542,6 +573,8 @@ pub enum RemoteAuthorityStorageErrorV1 {
     AuthorityUnavailable,
     #[error("remote durable sink fence is stale")]
     StaleFence,
+    #[error("old remote authority is still writable")]
+    OldAuthorityStillWritable,
     #[error("remote durable sink fence is missing: {sink_id}")]
     MissingFence { sink_id: String },
     #[error("remote authority record is corrupt")]
