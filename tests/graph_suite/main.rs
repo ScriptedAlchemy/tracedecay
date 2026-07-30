@@ -4,7 +4,7 @@
 //! Merging these formerly separate integration-test binaries into one binary
 //! cuts Windows CI link time (each `tests/*.rs` file links separately).
 
-/// Crate-root shim so `crates/tracedecay-code-index/src/extraction/annotations.rs`
+/// Crate-root shim so `crates/tracedecay-code-extraction/src/annotations.rs`
 /// (included via `#[path]` in `annotation_helpers_test`) can resolve its
 /// `use crate::types::...` imports inside this test crate.
 mod types {

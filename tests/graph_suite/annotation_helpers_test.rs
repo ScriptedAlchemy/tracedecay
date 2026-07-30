@@ -1,6 +1,6 @@
-// `crate::types` (needed by the included `annotations.rs`) is provided by the
-// `types` shim in this suite's `main.rs`.
-#[path = "../../crates/tracedecay-code-index/src/extraction/annotations.rs"]
+// `crate::types` (needed by the included leaf implementation) is provided by
+// the `types` shim in this suite's `main.rs`.
+#[path = "../../crates/tracedecay-code-extraction/src/annotations.rs"]
 mod annotations;
 
 use annotations::{
