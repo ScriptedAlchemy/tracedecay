@@ -111,7 +111,7 @@ where
             route_path: route_path.to_owned(),
         },
     )?;
-    Ok(ExecutableBindingAvailabilityV1::Available { binding })
+    Ok(ExecutableBindingAvailabilityV1::available(binding))
 }
 
 fn unavailable(operation: &str) -> ExecutableBindingAvailabilityV1 {
