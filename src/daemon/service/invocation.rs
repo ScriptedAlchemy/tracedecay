@@ -4506,6 +4506,14 @@ impl RegisteredFeedbackRuntime {
         &self.project_id
     }
 
+    pub(super) fn runtime(&self) -> Arc<Pr12FeedbackRuntime> {
+        Arc::clone(&self.runtime)
+    }
+
+    pub(super) fn invocation_owner(&self) -> DaemonFeedbackInvocationOwner {
+        DaemonFeedbackInvocationOwner::new(self.project_id.clone(), self.runtime.owner())
+    }
+
     pub(super) fn source_observation_port(
         &self,
     ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
@@ -7202,20 +7210,6 @@ impl DaemonInvocationService {
         Some(dispatch.dispatch(invocation, context, observed_at).await)
     }
 
-    pub(crate) async fn feedback_owner(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Option<DaemonFeedbackInvocationOwner> {
-        self.project_runtimes
-            .read::<RegisteredFeedbackRuntime, _, _>(project_root?, |registered| {
-                DaemonFeedbackInvocationOwner::new(
-                    registered.project_id.clone(),
-                    registered.runtime.owner(),
-                )
-            })
-            .await
-    }
-
     pub(crate) async fn feedback_runtime(
         &self,
         project_root: Option<&Path>,
@@ -7225,13 +7219,6 @@ impl DaemonInvocationService {
                 registered.runtime.clone()
             })
             .await
-    }
-
-    async fn advisory_cycle_invoker(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>> {
-        self.project_runtimes.get(project_root?).await
     }
 
     async fn configuration_runtime(
@@ -7397,7 +7384,18 @@ impl DaemonInvocationService {
         let request_id = request.request_id.clone();
         let operation = request.operation();
         let delivery_route = request.delivery_route;
-        let feedback_runtime = self.feedback_runtime(project_root).await;
+        // Every per-project component this request may need, taken in one pass
+        // so dispatch sees one consistent view of the project.
+        let runtimes = self
+            .project_runtimes
+            .request_runtimes(
+                project_root,
+                project_root
+                    .and_then(|root| root.canonicalize().ok())
+                    .as_deref(),
+            )
+            .await;
+        let feedback_runtime = runtimes.feedback;
         let observations = feedback_runtime
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
@@ -7439,10 +7437,10 @@ impl DaemonInvocationService {
         }
         let now_ms = now_millis();
         self.expire_sessions(now_ms).await;
-        let feedback_service = self.feedback_owner(project_root).await;
-        let advisory_cycle_invoker = self.advisory_cycle_invoker(project_root).await;
-        let configuration_runtime = self.configuration_runtime(project_root).await;
-        let lsp_owner = self.lsp_owner(project_root).await;
+        let feedback_service = runtimes.feedback_owner;
+        let advisory_cycle_invoker = runtimes.advisory_cycle_invoker;
+        let configuration_runtime = runtimes.configuration;
+        let lsp_owner = runtimes.lsp_owner;
 
         let response = match request.payload {
             DaemonInvocationPayload::GitRead {

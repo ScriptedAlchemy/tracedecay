@@ -25,12 +25,14 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::application::feedback::Pr12FeedbackCycleRuntime;
+use crate::application::feedback::concrete::Pr12FeedbackRuntime;
 use crate::application::primitives::Pr12PrimitiveProjectRuntime;
 
 use super::invocation::{
-    DaemonLspInvocationOwner, Pr13AdvisoryCycleInvocationPortV1, Pr13HookOrchestrationPortV1,
-    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, Pr13AdvisoryCycleInvocationPortV1,
+    Pr13HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
+    RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
+    UnavailableFeedbackCycleRuntimeV1,
 };
 
 /// Everything one canonical project's daemon runtime owns.
@@ -92,6 +94,21 @@ project_runtime_components!(
     Arc<dyn Pr13HookOrchestrationPortV1> => advisory_hook_orchestrator,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
+
+/// The per-project components one request may need, resolved together.
+///
+/// Dispatch used to reach for these one at a time, taking a lock per component
+/// on every request whatever its domain. Resolving them in a single pass means
+/// a request also sees one consistent view of the project rather than five
+/// views taken at five different moments.
+#[derive(Default)]
+pub(super) struct ProjectRequestRuntimesV1 {
+    pub(super) feedback: Option<Arc<Pr12FeedbackRuntime>>,
+    pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
+    pub(super) advisory_cycle_invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
+    pub(super) configuration: Option<RegisteredConfigurationRuntime>,
+    pub(super) lsp_owner: Option<DaemonLspInvocationOwner>,
+}
 
 /// A component was already published for this project.
 ///
@@ -192,6 +209,38 @@ impl ProjectRuntimeRegistryV1 {
                 *slot = Some(build()?);
                 Ok(())
             }
+        }
+    }
+
+    /// Resolve everything one request may need from a project, in one pass.
+    ///
+    /// A project opened under an uncanonical root keeps its LSP owner under
+    /// that root, so `canonical_root` is consulted only when the request's own
+    /// root has no owner — the same fallback the per-map lookup performed,
+    /// without a lock acquisition per component.
+    pub(super) async fn request_runtimes(
+        &self,
+        project_root: Option<&Path>,
+        canonical_root: Option<&Path>,
+    ) -> ProjectRequestRuntimesV1 {
+        let Some(project_root) = project_root else {
+            return ProjectRequestRuntimesV1::default();
+        };
+        let runtimes = self.runtimes.lock().await;
+        let Some(runtime) = runtimes.get(project_root) else {
+            return ProjectRequestRuntimesV1::default();
+        };
+        let feedback = runtime.feedback.as_ref();
+        ProjectRequestRuntimesV1 {
+            feedback: feedback.map(|registered| registered.runtime()),
+            feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
+            advisory_cycle_invoker: runtime.advisory_cycle_invoker.clone(),
+            configuration: runtime.configuration.clone(),
+            lsp_owner: runtime.lsp_owner.clone().or_else(|| {
+                canonical_root
+                    .and_then(|root| runtimes.get(root))
+                    .and_then(|runtime| runtime.lsp_owner.clone())
+            }),
         }
     }
 
@@ -462,6 +511,21 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn request_resolution_answers_nothing_for_an_absent_or_unnamed_project() {
+        let registry = ProjectRuntimeRegistryV1::default();
+        registry.publish(root("alpha"), component(1)).await;
+
+        for project_root in [None, Some(root("beta").as_path())] {
+            let resolved = registry.request_runtimes(project_root, None).await;
+            assert!(resolved.feedback.is_none());
+            assert!(resolved.feedback_owner.is_none());
+            assert!(resolved.advisory_cycle_invoker.is_none());
+            assert!(resolved.configuration.is_none());
+            assert!(resolved.lsp_owner.is_none());
+        }
     }
 
     #[tokio::test]
