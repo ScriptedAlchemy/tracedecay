@@ -40,6 +40,17 @@ The first version of a crate must exist before trusted publishing can be configu
 
 After that, release-plz detects unpublished changes from crates.io, opens a release PR, and publishes on merge.
 
+### Publishing a new workspace library crate (e.g. `tracedecay-sdk`)
+
+Workspace library crates (`crates/tracedecay-sdk`, and similarly `tracedecay-domain`/`tracedecay-store`) publish through the same `release-plz.yml` workflow and `crates-io` environment as the root `tracedecay` crate — there is no separate publish workflow. Each such crate carries a `[[package]]` entry in `release-plz.toml` that sets `git_release_enable = false` and `git_tag_enable = false`, so it is versioned and published alongside the root crate without claiming its own `vX.Y.Z` tag or GitHub Release (the root crate keeps sole ownership of those for binary distribution).
+
+Because trusted publishing on crates.io is normally configured only after a crate's first version exists, a brand-new crate like `tracedecay-sdk` needs one of the following before its first automated release:
+
+1. **Preferred — configure a pending trusted publisher.** On crates.io, a maintainer with the rights to claim the crate name creates a "pending" trusted publisher for `tracedecay-sdk` (GitHub Actions, repository `ScriptedAlchemy/tracedecay`, workflow `release-plz.yml`, environment `crates-io`) before the first publish. crates.io accepts the first `cargo publish` for that name via OIDC once the pending publisher exists, with no long-lived token involved.
+2. **Fallback — one-time manual bootstrap publish.** If a pending trusted publisher cannot be configured ahead of time, a maintainer runs `cargo publish -p tracedecay-sdk` once from a trusted local machine using a short-lived, scoped crates.io API token (never committed or stored as a repository secret). After that first version exists, configure the crates.io trusted publisher for `ScriptedAlchemy/tracedecay` / `release-plz.yml` / `crates-io` exactly as described above, and all subsequent releases flow through the normal automated path.
+
+Either way, no second GitHub Actions workflow is introduced: `release-plz.yml`'s existing `crates-io` environment and OIDC (`id-token: write`) permission cover every workspace crate release-plz decides to publish.
+
 Release PRs may modify only `CHANGELOG.md`, `Cargo.lock`, and `Cargo.toml`. The
 read-only `Release PR integrity` workflow loads its guard from the trusted base
 commit, not from the proposed release branch. If a reviewed release PR must

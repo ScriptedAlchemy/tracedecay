@@ -4349,6 +4349,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -5685,6 +5686,20 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-store",
+ "tracedecay-tool-catalog",
+]
+
+[[package]]
+name = "tracedecay-sdk"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-domain",
  "tracedecay-tool-catalog",
 ]
 

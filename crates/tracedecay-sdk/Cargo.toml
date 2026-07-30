@@ -1,9 +1,7 @@
-[workspace]
-
 [package]
 name = "tracedecay-sdk"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 autobins = false
 license = "MIT"
 description = "Native Rust lifecycle client for canonical TraceDecay operations"

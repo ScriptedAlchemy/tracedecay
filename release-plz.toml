@@ -29,3 +29,8 @@ git_tag_enable = false
 name = "tracedecay-store"
 git_release_enable = false
 git_tag_enable = false
+
+[[package]]
+name = "tracedecay-sdk"
+git_release_enable = false
+git_tag_enable = false
