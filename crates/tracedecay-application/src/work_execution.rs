@@ -147,19 +147,6 @@ impl Display for WorkProviderExecutionError {
 
 impl std::error::Error for WorkProviderExecutionError {}
 
-pub trait WorkProviderExecutionPort: Send + Sync {
-    fn start(
-        &self,
-        attempt: &WorkAttemptV1,
-    ) -> Result<WorkProviderRouteV1, WorkProviderExecutionError>;
-
-    fn request_cancellation(
-        &self,
-        attempt: &WorkAttemptV1,
-        request: &WorkCancellationRequestV1,
-    ) -> Result<(), WorkProviderExecutionError>;
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkExecutionError {
     NotFound,
@@ -207,21 +194,21 @@ impl From<WorkProviderExecutionError> for WorkExecutionError {
     }
 }
 
-pub struct WorkExecutionService<S, P> {
+/// Records every durable Work attempt transition.
+///
+/// The service owns state only: it never reaches a provider, so a recorded
+/// transition can never trail a side effect. Provider execution is admitted
+/// from the durable intent by `WorkExecutionQueueV1`.
+pub struct WorkExecutionService<S> {
     persistence: S,
-    provider: P,
 }
 
-impl<S, P> WorkExecutionService<S, P>
+impl<S> WorkExecutionService<S>
 where
     S: WorkAttemptPersistencePort,
-    P: WorkProviderExecutionPort,
 {
-    pub const fn new(persistence: S, provider: P) -> Self {
-        Self {
-            persistence,
-            provider,
-        }
+    pub const fn new(persistence: S) -> Self {
+        Self { persistence }
     }
 
     pub fn acquire_lease(
@@ -282,24 +269,30 @@ where
         Ok(next)
     }
 
+    /// Records the durable intent to run an attempt on `route`.
+    ///
+    /// Replaying `start` for an already-running attempt re-records the same
+    /// state, so a caller whose provider admission was refused can retry
+    /// without a compensating rollback.
     pub fn start(
         &self,
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
         recovery: WorkRecoveryStateV1,
+        route: WorkProviderRouteV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let current = self.load_with_fence(authority, identity, lease)?;
-        let actual_route = self.provider.start(&current)?;
+        let artifacts = current.artifacts().to_vec();
         self.transition(
             authority,
             current,
             WorkAttemptStateV1::Running,
             None,
-            Vec::new(),
+            artifacts,
             WorkCancellationStateV1::None,
             recovery,
-            Some(actual_route),
+            Some(route),
             None,
             lease.clone(),
         )
@@ -361,6 +354,8 @@ where
         )
     }
 
+    /// Records the durable intent to cancel an attempt before any provider is
+    /// asked to stop.
     pub fn request_cancellation(
         &self,
         authority: &WorkAuthority,
@@ -369,7 +364,6 @@ where
         request: WorkCancellationRequestV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let current = self.load_with_fence(authority, identity, lease)?;
-        self.provider.request_cancellation(&current, &request)?;
         let artifacts = current.artifacts().to_vec();
         let recovery = current.recovery().clone();
         self.transition(
@@ -444,7 +438,11 @@ where
         let current = self.load_with_fence(authority, identity, lease)?;
         let artifacts = current.artifacts().to_vec();
         let recovery = WorkRecoveryStateV1::RecoveryRequired {
-            source_attempt_id: current.identity().attempt_id().clone(),
+            source_attempt_id: current
+                .recovery()
+                .source_attempt_id()
+                .cloned()
+                .ok_or(WorkRuntimeContractError::SelfRecovery)?,
             reason,
         };
         self.transition(
@@ -724,31 +722,11 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct FakeProvider;
-
-    impl WorkProviderExecutionPort for FakeProvider {
-        fn start(
-            &self,
-            _attempt: &WorkAttemptV1,
-        ) -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
-            Ok(route("route.actual"))
-        }
-
-        fn request_cancellation(
-            &self,
-            _attempt: &WorkAttemptV1,
-            _request: &WorkCancellationRequestV1,
-        ) -> Result<(), WorkProviderExecutionError> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn lifecycle_persists_bounded_progress_artifacts_and_terminal_replay() {
         let attempt = leased_attempt("attempt.work.lifecycle");
         let identity = attempt.identity().clone();
-        let service = WorkExecutionService::new(FakePersistence::seeded(attempt), FakeProvider);
+        let service = WorkExecutionService::new(FakePersistence::seeded(attempt));
 
         service
             .start(
@@ -756,6 +734,7 @@ mod tests {
                 &identity,
                 &lease(1),
                 WorkRecoveryStateV1::Fresh,
+                route("route.actual"),
             )
             .unwrap();
         service
@@ -795,7 +774,7 @@ mod tests {
         let identity = attempt.identity().clone();
         let persistence = FakePersistence::seeded(attempt);
         *persistence.reject_cas.lock().unwrap() = true;
-        let service = WorkExecutionService::new(persistence, FakeProvider);
+        let service = WorkExecutionService::new(persistence.clone());
 
         assert_eq!(
             service
@@ -804,9 +783,114 @@ mod tests {
                     &identity,
                     &lease(1),
                     WorkRecoveryStateV1::Fresh,
+                    route("route.actual"),
                 )
                 .unwrap_err(),
             WorkExecutionError::Persistence(WorkExecutionPersistenceError::Conflict)
+        );
+        assert_eq!(
+            persistence
+                .load(&authority(), &identity)
+                .unwrap()
+                .unwrap()
+                .state(),
+            WorkAttemptStateV1::Leased,
+            "a refused compare-and-swap must leave no running intent behind"
+        );
+    }
+
+    #[test]
+    fn replayed_start_re_records_the_same_running_intent() {
+        let attempt = leased_attempt("attempt.work.replay");
+        let identity = attempt.identity().clone();
+        let service = WorkExecutionService::new(FakePersistence::seeded(attempt));
+
+        let first = service
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRecoveryStateV1::Fresh,
+                route("route.actual"),
+            )
+            .unwrap();
+        let replayed = service
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRecoveryStateV1::Fresh,
+                route("route.actual"),
+            )
+            .unwrap();
+
+        assert_eq!(first, replayed);
+        assert_eq!(replayed.state(), WorkAttemptStateV1::Running);
+    }
+
+    #[test]
+    fn recovery_required_carries_the_predecessor_and_never_names_itself() {
+        let attempt = leased_attempt("attempt.work.recovery");
+        let identity = attempt.identity().clone();
+        let predecessor = id::<AttemptId>("attempt.work.predecessor");
+        let service = WorkExecutionService::new(FakePersistence::seeded(attempt));
+        service
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRecoveryStateV1::Restarted {
+                    source_attempt_id: predecessor.clone(),
+                    reason: WorkRestartReasonV1::ProcessLost,
+                },
+                route("route.actual"),
+            )
+            .unwrap();
+
+        let recovering = service
+            .require_recovery(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRestartReasonV1::ProviderUnavailable,
+            )
+            .unwrap();
+
+        assert_eq!(recovering.state(), WorkAttemptStateV1::RecoveryRequired);
+        assert_eq!(
+            recovering.recovery(),
+            &WorkRecoveryStateV1::RecoveryRequired {
+                source_attempt_id: predecessor,
+                reason: WorkRestartReasonV1::ProviderUnavailable,
+            }
+        );
+    }
+
+    #[test]
+    fn an_attempt_with_no_predecessor_cannot_be_marked_for_recovery() {
+        let attempt = leased_attempt("attempt.work.fresh-recovery");
+        let identity = attempt.identity().clone();
+        let service = WorkExecutionService::new(FakePersistence::seeded(attempt));
+        service
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                WorkRecoveryStateV1::Fresh,
+                route("route.actual"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            service
+                .require_recovery(
+                    &authority(),
+                    &identity,
+                    &lease(1),
+                    WorkRestartReasonV1::ProcessLost,
+                )
+                .unwrap_err(),
+            WorkExecutionError::Contract(WorkRuntimeContractError::SelfRecovery)
         );
     }
 
@@ -814,14 +898,20 @@ mod tests {
     fn resumed_attempt_binds_recovery_to_a_different_attempt() {
         let attempt = leased_attempt("attempt.work.resumed");
         let identity = attempt.identity().clone();
-        let service = WorkExecutionService::new(FakePersistence::seeded(attempt), FakeProvider);
+        let service = WorkExecutionService::new(FakePersistence::seeded(attempt));
         let recovery = WorkRecoveryStateV1::Resumed {
             source_attempt_id: id::<AttemptId>("attempt.work.original"),
             checkpoint: None,
         };
 
         let running = service
-            .start(&authority(), &identity, &lease(1), recovery.clone())
+            .start(
+                &authority(),
+                &identity,
+                &lease(1),
+                recovery.clone(),
+                route("route.actual"),
+            )
             .unwrap();
         assert_eq!(running.recovery(), &recovery);
         assert_eq!(running.state(), WorkAttemptStateV1::Running);

@@ -457,7 +457,8 @@ pub enum WorkRecoveryStateV1 {
 }
 
 impl WorkRecoveryStateV1 {
-    fn source_attempt_id(&self) -> Option<&AttemptId> {
+    /// The predecessor attempt this recovery state resumes from, if any.
+    pub fn source_attempt_id(&self) -> Option<&AttemptId> {
         match self {
             Self::Fresh => None,
             Self::Resumed {

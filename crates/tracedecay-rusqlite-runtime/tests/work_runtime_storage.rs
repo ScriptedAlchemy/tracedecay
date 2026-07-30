@@ -6,7 +6,7 @@ use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
     CreateWorkCommand, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
     ReviewProposalCommand, WorkAttemptPersistencePort, WorkExecutionPersistenceError,
-    WorkExecutionService, WorkProviderExecutionError, WorkProviderExecutionPort, WorkService,
+    WorkExecutionService, WorkService,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
@@ -177,26 +177,6 @@ fn replace_attempt(
     storage.compare_and_swap(authority, expected, replacement)
 }
 
-#[derive(Clone, Copy)]
-struct TestProvider;
-
-impl WorkProviderExecutionPort for TestProvider {
-    fn start(
-        &self,
-        _attempt: &WorkAttemptV1,
-    ) -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
-        Ok(route("provider.work.actual", "route.work.actual"))
-    }
-
-    fn request_cancellation(
-        &self,
-        _attempt: &WorkAttemptV1,
-        _request: &WorkCancellationRequestV1,
-    ) -> Result<(), WorkProviderExecutionError> {
-        Ok(())
-    }
-}
-
 #[test]
 fn application_execution_service_composes_with_sqlite_adapter() {
     let connection = Connection::open_in_memory().unwrap();
@@ -221,7 +201,7 @@ fn application_execution_service_composes_with_sqlite_adapter() {
         id("attempt.work.runtime-store.application"),
     )
     .unwrap();
-    let service = WorkExecutionService::new(storage.clone(), TestProvider);
+    let service = WorkExecutionService::new(storage.clone());
     let leased = service
         .acquire_lease(
             &owner,
@@ -251,7 +231,13 @@ fn application_execution_service_composes_with_sqlite_adapter() {
         leased
     );
     service
-        .start(&owner, &identity, &lease(1), WorkRecoveryStateV1::Fresh)
+        .start(
+            &owner,
+            &identity,
+            &lease(1),
+            WorkRecoveryStateV1::Fresh,
+            route("provider.work.actual", "route.work.actual"),
+        )
         .unwrap();
     service
         .publish_progress(
