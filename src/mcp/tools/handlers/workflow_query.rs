@@ -3,8 +3,13 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
+use tracedecay_sessions::{
+    WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowRunDetail,
+    WorkflowRunDetailOutcome, WorkflowRunDetailRequest, WorkflowRunListOutcome,
+    WorkflowRunListRequest, WorkflowRunScope,
+};
 
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::sessions::git_correlation::GitScopeFilter;
 use crate::sessions::workflow_index::MAX_WORKFLOW_LIMIT;
 use crate::tracedecay::TraceDecay;
@@ -12,12 +17,7 @@ use crate::tracedecay::TraceDecay;
 use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::support::{argument_error, string_arg, tool_json_with_md};
-use super::workflow_index::{
-    WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexUnavailableReason,
-    WorkflowRunDetailCommand, WorkflowRunDetailOutcome, WorkflowRunDetailView,
-    WorkflowRunListCommand, WorkflowRunListOutcome, WorkflowRunScope, list_workflow_runs,
-    read_workflow_run,
-};
+use super::workflow_index::{list_workflow_runs, read_workflow_run};
 
 const DEFAULT_WORKFLOWS_LIMIT: usize = 20;
 
@@ -88,7 +88,7 @@ fn parse_mode(args: &Value) -> Result<WorkflowMode> {
 ///
 /// `reason` and `retryable` follow the typed-error shape the session-retrieval
 /// surface already uses, so a caller reads unavailability the same way here.
-fn index_unavailable_payload(reason: WorkflowIndexUnavailableReason) -> Value {
+fn index_unavailable_payload(reason: WorkflowIndexState) -> Value {
     json!({
         "status": "unavailable",
         "message": reason.message(),
@@ -115,7 +115,7 @@ pub(super) async fn handle_workflows(
             agent_label,
         } => run_payload(workflow_index, run_id, agent_label.as_deref(), limit).await?,
         WorkflowMode::Session { session_id } => {
-            let command = WorkflowRunListCommand {
+            let command = WorkflowRunListRequest {
                 scope: WorkflowRunScope::Session {
                     session_id: session_id.clone(),
                 },
@@ -133,7 +133,7 @@ pub(super) async fn handle_workflows(
             }
         }
         WorkflowMode::GitScope { filter } => {
-            let command = WorkflowRunListCommand {
+            let command = WorkflowRunListRequest {
                 scope: WorkflowRunScope::GitScope(WorkflowGitScope {
                     branch: filter.branch.clone(),
                     worktree: filter.worktree.clone(),
@@ -211,29 +211,52 @@ async fn run_payload(
     agent_label: Option<&str>,
     limit: usize,
 ) -> Result<Value> {
-    let command = WorkflowRunDetailCommand {
-        run_id: run_id.to_string(),
-        limit,
+    let outcome = match agent_label {
+        Some(label) => match workflow_index {
+            Some(port) => port
+                .agent(run_id.to_string(), label.to_string())
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: error.to_string(),
+                })?,
+            None => WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::AuthorityNotRetained),
+        },
+        None => {
+            let command = WorkflowRunDetailRequest {
+                run_id: run_id.to_string(),
+                limit,
+            };
+            read_workflow_run(workflow_index, command).await?
+        }
     };
-    let WorkflowRunDetailView { run, agents } =
-        match read_workflow_run(workflow_index, command).await? {
-            WorkflowRunDetailOutcome::Run(detail) => detail,
-            WorkflowRunDetailOutcome::NotFound => return Ok(run_not_found_payload(run_id)),
-            WorkflowRunDetailOutcome::Unavailable(reason) => {
-                return Ok(index_unavailable_payload(reason));
-            }
-        };
+    let WorkflowRunDetail {
+        run,
+        agents,
+        agent_count,
+        agents_complete,
+    } = match outcome {
+        WorkflowRunDetailOutcome::Run(detail) => detail,
+        WorkflowRunDetailOutcome::NotFound => return Ok(run_not_found_payload(run_id)),
+        WorkflowRunDetailOutcome::Unavailable(reason) => {
+            return Ok(index_unavailable_payload(reason));
+        }
+    };
     match agent_label {
         Some(label) => {
             let agent = agents.iter().find(|agent| agent.agent_label == label);
+            let lookup_complete = agent.is_some() || agents_complete;
             Ok(json!({
-                "status": "ok",
+                "status": if lookup_complete { "ok" } else { "partial" },
                 "mode": "agent",
                 "run_id": run_id,
                 "agent_label": label,
-                "found": agent.is_some(),
+                "found": lookup_complete.then_some(agent.is_some()),
                 "run": run,
                 "agent": agent,
+                "agent_count": agent_count,
+                "agents_returned": agents.len(),
+                "lookup_complete": lookup_complete,
+                "lookup_coverage": if lookup_complete { "conclusive" } else { "bounded_prefix" },
             }))
         }
         None => Ok(json!({
@@ -243,7 +266,10 @@ async fn run_payload(
             "found": true,
             "run": run,
             "agents": agents,
-            "agent_count": agents.len(),
+            "agent_count": agent_count,
+            "agents_returned": agents.len(),
+            "agents_complete": agents_complete,
+            "agents_coverage": if agents_complete { "complete" } else { "bounded_prefix" },
         })),
     }
 }
@@ -354,6 +380,20 @@ fn render_run_detail_md(md: &mut Md, value: &Value) {
     {
         md.field("thread", &format!("`{parent}`"));
     }
+    let agent_count = render::field_i64(value, "agent_count");
+    let agents_returned = render::field_i64(value, "agents_returned");
+    let agents_complete = value
+        .get("agents_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if agents_complete {
+        md.field("agents", &agent_count.to_string());
+    } else {
+        md.field(
+            "agents",
+            &format!("{agents_returned} of {agent_count} (bounded)"),
+        );
+    }
     let summary = render::field_str(run, "result_summary");
     if !summary.is_empty() {
         md.blank()
@@ -384,9 +424,18 @@ fn render_run_detail_md(md: &mut Md, value: &Value) {
                 append_agent_bullet(md, agent);
             }
         }
-        _ => {
+        _ if agents_complete => {
             md.blank().empty_note("No agents recorded for this run.");
         }
+        _ => {
+            md.blank()
+                .empty_note("No agents are visible within this bounded detail response.");
+        }
+    }
+    if !agents_complete {
+        md.blank().empty_note(&format!(
+            "Agent coverage is partial: showing {agents_returned} of {agent_count}."
+        ));
     }
 }
 
@@ -404,6 +453,15 @@ fn render_agent_md(md: &mut Md, value: &Value) {
                     .line(&format!("transcript: `{transcript}`"))
                     .line("Replay it with `tracedecay_message_search` (workflow_run/workflow_agent filter) or `tracedecay_lcm_load_session`.");
             }
+        }
+        _ if value
+            .get("lookup_complete")
+            .and_then(Value::as_bool)
+            .is_some_and(|complete| !complete) =>
+        {
+            md.blank().empty_note(
+                "Agent lookup coverage is partial; this response cannot establish absence.",
+            );
         }
         _ => {
             md.blank()
@@ -454,7 +512,115 @@ fn git_filter_summary(filter: &Value) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use tracedecay_sessions::{
+        WorkflowAgent, WorkflowRun, WorkflowRunDetailFuture, WorkflowRunListFuture, WorkflowStatus,
+    };
+
     use super::*;
+
+    struct BoundedAgentPort {
+        run: WorkflowRun,
+        agents: Vec<WorkflowAgent>,
+    }
+
+    impl WorkflowIndexReadPort for BoundedAgentPort {
+        fn runs(&self, _command: WorkflowRunListRequest) -> WorkflowRunListFuture<'_> {
+            Box::pin(async { Ok(WorkflowRunListOutcome::Runs(Vec::new())) })
+        }
+
+        fn run(&self, command: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_> {
+            let run = self.run.clone();
+            let agents = self
+                .agents
+                .iter()
+                .take(command.limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            let agent_count = i64::try_from(self.agents.len()).expect("agent count");
+            Box::pin(async move {
+                Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+                    run,
+                    agents,
+                    agent_count,
+                    agents_complete: false,
+                }))
+            })
+        }
+
+        fn agent(&self, run_id: String, agent_label: String) -> WorkflowRunDetailFuture<'_> {
+            let mut run = self.run.clone();
+            let agents = self
+                .agents
+                .iter()
+                .find(|agent| agent.run_id == run_id && agent.agent_label == agent_label)
+                .cloned()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let agent_count = i64::try_from(self.agents.len()).expect("agent count");
+            run.agent_count = agent_count;
+            Box::pin(async move {
+                Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+                    run,
+                    agents,
+                    agent_count,
+                    agents_complete: true,
+                }))
+            })
+        }
+    }
+
+    struct PrefixOnlyPort(BoundedAgentPort);
+
+    impl WorkflowIndexReadPort for PrefixOnlyPort {
+        fn runs(&self, _command: WorkflowRunListRequest) -> WorkflowRunListFuture<'_> {
+            Box::pin(async { Ok(WorkflowRunListOutcome::Runs(Vec::new())) })
+        }
+
+        fn run(&self, _command: WorkflowRunDetailRequest) -> WorkflowRunDetailFuture<'_> {
+            let run = self.0.run.clone();
+            let agents = self.0.agents.iter().take(2).cloned().collect::<Vec<_>>();
+            let agent_count = i64::try_from(self.0.agents.len()).expect("agent count");
+            Box::pin(async move {
+                Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+                    run,
+                    agents,
+                    agent_count,
+                    agents_complete: false,
+                }))
+            })
+        }
+    }
+
+    fn bounded_agent_port() -> BoundedAgentPort {
+        let run = WorkflowRun {
+            run_id: "wf_bounded".to_string(),
+            parent_session_id: "session-1".to_string(),
+            name: None,
+            description: None,
+            phase_json: None,
+            status: WorkflowStatus::Running,
+            started_ts: Some(100),
+            ended_ts: None,
+            result_summary: None,
+            agent_count: 3,
+        };
+        let agents = (1..=3)
+            .map(|index| WorkflowAgent {
+                run_id: run.run_id.clone(),
+                agent_label: format!("agent-{index}"),
+                agent_id: format!("id-{index}"),
+                phase: None,
+                transcript_path: None,
+                agent_session_id: None,
+                status: WorkflowStatus::Running,
+                model: None,
+                tokens: 0,
+                started_ts: Some(index),
+                ended_ts: None,
+            })
+            .collect();
+        BoundedAgentPort { run, agents }
+    }
 
     /// Each unavailable state must be legible on the wire and must never look
     /// like a run list that came back empty. A caller that reads only `count`
@@ -463,12 +629,12 @@ mod tests {
     fn unavailable_payload_names_the_state_instead_of_reporting_zero_runs() {
         for (reason, wire, retryable) in [
             (
-                WorkflowIndexUnavailableReason::AuthorityNotRetained,
+                WorkflowIndexState::AuthorityNotRetained,
                 "authority_not_retained",
                 false,
             ),
             (
-                WorkflowIndexUnavailableReason::IndexNotBuilt,
+                WorkflowIndexState::IndexNotBuilt,
                 "workflow_index_not_built",
                 true,
             ),
@@ -502,8 +668,7 @@ mod tests {
             "count": 0,
         }));
         let missing_run = render_workflows_md(&run_not_found_payload("wf_absent"));
-        let unavailable =
-            render_unavailable_md(WorkflowIndexUnavailableReason::IndexNotBuilt.message());
+        let unavailable = render_unavailable_md(WorkflowIndexState::IndexNotBuilt.message());
 
         assert_ne!(empty_scope, missing_run);
         assert_ne!(missing_run, unavailable);
@@ -520,10 +685,9 @@ mod tests {
     /// message, or markdown readers cannot tell the two apart.
     #[test]
     fn unavailable_markdown_distinguishes_the_states() {
-        let not_built =
-            render_unavailable_md(WorkflowIndexUnavailableReason::IndexNotBuilt.message());
+        let not_built = render_unavailable_md(WorkflowIndexState::IndexNotBuilt.message());
         let no_authority =
-            render_unavailable_md(WorkflowIndexUnavailableReason::AuthorityNotRetained.message());
+            render_unavailable_md(WorkflowIndexState::AuthorityNotRetained.message());
         assert_ne!(not_built, no_authority);
         assert!(not_built.contains("has not been built"));
         assert!(!not_built.contains('{'), "markdown must not leak JSON");
@@ -572,6 +736,53 @@ mod tests {
             MAX_WORKFLOW_LIMIT
         );
         assert!(bounded_limit(&json!({"limit": "nope"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_run_and_exact_agent_report_truthful_coverage() {
+        let port = bounded_agent_port();
+
+        let run = run_payload(Some(&port), "wf_bounded", None, 2)
+            .await
+            .expect("run payload");
+        assert_eq!(run["agent_count"], 3);
+        assert_eq!(run["agents_returned"], 2);
+        assert_eq!(run["agents_complete"], false);
+        assert_eq!(run["agents_coverage"], "bounded_prefix");
+
+        let agent = run_payload(Some(&port), "wf_bounded", Some("agent-3"), 2)
+            .await
+            .expect("agent payload");
+        assert_eq!(agent["status"], "ok");
+        assert_eq!(agent["found"], true);
+        assert_eq!(agent["agent"]["agent_label"], "agent-3");
+        assert_eq!(agent["agent_count"], 3);
+        assert_eq!(agent["agents_returned"], 1);
+        assert_eq!(agent["lookup_complete"], true);
+        assert_eq!(agent["lookup_coverage"], "conclusive");
+
+        let absent = run_payload(Some(&port), "wf_bounded", Some("agent-4"), 2)
+            .await
+            .expect("missing agent payload");
+        assert_eq!(absent["status"], "ok");
+        assert_eq!(absent["found"], false);
+        assert_eq!(absent["lookup_complete"], true);
+        assert_eq!(absent["lookup_coverage"], "conclusive");
+    }
+
+    #[tokio::test]
+    async fn partial_agent_lookup_never_claims_absence() {
+        let port = PrefixOnlyPort(bounded_agent_port());
+
+        let agent = run_payload(Some(&port), "wf_bounded", Some("agent-3"), 2)
+            .await
+            .expect("agent payload");
+        assert_eq!(agent["status"], "partial");
+        assert!(agent["found"].is_null());
+        assert_eq!(agent["agent_count"], 3);
+        assert_eq!(agent["agents_returned"], 0);
+        assert_eq!(agent["lookup_complete"], false);
+        assert_eq!(agent["lookup_coverage"], "bounded_prefix");
     }
 
     #[test]

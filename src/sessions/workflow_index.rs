@@ -483,6 +483,54 @@ impl RegisteredWorkflowIndexSnapshot {
         Ok(agents)
     }
 
+    pub(crate) async fn agent_count_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<i64, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(0);
+        }
+        let mut rows = self
+            .snapshot
+            .query(
+                "SELECT COUNT(*) FROM workflow_agents WHERE run_id = ?1",
+                params![run_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(0);
+        };
+        Ok(row.get(0)?)
+    }
+
+    pub(crate) async fn agent_for_run_label(
+        &self,
+        run_id: &str,
+        agent_label: &str,
+    ) -> Result<Option<WorkflowAgent>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT {AGENT_COLUMNS}
+             FROM workflow_agents
+             WHERE run_id = ?1 AND agent_label = ?2
+             ORDER BY COALESCE(started_ts, 0) ASC, agent_id ASC
+             LIMIT 1"
+        );
+        let mut rows = self
+            .snapshot
+            .query(&sql, params![run_id, agent_label])
+            .await?;
+        rows.next().await?.map(|row| row_to_agent(&row)).transpose()
+    }
+
     pub(crate) async fn runs_for_git_scope(
         &self,
         filter: &GitScopeFilter,
@@ -698,6 +746,87 @@ pub(crate) fn workflow_scope_exists_predicate(
 
 mod port;
 pub(crate) use port::{WorkflowIngestSink, WorkflowIngestWriteTxn};
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod detail_coverage_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_prefix_keeps_exact_last_agent_and_total_count_queryable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let connection =
+            crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+        ensure_workflow_index_schema(&connection)
+            .await
+            .expect("workflow schema");
+        upsert_run(
+            &connection,
+            &WorkflowRun {
+                run_id: "wf_bounded".to_string(),
+                parent_session_id: "session-1".to_string(),
+                name: None,
+                description: None,
+                phase_json: None,
+                status: WorkflowStatus::Running,
+                started_ts: Some(100),
+                ended_ts: None,
+                result_summary: None,
+                // Detail reads count indexed rows instead of trusting this
+                // potentially stale run metadata.
+                agent_count: 99,
+            },
+        )
+        .await
+        .expect("run");
+        for index in 1..=3 {
+            upsert_agent(
+                &connection,
+                &WorkflowAgent {
+                    run_id: "wf_bounded".to_string(),
+                    agent_label: format!("agent-{index}"),
+                    agent_id: format!("id-{index}"),
+                    phase: None,
+                    transcript_path: None,
+                    agent_session_id: None,
+                    status: WorkflowStatus::Running,
+                    model: None,
+                    tokens: 0,
+                    started_ts: Some(index),
+                    ended_ts: None,
+                },
+            )
+            .await
+            .expect("agent");
+        }
+
+        let snapshot = RegisteredWorkflowIndexSnapshot::from_snapshot(
+            connection.read_snapshot().await.expect("snapshot"),
+        );
+        let prefix = snapshot
+            .agents_for_run("wf_bounded", 2)
+            .await
+            .expect("bounded agents");
+        assert_eq!(prefix.len(), 2);
+        assert!(prefix.iter().all(|agent| agent.agent_label != "agent-3"));
+        assert_eq!(
+            snapshot
+                .agent_count_for_run("wf_bounded")
+                .await
+                .expect("agent count"),
+            3
+        );
+        assert_eq!(
+            snapshot
+                .agent_for_run_label("wf_bounded", "agent-3")
+                .await
+                .expect("exact agent")
+                .expect("last agent")
+                .agent_label,
+            "agent-3"
+        );
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
