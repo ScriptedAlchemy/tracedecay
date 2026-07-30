@@ -27,7 +27,7 @@ use crate::{
     HookContractError, HookEventEnvelopeV2, HookHostV1, HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES,
     MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
     MAX_SPOOL_BYTES_PER_HOST, MAX_SPOOL_BYTES_PER_SESSION, MAX_SPOOL_RECORDS_PER_HOST,
-    MAX_SPOOL_RECORDS_PER_SESSION,
+    MAX_SPOOL_RECORDS_PER_SESSION, decode_hook_event_envelope_compat,
 };
 
 mod replay;
@@ -1131,8 +1131,8 @@ fn decode_complete_frame(
         });
     }
     let payload = &frame[62..checksum_at];
-    let envelope: HookEventEnvelopeV2 =
-        serde_json::from_slice(payload).map_err(|_| HookSpoolError::Corrupted {
+    let envelope =
+        decode_hook_event_envelope_compat(payload).map_err(|_| HookSpoolError::Corrupted {
             at_offset: file_offset,
         })?;
     if envelope.producer != host || envelope.protected_session_id != protected_session_id {
@@ -1438,6 +1438,22 @@ mod tests {
                 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
                 0xf2, 0x00, 0x15, 0xad,
             ]
+        );
+    }
+
+    #[test]
+    fn replay_decoder_migrates_retained_authorization_era_frame() {
+        let payload = include_bytes!("../fixtures/envelopes/authorization-era-saved-edit.json");
+        let frame = encode_frame(1, UtcMicros(10), [8; 32], payload).unwrap();
+        let record = decode_complete_frame(&frame, 0, HookHostV1::CursorDesktop).unwrap();
+
+        assert_eq!(record.sequence, 1);
+        assert_eq!(
+            record.envelope.event,
+            HookEventV2::SavedEdit {
+                file_id: [11; 16],
+                changed_range_count: 1,
+            }
         );
     }
 
