@@ -7,10 +7,12 @@ use fs2::FileExt;
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+// `build_inventory` is deliberately absent: it is reachable only through
+// `build_inventory_in`/`block_on_inventory_in`, which require an owned profile.
 use tracedecay::migrate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, MigrationInventory, MigrationInventoryOptions,
     RegistryStatus, SqliteIntegrityOutcome, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
-    StoreStatus, build_inventory,
+    StoreStatus,
 };
 use tracedecay::migrate::manifest::{
     MigrationManifest, MigrationPlanOptions, MigrationProtocol, StoreArtifactPath,
@@ -28,31 +30,38 @@ use crate::common::fixture::TestProfile;
 /// inspect, so two tests that resolve the same profile root can never both run:
 /// the loser fails with "another lifecycle operation is already active". These
 /// tests used to inspect whichever profile the ambient environment named — one
-/// shared root per checkout — and leaned on an in-process mutex, which a
-/// process-per-test runner leaves uncontended. Owning a profile per test gives
-/// every process its own lease regardless of runner, and keeps Hermes discovery
-/// (which resolves from `HOME`) off the operator's real profile.
+/// shared root per checkout — so they collided as soon as anything stopped
+/// handing each test a private directory. Owning a profile per test gives every
+/// test its own lease by construction, under any runner.
+///
+/// Profile resolution still reads process-global environment, which threads
+/// cannot hold different values of. Under a process-per-test runner that is
+/// moot. Under single-process `cargo test` a sibling module that restores `HOME`
+/// mid-test can still redirect resolution, which is why
+/// [`prepare_inventory_profile`] refuses to proceed unless the root about to be
+/// leased is this test's own.
 struct InventoryProfile {
-    // Declared before the profile so `HERMES_HOME` is restored while the
-    // profile still holds the process-wide environment lock.
+    // Fields drop in declaration order, so `HERMES_HOME` is restored before the
+    // profile releases the environment it pinned.
     _hermes_home: EnvVarGuard,
     profile: TestProfile,
 }
 
 impl InventoryProfile {
     async fn acquire() -> Self {
-        Self::isolate_hermes_home(TestProfile::acquire().await)
+        Self::isolate(TestProfile::acquire().await)
     }
 
     /// Counterpart of [`Self::acquire`] for plain `#[test]` fns; call it outside
-    /// any runtime the test later builds.
+    /// any runtime the test later builds, because the fixture lock blocks.
     fn acquire_blocking() -> Self {
-        Self::isolate_hermes_home(TestProfile::acquire_blocking())
+        Self::isolate(TestProfile::acquire_blocking())
     }
 
-    /// Removes `HERMES_HOME` so a Hermes profile home is discovered from this
-    /// fixture's `HOME` rather than an operator-configured agent host.
-    fn isolate_hermes_home(profile: TestProfile) -> Self {
+    /// Removes `HERMES_HOME` so no operator-configured agent host leaks into the
+    /// production code these tests drive. Inventory's own Hermes scan resolves
+    /// from `HOME`, which the profile already owns; this covers the rest.
+    fn isolate(profile: TestProfile) -> Self {
         Self {
             _hermes_home: EnvVarGuard::unset("HERMES_HOME"),
             profile,
@@ -88,7 +97,7 @@ async fn build_inventory_in(
     options: MigrationInventoryOptions,
 ) -> tracedecay::errors::Result<MigrationInventory> {
     prepare_inventory_profile(profile, &options);
-    build_inventory(options).await
+    tracedecay::migrate::inventory::build_inventory(options).await
 }
 
 /// [`build_inventory_in`] for plain `#[test]` fns.
@@ -99,7 +108,7 @@ fn block_on_inventory_in(
     prepare_inventory_profile(profile, &options);
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(build_inventory(options))
+        .block_on(tracedecay::migrate::inventory::build_inventory(options))
 }
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
