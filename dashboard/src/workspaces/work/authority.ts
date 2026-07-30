@@ -27,8 +27,23 @@ export interface WithheldSurface {
   /** What it would draw once its contract exists — the shape of the absence,
    * so a reviewer can see what is missing rather than only that something is. */
   readonly draws: string;
-  /** The generated contract it reads or writes through. */
+  /** The generated contract it reads or writes through, named the way the design
+   * authority names it. A label for the reader, not a lookup key. */
   readonly requires: string;
+  /**
+   * The schemars type names whose arrival would satisfy this row, matched by
+   * prefix so a `V1` suffix and the `Schema` const beside it both count.
+   *
+   * Explicit, because the design name and the implemented name are not the same
+   * string: the application authority calls its projections `WorkSnapshotV1` and
+   * `WorkDeltaV1`, and its writes `AdmitExecutionCommand` rather than
+   * `ExecutionAdmission`. Deriving the key from `requires` would watch for names
+   * nothing will ever emit, and a gate that cannot see its contract arrive is
+   * worse than no gate — it would leave this page claiming absence over live
+   * data. Watching several candidate names costs a false positive that a reader
+   * would immediately notice; missing the real one is the failure that lies.
+   */
+  readonly watches: readonly string[];
   readonly reason: WithheldReason;
 }
 
@@ -62,6 +77,18 @@ export function withheldPresentation(reason: WithheldReason): WithheldPresentati
 }
 
 /**
+ * The names a landed projection could arrive under.
+ *
+ * `WorkSnapshotV1` and `WorkDeltaV1` are what the committed application
+ * authority actually serves; the `WorkProjectionSnapshot` and `WorkEventDelta`
+ * spellings are what the wire boundary was announced as. Both are watched
+ * because whichever one reaches `DashboardContractCatalogV1` first is the one
+ * that must switch these rows off.
+ */
+const SNAPSHOT_NAMES = ['WorkSnapshot', 'WorkProjectionSnapshot'] as const;
+const DELTA_NAMES = ['WorkDelta', 'WorkEventDelta'] as const;
+
+/**
  * Everything Work is made of.
  *
  * Held as data rather than markup so the ledger, the tests and the wired
@@ -78,6 +105,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Kanban',
         draws: 'triage, ready, running, blocked, review and done lanes derived from immutable history',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -85,6 +113,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Dependency DAG',
         draws: 'gating edges, cycles and supersession, kept distinct from the branch stack',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -92,6 +121,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Timeline',
         draws: 'one task’s event order at a chosen graph version',
         requires: 'WorkEvent',
+        watches: DELTA_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -99,6 +129,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Causal',
         draws: 'declared baselines, and correlation narrowed where causation is not claimed',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -106,6 +137,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Critical path',
         draws: 'the gating chain through the accepted graph, with its blockers',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -113,6 +145,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Workload and capacity',
         draws: 'active and deferred work, requested against actual concurrency, queue and defer reasons, deadlines and budgets',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -120,6 +153,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Executor and model',
         draws: 'recommendation evidence beside the route actually taken, without prompts or credentials',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -127,6 +161,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Repository and delivery',
         draws: 'the repository, worktree and exact commits a task requires and produces',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -134,6 +169,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Evidence',
         draws: 'TaskId-rooted bounded evidence with its coverage, unknowns and anchors',
         requires: 'WorkProjection',
+        watches: SNAPSHOT_NAMES,
         reason: 'read_model_absent',
       },
       {
@@ -141,6 +177,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'History',
         draws: 'current, as-of, evolution and forensic reads of one TaskId',
         requires: 'WorkEvent',
+        watches: DELTA_NAMES,
         reason: 'read_model_absent',
       },
     ],
@@ -154,6 +191,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Create and change work',
         draws: 'expected-version graph writes with idempotent receipts',
         requires: 'WorkCommand',
+        watches: ['CreateWorkCommand', 'ReplanDependenciesCommand', 'AcceptTaskCommand', 'WorkCommand'],
         reason: 'command_absent',
       },
       {
@@ -161,6 +199,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Review a proposal',
         draws: 'accept, reject or supersede an explained proposal under graph and evidence CAS',
         requires: 'WorkProposal',
+        watches: ['ReviewProposalCommand', 'AcceptProposalCommand', 'GeneratedWorkProposal', 'GenerateProposalRequest', 'WorkProposal'],
         reason: 'command_absent',
       },
       {
@@ -168,6 +207,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Admit execution',
         draws: 'a separate admission naming scope, provider, grants, budget and deadline',
         requires: 'ExecutionAdmission',
+        watches: ['AdmitExecutionCommand', 'ExecutionAdmission'],
         reason: 'command_absent',
       },
       {
@@ -175,6 +215,10 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Control a run',
         draws: 'cancel, resume and restart against a fenced lease and attempt',
         requires: 'RunControl',
+        // The one row with no counterpart in the committed application
+        // authority either: run control is designed but not yet implemented, so
+        // only the design name can be watched.
+        watches: ['RunControl'],
         reason: 'command_absent',
       },
       {
@@ -182,6 +226,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Accept an outcome',
         draws: 'sealed terminal evidence, accepted, rejected or replanned as its own step',
         requires: 'TerminalEvidence',
+        watches: ['AttachRuntimeEvidenceCommand', 'TerminalEvidence'],
         reason: 'command_absent',
       },
     ],
@@ -195,6 +240,11 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Task activity',
         draws: 'lease, attempt and progress changes as they land, under a bounded monotone reducer',
         requires: 'task_activity',
+        // A typed stream arrives as a variant of the daemon's event-kind union
+        // rather than as a payload of its own, so the union is the contract this
+        // row actually waits on: without it the dashboard cannot name any
+        // stream to subscribe to, let alone this one.
+        watches: ['DashboardEventKind'],
         reason: 'stream_absent',
       },
     ],
