@@ -209,6 +209,7 @@ from tracedecay_sdk import (
     TraceDecayClient,
     TraceDecayProblemError,
     UNAVAILABLE_OPERATIONS,
+    WORK_OPERATIONS,
 )
 
 base_url = os.environ["TRACEDECAY_SDK_BASE_URL"]
@@ -217,12 +218,30 @@ token = os.environ["TRACEDECAY_SDK_TOKEN"]
 
 for mode in ("local",):
     client = TraceDecayClient.local(base_url, project_id=project_id, token=token)
-    if len(SERVER_OPERATIONS) != 82 or len(UNAVAILABLE_OPERATIONS) != 64:
+    available_work = {name for name in SERVER_OPERATIONS if name.startswith("work_")}
+    if (
+        not SERVER_OPERATIONS
+        or not UNAVAILABLE_OPERATIONS
+        or available_work != set(WORK_OPERATIONS)
+        or available_work & set(UNAVAILABLE_OPERATIONS)
+    ):
         raise AssertionError("installed operation availability inventory drifted")
     if any(value != "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values()):
         raise AssertionError("base routes must remain typed schema-unavailable")
     if hasattr(client, "call") or not hasattr(client.operations, "work_snapshot"):
         raise AssertionError("only typed Work operations may be callable")
+    attempt_finish = WORK_OPERATIONS.get("work_attempt_finish")
+    if (
+        attempt_finish is None
+        or attempt_finish.operation_id != "operation.work.attempt_finish"
+        or attempt_finish.route != "/application/work/attempt/finish"
+        or attempt_finish.binding_id != "binding.http.work.attempt_finish"
+        or attempt_finish.result_schema_id != "schema.work.attempt_finish.result"
+        or attempt_finish.result_schema_revision != 1
+        or attempt_finish.request_schema.get("title") != "WorkAttemptFinishRequestV1"
+        or not hasattr(client.operations, "work_attempt_finish")
+    ):
+        raise AssertionError("installed package work_attempt_finish descriptor identity drifted")
     try:
         response = client.operations.work_snapshot(
             {"page_size": 1}, page=PageOptions(size=1)
