@@ -94,6 +94,23 @@ pub struct ReviewProposalCommand {
     pub occurred_at: UtcMicros,
 }
 
+/// A proposal review records a non-accepting disposition. Acceptance remains a
+/// separate command so callers cannot accidentally collapse review into
+/// approval.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewProposalDispositionV1 {
+    Rejected,
+    Superseded,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewProposalRequestV1 {
+    pub review: ReviewProposalCommand,
+    pub disposition: ReviewProposalDispositionV1,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptProposalCommand {
@@ -258,7 +275,19 @@ where
         context: &RequestContext,
         command: AcceptProposalCommand,
     ) -> Result<WorkProjection, ApplicationProblem> {
-        self.review_proposal(context, command.review, ProposalDisposition::Accepted)
+        self.apply_proposal_disposition(context, command.review, ProposalDisposition::Accepted)
+    }
+
+    pub fn review_proposal(
+        &self,
+        context: &RequestContext,
+        request: ReviewProposalRequestV1,
+    ) -> Result<WorkProjection, ApplicationProblem> {
+        let disposition = match request.disposition {
+            ReviewProposalDispositionV1::Rejected => ProposalDisposition::Rejected,
+            ReviewProposalDispositionV1::Superseded => ProposalDisposition::Superseded,
+        };
+        self.apply_proposal_disposition(context, request.review, disposition)
     }
 
     pub fn reject_proposal(
@@ -266,7 +295,7 @@ where
         context: &RequestContext,
         command: ReviewProposalCommand,
     ) -> Result<WorkProjection, ApplicationProblem> {
-        self.review_proposal(context, command, ProposalDisposition::Rejected)
+        self.apply_proposal_disposition(context, command, ProposalDisposition::Rejected)
     }
 
     pub fn supersede_proposal(
@@ -274,7 +303,7 @@ where
         context: &RequestContext,
         command: ReviewProposalCommand,
     ) -> Result<WorkProjection, ApplicationProblem> {
-        self.review_proposal(context, command, ProposalDisposition::Superseded)
+        self.apply_proposal_disposition(context, command, ProposalDisposition::Superseded)
     }
 
     pub fn admit_execution(
@@ -389,7 +418,7 @@ where
         }
     }
 
-    fn review_proposal(
+    fn apply_proposal_disposition(
         &self,
         context: &RequestContext,
         command: ReviewProposalCommand,

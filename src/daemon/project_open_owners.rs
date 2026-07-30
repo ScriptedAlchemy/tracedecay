@@ -2718,8 +2718,9 @@ fn project_open_work_grant(
     observed_at: UtcMicros,
 ) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
 {
-    let capabilities = tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1
+    let capabilities = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
+        .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1.iter())
         .map(|(_, capability, _)| CapabilityId::new(*capability))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -2734,8 +2735,9 @@ fn project_open_work_grant(
             field: "project-open Work capability grant",
         });
     }
-    let use_cases = tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1
+    let use_cases = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
+        .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1.iter())
         .map(|(_, _, use_case)| tracedecay_tool_catalog::UseCaseId::new(*use_case))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -2828,7 +2830,10 @@ fn production_owner_capabilities()
             }
         })?);
     }
-    for (_, capability, _) in tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1 {
+    for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        .into_iter()
+        .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1)
+    {
         capabilities.insert(CapabilityId::new(capability).map_err(|_| {
             ApplicationContractError::Inconsistent {
                 field: "project-open Work capability",
@@ -2898,10 +2903,13 @@ mod tests {
     }
 
     #[test]
-    fn production_project_owner_grants_every_work_attempt_operation() {
+    fn production_project_owner_grants_every_work_operation() {
         let capabilities = production_owner_capabilities().expect("production capabilities");
 
-        for (_, capability, _) in tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1 {
+        for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+            .into_iter()
+            .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1)
+        {
             let capability = CapabilityId::new(capability).expect("Work attempt capability");
             assert!(
                 capabilities.contains(&capability),

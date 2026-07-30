@@ -485,7 +485,9 @@ fn code_index_search_display_bytes(
     .ok_or(tracedecay_query::retrieval::hydrate::HydrationUnavailableV1::Internal)
 }
 
-impl tracedecay_query::retrieval::semantic::SemanticExecutionControl for McpSemanticExecutionControlV1 {
+impl tracedecay_query::retrieval::semantic::SemanticExecutionControl
+    for McpSemanticExecutionControlV1
+{
     fn is_cancelled(&self) -> bool {
         !self.admission_provider.route_is_registered() || self.request_termination().is_some()
     }
@@ -591,7 +593,8 @@ fn code_index_search_executor(
                     exact_rule_revision,
                     lexical_profile_revision,
                     lexical_score_domain,
-                    fuzzy_budget: tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+                    fuzzy_budget:
+                        tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
                     graph_edge_kinds: vec![tracedecay_domain::RelationEdgeKindV1::Calls],
                     graph_max_depth: 1,
                     page_size: request.limit,
@@ -1279,8 +1282,9 @@ pub(crate) use service::invocation::{
     Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationOutcomeV1,
     Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
     Pr13AdvisoryCycleTerminalV1, Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
-    daemon_operation_event_authority, parse_daemon_invocation_request,
+    Pr13HookOrchestrationTriggerV1, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
+    admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
+    parse_daemon_invocation_request,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
