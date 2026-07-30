@@ -407,7 +407,13 @@ function settleSubmit(
           actualRevisionId: result.actualRevisionId,
         },
       };
+    // Three ways for nothing to have been applied, and they share a state
+    // because they share the statement the reader needs: the draft is intact,
+    // the revision is untouched, and the detail says why. They differ only in
+    // the reason, which each one carries.
     case 'unavailable':
+    case 'not_dispatched':
+    case 'read_only_scope':
       return { status: 'authority_withdrawn', authority, draft, review, detail: result.detail };
     case 'offline':
       return failed(state, { kind: 'offline', detail: result.detail });
@@ -442,11 +448,17 @@ export type SubmittingSettingsState = Extract<SettingsEditorState, { status: 'su
  * Total, and reachable from nowhere else: a request exists only where the
  * machine has already checked the held revision against the authority, so
  * there is no path that sends a patch from a stale review.
+ *
+ * Scope writability is deliberately absent. It is not a property of the review
+ * this machine holds — it is a property of the dashboard the routes point at,
+ * and it can change while a review sits open. The controller supplies it at
+ * dispatch so the write refuses on the current reading rather than one captured
+ * when the draft was confirmed.
  */
 export function settingsSubmission(
   state: SubmittingSettingsState,
   routes: SettingsRoutes,
-): SettingsMutationRequest {
+): Omit<SettingsMutationRequest, 'writability'> {
   return {
     scope: state.review.scope,
     expectedRevisionId: state.review.expectedRevisionId,

@@ -7,10 +7,19 @@ import {
   type WireLegalActionRef,
 } from '../../contracts/wire.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { scopedUrl, useScope } from '../../data/scope/store.ts';
+import {
+  scopeWritable,
+  scopedUrl,
+  useScope,
+  type ScopeWritability,
+} from '../../data/scope/store.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { WorkspaceHeader } from '../../ui/instrument.tsx';
-import { SettingsEditorPanel, type WritableScopes } from './SettingsEditorController.tsx';
+import {
+  SettingsEditorPanel,
+  settingsWriteGate,
+  type WritableScopes,
+} from './SettingsEditorController.tsx';
 import { OriginBand, SectionIndex } from './SettingsProvenance.tsx';
 import { ConfigSectionBlock } from './SettingsValues.tsx';
 import {
@@ -47,6 +56,9 @@ export function SettingsPage() {
     EnvelopeSchema(SettingsPayloadV1Schema),
   );
   const readUrl = scopedUrl(scope, '/api/settings');
+  // Both patch routes are addressed through the project gateway, so whether
+  // this scope accepts a write bears on both scopes' editors.
+  const writability = scopeWritable(scope);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -54,7 +66,8 @@ export function SettingsPage() {
         {(envelope) => (
           <SettingsSurface
             payload={envelope.payload}
-            writable={writableScopes(envelope.legal_actions)}
+            writable={writableScopes(envelope.legal_actions, writability)}
+            writability={writability}
             readUrl={readUrl}
             projectPatchUrl={scopedUrl(scope, '/api/settings/project')}
             userPatchUrl={scopedUrl(scope, '/api/settings/user')}
@@ -75,20 +88,24 @@ export function SettingsPage() {
  * without the control plane omits the project action. Offering the editor
  * anyway would put a control on screen whose only outcome is a 503.
  */
-function writableScopes(legalActions: readonly WireLegalActionRef[]): WritableScopes {
+function writableScopes(
+  legalActions: readonly WireLegalActionRef[],
+  writability: ScopeWritability,
+): WritableScopes {
   const authorizes = (operation: string) =>
     legalActions.some(
       (action) => action.kind === 'request_apply' && action.operation === operation,
     );
   return {
-    project: authorizes('configuration_batch'),
-    user: authorizes('user_settings_mutate'),
+    project: settingsWriteGate(authorizes('configuration_batch'), writability),
+    user: settingsWriteGate(authorizes('user_settings_mutate'), writability),
   };
 }
 
 function SettingsSurface({
   payload,
   writable,
+  writability,
   readUrl,
   projectPatchUrl,
   userPatchUrl,
@@ -96,6 +113,7 @@ function SettingsSurface({
 }: {
   payload: SettingsPayloadV1;
   writable: WritableScopes;
+  writability: ScopeWritability;
   readUrl: string;
   projectPatchUrl: string;
   userPatchUrl: string;
@@ -231,6 +249,7 @@ function SettingsSurface({
                 <SettingsEditorPanel
                   payload={payload}
                   writable={writable}
+                  writability={writability}
                   readUrl={readUrl}
                   projectPatchUrl={projectPatchUrl}
                   userPatchUrl={userPatchUrl}

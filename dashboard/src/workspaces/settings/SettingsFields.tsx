@@ -19,6 +19,7 @@ import type {
   SettingsValidationError,
   UserSettingsValues,
 } from './settingsModel.ts';
+import type { SettingsWriteGate } from './SettingsEditorController.tsx';
 
 export function ProjectSettingsFields({
   values,
@@ -31,17 +32,24 @@ export function ProjectSettingsFields({
   values: ProjectSettingsValues;
   errors: readonly SettingsValidationError[];
   dirty: boolean;
-  writable: boolean;
+  writable: SettingsWriteGate;
   onChange: (values: ProjectSettingsValues) => void;
   onReview: () => void;
 }) {
   return (
     <fieldset
       className="min-w-0 border border-edge-subtle bg-surface-1 p-3"
-      disabled={!writable}
+      disabled={writable.state !== 'writable'}
     >
       <legend className="px-1 text-xs font-semibold text-text-primary">Project settings</legend>
-      {writable ? <EditState scope="project" dirty={dirty} /> : <ReadOnlyScope scope="project" />}
+      {writable.state === 'writable' ? (
+        <>
+          <WritableScopeNote gate={writable} />
+          <EditState scope="project" dirty={dirty} />
+        </>
+      ) : (
+        <ReadOnlyScope scope="project" gate={writable} />
+      )}
       <div className="grid gap-2 sm:grid-cols-2">
         <SettingsTextArea
           label="Include globs"
@@ -102,7 +110,7 @@ export function ProjectSettingsFields({
           onChange={(checked) => onChange({ ...values, auto_track_pr_branches: checked })}
         />
       </div>
-      {writable ? (
+      {writable.state === 'writable' ? (
         <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
           Review project changes
         </button>
@@ -123,17 +131,24 @@ export function UserSettingsFields({
   values: UserSettingsValues;
   errors: readonly SettingsValidationError[];
   dirty: boolean;
-  writable: boolean;
+  writable: SettingsWriteGate;
   onChange: (values: UserSettingsValues) => void;
   onReview: () => void;
 }) {
   return (
     <fieldset
       className="min-w-0 border border-edge-subtle bg-surface-1 p-3"
-      disabled={!writable}
+      disabled={writable.state !== 'writable'}
     >
       <legend className="px-1 text-xs font-semibold text-text-primary">User settings</legend>
-      {writable ? <EditState scope="user" dirty={dirty} /> : <ReadOnlyScope scope="user" />}
+      {writable.state === 'writable' ? (
+        <>
+          <WritableScopeNote gate={writable} />
+          <EditState scope="user" dirty={dirty} />
+        </>
+      ) : (
+        <ReadOnlyScope scope="user" gate={writable} />
+      )}
       <div className="grid gap-2">
         <SettingsInput
           label="Watcher debounce"
@@ -155,7 +170,7 @@ export function UserSettingsFields({
           onChange={(checked) => onChange({ ...values, upload_enabled: checked })}
         />
       </div>
-      {writable ? (
+      {writable.state === 'writable' ? (
         <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
           Review user changes
         </button>
@@ -285,15 +300,62 @@ function EditState({ scope, dirty }: { scope: SettingsScope; dirty: boolean }) {
 
 /** A scope the envelope carries no apply action for.
  *
- * This states only what the wire states — the server does not currently
- * authorize this write — rather than guessing at which authority is missing. */
-function ReadOnlyScope({ scope }: { scope: SettingsScope }) {
+ * Each state states only what its authority stated, rather than guessing at
+ * which one is missing. */
+/**
+ * Why this scope cannot be written, in the words of whichever authority
+ * refused.
+ *
+ * This used to print one sentence for every case — "this dashboard is not
+ * authorized to apply {scope} settings" — which was the right accusation only
+ * when the envelope advertised no apply action. Under a selected project the
+ * obstacle is the scope, the remedy is switching it, and the old sentence sent
+ * the reader looking for a permission problem that did not exist. Exhaustive,
+ * so a new gate state states its own reason rather than inheriting one.
+ *
+ * The uppercase letterspacing went with that fixed phrase. The scope reasons
+ * are sentences, and `uppercase tracking-[0.16em]` at 3xs makes a sentence
+ * something to decode rather than read — so the label keeps its weight and
+ * token and loses the treatment that only suited a four-word tag.
+ */
+function ReadOnlyScope({ scope, gate }: { scope: SettingsScope; gate: SettingsWriteGate }) {
+  const reason = ((): string => {
+    switch (gate.state) {
+      case 'unauthorized':
+        return `this dashboard is not authorized to apply ${scope} settings`;
+      case 'read_only':
+      case 'unknown':
+        return gate.reason;
+      case 'writable':
+        // Unreachable: the caller renders the editable state instead.
+        return `${scope} settings are writable`;
+      default: {
+        const exhaustive: never = gate;
+        return exhaustive;
+      }
+    }
+  })();
   return (
     <p
       aria-live="polite"
-      className="mb-2 text-3xs font-semibold uppercase tracking-[0.16em] text-state-unsupported-schema"
+      data-settings-gate={gate.state}
+      className="mb-2 text-3xs font-semibold text-state-unsupported-schema"
     >
-      Read-only · this dashboard is not authorized to apply {scope} settings
+      Read-only · {reason}
+    </p>
+  );
+}
+
+/** The scope a write under this gate would land in, when it would land at all.
+ *
+ * Present in the writable case for the aggregate scope's sake: a settings
+ * change made under "all projects" is applied to one project, and the editor
+ * names which rather than implying it fans out. */
+function WritableScopeNote({ gate }: { gate: SettingsWriteGate }) {
+  if (gate.state !== 'writable') return null;
+  return (
+    <p data-settings-gate="writable" className="mb-2 text-3xs text-text-secondary">
+      Applies to {gate.target}.
     </p>
   );
 }
