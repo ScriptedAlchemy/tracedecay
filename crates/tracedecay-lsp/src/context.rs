@@ -469,8 +469,8 @@ impl ContextProjectionPort for ContextProjectionAdapter {
 
     fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
         let key = Self::key(root, request_id);
-        let cancelled_projection = self.in_flight.cancel(&key, true);
-        let cancelled_expansion = self.expansions.cancel(&key, true);
+        let cancelled_projection = self.in_flight.cancel(&key);
+        let cancelled_expansion = self.expansions.cancel(&key);
         self.authority.cancel_request(root, request_id)
             || cancelled_projection
             || cancelled_expansion

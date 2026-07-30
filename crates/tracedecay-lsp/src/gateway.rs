@@ -800,7 +800,7 @@ impl SemanticProviderAdapter {
     pub fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
         let key = Self::key(root, request_id);
         let authority_cancelled = self.authority.cancel_request(root, request_id);
-        let broker_cancelled = self.operations.cancel(&key, !authority_cancelled);
+        let broker_cancelled = self.operations.cancel(&key);
         authority_cancelled || broker_cancelled
     }
 
