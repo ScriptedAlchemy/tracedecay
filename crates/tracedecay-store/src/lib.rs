@@ -59,10 +59,12 @@ pub use evidence_assembly::{
     derive_source_occurrence_id_v1,
 };
 pub use external_source::{
-    MAX_SOURCE_COMMIT_OBSERVATIONS_V1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
+    MAX_SOURCE_COMMIT_OBSERVATIONS_V1, SourceAuthorityPublicationReceiptV1,
+    SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
     SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1, SourceObjectTransitionV1,
     SourceObservationEvidenceV1, SourceProjectionCommitV1, SourceProjectionEffectV1,
-    SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_commit,
+    SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_authority_publication,
+    apply_source_commit,
 };
 pub use git_index_transactions::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
