@@ -7,6 +7,7 @@
 mod authorization;
 mod ingest;
 pub mod lcm;
+mod orchestration;
 mod provider;
 mod workflow;
 
@@ -14,6 +15,7 @@ pub use authorization::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionRetrievalScope,
 };
 pub use ingest::{NewRows, StoredCursor, TranscriptIngestStats};
+pub use orchestration::{ProviderRunFailure, ProviderRunFold, ProviderRunOutcome};
 pub use provider::{
     EXPECTED_MESSAGE_SEARCH_PROVIDER, MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider,
     decode_kiro_workspace_path,

@@ -5498,7 +5498,6 @@ dependencies = [
  "tracedecay-sessions",
  "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
- "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
  "tracing",
  "tracing-subscriber",
@@ -5713,20 +5712,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracedecay-domain",
-]
-
-[[package]]
-name = "tracedecay-temporal-query"
-version = "0.1.0"
-dependencies = [
- "hex",
- "hmac 0.13.0",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror",
- "tracedecay-domain",
- "zeroize",
 ]
 
 [[package]]
