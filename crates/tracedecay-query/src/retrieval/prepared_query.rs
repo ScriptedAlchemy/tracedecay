@@ -14,9 +14,7 @@ use tracedecay_domain::{
     UtcMicros, canonical_sha256,
 };
 
-use super::fusion::{
-    PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1, QueryDigestAuthenticationError,
-};
+use super::fusion::{PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1, QueryDigestAuthenticationError};
 use super::{Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1};
 
 const PREPARED_QUERY_CURSOR_PREFIX_V1: &str = "ccq1.";
@@ -261,6 +259,7 @@ fn cursor_authentication_payload_bytes(
         generation: &'a CodeGenerationId,
         query_binding_digest: &'a ManifestDigest,
         candidate_set_digest: &'a ManifestDigest,
+        authentication_key_id: &'a RetrievalCursorKeyId,
         next_offset: u32,
         expires_at: UtcMicros,
     }
@@ -272,6 +271,7 @@ fn cursor_authentication_payload_bytes(
         generation: &payload.generation,
         query_binding_digest: &payload.query_binding_digest,
         candidate_set_digest: &payload.candidate_set_digest,
+        authentication_key_id: &payload.authentication_key_id,
         next_offset: payload.next_offset,
         expires_at: payload.expires_at,
     })
