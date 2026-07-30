@@ -2853,7 +2853,7 @@ mod tests {
                 external_consumer: "fixture consumer".to_owned(),
                 owner: "fixture API team".to_owned(),
                 deprecation_policy: "retained as a stable compatibility alias".to_owned(),
-                pr19_deletion_condition: None,
+                deletion_condition: None,
             },
         };
 
@@ -2969,7 +2969,7 @@ mod tests {
                         external_consumer: "fixture consumer".to_owned(),
                         owner: "fixture API team".to_owned(),
                         deprecation_policy: "retained as a stable compatibility alias".to_owned(),
-                        pr19_deletion_condition: None,
+                        deletion_condition: None,
                     },
                 },
                 ApiMigrationOperationRequestV1::ReplaceSelectedTerminology {

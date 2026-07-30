@@ -76,8 +76,16 @@ pub struct ApiCompatibilityDispositionV1 {
     pub external_consumer: String,
     pub owner: String,
     pub deprecation_policy: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pr19_deletion_condition: Option<String>,
+    /// Product sunset predicate for temporary compatibility inserts.
+    ///
+    /// Wire migration: serialize as `deletion_condition`; deserialize also
+    /// accepts the historical `pr19_deletion_condition` field name.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "pr19_deletion_condition"
+    )]
+    pub deletion_condition: Option<String>,
 }
 
 impl ApiCompatibilityDispositionV1 {
@@ -93,15 +101,15 @@ impl ApiCompatibilityDispositionV1 {
         )?;
         match self.lifetime {
             ApiCompatibilityLifetimeV1::StablePublicContract
-                if self.pr19_deletion_condition.is_some() =>
+                if self.deletion_condition.is_some() =>
             {
                 Err(ApplicationContractError::Inconsistent {
                     field: "stable API compatibility deletion condition",
                 })
             }
             ApiCompatibilityLifetimeV1::Temporary => validate_text(
-                "temporary API compatibility PR19 deletion condition",
-                self.pr19_deletion_condition.as_deref().unwrap_or_default(),
+                "temporary API compatibility deletion condition",
+                self.deletion_condition.as_deref().unwrap_or_default(),
             ),
             ApiCompatibilityLifetimeV1::StablePublicContract => Ok(()),
         }
@@ -915,15 +923,38 @@ mod tests {
     }
 
     #[test]
-    fn temporary_compatibility_requires_pr19_condition() {
+    fn temporary_compatibility_requires_deletion_condition() {
         let disposition = ApiCompatibilityDispositionV1 {
             lifetime: ApiCompatibilityLifetimeV1::Temporary,
             external_consumer: "published users".to_owned(),
             owner: "api".to_owned(),
             deprecation_policy: "warn for one release".to_owned(),
-            pr19_deletion_condition: None,
+            deletion_condition: None,
         };
         assert!(disposition.validate().is_err());
+
+        let with_condition = ApiCompatibilityDispositionV1 {
+            deletion_condition: Some("remove after consumers migrate".to_owned()),
+            ..disposition.clone()
+        };
+        with_condition.validate().unwrap();
+
+        let legacy_wire: ApiCompatibilityDispositionV1 = serde_json::from_value(serde_json::json!({
+            "lifetime": "temporary",
+            "external_consumer": "published users",
+            "owner": "api",
+            "deprecation_policy": "warn for one release",
+            "pr19_deletion_condition": "legacy wire sunset predicate"
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy_wire.deletion_condition.as_deref(),
+            Some("legacy wire sunset predicate")
+        );
+        legacy_wire.validate().unwrap();
+        let serialized = serde_json::to_value(&legacy_wire).unwrap();
+        assert!(serialized.get("deletion_condition").is_some());
+        assert!(serialized.get("pr19_deletion_condition").is_none());
     }
 
     #[test]
@@ -939,7 +970,7 @@ mod tests {
                 external_consumer: "published users".to_owned(),
                 owner: "api".to_owned(),
                 deprecation_policy: "retain indefinitely".to_owned(),
-                pr19_deletion_condition: None,
+                deletion_condition: None,
             },
         };
         let plan = plan_with(
