@@ -283,24 +283,24 @@ impl<A, P, H> CodeIndexSearchHydrationSourceV1<A, P, H> {
 }
 
 impl<A, P, H>
-    crate::query::retrieval::hydrate::LateHydrationSource<
+    tracedecay_query::retrieval::hydrate::LateHydrationSource<
         crate::mcp::server::CodeIndexSearchDisplayV1,
     > for CodeIndexSearchHydrationSourceV1<A, P, H>
 where
     A: FnMut(
         &tracedecay_domain::RetrievalRequest,
         &tracedecay_domain::RankedCandidate,
-    ) -> crate::query::retrieval::hydrate::HydrationAuthorizationV1,
+    ) -> tracedecay_query::retrieval::hydrate::HydrationAuthorizationV1,
     P: FnMut(
         &tracedecay_domain::RetrievalRequest,
         &tracedecay_domain::RankedCandidate,
-        &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
-    ) -> crate::query::retrieval::hydrate::HydrationPreflightOutcomeV1,
+        &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> tracedecay_query::retrieval::hydrate::HydrationPreflightOutcomeV1,
     H: FnMut(
         &tracedecay_domain::RetrievalRequest,
         &tracedecay_domain::RankedCandidate,
-        &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
-    ) -> crate::query::retrieval::hydrate::HydrationReadOutcomeV1<
+        &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> tracedecay_query::retrieval::hydrate::HydrationReadOutcomeV1<
         crate::mcp::server::CodeIndexSearchDisplayV1,
     >,
 {
@@ -308,7 +308,7 @@ where
         &mut self,
         request: &tracedecay_domain::RetrievalRequest,
         candidate: &tracedecay_domain::RankedCandidate,
-    ) -> crate::query::retrieval::hydrate::HydrationAuthorizationV1 {
+    ) -> tracedecay_query::retrieval::hydrate::HydrationAuthorizationV1 {
         (self.authorize)(request, candidate)
     }
 
@@ -316,9 +316,9 @@ where
         &mut self,
         request: &tracedecay_domain::RetrievalRequest,
         candidate: &tracedecay_domain::RankedCandidate,
-        permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
-    ) -> crate::query::retrieval::hydrate::HydrationPreflightOutcomeV1 {
-        use crate::query::retrieval::hydrate::{
+        permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> tracedecay_query::retrieval::hydrate::HydrationPreflightOutcomeV1 {
+        use tracedecay_query::retrieval::hydrate::{
             HydrationAuthorizationV1, HydrationPreflightOutcomeV1, HydrationUnavailableV1,
         };
 
@@ -337,11 +337,11 @@ where
         &mut self,
         request: &tracedecay_domain::RetrievalRequest,
         candidate: &tracedecay_domain::RankedCandidate,
-        permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
-    ) -> crate::query::retrieval::hydrate::HydrationReadOutcomeV1<
+        permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> tracedecay_query::retrieval::hydrate::HydrationReadOutcomeV1<
         crate::mcp::server::CodeIndexSearchDisplayV1,
     > {
-        use crate::query::retrieval::hydrate::{
+        use tracedecay_query::retrieval::hydrate::{
             HydrationAuthorizationV1, HydrationReadOutcomeV1, HydrationUnavailableV1,
         };
 
@@ -366,9 +366,9 @@ fn code_index_search_display_binding(
         crate::mcp::server::CodeIndexSearchDisplayV1,
         tracedecay_domain::OccurrenceProvenance,
     ),
-    crate::query::retrieval::hydrate::HydrationUnavailableV1,
+    tracedecay_query::retrieval::hydrate::HydrationUnavailableV1,
 > {
-    use crate::query::retrieval::hydrate::HydrationUnavailableV1;
+    use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
 
     if generation.symbols().generation_id != generation.manifest().generation_id
         || request.scope.privacy_domain != generation.manifest().privacy_domain
@@ -474,7 +474,7 @@ fn code_index_symbol_display(
 
 fn code_index_search_display_bytes(
     display: &crate::mcp::server::CodeIndexSearchDisplayV1,
-) -> std::result::Result<u64, crate::query::retrieval::hydrate::HydrationUnavailableV1> {
+) -> std::result::Result<u64, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1> {
     serde_json::to_vec(&(
         display.name.as_str(),
         display.qualified_name.as_str(),
@@ -482,10 +482,10 @@ fn code_index_search_display_bytes(
     ))
     .ok()
     .and_then(|bytes| u64::try_from(bytes.len()).ok())
-    .ok_or(crate::query::retrieval::hydrate::HydrationUnavailableV1::Internal)
+    .ok_or(tracedecay_query::retrieval::hydrate::HydrationUnavailableV1::Internal)
 }
 
-impl crate::query::retrieval::semantic::SemanticExecutionControl for McpSemanticExecutionControlV1 {
+impl tracedecay_query::retrieval::semantic::SemanticExecutionControl for McpSemanticExecutionControlV1 {
     fn is_cancelled(&self) -> bool {
         !self.admission_provider.route_is_registered() || self.request_termination().is_some()
     }
@@ -495,11 +495,11 @@ impl crate::query::retrieval::semantic::SemanticExecutionControl for McpSemantic
     }
 }
 
-impl crate::query::retrieval::hydrate::HydrationExecutionControlV1
+impl tracedecay_query::retrieval::hydrate::HydrationExecutionControlV1
     for McpSemanticExecutionControlV1
 {
     fn elapsed_micros(&self) -> u64 {
-        crate::query::retrieval::semantic::SemanticExecutionControl::elapsed_micros(self)
+        tracedecay_query::retrieval::semantic::SemanticExecutionControl::elapsed_micros(self)
     }
 
     fn is_cancelled(&self) -> bool {
@@ -562,19 +562,19 @@ fn code_index_search_executor(
             let terminal_expected_authority = authority.clone();
             let policy = match (
                 tracedecay_domain::SanitizerRevision::new(
-                    crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
+                    tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
                 ),
                 tracedecay_domain::QueryNormalizationRevision::new(
-                    crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+                    tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
                 ),
                 tracedecay_domain::ExactAdmissionRuleRevision::new(
-                    crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                    tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
                 ),
                 tracedecay_domain::ComponentRevision::new(
-                    crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                    tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
                 ),
                 tracedecay_domain::ScoreDomainId::new(
-                    crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                    tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
                 ),
             ) {
                 (
@@ -591,7 +591,7 @@ fn code_index_search_executor(
                     exact_rule_revision,
                     lexical_profile_revision,
                     lexical_score_domain,
-                    fuzzy_budget: crate::query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+                    fuzzy_budget: tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
                     graph_edge_kinds: vec![tracedecay_domain::RelationEdgeKindV1::Calls],
                     graph_max_depth: 1,
                     page_size: request.limit,
@@ -615,10 +615,10 @@ fn code_index_search_executor(
             let cancellation = request.cancellation;
             let semantic_mode = match mode {
                 crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed => {
-                    crate::query::retrieval::semantic::SemanticQueryModeV1::FallbackAllowed
+                    tracedecay_query::retrieval::semantic::SemanticQueryModeV1::FallbackAllowed
                 }
                 crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic => {
-                    crate::query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
+                    tracedecay_query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
                 }
             };
             let control = Arc::new(McpSemanticExecutionControlV1 {
@@ -786,7 +786,7 @@ fn code_index_search_executor(
                         Pr9SemanticSearchExecutionErrorV1::Pr9(error) => match error {
                         Pr9SearchExecutionErrorV1::AuthorityUnavailable
                         | Pr9SearchExecutionErrorV1::Authority(
-                            crate::query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable,
+                            tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable,
                         ) => crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         Pr9SearchExecutionErrorV1::GenerationUnavailable => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
@@ -939,7 +939,7 @@ fn code_index_search_executor(
             let authorize =
                 |request: &tracedecay_domain::RetrievalRequest,
                  _candidate: &tracedecay_domain::RankedCandidate| {
-                    use crate::query::retrieval::hydrate::HydrationAuthorizationV1;
+                    use tracedecay_query::retrieval::hydrate::HydrationAuthorizationV1;
 
                     let Ok(current_scope) =
                         project_open_owners::resolved_scope_for_project(&project_root, &project_id)
@@ -971,8 +971,8 @@ fn code_index_search_executor(
             let preflight =
                 |request: &tracedecay_domain::RetrievalRequest,
                  candidate: &tracedecay_domain::RankedCandidate,
-                 _permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1| {
-                    use crate::query::retrieval::hydrate::HydrationPreflightOutcomeV1;
+                 _permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1| {
+                    use tracedecay_query::retrieval::hydrate::HydrationPreflightOutcomeV1;
 
                     match code_index_search_display_binding(
                         latest.generation(),
@@ -990,8 +990,8 @@ fn code_index_search_executor(
             let hydrate =
                 |request: &tracedecay_domain::RetrievalRequest,
                  candidate: &tracedecay_domain::RankedCandidate,
-                 _permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1| {
-                    use crate::query::retrieval::hydrate::HydrationReadOutcomeV1;
+                 _permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1| {
+                    use tracedecay_query::retrieval::hydrate::HydrationReadOutcomeV1;
 
                     let (display, provenance) = match code_index_search_display_binding(
                         latest.generation(),
@@ -1011,7 +1011,7 @@ fn code_index_search_executor(
                         Ok(revision) => revision,
                         Err(_) => {
                             return HydrationReadOutcomeV1::Unavailable(
-                                crate::query::retrieval::hydrate::HydrationUnavailableV1::Internal,
+                                tracedecay_query::retrieval::hydrate::HydrationUnavailableV1::Internal,
                             );
                         }
                     };
@@ -1028,7 +1028,7 @@ fn code_index_search_executor(
                     }
                 };
             let mut source = CodeIndexSearchHydrationSourceV1::new(authorize, preflight, hydrate);
-            let hydrated = match crate::query::retrieval::hydrate::CanonicalLateHydration::new(
+            let hydrated = match tracedecay_query::retrieval::hydrate::CanonicalLateHydration::new(
                 &mut source,
             )
             .hydrate_with_control(
@@ -1060,7 +1060,7 @@ fn code_index_search_executor(
             let mut display_by_anchor = HashMap::new();
             let mut hydrated_candidates = Vec::with_capacity(ordered_candidates.len());
             for result in hydrated.results {
-                use crate::query::retrieval::hydrate::{
+                use tracedecay_query::retrieval::hydrate::{
                     HydrationOutcomeV1, HydrationUnavailableV1,
                 };
 
