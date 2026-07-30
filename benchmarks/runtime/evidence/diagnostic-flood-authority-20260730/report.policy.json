@@ -1,0 +1,14 @@
+{
+  "acceptance": {
+    "artifact_sha256": "a45ac061172fbeda7c5d4ac13e80569091c260d675c83baa63652aaba910534d",
+    "policy_id": "runtime-acceptance-v1",
+    "policy_sha256": "7c74637ac91439e8d04870d322c7e9c9d1d4dc926958c01c475c3c7f37651878",
+    "policy_version": 1
+  },
+  "journey": {
+    "artifact_sha256": "a45ac061172fbeda7c5d4ac13e80569091c260d675c83baa63652aaba910534d",
+    "policy_id": "runtime-journey-margins-v1",
+    "policy_sha256": "6db22e48d7e45a6cc751baaf1ae40e67905aafb5b315157f646a94cf57695d45",
+    "policy_version": 1
+  }
+}
