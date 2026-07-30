@@ -11,38 +11,59 @@ import platform
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping, NoReturn, Sequence
 
-from fixtures import (
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if os.fspath(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, os.fspath(REPOSITORY_ROOT))
+
+from benchmarks.runtime.fixtures import (
     FixtureError,
     PreparedFixture,
     clone_prepared_profile,
+    fixture_source_root,
     isolated_environment,
     prepare_fixture_snapshot,
     provider_fixture_files,
     provider_roots,
 )
-from lifecycle import LifecycleError, OwnedDaemon, ProbeResult, RunWorkspace
-from policy import (
+from benchmarks.runtime.lifecycle import (
+    LifecycleError,
+    OwnedDaemon,
+    ProbeResult,
+    RunWorkspace,
+)
+from benchmarks.runtime.incident_workloads import incident_catalog_document
+from benchmarks.runtime.policy import (
     PolicyViolation,
     evaluate_artifact,
     load_acceptance_policy,
+    load_journey_policy,
     make_policy_receipt,
 )
-from scenarios import SCENARIOS, WORKLOADS, Workload, WorkloadInputs
-from schema import (
+from benchmarks.runtime.scenarios import (
+    SCENARIOS,
+    WORKLOADS,
+    Workload,
+    WorkloadInputs,
+    stable_digest,
+)
+from benchmarks.runtime.schema import (
     SchemaValidationError,
+    read_jsonl,
     validate_report,
     validate_sample,
     write_jsonl,
 )
+from benchmarks.runtime.statistics import nearest_rank
 
 
 SCHEMA_VERSION = 1
-SUBCOMMANDS = ("prepare", "capture", "paired", "compare", "smoke")
+SUBCOMMANDS = ("prepare", "capture", "paired", "compare", "incidents", "smoke")
 FORBIDDEN_REPORT_FIELDS = frozenset({"pr_stage", "milestone_budget_ns"})
 
 
@@ -90,6 +111,17 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_tree(path: Path) -> str:
+    digest = hashlib.sha256()
+    for entry in sorted(Path(path).rglob("*")):
+        if not entry.is_file():
+            continue
+        digest.update(entry.relative_to(path).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(entry)))
     return digest.hexdigest()
 
 
@@ -215,6 +247,83 @@ def _machine_fingerprint() -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
+def _process_observations(process_id: int) -> dict[str, int]:
+    observations: dict[str, int] = {}
+    proc = Path("/proc") / str(process_id)
+    try:
+        stat_fields = (proc / "stat").read_text(encoding="utf-8").split()
+        clock_ticks = int(os.sysconf("SC_CLK_TCK"))
+        cpu_ticks = int(stat_fields[13]) + int(stat_fields[14])
+        observations["daemon_cpu_time_ns"] = (
+            cpu_ticks * 1_000_000_000 // clock_ticks
+        )
+    except (FileNotFoundError, IndexError, OSError, ValueError):
+        pass
+    try:
+        status = (proc / "status").read_text(encoding="utf-8")
+        for line in status.splitlines():
+            if line.startswith(("VmHWM:", "VmRSS:")):
+                label, value, _unit = line.split()
+                if (
+                    label == "VmHWM:"
+                    or "daemon_peak_rss_bytes" not in observations
+                ):
+                    observations["daemon_peak_rss_bytes"] = int(value) * 1024
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    try:
+        smaps_rollup = (proc / "smaps_rollup").read_text(encoding="utf-8")
+        for line in smaps_rollup.splitlines():
+            if line.startswith("Pss:"):
+                observations["daemon_pss_bytes"] = int(line.split()[1]) * 1024
+                break
+    except (FileNotFoundError, OSError, PermissionError, ValueError):
+        pass
+    try:
+        io_values = {}
+        for line in (proc / "io").read_text(encoding="utf-8").splitlines():
+            key, value = line.split(":", 1)
+            io_values[key] = int(value.strip())
+        observations["disk_read_bytes"] = io_values["read_bytes"]
+        observations["disk_write_bytes"] = io_values["write_bytes"]
+    except (FileNotFoundError, KeyError, OSError, PermissionError, ValueError):
+        pass
+    return observations
+
+
+def _resource_delta(
+    before: Mapping[str, int],
+    after: Mapping[str, int],
+    *,
+    logical_write_bytes: int | None,
+) -> dict[str, int | None]:
+    result: dict[str, int | None] = {}
+    for field in ("daemon_cpu_time_ns", "disk_read_bytes", "disk_write_bytes"):
+        if field in before and field in after:
+            result[field] = max(0, after[field] - before[field])
+    for field in ("daemon_peak_rss_bytes", "daemon_pss_bytes"):
+        if field in after:
+            result[field] = after[field]
+    disk_write_bytes = result.get("disk_write_bytes")
+    if isinstance(disk_write_bytes, int) and logical_write_bytes is not None:
+        result["write_amplification_ppm"] = (
+            disk_write_bytes * 1_000_000 // max(1, logical_write_bytes)
+        )
+    else:
+        result["write_amplification_ppm"] = None
+    result["memory_peak_bytes"] = None
+    result["profiler_overhead_ns"] = None
+    return result
+
+
+def _wal_bytes(root: Path) -> int:
+    return sum(
+        path.stat().st_size
+        for path in Path(root).rglob("*-wal")
+        if path.is_file()
+    )
+
+
 def _artifact_paths(output: Path) -> tuple[Path, Path]:
     return output.with_suffix(".samples.jsonl"), output.with_suffix(".policy.json")
 
@@ -225,6 +334,8 @@ def _run_capture(
     prepared: PreparedFixture,
     output: Path,
     variant: str,
+    round_index: int = 0,
+    abba_position: int = 0,
 ) -> None:
     scenario, workload = runtime_scenario()
     try:
@@ -293,6 +404,9 @@ def _run_capture(
     )
     with daemon:
         admission_ns = time.monotonic_ns() - daemon_started_ns
+        if daemon.process is None:
+            fail("owned daemon process is missing after readiness")
+        resources_before = _process_observations(daemon.process.pid)
         cli_started_ns = time.monotonic_ns()
         try:
             completed = subprocess.run(
@@ -323,17 +437,18 @@ def _run_capture(
             fail(f"exact-symbol smoke response did not contain {expected_symbol}")
         daemon_survived = daemon.is_alive
         process_count = daemon.evidence.process_count
+        resources_after = _process_observations(daemon.process.pid)
     if daemon.evidence.process_count_after_cleanup != 0:
         fail("owned daemon process tree was not reaped")
 
     elapsed_ns = time.monotonic_ns() - started_ns
-    result_digest = hashlib.sha256(response).hexdigest()
+    result_digest = stable_digest(response_document, workload.digest_semantics)
     identity = scenario.sample_identity(
         run_id=run_id,
         variant=variant,
         machine_fingerprint=_machine_fingerprint(),
-        round_index=0,
-        abba_position=0,
+        round_index=round_index,
+        abba_position=abba_position,
         capture_id=capture_id,
         platform=platform_id,
         shard=shard,
@@ -375,6 +490,15 @@ def _run_capture(
             "activation_state": "active",
             "restart_state": "not_required",
             "daemon_survived": daemon_survived,
+        },
+        "observations": {
+            **_resource_delta(
+                resources_before,
+                resources_after,
+                logical_write_bytes=None,
+            ),
+            "wal_bytes": _wal_bytes(prepared.snapshot_root),
+            "process_tree_reaped": True,
         },
         "outcome": {
             "status": "success",
@@ -539,6 +663,14 @@ def compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def incidents(args: argparse.Namespace) -> int:
+    output = Path(args.output)
+    if output.exists():
+        fail(f"incident catalog output already exists: {output}")
+    write_json(output, incident_catalog_document())
+    return 0
+
+
 def capture(args: argparse.Namespace) -> int:
     binary = require_binary(args.binary)
     output = Path(args.output)
@@ -552,7 +684,10 @@ def capture(args: argparse.Namespace) -> int:
         else None
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    with RunWorkspace(output.parent, preserve_on_failure=False) as workspace:
+    with RunWorkspace(
+        Path(tempfile.gettempdir()),
+        preserve_on_failure=False,
+    ) as workspace:
         if prepared_source is None:
             prepared = prepare_fixture_snapshot(
                 workspace.path / "fixture",
@@ -582,7 +717,187 @@ def paired(args: argparse.Namespace) -> int:
     treatment = require_binary(args.treatment)
     if baseline.samefile(treatment):
         fail("baseline and treatment resolve to the same binary")
-    fail("paired requires a prepared runtime fixture")
+    if sha256_file(baseline) == sha256_file(treatment):
+        fail("baseline and treatment binaries have identical content")
+    samples_per_variant = args.samples_per_variant
+    if (
+        isinstance(samples_per_variant, bool)
+        or samples_per_variant < 2
+        or samples_per_variant % 2 != 0
+    ):
+        fail("samples-per-variant must be a positive even integer of at least 2")
+    output = Path(args.output)
+    samples_path, policy_path = _artifact_paths(output)
+    for path in (output, samples_path, policy_path):
+        if path.exists():
+            fail(f"paired output already exists: {path}")
+
+    schedule = (
+        ("baseline", baseline),
+        ("treatment", treatment),
+        ("treatment", treatment),
+        ("baseline", baseline),
+    )
+    samples: list[dict[str, Any]] = []
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with RunWorkspace(
+        Path(tempfile.gettempdir()),
+        preserve_on_failure=False,
+    ) as workspace:
+        base = prepare_fixture_snapshot(
+            workspace.path / "base",
+            prebuilt_binary=baseline,
+        )
+        for cycle in range(samples_per_variant // 2):
+            for position, (variant, binary) in enumerate(schedule):
+                sample_root = workspace.path / f"sample-{cycle}-{position}"
+                prepared = clone_prepared_profile(
+                    base,
+                    sample_root,
+                    prebuilt_binary=binary,
+                    runtime_state="cold",
+                    temperature="cold",
+                )
+                sample_output = workspace.path / f"capture-{cycle}-{position}.json"
+                _run_capture(
+                    binary=prepared.prebuilt_binary,
+                    prepared=prepared,
+                    output=sample_output,
+                    variant=variant,
+                    round_index=cycle,
+                    abba_position=position,
+                )
+                captured = read_jsonl(sample_output.with_suffix(".samples.jsonl"))
+                if len(captured) != 1:
+                    fail("paired child capture did not produce exactly one raw sample")
+                samples.append(captured[0])
+
+    result_digests = {
+        sample["outcome"]["result_digest"]
+        for sample in samples
+        if sample["outcome"]["status"] == "success"
+    }
+    if len(result_digests) != 1:
+        fail("paired same-input result digest mismatch")
+    write_jsonl(samples_path, samples)
+
+    def summarize_variant(variant: str) -> dict[str, Any]:
+        matching = [
+            sample
+            for sample in samples
+            if sample["identity"]["variant"] == variant
+        ]
+        latencies = [
+            sample["timing"]["elapsed_ns"]
+            for sample in matching
+            if sample["timing"]["elapsed_ns"] is not None
+        ]
+        return {
+            "sample_count": len(matching),
+            "latency_ns": {
+                "p50": {
+                    "available": len(latencies) >= 2,
+                    "value": (
+                        nearest_rank(latencies, 0.50)
+                        if len(latencies) >= 2
+                        else None
+                    ),
+                    "minimum_samples": 2,
+                },
+                "p95": {
+                    "available": len(latencies) >= 40,
+                    "value": (
+                        nearest_rank(latencies, 0.95)
+                        if len(latencies) >= 40
+                        else None
+                    ),
+                    "minimum_samples": 40,
+                },
+                "p99": {
+                    "available": len(latencies) >= 100,
+                    "value": (
+                        nearest_rank(latencies, 0.99)
+                        if len(latencies) >= 100
+                        else None
+                    ),
+                    "minimum_samples": 100,
+                },
+            },
+        }
+
+    policy = load_acceptance_policy(
+        Path(__file__).resolve().with_name("policies") / "acceptance-v1.json"
+    )
+    journey_policy = load_journey_policy(
+        Path(__file__).resolve().with_name("policies")
+        / "journey-margins-v1.json"
+    )
+    baseline_summary = summarize_variant("baseline")
+    treatment_summary = summarize_variant("treatment")
+    evaluate_artifact(
+        {
+            "sample_count": samples_per_variant,
+            "measurements": [
+                {"latency_ns": sample["timing"]["elapsed_ns"]}
+                for sample in samples
+            ],
+        },
+        policy,
+    )
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "report_id": f"paired-{uuid.uuid4().hex}",
+        "evidence_class": "repeated_raw_samples",
+        "fixture": {
+            "id": "runtime-v2-final",
+            "same_input": True,
+            "input_sha256": sha256_tree(fixture_source_root()),
+        },
+        "binaries": {
+            "baseline_sha256": sha256_file(baseline),
+            "treatment_sha256": sha256_file(treatment),
+        },
+        "schedule": "ABBA",
+        "samples_sha256": sha256_file(samples_path),
+        "variants": {
+            "baseline": baseline_summary,
+            "treatment": treatment_summary,
+        },
+        "outcome": {
+            "digest_match": True,
+            "error_count": sum(
+                sample["outcome"]["status"] != "success" for sample in samples
+            ),
+            "process_leak_count": sum(
+                sample["observations"].get("process_tree_reaped") is not True
+                for sample in samples
+            ),
+        },
+        "policy": {
+            "policy_id": policy.policy_id,
+            "policy_sha256": policy.sha256,
+            "latency_mode": policy.latency_mode,
+            "journey_policy_id": journey_policy.policy_id,
+            "journey_policy_sha256": journey_policy.sha256,
+            "journey_margins": journey_policy.journeys["cli"],
+        },
+    }
+    write_json(output, report)
+    artifact_sha256 = sha256_file(output)
+    write_json(
+        policy_path,
+        {
+            "acceptance": make_policy_receipt(
+                policy,
+                artifact_sha256=artifact_sha256,
+            ),
+            "journey": make_policy_receipt(
+                journey_policy,
+                artifact_sha256=artifact_sha256,
+            ),
+        },
+    )
+    return 0
 
 
 def parser() -> argparse.ArgumentParser:
@@ -620,6 +935,7 @@ def parser() -> argparse.ArgumentParser:
     paired_parser.add_argument("--treatment", required=True)
     paired_parser.add_argument("--output", required=True)
     paired_parser.add_argument("--prepared")
+    paired_parser.add_argument("--samples-per-variant", type=int, default=4)
     paired_parser.set_defaults(handler=paired)
 
     compare_parser = subparsers.add_parser(
@@ -630,6 +946,13 @@ def parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--treatment", required=True)
     compare_parser.add_argument("--output", required=True)
     compare_parser.set_defaults(handler=compare)
+
+    incidents_parser = subparsers.add_parser(
+        "incidents",
+        help="write fail-closed final incident workload catalog",
+    )
+    incidents_parser.add_argument("--output", required=True)
+    incidents_parser.set_defaults(handler=incidents)
 
     smoke_parser = subparsers.add_parser(
         "smoke",

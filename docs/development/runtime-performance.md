@@ -57,13 +57,17 @@ without reading real host data.
   snapshot in an explicit location.
 - `capture --binary BIN --output REPORT` records one variant and writes its raw
   samples as JSONL alongside the aggregate report.
-- `paired --baseline A --treatment B --output REPORT` runs same-machine ABBA
-  rounds (`A, B, B, A`) and retains the individual raw samples.
+- `paired --baseline A --treatment B --samples-per-variant N --output REPORT`
+  runs isolated same-input ABBA rounds (`A, B, B, A`) and retains every raw
+  sample. `N` is a positive even count per binary; four is the default and
+  remains below percentile eligibility.
 - `compare --baseline REPORT --treatment REPORT --output REPORT` checks schema,
   fixture, machine, correctness, and paired latency evidence without executing
   either binary.
 - `smoke --binary BIN --output REPORT` runs the smallest contract-complete
   capture for development and CI wiring.
+- `incidents --output REPORT` writes the machine-readable final incident
+  catalog. Pending product routes remain explicitly unavailable.
 
 All output paths are explicit. Existing output must fail safely rather than be
 overwritten or receive another capture. Runner-generated capture identifiers
@@ -107,6 +111,14 @@ missing evidence:
   newly performed, or required a restart.
 - Daemon survival evidence after each success, error, or timeout. Survival is
   verified from process/status evidence, not assumed from a wrapper exit code.
+- Linux daemon CPU time, peak RSS, PSS, process disk-read/write bytes, SQLite
+  WAL bytes, and integer write-amplification parts per million when `/proc`
+  exposes authoritative counters. Unsupported memory-peak and profiler
+  overhead counters remain null.
+- Typed queue depth/enqueue/shed/cancel/retry, generation, diagnostic
+  generated/deduplicated/batch, indexing no-op/coalesced, and
+  renderer/consumer event counters. A journey without an authoritative
+  production counter remains unavailable rather than recording zero.
 
 An unavailable measurement remains unavailable. An unsupported surface remains
 unsupported. Neither may be rendered as a successful zero-duration or
@@ -137,6 +149,16 @@ session and LCM retrieval, provider ingestion, and payload stress. CLI and MCP
 include serial and concurrent throughput cases. Hook and host cases measure
 their full external boundary rather than reporting only an internal handler
 timer.
+
+The final incident catalog additionally covers missing-daemon after-shell
+failure and descendant reaping, sustained edit/commit indexing coalescence,
+foreground work under maintenance, diagnostic deduplication/batching, daemon
+steady-state CPU/memory/WAL/I/O/queue/generation, and renderer-consumer event
+counts. Entries remain `n=1` and non-gating until their committed production
+routes are mounted. The paired executable driver currently records the
+integrated CLI exact-query lane; MCP, dashboard, host, storage, maintenance,
+and renderer-consumer entries remain truthfully unavailable until their real
+driver and authoritative evidence are observable.
 
 Correctness is part of every performance sample. Stable expected-result digests
 ignore explicitly volatile timing metadata while preserving each workload's
@@ -233,6 +255,14 @@ are advisory. They must not affect the process exit status until the advisory
 baseline policy has been met with repeated representative captures, comparable
 machine and fixture identity, reviewed variance/confidence evidence, and an
 explicit decision to promote a budget.
+
+Relative comparison margins are not accepted from measured output. They live
+in the independently versioned and hashed
+`benchmarks/runtime/policies/journey-margins-v1.json` artifact, separately for
+CLI, MCP, query, dashboard, host, storage, daemon steady-state, and foreground
+under maintenance. Policy loading rejects modified journey identities,
+eligibility counts, or margins. Paired reports hash both acceptance and journey
+policy artifacts into receipts.
 
 Current shutdown observations are historical `n=1` regression samples:
 

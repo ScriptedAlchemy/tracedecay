@@ -12,6 +12,11 @@ from os import PathLike
 from pathlib import Path
 from typing import Any
 
+from benchmarks.runtime.incident_workloads import (
+    IncidentWorkloadError,
+    validate_incident_observation,
+)
+
 
 SCHEMA_VERSION = 1
 OUTCOME_STATUSES = frozenset({"success", "error", "timeout"})
@@ -49,6 +54,7 @@ _SAMPLE_SECTIONS = (
     "timing",
     "size",
     "lifecycle",
+    "observations",
     "outcome",
 )
 _REPORT_SECTIONS = (
@@ -468,6 +474,11 @@ def validate_sample(document: Any) -> Document:
     daemon_survived = _boolean(
         lifecycle["daemon_survived"], "sample.lifecycle.daemon_survived"
     )
+
+    try:
+        validate_incident_observation(sample["observations"])
+    except IncidentWorkloadError as error:
+        raise SchemaValidationError(f"sample.observations {error}") from error
 
     outcome = _object(
         sample["outcome"],

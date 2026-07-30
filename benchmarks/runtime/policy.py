@@ -39,6 +39,28 @@ class AcceptancePolicy:
     sha256: str
 
 
+@dataclass(frozen=True)
+class JourneyPolicy:
+    policy_id: str
+    policy_version: int
+    p95_minimum_matching_samples: int
+    p99_minimum_matching_samples: int
+    journeys: Mapping[str, Mapping[str, int]]
+    sha256: str
+
+
+_FROZEN_JOURNEY_MARGINS = {
+    "cli": (15, 20, 20),
+    "mcp": (15, 20, 20),
+    "query": (15, 20, 20),
+    "dashboard": (20, 25, 20),
+    "host": (20, 25, 20),
+    "storage": (20, 25, 20),
+    "daemon-steady-state": (20, 25, 20),
+    "foreground-under-maintenance": (20, 25, 20),
+}
+
+
 def _canonical_json(document: Mapping[str, Any]) -> bytes:
     return (
         json.dumps(
@@ -86,6 +108,53 @@ def load_acceptance_policy(path: Path) -> AcceptancePolicy:
         p95_minimum_matching_samples=percentiles["p95"],
         p99_minimum_matching_samples=percentiles["p99"],
         hard_failures=tuple(hard_failures),
+        sha256=hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def load_journey_policy(path: Path) -> JourneyPolicy:
+    raw = Path(path).read_bytes()
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PolicyViolation(f"invalid journey policy JSON: {exc}") from exc
+    if not isinstance(document, dict) or raw != _canonical_json(document):
+        raise PolicyViolation("journey policy must be a canonical JSON object")
+    if set(document) != {
+        "schema_version",
+        "policy_id",
+        "policy_version",
+        "percentile_minimum_matching_samples",
+        "journeys",
+    }:
+        raise PolicyViolation("journey policy fields do not match the versioned schema")
+    if (
+        document["schema_version"] != 1
+        or document["policy_version"] != 1
+        or document["policy_id"] != "runtime-journey-margins-v1"
+        or document["percentile_minimum_matching_samples"]
+        != {"p95": 40, "p99": 100}
+    ):
+        raise PolicyViolation("journey policy identity or eligibility was modified")
+    journeys = document["journeys"]
+    if not isinstance(journeys, dict) or set(journeys) != set(
+        _FROZEN_JOURNEY_MARGINS
+    ):
+        raise PolicyViolation("journey policy catalog was modified")
+    for journey, frozen in _FROZEN_JOURNEY_MARGINS.items():
+        expected = {
+            "p50_regression_margin_pct": frozen[0],
+            "p95_regression_margin_pct": frozen[1],
+            "resource_regression_margin_pct": frozen[2],
+        }
+        if journeys[journey] != expected:
+            raise PolicyViolation(f"journey policy margin was modified: {journey}")
+    return JourneyPolicy(
+        policy_id=document["policy_id"],
+        policy_version=document["policy_version"],
+        p95_minimum_matching_samples=40,
+        p99_minimum_matching_samples=100,
+        journeys=journeys,
         sha256=hashlib.sha256(raw).hexdigest(),
     )
 

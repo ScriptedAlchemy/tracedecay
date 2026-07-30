@@ -201,6 +201,7 @@ def clone_prepared_profile(
     prepared: PreparedFixture,
     destination: Path,
     *,
+    prebuilt_binary: Path | None = None,
     runtime_state: str | None = None,
     temperature: str | None = None,
 ) -> PreparedFixture:
@@ -214,6 +215,12 @@ def clone_prepared_profile(
         destination,
         copy_function=shutil.copy2,
     )
+    copied_binary = destination / "bin" / "tracedecay"
+    if prebuilt_binary is not None:
+        binary = Path(prebuilt_binary)
+        _validate_prebuilt_binary(binary)
+        shutil.copy2(binary, copied_binary)
+        copied_binary.chmod(binary.stat().st_mode & 0o777)
     home = destination / "home"
     runtime_identity = dict(prepared.runtime_identity)
     if runtime_state is not None:
@@ -237,7 +244,7 @@ def clone_prepared_profile(
         project=home / "workspace" / "runtime-fixture",
         provider_roots=provider_roots(home),
         provider_files=provider_fixture_files(home),
-        prebuilt_binary=destination / "bin" / "tracedecay",
+        prebuilt_binary=copied_binary,
         evidence_root=destination / "evidence",
         prepared_evidence=prepared_evidence,
         runtime_identity=runtime_identity,
