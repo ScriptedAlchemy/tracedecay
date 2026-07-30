@@ -372,4 +372,23 @@ mod tests {
             Err(PreparedQueryErrorV1::Invalid)
         );
     }
+
+    #[test]
+    fn equivalent_prepared_cursors_have_identical_bytes() {
+        let first = cursor(2, UtcMicros(1_000));
+        let second = cursor(2, UtcMicros(1_000));
+
+        assert_eq!(first, second);
+        let first_bytes = hex::decode(
+            first
+                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V1)
+                .expect("prepared cursor prefix"),
+        )
+        .expect("prepared cursor bytes");
+        let decoded = decode_cursor(&first).expect("canonical cursor");
+        assert_eq!(
+            serde_json::to_vec(&decoded).expect("canonical cursor serialization"),
+            first_bytes
+        );
+    }
 }
