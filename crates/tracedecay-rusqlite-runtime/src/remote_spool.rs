@@ -624,14 +624,13 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_domain::{
-        AuthorityEpoch, BrainId, ComponentVersion, ObservationId,
-        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-        ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-        PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RefId,
-        RemoteAuthorityUnavailableReasonV1, RemotePlacementRevisionV1, RepositoryId,
-        RepositoryStateSnapshotId, RetentionClass, SanitizationReceiptId,
-        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-        SessionId, ShardId, WorktreeId,
+        AuthorityEpoch, BrainId, ComponentVersion, ObservationId, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
+        ProjectionGenerationId, ProviderId, RefId, RemoteAuthorityUnavailableReasonV1,
+        RemotePlacementRevisionV1, RepositoryId, RepositoryStateSnapshotId, RetentionClass,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, WorktreeId,
     };
     use tracedecay_store::{RepositoryWritePayloadV1, StoreRuntimeBindingV1};
 
@@ -968,6 +967,69 @@ mod tests {
                 receipt: Some(replay_receipt),
             }
         );
+        assert_eq!(
+            reopened.pending().unwrap(),
+            vec![(capture_receipt.event_id, capture)]
+        );
+    }
+
+    #[test]
+    fn garbage_collection_reclaims_event_capacity_after_reopen() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("remote.spool");
+        let mut bounded = config();
+        bounded.maximum_events = 1;
+        let capture_spool = RemoteCaptureSpool::open(
+            path.clone(),
+            bounded.clone(),
+            Box::new(XorEncryption(0xA5)),
+            Box::new(Offline),
+        )
+        .unwrap();
+        let first = command(1, None);
+        let first_receipt = capture_spool.capture_pending(&first).unwrap();
+        let replay_receipt = RemoteReplayCommitReceiptV1 {
+            event_id: first_receipt.event_id.clone(),
+            writer_fence: first.writer.authority.fence.clone(),
+            commit_sequence: 7,
+        };
+        for (from, to) in [
+            (RemoteReplayStateV1::Pending, RemoteReplayStateV1::Admitted),
+            (
+                RemoteReplayStateV1::Admitted,
+                RemoteReplayStateV1::Acknowledged,
+            ),
+            (
+                RemoteReplayStateV1::Acknowledged,
+                RemoteReplayStateV1::GarbageCollectionEligible,
+            ),
+        ] {
+            RemoteReplaySpoolPortV1::transition(
+                &capture_spool,
+                RemoteReplayTransitionV1 {
+                    event_id: first_receipt.event_id.clone(),
+                    from,
+                    to,
+                    replay_attempt: 1,
+                    observed_at: UtcMicros(20),
+                    finding: None,
+                    receipt: Some(replay_receipt.clone()),
+                },
+            )
+            .unwrap();
+        }
+        drop(capture_spool);
+
+        let reopened = RemoteCaptureSpool::open(
+            path,
+            bounded,
+            Box::new(XorEncryption(0xA5)),
+            Box::new(Offline),
+        )
+        .unwrap();
         assert!(reopened.pending().unwrap().is_empty());
+        let second = command(2, Some(first_receipt.event_id));
+        assert!(reopened.capture_pending(&second).is_ok());
+        assert_eq!(reopened.pending().unwrap().len(), 1);
     }
 }
