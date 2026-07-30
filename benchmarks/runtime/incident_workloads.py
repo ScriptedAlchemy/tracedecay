@@ -49,6 +49,10 @@ INTEGER_OBSERVATIONS = frozenset(
         "renderer_event_count",
         "consumer_event_count",
         "missing_daemon_fail_fast_ns",
+        "process_startup_control_ns",
+        "direct_hook_wall_ns",
+        "hook_residual_ns",
+        "lifecycle_wrapper_overhead_ns",
     }
 )
 BOOLEAN_OBSERVATIONS = frozenset({"process_tree_reaped"})
@@ -158,7 +162,14 @@ INCIDENT_WORKLOADS = (
         RuntimeState.RECOVERY,
         TimeoutPhase.SHUTDOWN,
         "crash",
-        ("missing_daemon_fail_fast_ns", "process_tree_reaped"),
+        (
+            "missing_daemon_fail_fast_ns",
+            "process_startup_control_ns",
+            "direct_hook_wall_ns",
+            "hook_residual_ns",
+            "lifecycle_wrapper_overhead_ns",
+            "process_tree_reaped",
+        ),
     ),
     IncidentWorkload(
         "sustained-edit-commit-indexing",
@@ -269,6 +280,26 @@ def validate_incident_workloads() -> tuple[IncidentWorkload, ...]:
     return INCIDENT_WORKLOADS
 
 
+def _incident_availability(workload: IncidentWorkload) -> dict[str, str | None]:
+    if workload.id == "missing-daemon-after-shell":
+        return {
+            "state": "available",
+            "detail": "wired product command: hook-cursor-after-shell",
+        }
+    if workload.id == "diagnostic-dedup-batch-rate":
+        return {
+            "state": "available",
+            "detail": "wired product command: lsp bridge --stdio",
+        }
+    return {
+        "state": "unavailable",
+        "detail": (
+            "baseline/treatment capture waits for committed product fix "
+            "and mounted production route"
+        ),
+    }
+
+
 def incident_catalog_document() -> dict[str, Any]:
     """Render the pending workloads without claiming production availability."""
 
@@ -291,20 +322,7 @@ def incident_catalog_document() -> dict[str, Any]:
                 "required_observations": list(workload.required_observations),
                 "sample_count": workload.sample_count,
                 "slo_gate": workload.slo_gate,
-                "availability": (
-                    {
-                        "state": "available",
-                        "detail": "wired product command: hook-cursor-after-shell",
-                    }
-                    if workload.id == "missing-daemon-after-shell"
-                    else {
-                        "state": "unavailable",
-                        "detail": (
-                            "baseline/treatment capture waits for committed "
-                            "product fix and mounted production route"
-                        ),
-                    }
-                ),
+                "availability": _incident_availability(workload),
             }
             for workload in validate_incident_workloads()
         ],

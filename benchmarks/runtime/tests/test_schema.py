@@ -256,6 +256,17 @@ class SampleSchemaTests(unittest.TestCase):
 
         self.assertIs(validate_sample(sample), sample)
 
+    def test_success_without_daemon_requires_not_applicable_activation(self) -> None:
+        sample = valid_sample()
+        sample["lifecycle"] = {
+            "timeout_phase": None,
+            "activation_state": "not_applicable",
+            "restart_state": "not_applicable",
+            "daemon_survived": None,
+        }
+
+        self.assertIs(validate_sample(sample), sample)
+
     def test_stable_workload_identity_supports_every_crate_lane_and_state(self) -> None:
         for crate_id in CRATE_LANES:
             with self.subTest(crate_id=crate_id):
