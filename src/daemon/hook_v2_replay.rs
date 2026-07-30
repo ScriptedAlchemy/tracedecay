@@ -69,7 +69,7 @@ pub(crate) struct HookReplayPassReportV1 {
 }
 
 pub(crate) fn hook_v2_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
-    data_root.join("hook-v2-spool").join(host.as_key())
+    data_root.join("hook-v2-spool").join(host.hook_key())
 }
 
 fn current_binding(
@@ -250,7 +250,7 @@ fn log_tombstone(
 ) {
     tracing::debug!(
         event = "hook_v2_replay_tombstone",
-        host = host.as_key(),
+        host = host.hook_key(),
         sequence = record.sequence,
         reason = reason.as_key(),
         "hook V2 replay record dropped terminally"
@@ -332,7 +332,7 @@ async fn drain_all_hosts(graph: &crate::tracedecay::TraceDecay, data_root: &Path
         {
             tracing::debug!(
                 event = "hook_v2_replay_pass",
-                host = host.as_key(),
+                host = host.hook_key(),
                 committed = report.committed,
                 duplicates = report.duplicates,
                 tombstoned = report.tombstoned,
@@ -454,6 +454,20 @@ mod tests {
     };
 
     const HOST: HookHostV1 = HookHostV1::ClaudeCode;
+
+    #[test]
+    fn cursor_native_identities_use_distinct_canonical_spool_roots() {
+        let data_root = Path::new("/tmp/tracedecay-hook-v2");
+
+        assert_eq!(
+            hook_v2_spool_root(data_root, HookHostV1::CursorDesktop),
+            data_root.join("hook-v2-spool").join("cursor-desktop")
+        );
+        assert_eq!(
+            hook_v2_spool_root(data_root, HookHostV1::CursorCloud),
+            data_root.join("hook-v2-spool").join("cursor-cloud")
+        );
+    }
 
     fn binding(epoch: u64) -> HookScopeBindingV1 {
         HookScopeBindingV1 {
