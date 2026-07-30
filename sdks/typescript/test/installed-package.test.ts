@@ -236,7 +236,9 @@ const availabilityClient = sdk.createClient({
   token: process.env.TRACEDECAY_SDK_TOKEN,
 });
 if (!("work_snapshot" in availabilityClient.operations) ||
-    "test_results" in availabilityClient.operations) {
+    "test_results" in availabilityClient.operations ||
+    "invoke" in availabilityClient ||
+    "requestOperation" in availabilityClient) {
   throw new Error("only schema-authorized Work operations may be callable");
 }
 

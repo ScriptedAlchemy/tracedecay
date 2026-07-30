@@ -3,6 +3,7 @@ pub mod hermes;
 pub mod inventory;
 pub mod manifest;
 pub mod memory_cutover;
+pub mod profile_backup;
 pub mod registry;
 
 /// Store durability classification, extracted to `tracedecay-migrate` because

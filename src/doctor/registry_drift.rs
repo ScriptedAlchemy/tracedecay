@@ -8,7 +8,7 @@ use tracedecay_application::doctor::{
 };
 
 use crate::retention::orphan_stores::{
-    OrphanStoreFinding, StoreDisposition, UnregisteredStoreFinding,
+    OrphanStoreFinding, StoreDisposition, UnregisteredStoreFinding, UnverifiableReason,
 };
 
 /// Owning operation Doctor names for collecting a dead-identity orphan store.
@@ -16,6 +16,9 @@ const ORPHAN_COLLECT_OP: &str = "retention.orphan_store_sweep";
 /// Owning operation Doctor names for re-linking a moved-repository store —
 /// this reconciliation path (`doctor::registry_drift`), per Plan 38 §2.
 const ORPHAN_RELINK_OP: &str = "doctor.registry_drift.relink";
+/// Remediation for a store whose liveness could not be determined: inspect the
+/// identity, never collect it.
+const ORPHAN_INSPECT_OP: &str = "doctor.registry_drift.inspect";
 /// Owning operation Doctor name for collecting a directory with no registry
 /// trace at all (plan 38 §2's disjoint "unregistered store" audit class).
 const UNREGISTERED_COLLECT_OP: &str = "retention.unregistered_store_sweep";
@@ -53,6 +56,23 @@ pub(crate) fn orphan_store_doctor_finding(
 ) -> Option<DoctorStorageFindingV1> {
     let (state, remediation_op, statement) = match &finding.disposition {
         StoreDisposition::Live => return None,
+        // Liveness was never proven either way, so this must not carry the
+        // collect remediation — the sweep would delete a possibly-live store.
+        StoreDisposition::Unverifiable { reason } => (
+            DoctorEvidenceStateV1::Unknown,
+            ORPHAN_INSPECT_OP,
+            format!(
+                "store '{}' (project '{}') has unverifiable liveness ({}): {} bytes, not collectable",
+                finding.store_id,
+                finding.project_id,
+                match reason {
+                    UnverifiableReason::RootInspectionFailed => "a root could not be inspected",
+                    UnverifiableReason::ManifestUnreadable =>
+                        "the store manifest is missing or malformed",
+                },
+                finding.size_bytes
+            ),
+        ),
         StoreDisposition::Orphaned => (
             DoctorEvidenceStateV1::Degraded,
             ORPHAN_COLLECT_OP,
@@ -75,11 +95,13 @@ pub(crate) fn orphan_store_doctor_finding(
     };
     let reference = DoctorEvidenceReferenceV1::new(finding.store_id.clone()).ok()?;
     let evidence = DoctorEvidenceRefV1::new(DoctorFindingFamilyV1::Storage, reference);
-    let coverage = DoctorCoverageStatementV1::new(
-        DoctorCoverageCompletenessV1::Complete,
-        bounded_statement(&statement),
-    )
-    .ok()?;
+    let completeness = if matches!(finding.disposition, StoreDisposition::Unverifiable { .. }) {
+        DoctorCoverageCompletenessV1::Unknown
+    } else {
+        DoctorCoverageCompletenessV1::Complete
+    };
+    let coverage =
+        DoctorCoverageStatementV1::new(completeness, bounded_statement(&statement)).ok()?;
     let remediation = DoctorRemediationRefV1::new(
         DoctorOwningOperationRefV1::new(remediation_op).ok()?,
         DoctorRemediationKindV1::Action,
@@ -351,6 +373,7 @@ mod tests {
             expected_last_write_at: None,
             expected_payload_mtime_secs: 0,
             expected_manifest_bytes: None,
+            graph_scope_relpaths: Vec::new(),
         }
     }
 

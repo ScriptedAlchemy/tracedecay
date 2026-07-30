@@ -4,10 +4,13 @@ import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ProjectContextPayloadSchema,
   ProjectsPayloadSchema,
+  type ProjectContextPayload,
   type ProjectsPayload,
   type PublicCodeProject,
 } from '../../contracts/wire.ts';
+import { projectRegistryInvalidationKey } from '../../data/query/projectRegistry.ts';
 import { scopeWritable, useScope } from '../../data/scope/store.ts';
 import { DoctorInspector } from '../../workspaces/observatory/DoctorInspector.tsx';
 import { NavRail } from './NavRail.tsx';
@@ -83,7 +86,7 @@ describe('shared shell truthfulness', () => {
    */
   it('marks an untrusted scope label unverified, then replaces it from the registry', async () => {
     useScope.getState().selectProject('proj-real', 'fabricated label');
-    stubRegistry(registryPayload('proj-real'));
+    stubRegistry(entryPayload({ label: 'Canonical project', isActive: true }));
 
     const { queryByText, findByText } = render(queryWrapper(<ScopeBar />));
 
@@ -110,7 +113,7 @@ describe('shared shell truthfulness', () => {
   it('resolves a deep-linked project to active when the registry names it active', async () => {
     useScope.getState().selectProject('proj-real', 'Canonical project', 'unresolved');
     expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
-    stubRegistry(registryPayload('proj-real'));
+    stubRegistry(entryPayload({ label: 'Canonical project', isActive: true }));
 
     render(queryWrapper(<ScopeBar />));
 
@@ -129,7 +132,7 @@ describe('shared shell truthfulness', () => {
    */
   it('names its write target from the registry, not from the label it was selected with', async () => {
     useScope.getState().selectProject('proj-real', 'fabricated label', 'unresolved');
-    stubRegistry(registryPayload('proj-real'));
+    stubRegistry(entryPayload({ label: 'Canonical project', isActive: true }));
 
     const { findByText, queryByText } = render(queryWrapper(<ScopeBar />));
 
@@ -173,31 +176,116 @@ describe('shared shell truthfulness', () => {
   });
 
   /**
-   * Answered, and this id is not in it. The label has been contradicted rather
-   * than left unconfirmed, so keeping it would state a name no authority backs
-   * — but the id is still what every read routes by, so it stands in.
+   * The truncation defect, at the surface.
+   *
+   * Reconciliation used to search `/api/projects`, which the daemon truncates to
+   * a page — 100 entries by default. A selected project past the end of that
+   * page produced exactly what a nonexistent project produced, so the bar
+   * renamed a real project to its raw id and announced "not in registry". This
+   * asks the project's own route instead, which has no page, so a listing that
+   * omits the id establishes nothing and cannot be consulted for it.
+   *
+   * The stub answers the listing with a truncated page that excludes this
+   * project, precisely so a regression to searching it fails here.
    */
-  it('drops a label the registry contradicts, and says the project is not listed', async () => {
-    useScope.getState().selectProject('proj-ghost', 'Looks Legitimate', 'unresolved');
-    stubRegistry(registryPayload('proj-real'));
+  it('resolves a project the truncated listing omits, and never renames it to its id', async () => {
+    useScope.getState().selectProject('proj-page-101', 'Stale Bookmark Name', 'unresolved');
+    stubRoutes({
+      '/api/projects': truncatedListing(),
+      '/api/projects/proj-page-101': entryPayload({
+        label: 'Project One Hundred And One',
+        isActive: true,
+      }),
+    });
 
     const { findByText, queryByText } = render(queryWrapper(<ScopeBar />));
 
-    expect(await findByText('proj-ghost')).toBeTruthy();
-    expect(queryByText('Looks Legitimate')).toBeNull();
-    const annotated = document.querySelector('[data-scope-label-annotation]');
-    expect(annotated?.getAttribute('data-scope-label-annotation')).toBe('not in registry');
-    // A project the registry does not list is certainly not the active one, so
-    // this is a measured read-only rather than an unknown.
+    expect(await findByText('Project One Hundred And One')).toBeTruthy();
+    expect(queryByText('Stale Bookmark Name')).toBeNull();
+    // Not renamed to the id, and not annotated as missing.
+    expect(queryByText('proj-page-101')).toBeNull();
+    expect(document.querySelector('[data-scope-label-annotation]')).toBeNull();
+    expect(scopeWritable(useScope.getState().scope)).toEqual({
+      state: 'writable',
+      target: 'Project One Hundred And One',
+    });
+    // The stronger statement, and the one that keeps the defect from returning:
+    // the page was never even asked for. A reconciliation that searched a
+    // listing would have to read one.
+    expect(requestedUrls).toContain('/api/projects/proj-page-101');
+    expect(requestedUrls).not.toContain('/api/projects');
+  });
+
+  /**
+   * A project the registry genuinely cannot resolve. `fetchLegacy` does not
+   * carry a non-2xx body, so a 404 for an unheld id and a registry that failed
+   * arrive here identically — and the honest reading of that is "unconfirmed",
+   * not "absent". The supplied name stands, marked, and writability stays
+   * unknown rather than becoming a refusal the dashboard cannot substantiate.
+   */
+  it('keeps an unresolvable project unconfirmed rather than asserting it is absent', async () => {
+    useScope.getState().selectProject('proj-ghost', 'Looks Legitimate', 'unresolved');
+    stubRoutes({ '/api/projects/proj-ghost': { status: 404, body: { status: 'not_found' } } });
+
+    const { findByText } = render(queryWrapper(<ScopeBar />));
+
+    expect(await findByText('Looks Legitimate')).toBeTruthy();
+    const annotated = await waitFor(() => {
+      const found = document.querySelector('[data-scope-label-annotation]');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(annotated.getAttribute('data-scope-label-annotation')).toContain('unconfirmed');
+    // Unknown, not read-only: the dashboard has no answer to refuse a write on.
+    expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
+  });
+
+  /**
+   * F1: the scope bar's registry read had a private query key that no event
+   * named, and no poll. It is where activation is reconciled, so a rename or an
+   * active-project switch left every write control in the product acting on the
+   * pre-change answer for the rest of the session.
+   *
+   * The invalidation key here is the one the SSE handler emits — see
+   * `projectRegistry.test.ts`, which pins the handler's output to this same
+   * constant — so this covers the second half of the link: that the key reaches
+   * this query and reconciliation runs again.
+   */
+  it('re-reconciles activation and label when a registry change is invalidated', async () => {
+    useScope.getState().selectProject('proj-real', 'Before Rename', 'unresolved');
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 0 } },
+    });
+    stubRegistry(entryPayload({ label: 'Before Rename', isActive: true }));
+
+    const { findByText } = render(
+      <QueryClientProvider client={client}>
+        <ScopeBar />
+      </QueryClientProvider>,
+    );
+    await findByText('Before Rename');
+    await waitFor(() => expect(useScope.getState().scope).toMatchObject({ activation: 'active' }));
+
+    // The daemon renamed it and made another project active.
+    stubRegistry(entryPayload({ label: 'After Rename', isActive: false }));
+    await client.invalidateQueries({ queryKey: [...projectRegistryInvalidationKey] });
+
+    expect(await findByText('After Rename')).toBeTruthy();
+    await waitFor(() =>
+      expect(useScope.getState().scope).toMatchObject({
+        label: 'After Rename',
+        activation: 'selected',
+      }),
+    );
     const writability = scopeWritable(useScope.getState().scope);
     expect(writability.state).toBe('read_only');
     if (writability.state !== 'read_only') throw new Error('unreachable');
-    expect(writability.reason).toContain('proj-ghost is not the active project');
+    expect(writability.reason).toContain('After Rename is not the active project');
   });
 
   it('resolves a deep-linked project to read-only when another project is active', async () => {
     useScope.getState().selectProject('proj-real', 'Canonical project', 'unresolved');
-    stubRegistry(registryPayload('proj-other'));
+    stubRegistry(entryPayload({ label: 'Canonical project', isActive: false }));
 
     render(queryWrapper(<ScopeBar />));
 
@@ -265,48 +353,106 @@ describe('shared shell truthfulness', () => {
   });
 });
 
-/**
- * A registry body the daemon would actually send.
- *
- * Built through `ProjectsPayloadSchema` rather than hand-shaped: the stub this
- * replaced carried `status` and two fields per project, which the generated
- * contract rejects, so it only ever exercised the parse failure path while
- * appearing to test the success one.
- */
-function registryPayload(activeProjectId: string): ProjectsPayload {
-  const project = (projectId: string, label: string): PublicCodeProject => ({
+function projectRecord(projectId: string, label: string): PublicCodeProject {
+  return {
     canonical_root: `/repos/${projectId}`,
     created_at: 1,
     default_branch: 'master',
     display_root: `~/repos/${projectId}`,
     git_common_dir: null,
-    is_active: projectId === activeProjectId,
     label,
     last_seen_at: 2,
     project_id: projectId,
     project_root: `/repos/${projectId}`,
-  });
-  return ProjectsPayloadSchema.parse({
-    active_project_id: activeProjectId,
-    active_project_root: `/repos/${activeProjectId}`,
-    error: null,
-    limit: 100,
-    project_tree: [],
-    projects: [project('proj-real', 'Canonical project'), project('proj-other', 'Other project')],
+  };
+}
+
+/**
+ * A `GET /api/projects/{id}` body the daemon would actually send.
+ *
+ * Parsed through the generated schema rather than hand-shaped, so a body this
+ * dashboard could not read cannot masquerade as a successful reading — the stub
+ * that preceded these carried fields the contract rejects, and so only ever
+ * exercised the parse-failure path while appearing to test the success one.
+ */
+function entryPayload({
+  label,
+  isActive,
+}: {
+  label: string;
+  isActive: boolean;
+}): ProjectContextPayload {
+  return ProjectContextPayloadSchema.parse({
     status: 'ok',
-    summary: null,
-    truncated: false,
+    error: null,
+    is_active: isActive,
+    project: projectRecord('proj-real', label),
+    aliases: [],
+    stores: [],
   });
 }
 
-function stubRegistry(payload: ProjectsPayload) {
+/**
+ * A listing that is truncated and does not contain the selected project.
+ *
+ * The shape the daemon sends for a profile with more projects than the page
+ * holds — `truncated: true`, `limit` entries, and any project past the end
+ * simply missing. Reconciliation must not consult this at all, which the test
+ * using it asserts directly by checking the route is never requested.
+ */
+function truncatedListing(): ProjectsPayload {
+  return ProjectsPayloadSchema.parse({
+    active_project_id: 'proj-first',
+    active_project_root: '/repos/proj-first',
+    error: null,
+    limit: 2,
+    project_tree: [],
+    projects: [
+      projectRecord('proj-first', 'First page project'),
+      projectRecord('proj-second', 'Second page project'),
+    ],
+    status: 'ok',
+    summary: null,
+    truncated: true,
+  });
+}
+
+/** Every request, in order, so a test can assert what was *not* asked for. */
+let requestedUrls: string[] = [];
+
+function stubRegistry(payload: ProjectContextPayload) {
+  requestedUrls = [];
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }),
-    ),
+    vi.fn(async (input: RequestInfo | URL) => {
+      requestedUrls.push(String(input));
+      return jsonResponse(200, payload);
+    }),
   );
+}
+
+/** Route-aware stub. An unmapped route answers 404, so a test that forgot to map
+ * something sees a missing route rather than another route's body. */
+function stubRoutes(routes: Record<string, unknown | { status: number; body: unknown }>) {
+  requestedUrls = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      const match = routes[url.split('?')[0] ?? url];
+      if (match === undefined) return jsonResponse(404, { status: 'not_found' });
+      const framed = match as { status?: number; body?: unknown };
+      return typeof framed.status === 'number'
+        ? jsonResponse(framed.status, framed.body)
+        : jsonResponse(200, match);
+    }),
+  );
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
 }

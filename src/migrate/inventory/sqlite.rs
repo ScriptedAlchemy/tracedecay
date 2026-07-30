@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use tracedecay_migrate::inventory::{GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome};
 use crate::db::engine::{Error as EngineError, QueryExecutor, params};
 use crate::global_db::{self, RegisteredGlobalDb};
+use tracedecay_migrate::inventory::{
+    GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome,
+};
 
 pub(super) async fn inspect_global_db(
     path: &Path,

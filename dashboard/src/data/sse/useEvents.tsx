@@ -16,6 +16,7 @@ import {
   type SseConnectionState,
 } from './connect.ts';
 import type { SseBatch, SseReducerStats } from './types.ts';
+import { projectRegistryInvalidationKey } from '../query/projectRegistry.ts';
 
 /**
  * Period of the render clock. The plan bounds SSE-driven work at "at most ten
@@ -186,7 +187,12 @@ export function targetedInvalidationKeys(
   }
   const keys: string[][] = [];
   if (storage) keys.push(['storage', 'telemetry']);
-  if (projects) keys.push(['projects']);
+  // The registry root, taken from the module that owns every registry key, so
+  // this reaches the listing and each per-project entry by prefix. Written as a
+  // literal here, it named exactly one of the four keys that read the registry
+  // and silently missed the rest — including the scope bar's, which is where
+  // activation is reconciled.
+  if (projects) keys.push([...projectRegistryInvalidationKey]);
   return keys;
 }
 

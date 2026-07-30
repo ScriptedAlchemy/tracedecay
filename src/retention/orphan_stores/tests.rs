@@ -54,6 +54,9 @@ fn entry(
         store_id: store_id.to_string(),
         canonical_root,
         display_root,
+        git_common_dir: None,
+        alias_roots: Vec::new(),
+        manifest_readable: true,
         data_root,
         manifest_root,
         last_write_secs,
@@ -63,6 +66,7 @@ fn entry(
         expected_last_write_at: Some(last_write_secs),
         expected_payload_mtime_secs: last_write_secs,
         expected_manifest_bytes: None,
+        graph_scope_relpaths: Vec::new(),
     }
 }
 
@@ -88,6 +92,124 @@ fn live_root_is_never_collected() {
     );
     assert!(plan.relink.is_empty());
     assert!(plan.retained_immature.is_empty());
+}
+
+#[test]
+fn live_registered_alias_keeps_the_store_out_of_every_collectable_bucket() {
+    let dead = PathBuf::from("/definitely/not/here/retired-checkout");
+    let live_alias = std::env::current_dir().unwrap();
+    let mut census_entry = entry(
+        "aliased",
+        dead,
+        None,
+        None,
+        PathBuf::from("/profile/stores/aliased"),
+        0,
+        4096,
+    );
+    census_entry.alias_roots = vec![live_alias];
+
+    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    assert_eq!(
+        findings[0].disposition,
+        StoreDisposition::Live,
+        "a registered alias that still exists keeps the store's identity live"
+    );
+
+    let plan = plan_collection(findings, 0);
+    assert!(plan.collect.is_empty());
+    assert!(plan.retained_immature.is_empty());
+    assert!(plan.unverifiable.is_empty());
+}
+
+#[test]
+fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
+    // A linked worktree's own root can vanish while the repository — and every
+    // other checkout sharing its common directory — stays live.
+    let gone_worktree = PathBuf::from("/definitely/not/here/linked-worktree");
+    let shared_common_dir = std::env::current_dir().unwrap();
+    let mut census_entry = entry(
+        "worktree",
+        gone_worktree,
+        None,
+        None,
+        PathBuf::from("/profile/stores/worktree"),
+        0,
+        4096,
+    );
+    census_entry.git_common_dir = Some(shared_common_dir);
+
+    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    assert_eq!(findings[0].disposition, StoreDisposition::Live);
+    assert!(plan_collection(findings, 0).collect.is_empty());
+}
+
+#[test]
+fn unreadable_manifest_is_unverifiable_never_orphaned() {
+    let dead = PathBuf::from("/definitely/not/here/gone");
+    let mut census_entry = entry(
+        "malformed",
+        dead,
+        None,
+        None,
+        PathBuf::from("/profile/stores/malformed"),
+        0,
+        4096,
+    );
+    census_entry.manifest_readable = false;
+
+    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    assert_eq!(
+        findings[0].disposition,
+        StoreDisposition::Unverifiable {
+            reason: UnverifiableReason::ManifestUnreadable
+        },
+        "a manifest that will not parse must fail closed, not read as an orphan"
+    );
+
+    // Even with a zero retention window the store is never collectable.
+    let plan = plan_collection(findings, 0);
+    assert!(plan.collect.is_empty());
+    assert!(plan.relink.is_empty());
+    assert_eq!(plan.unverifiable.len(), 1);
+}
+
+#[test]
+fn malformed_manifest_bytes_mark_the_census_entry_unverifiable() {
+    let profile = tempfile::tempdir().unwrap();
+    let data_root = profile.path().join("stores/malformed");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(
+        data_root.join(crate::storage::STORE_MANIFEST_FILENAME),
+        b"{ this is not valid manifest json",
+    )
+    .unwrap();
+
+    // Exercise the same parse the census performs, so the fixture proves the
+    // production decode path — not a hand-set flag — yields unverifiable.
+    let bytes = std::fs::read(data_root.join(crate::storage::STORE_MANIFEST_FILENAME)).unwrap();
+    let parsed = serde_json::from_slice::<StoreManifest>(&bytes).ok();
+    assert!(parsed.is_none(), "fixture manifest must be unparseable");
+
+    let mut census_entry = entry(
+        "malformed",
+        PathBuf::from("/definitely/not/here/gone"),
+        None,
+        None,
+        data_root,
+        0,
+        4096,
+    );
+    census_entry.manifest_readable = parsed.is_some();
+
+    let findings = classify_stores(&[census_entry], 1_000 * DAY);
+    assert!(
+        matches!(
+            findings[0].disposition,
+            StoreDisposition::Unverifiable { .. }
+        ),
+        "unparseable manifest bytes must classify as unverifiable"
+    );
 }
 
 #[test]
@@ -170,6 +292,7 @@ fn execute_collection_deletes_only_collect_set() {
             expected_last_write_at: None,
             expected_payload_mtime_secs: 0,
             expected_manifest_bytes: None,
+            graph_scope_relpaths: Vec::new(),
         }],
         retained_immature: vec![OrphanStoreFinding {
             project_id: "proj_keep".into(),
@@ -183,8 +306,10 @@ fn execute_collection_deletes_only_collect_set() {
             expected_last_write_at: None,
             expected_payload_mtime_secs: 0,
             expected_manifest_bytes: None,
+            graph_scope_relpaths: Vec::new(),
         }],
         relink: Vec::new(),
+        unverifiable: Vec::new(),
     };
 
     let outcome = execute_collection(&plan, tmp.path());
@@ -213,6 +338,7 @@ fn already_missing_directory_collects_idempotently() {
             expected_last_write_at: None,
             expected_payload_mtime_secs: 0,
             expected_manifest_bytes: None,
+            graph_scope_relpaths: Vec::new(),
         }],
         ..CollectionPlan::default()
     };
@@ -240,6 +366,7 @@ fn execute_collection_rejects_store_outside_profile() {
             expected_last_write_at: None,
             expected_payload_mtime_secs: 0,
             expected_manifest_bytes: None,
+            graph_scope_relpaths: Vec::new(),
         }],
         ..CollectionPlan::default()
     };
@@ -1038,4 +1165,111 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
         CollectionFailureKind::DurableDataProtected
     );
     assert!(dir.exists());
+}
+
+/// A store is not one database. The durable-data check has to cover the
+/// manifest-selected main graph, every registered graph scope, and the branch
+/// databases discovered on disk — and refuse to answer at all when the
+/// manifest that names them cannot be read.
+mod durable_inventory {
+    use super::*;
+
+    fn manifest_bytes(graph_db_relpath: &str) -> Vec<u8> {
+        let manifest = StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: "proj_inventory".to_string(),
+            project_root: PathBuf::from("/definitely/not/here/gone"),
+            store_kind: StoreKind::Graph,
+            storage_mode: StorageMode::ProfileSharded,
+            graph_db_relpath: PathBuf::from(graph_db_relpath),
+            ..Default::default()
+        };
+        serde_json::to_vec(&manifest).unwrap()
+    }
+
+    #[test]
+    fn branch_databases_are_part_of_the_inventory() {
+        let store = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(store.path().join("branches")).unwrap();
+        std::fs::write(store.path().join("branches/feature-x.db"), b"").unwrap();
+        std::fs::write(store.path().join("branches/main.db"), b"").unwrap();
+        // Non-database debris must not enter the inventory.
+        std::fs::write(store.path().join("branches/notes.txt"), b"").unwrap();
+
+        let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
+            store.path(),
+            Some(&manifest_bytes(crate::config::DB_FILENAME)),
+            &[],
+        ) else {
+            panic!("a readable manifest must resolve an inventory");
+        };
+
+        assert!(inventory.contains(&PathBuf::from(crate::config::DB_FILENAME)));
+        assert!(inventory.contains(&PathBuf::from("branches/feature-x.db")));
+        assert!(inventory.contains(&PathBuf::from("branches/main.db")));
+        assert!(
+            !inventory.contains(&PathBuf::from("branches/notes.txt")),
+            "only databases belong in the durable inventory"
+        );
+    }
+
+    #[test]
+    fn registered_graph_scopes_at_custom_paths_are_covered() {
+        let store = tempfile::tempdir().unwrap();
+        let custom = PathBuf::from("scopes/custom-scope.db");
+
+        let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
+            store.path(),
+            Some(&manifest_bytes("custom-main.db")),
+            std::slice::from_ref(&custom),
+        ) else {
+            panic!("a readable manifest must resolve an inventory");
+        };
+
+        assert!(
+            inventory.contains(&PathBuf::from("custom-main.db")),
+            "the manifest's custom main graph path must be honoured, not the default filename"
+        );
+        assert!(inventory.contains(&custom));
+    }
+
+    #[test]
+    fn a_missing_manifest_fails_closed() {
+        let store = tempfile::tempdir().unwrap();
+        assert_eq!(
+            durable_database_inventory(store.path(), None, &[]),
+            DurableDatabaseInventoryV1::Unverifiable,
+            "without a manifest the store's graph path is a guess, not a fact"
+        );
+    }
+
+    #[test]
+    fn a_malformed_manifest_fails_closed() {
+        let store = tempfile::tempdir().unwrap();
+        assert_eq!(
+            durable_database_inventory(store.path(), Some(b"{ not json"), &[]),
+            DurableDatabaseInventoryV1::Unverifiable
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_whose_manifest_is_unreadable_is_never_reported_empty() {
+        let profile = tempfile::tempdir().unwrap();
+        let data_root = profile.path().join("stores/unreadable");
+        std::fs::create_dir_all(&data_root).unwrap();
+
+        let check = check_store_durable_memory(
+            &data_root,
+            Some(b"{ not json"),
+            &[],
+            &durable_check_scratch_root(profile.path()),
+        )
+        .await;
+
+        assert_eq!(
+            check,
+            DurableMemoryCheck::Unverifiable,
+            "an unverifiable inventory must protect the store, never clear it for deletion"
+        );
+    }
 }

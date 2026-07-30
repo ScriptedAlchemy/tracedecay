@@ -9,8 +9,8 @@ use super::SOCKET_ENV;
 
 pub(crate) mod invocation;
 mod multi_root;
-pub(crate) mod project_runtime;
 mod probe;
+pub(crate) mod project_runtime;
 mod runner;
 mod unit_file;
 

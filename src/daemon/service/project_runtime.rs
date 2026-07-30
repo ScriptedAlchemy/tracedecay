@@ -348,7 +348,11 @@ mod tests {
 
         assert_eq!(refused, Err(ProjectRuntimeAlreadyRegistered));
         assert_eq!(
-            registry.get::<Component>(&project).await.as_ref().and_then(mark),
+            registry
+                .get::<Component>(&project)
+                .await
+                .as_ref()
+                .and_then(mark),
             Some(1),
             "a refused registration must not detach the live component"
         );
@@ -363,7 +367,11 @@ mod tests {
         registry.publish(project.clone(), component(2)).await;
 
         assert_eq!(
-            registry.get::<Component>(&project).await.as_ref().and_then(mark),
+            registry
+                .get::<Component>(&project)
+                .await
+                .as_ref()
+                .and_then(mark),
             Some(2)
         );
     }
@@ -435,7 +443,11 @@ mod tests {
              be dropped on the reconcile path"
         );
         assert_eq!(
-            registry.get::<Component>(&project).await.as_ref().and_then(mark),
+            registry
+                .get::<Component>(&project)
+                .await
+                .as_ref()
+                .and_then(mark),
             Some(1)
         );
     }
@@ -467,7 +479,11 @@ mod tests {
             .await;
         assert_eq!(built, Ok(()));
         assert_eq!(
-            registry.get::<Component>(&project).await.as_ref().and_then(mark),
+            registry
+                .get::<Component>(&project)
+                .await
+                .as_ref()
+                .and_then(mark),
             Some(1)
         );
     }
@@ -488,7 +504,11 @@ mod tests {
 
         assert_eq!(refused, Err("a different authority is already registered"));
         assert_eq!(
-            registry.get::<Component>(&project).await.as_ref().and_then(mark),
+            registry
+                .get::<Component>(&project)
+                .await
+                .as_ref()
+                .and_then(mark),
             Some(1)
         );
     }

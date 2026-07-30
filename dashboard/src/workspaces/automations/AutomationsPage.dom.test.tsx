@@ -398,8 +398,8 @@ describe('AutomationsPage scheduler control scope', () => {
     act(() =>
       useScope.getState().reconcileScope({
         state: 'measured',
-        activeProjectId: 'proj_other',
-        projects: [{ projectId: 'proj_other', label: 'Production' }],
+        label: 'Production',
+        isActive: true,
       }),
     );
 

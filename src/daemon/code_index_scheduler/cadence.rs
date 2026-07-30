@@ -274,7 +274,9 @@ impl CodeIndexCadenceTelemetryV1 {
         self.receipts.back()
     }
 
-    pub(crate) fn receipts(&self) -> impl ExactSizeIterator<Item = &CodeIndexEventToReadyReceiptV1> {
+    pub(crate) fn receipts(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &CodeIndexEventToReadyReceiptV1> {
         self.receipts.iter()
     }
 
@@ -491,7 +493,13 @@ mod tests {
             telemetry.latency_sample_count(),
             CodeIndexCadenceTelemetryV1::CAPACITY
         );
-        assert!(telemetry.read_model().event_to_ready_micros.p99.is_available());
+        assert!(
+            telemetry
+                .read_model()
+                .event_to_ready_micros
+                .p99
+                .is_available()
+        );
         // Oldest receipts were evicted, newest retained.
         assert_eq!(
             telemetry

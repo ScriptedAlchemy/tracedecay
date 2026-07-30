@@ -6,6 +6,7 @@ import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useProjectEntry } from '../../data/query/projectRegistry.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { relativeTime } from './BrainPage.tsx';
 import {
@@ -14,7 +15,6 @@ import {
   GraphSubgraphPayloadSchema,
   MemoryStatusPayloadSchema,
   type ProjectContextPayload,
-  ProjectContextPayloadSchema,
   type ProjectStoreContext,
 } from '../../contracts/wire.ts';
 
@@ -44,11 +44,10 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // gateway — `/api/projects` is deliberately never rewritten by scope (see
   // `scopedUrl`), and this read must resolve for a project whose graph is not
   // mounted, which is exactly when the rest of this surface cannot.
-  const context = useLegacy(
-    ['project-context', projectId],
-    `/api/projects/${encodeURIComponent(projectId)}`,
-    ProjectContextPayloadSchema,
-  );
+  // The shared per-project registry read: the same key and route the scope bar
+  // reconciles from, so the two cannot disagree about what this project is
+  // called, it is fetched once, and a registry change invalidates both.
+  const context = useProjectEntry(projectId);
 
   // Scoped reads. `useLegacy` rewrites each of these through the project
   // gateway for the current scope, so the paths below are written unscoped.
@@ -95,20 +94,44 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     [graph],
   );
 
-  const reportedTotals =
-    overview.data?.outcome === 'ok' ? overview.data.data.totals : null;
-  const totalsUnverified =
-    reportedTotals != null &&
-    (reportedTotals.nodes === 0 ||
-      reportedTotals.edges === 0 ||
-      reportedTotals.files === 0);
-  const totals = totalsUnverified ? null : reportedTotals;
-  const bank =
-    memory.data?.outcome === 'ok' && memory.data.data.exists
-      ? (memory.data.data.memory ?? null)
-      : null;
+  // Graph totals as measured. `graph_api.rs` answers 500 `read_failed` when a
+  // count query fails, so a 200 carries counts that were really taken and a
+  // zero among them is an empty graph. The rule here used to blank all three
+  // whenever any one was zero, on the stated grounds that the response "cannot
+  // distinguish zero data from a query failure" — it can, by status code, and
+  // the rule cost a project with an indexed graph and no edges its node count
+  // as well.
+  const totals = overview.data?.outcome === 'ok' ? overview.data.data.totals : null;
+
+  // `exists` is the memory bank reporting whether it is there, and `error`
+  // carries why when it is not. Reading `memory` regardless would render its
+  // zeros as a measured empty bank for a project that has no bank at all.
+  const memoryRead = memory.data?.outcome === 'ok' ? memory.data.data : null;
+  const bank = memoryRead?.exists === true ? memoryRead.memory : null;
+
+  // Two `available` flags, both required by the generated contract, and both
+  // load-bearing: `event_count` is 0 when the store did not answer, so reading
+  // the number without the flags turns an absent analytics store into a
+  // project where nothing has happened.
+  const analyticsRead = analytics.data?.outcome === 'ok' ? analytics.data.data : null;
   const usage =
-    analytics.data?.outcome === 'ok' ? (analytics.data.data.usage ?? null) : null;
+    analyticsRead?.available === true && analyticsRead.usage.available ? analyticsRead.usage : null;
+
+  // Named per source, so a dash in the readout is accounted for rather than
+  // being left to read as zero. Only for sources that answered and declared
+  // themselves unavailable — a read still in flight, or one that failed, is
+  // already reported by its own boundary.
+  const unmeasured = [
+    memoryRead !== null && memoryRead.exists === false
+      ? `Memory: ${memoryRead.error || 'this project has no memory bank.'}`
+      : null,
+    analyticsRead !== null && analyticsRead.available !== true
+      ? 'Analytics: this project has no analytics store, so no activity has been counted.'
+      : null,
+    analyticsRead?.available === true && !analyticsRead.usage.available
+      ? 'Analytics: the store is present but reported no usage summary.'
+      : null,
+  ].filter((line): line is string => line !== null);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -145,11 +168,12 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                 { label: 'events', ...splitCount(usage?.event_count ?? null) },
               ]}
             />
-            {totalsUnverified ? (
-              <p className="max-w-sm bg-surface-0/75 px-2 py-1 text-3xs leading-relaxed text-text-muted backdrop-blur-sm">
-                Graph totals are unverified: this legacy response cannot distinguish zero data
-                from a query failure.
-              </p>
+            {unmeasured.length > 0 ? (
+              <ul className="max-w-sm bg-surface-0/75 px-2 py-1 text-3xs leading-relaxed text-text-muted backdrop-blur-sm">
+                {unmeasured.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
             ) : null}
           </div>
           <LegacyBoundary
@@ -189,9 +213,12 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                   }
                 />
               ) : (
+                // The slice route fails with 500 `read_failed` too, so this is
+                // an answered read that returned no symbols — a project whose
+                // graph holds nothing, stated as the measurement it is.
                 <CenteredState
-                  title="Graph slice is unverified — the legacy response cannot distinguish empty data from query failure"
-                  kind="partial"
+                  title={`No symbols are indexed for ${label}`}
+                  kind="complete_zero_findings"
                 />
               )
             }
@@ -209,11 +236,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           >
             {(data) => <ProjectHoldings data={data} />}
           </LegacyBoundary>
-          {usage && (usage.by_category?.length ?? 0) > 0 ? (
-            <ActivityByCategory
-              categories={usage.by_category ?? []}
-              total={usage.event_count ?? null}
-            />
+          {usage && usage.by_category.length > 0 ? (
+            <ActivityByCategory categories={usage.by_category} total={usage.event_count} />
           ) : null}
         </aside>
       </div>
@@ -255,10 +279,24 @@ function ScopedReadout({
  * the artifacts they weigh, and the paths this project has been checked out
  * at. Available for every registered project, mounted or not. */
 function ProjectHoldings({ data }: { data: ProjectContextPayload }) {
+  // The route's own discriminant, honoured before its arrays are read. A
+  // non-`ok` body sends `project: null` with empty `stores`/`aliases`, which
+  // rendered as a project that simply holds nothing — the same picture a real
+  // empty project draws, for a response that measured nothing at all.
+  if (data.status !== 'ok') {
+    return (
+      <CenteredState
+        title={`Project registry reported: ${data.status}`}
+        kind="unavailable"
+        detail={data.error ?? undefined}
+      />
+    );
+  }
   const project = data.project;
-  const aliases = [...(data.aliases ?? [])].sort(
-    (a, b) => b.last_seen_at - a.last_seen_at,
-  );
+  // `aliases` and `stores` are required arrays in the generated contract, so
+  // they are read as arrays. A `?? []` here would absorb a contract change
+  // into an empty rail rather than surfacing it.
+  const aliases = [...data.aliases].sort((a, b) => b.last_seen_at - a.last_seen_at);
   return (
     <>
       {project ? (
@@ -294,7 +332,7 @@ function ProjectHoldings({ data }: { data: ProjectContextPayload }) {
           </div>
         </section>
       ) : null}
-      {(data.stores ?? []).map((store) => (
+      {data.stores.map((store) => (
         <StoreCard key={store.store.store_id} store={store} />
       ))}
       {aliases.length > 0 ? (
@@ -339,8 +377,8 @@ function ProjectHoldings({ data }: { data: ProjectContextPayload }) {
 }
 
 function StoreCard({ store }: { store: ProjectStoreContext }) {
-  const scopes = store.graph_scopes ?? [];
-  const artifacts = store.artifacts ?? [];
+  const scopes = store.graph_scopes;
+  const artifacts = store.artifacts;
   const bytes = artifacts.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);
   const weight = splitBytes(bytes || null);
   const heaviest = artifacts.reduce((max, a) => Math.max(max, a.size_bytes ?? 0), 0);

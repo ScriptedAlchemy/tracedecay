@@ -379,20 +379,44 @@ mod tests {
     }
 
     /// The canonical envelope validator keeps its own list of admitted activity
-    /// families. A family this lane can publish but that list rejects is
+    /// families, and replay resolves a retained observation back through the
+    /// label. A family this lane can publish but either side rejects is
     /// swallowed by the error-tolerant publish path and renders as no activity.
+    ///
+    /// The match below is what binds the enum to [`ActivityFamilyV1::ALL`]:
+    /// adding a family without listing it there leaves this match
+    /// non-exhaustive, so the omission is a compile error rather than a family
+    /// this test silently never visits.
     #[test]
     fn every_published_family_is_admitted_by_the_canonical_envelope() {
         for family in ActivityFamilyV1::ALL {
+            let label = match family {
+                ActivityFamilyV1::Hook => "hook",
+                ActivityFamilyV1::SessionIngest => "session_ingest",
+                ActivityFamilyV1::CodeIndex => "code_index",
+                ActivityFamilyV1::ToolCall => "tool_call",
+                ActivityFamilyV1::Task => "task",
+            };
+            assert_eq!(family.observation_label(), label);
+            assert_eq!(
+                ActivityFamilyV1::from_observation_label(label),
+                Some(family),
+                "replay must resolve {label:?} back to the family that published it"
+            );
+
             let envelope = activity_envelope("project.activity.family", family, 1, None)
                 .unwrap_or_else(|| panic!("{family:?} envelope"));
             assert_eq!(
                 envelope.validate(),
                 Ok(()),
-                "{family:?} publishes label {:?}, which the canonical envelope must admit",
-                family.observation_label()
+                "{family:?} publishes label {label:?}, which the canonical envelope must admit"
             );
         }
+        assert_eq!(
+            ActivityFamilyV1::ALL.len(),
+            5,
+            "extend the exhaustive match above when this changes"
+        );
     }
 
     #[tokio::test]

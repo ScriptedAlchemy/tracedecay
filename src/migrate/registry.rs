@@ -7,8 +7,8 @@ use serde::Serialize;
 use crate::branch_meta;
 use crate::db::engine::{Executor, IntoParams, QueryExecutor, params};
 use crate::global_db::{
-    CodeProjectRecord, GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert,
-    StoreInstanceUpsert,
+    CodeProjectRecord, GraphScopeUpsert, ProjectRegistryContext, RegisteredGlobalDb,
+    StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use crate::storage::{
     ProjectStorageLocation, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -901,9 +901,110 @@ pub enum StaleRootScope {
     AllRootsMissing,
 }
 
-/// Returns true if the project's canonical or display root still exists.
+/// Whether a recorded root could be proven present or absent.
+///
+/// Deletion authority requires proof of *absence*. An inspection that fails —
+/// an unreadable parent directory, a stale mount, any I/O error — proves
+/// nothing, so it is [`RootLivenessV1::Unverifiable`] and never absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootLivenessV1 {
+    Live,
+    Absent,
+    Unverifiable,
+}
+
+impl RootLivenessV1 {
+    /// Whether this liveness permits retiring the identity that owns the root.
+    /// Only proven absence does.
+    pub fn permits_retirement(self) -> bool {
+        matches!(self, Self::Absent)
+    }
+
+    /// Combine sibling roots of one identity: any live root wins, then any
+    /// unverifiable root, and absence only when every root was proven absent.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Live, _) | (_, Self::Live) => Self::Live,
+            (Self::Unverifiable, _) | (_, Self::Unverifiable) => Self::Unverifiable,
+            (Self::Absent, Self::Absent) => Self::Absent,
+        }
+    }
+}
+
+/// Probe one root with typed existence, so a permission or I/O failure is
+/// reported as unverifiable rather than silently read as "gone".
+pub fn probe_root(root: &Path) -> RootLivenessV1 {
+    match root.try_exists() {
+        Ok(true) => RootLivenessV1::Live,
+        Ok(false) => RootLivenessV1::Absent,
+        Err(_) => RootLivenessV1::Unverifiable,
+    }
+}
+
+/// Liveness across every root one registry row records: canonical, display, and
+/// the git common directory. A linked worktree shares its common directory with
+/// the primary checkout, so a live common directory means the repository
+/// identity is still in use even when this row's working tree is gone.
+pub fn code_project_root_liveness(project: &CodeProjectRecord) -> RootLivenessV1 {
+    let mut liveness = probe_root(Path::new(&project.canonical_root))
+        .merge(probe_root(Path::new(&project.display_root)));
+    if let Some(git_common_dir) = project.git_common_dir.as_deref() {
+        liveness = liveness.merge(probe_root(Path::new(git_common_dir)));
+    }
+    liveness
+}
+
+/// Returns true unless every root this row records was *proven* absent.
 pub fn code_project_root_exists(project: &CodeProjectRecord) -> bool {
-    Path::new(&project.canonical_root).exists() || Path::new(&project.display_root).exists()
+    !code_project_root_liveness(project).permits_retirement()
+}
+
+/// Liveness of a fully-resolved registry identity: every root of the project
+/// row plus every registered alias path.
+///
+/// A registered store instance keeps the identity live on its own. Deleting the
+/// `code_projects` row cascades its aliases and store instances away, so a row
+/// that still owns a store must never be retired by an unreviewed pass.
+pub fn project_context_liveness(context: &ProjectRegistryContext) -> RootLivenessV1 {
+    if !context.stores.is_empty() {
+        return RootLivenessV1::Live;
+    }
+    context.aliases.iter().fold(
+        code_project_root_liveness(&context.project),
+        |liveness, alias| liveness.merge(probe_root(Path::new(&alias.alias_path))),
+    )
+}
+
+/// Registry identities that are stale under `scope` across every root and alias
+/// they record, restricted to canonical roots under one of `prefixes`.
+///
+/// This is the context-aware counterpart of [`stale_code_projects`]: an
+/// unreviewed pass must resolve aliases and store instances before retiring an
+/// identity, or it will retire a project another checkout is still using.
+pub fn stale_project_contexts<'a>(
+    contexts: &'a [ProjectRegistryContext],
+    prefixes: &[PathBuf],
+    scope: StaleRootScope,
+) -> Vec<&'a ProjectRegistryContext> {
+    contexts
+        .iter()
+        .filter(|context| {
+            let canonical_root = Path::new(&context.project.canonical_root);
+            prefixes.is_empty()
+                || prefixes
+                    .iter()
+                    .any(|prefix| canonical_root.starts_with(prefix))
+        })
+        .filter(|context| match scope {
+            StaleRootScope::CanonicalRootMissing => {
+                probe_root(Path::new(&context.project.canonical_root)).permits_retirement()
+                    && project_context_liveness(context).permits_retirement()
+            }
+            StaleRootScope::AllRootsMissing => {
+                project_context_liveness(context).permits_retirement()
+            }
+        })
+        .collect()
 }
 
 /// Filters registry rows that are stale under `scope`, restricted to
@@ -925,7 +1026,9 @@ pub fn stale_code_projects<'a>(
                     .any(|prefix| canonical_root.starts_with(prefix))
         })
         .filter(|project| match scope {
-            StaleRootScope::CanonicalRootMissing => !Path::new(&project.canonical_root).exists(),
+            StaleRootScope::CanonicalRootMissing => {
+                probe_root(Path::new(&project.canonical_root)).permits_retirement()
+            }
             StaleRootScope::AllRootsMissing => !code_project_root_exists(project),
         })
         .collect()

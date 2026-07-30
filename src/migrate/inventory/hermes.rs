@@ -2,10 +2,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::artifacts::file_size;
-use tracedecay_migrate::inventory::{
-    InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath, StoreArtifact,
-    StoreBrand, StoreInventory, StoreRole, StoreStatus,
-};
 use super::project::{
     InventoryScanOptions, canonicalize_lossy, inspect_data_dir_candidate, push_integrity_issue,
 };
@@ -13,6 +9,10 @@ use super::sqlite::sqlite_quick_check;
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;
 use crate::yaml_scalar::decode_yaml_scalar;
+use tracedecay_migrate::inventory::{
+    InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath, StoreArtifact,
+    StoreBrand, StoreInventory, StoreRole, StoreStatus,
+};
 
 pub(super) async fn scan_hermes_sources(
     include_default_home: bool,

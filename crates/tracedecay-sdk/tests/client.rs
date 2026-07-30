@@ -2,10 +2,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ClientError, ConnectionMode, PageOptions, RequestOptions,
-    StreamOptions, StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, RequestOptions, StreamOptions,
+    StreamResume,
 };
 use tracedecay_sdk::operations::{
     TypedOperation, WorkCreate, WorkSnapshot, base_operation_capabilities,
@@ -60,8 +60,38 @@ fn json_response(status: &str, value: serde_json::Value) -> String {
     )
 }
 
+fn event_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn work_snapshot_success() -> serde_json::Value {
+    json!({
+        "kind": "success",
+        "value": {
+            "binding_id": "binding.http.work.snapshot",
+            "contract": {"schema_id": "schema.work.snapshot.result", "schema_revision": 1},
+            "request_id": "request.sdk",
+            "scope": {},
+            "outcome": {"outcome": "evidence", "value": {
+                "temporal": {}, "authority": {}, "evidence_authorities": [],
+                "coverage": {}, "omissions": [], "scores": [], "contributions": [],
+                "page": {"sort_contract_id": "sort.work", "sort_revision": 1,
+                    "total": 1, "returned": 1, "cursor": null, "expires_at": null},
+                "execution": {"started_at": 1, "ended_at": 2,
+                    "effective_deadline": {"expires_at": 3}, "cancellation": null,
+                    "budget": {"units_consumed": 1, "bytes_consumed": 1,
+                        "elapsed_micros": 1}, "termination": "completed"},
+                "payload": {"not": "a work snapshot"}
+            }}
+        }
+    })
+}
+
 #[test]
-fn local_and_remote_clients_preserve_auth_origin_and_paging() {
+fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
     let success = json_response(
         "200 OK",
         json!({
@@ -114,13 +144,7 @@ fn local_and_remote_clients_preserve_auth_origin_and_paging() {
     .origin("https://client.example")
     .build()
     .unwrap();
-    let options = RequestOptions {
-        page: Some(PageOptions {
-            size: Some(25),
-            cursor: Some("cursor.next".into()),
-        }),
-        ..RequestOptions::default()
-    };
+    let options = RequestOptions::default();
 
     let request = serde_json::from_value(json!({
         "command_id": "command.sdk",
@@ -146,7 +170,7 @@ fn local_and_remote_clients_preserve_auth_origin_and_paging() {
     assert!(requests[0].contains("authorization: Bearer sdk-token"));
     assert!(requests[0].contains(&format!("origin: {base_url}")));
     assert!(requests[0].contains("/application/work/create"));
-    assert!(requests[0].contains("page_size=25&cursor=cursor.next"));
+    assert!(!requests[0].contains("/application/work/create?"));
     assert!(requests[1].contains("origin: https://client.example"));
 }
 
@@ -215,42 +239,13 @@ fn typed_work_descriptors_close_the_public_operation_surface() {
     assert_eq!(WorkCreate::OPERATION_ID, "operation.work.create");
     let capabilities = base_operation_capabilities().collect::<Vec<_>>();
     assert_eq!(capabilities.len(), 64);
-    assert!(
-        capabilities
-            .iter()
-            .all(|capability| capability.disposition
-                == tracedecay_sdk::operation::ExecutableUnavailableDispositionV1::SchemaUnavailable)
-    );
+    assert!(capabilities.iter().all(|capability| capability.disposition
+        == tracedecay_sdk::operation::ExecutableUnavailableDispositionV1::SchemaUnavailable));
 }
 
 #[test]
 fn typed_work_result_rejects_malformed_payloads() {
-    let response = json_response(
-        "200 OK",
-        json!({
-            "kind": "success",
-            "value": {
-                "binding_id": "binding.http.work.snapshot",
-                "contract": {
-                    "schema_id": "schema.work.snapshot.result",
-                    "schema_revision": 1
-                },
-                "request_id": "request.sdk",
-                "scope": {},
-                "outcome": {"outcome": "evidence", "value": {
-                    "temporal": {}, "authority": {}, "evidence_authorities": [],
-                    "coverage": {}, "omissions": [], "scores": [], "contributions": [],
-                    "page": {"sort_contract_id": "sort.work", "sort_revision": 1,
-                        "total": 1, "returned": 1, "cursor": null, "expires_at": null},
-                    "execution": {"started_at": 1, "ended_at": 2,
-                        "effective_deadline": {"expires_at": 3}, "cancellation": null,
-                        "budget": {"units_consumed": 1, "bytes_consumed": 1,
-                            "elapsed_micros": 1}, "termination": "completed"},
-                    "payload": {"not": "a work snapshot"}
-                }}
-            }
-        }),
-    );
+    let response = json_response("200 OK", work_snapshot_success());
     let (base_url, server) = serve(vec![response]);
     let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
         .build()
@@ -265,5 +260,112 @@ fn typed_work_result_rejects_malformed_payloads() {
         .unwrap_err();
 
     assert!(matches!(error, ClientError::Protocol { .. }));
-    server.join().unwrap();
+    let requests = server.join().unwrap();
+    assert!(requests[0].contains("POST /projects/project.sdk/application/work/snapshot HTTP/1.1"));
+    assert!(!requests[0].contains("/application/work/snapshot?"));
+    assert!(requests[0].contains(r#""page_size":1"#));
+}
+
+#[test]
+fn malformed_success_and_problem_fields_are_protocol_errors() {
+    let mut missing_scope = work_snapshot_success();
+    missing_scope["value"]
+        .as_object_mut()
+        .unwrap()
+        .remove("scope");
+    let mut bad_outcome = work_snapshot_success();
+    bad_outcome["value"]["outcome"]["outcome"] = json!("future");
+    let mut missing_receipt = work_snapshot_success();
+    missing_receipt["value"]["outcome"]["value"]["execution"]
+        .as_object_mut()
+        .unwrap()
+        .remove("budget");
+    let mut bad_contract = work_snapshot_success();
+    bad_contract["value"]["contract"]["schema_revision"] = json!("1");
+    let mut missing_identity = work_snapshot_success();
+    missing_identity["value"]["request_id"] = Value::Null;
+    let mut problem = json!({
+        "kind": "problem",
+        "value": {
+            "binding_id": "binding.http.work.snapshot",
+            "contract": {"schema_id": "schema.application.problem", "schema_revision": 1},
+            "request_id": "request.sdk",
+            "problem": {
+                "revision": 1, "kind": "unavailable", "code": "sdk.unavailable",
+                "message": "unavailable", "diagnostic": null,
+                "owning_layer": "application", "terminality": "terminal",
+                "retryable": true, "retry": "after_delay",
+                "retry_scope": "same_operation", "retry_after_millis": 1,
+                "cancellation_stage": null, "request_id": "request.sdk",
+                "trace_id": "trace.sdk", "details": [], "legal_actions": ["retry"],
+                "coverage": null
+            }
+        }
+    });
+    problem["value"]["problem"]
+        .as_object_mut()
+        .unwrap()
+        .remove("retry");
+    let responses = [
+        missing_scope,
+        bad_outcome,
+        missing_receipt,
+        bad_contract,
+        missing_identity,
+    ]
+    .into_iter()
+    .map(|value| json_response("200 OK", value))
+    .chain([json_response("503 Service Unavailable", problem)])
+    .collect::<Vec<_>>();
+    let (base_url, server) = serve(responses);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let request = serde_json::from_value::<<WorkSnapshot as TypedOperation>::Request>(
+        json!({"page_size": 1}),
+    )
+    .unwrap();
+    for _ in 0..6 {
+        assert!(matches!(
+            client.execute::<WorkSnapshot>(&request, RequestOptions),
+            Err(ClientError::Protocol { .. })
+        ));
+    }
+    assert_eq!(server.join().unwrap().len(), 6);
+}
+
+#[test]
+fn malformed_sse_events_are_protocol_errors() {
+    let open = concat!(
+        "event: open\n",
+        "data: {\"event\":\"open\",\"data\":{\"correlation_id\":\"request.operation\",",
+        "\"frontier\":{\"next_sequence\":0,\"retained_from_sequence\":0,",
+        "\"resume_token\":\"resume\"}}}\n\n"
+    );
+    let cases = [
+        format!(
+            "{open}event: future\nid: 0\ndata: {{\"event\":\"future\",\"data\":{{\"sequence\":0}}}}\n\n"
+        ),
+        open.replace("request.operation", "request.other"),
+        format!(
+            "{open}event: completed\nid: 0\ndata: {{\"event\":\"completed\",\"data\":{{\"sequence\":0,\"terminal\":{{\"termination\":\"completed\"}}}}}}\n\n"
+        ),
+        format!(
+            "{open}event: completed\ndata: {{\"event\":\"completed\",\"data\":{{\"sequence\":0,\"terminal\":{{\"termination\":\"completed\",\"receipt\":{{}}}}}}}}\n\n"
+        ),
+    ];
+    for body in cases {
+        let (base_url, server) = serve(vec![event_response(&body)]);
+        let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+            .build()
+            .unwrap();
+        let stream = client
+            .stream_operation("request.operation", StreamOptions::default())
+            .unwrap();
+        assert!(matches!(
+            stream.collect::<Result<Vec<_>, _>>(),
+            Err(ClientError::Protocol { .. })
+        ));
+        server.join().unwrap();
+    }
 }

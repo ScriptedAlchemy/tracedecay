@@ -29,6 +29,7 @@ mod telemetry;
 mod test_support;
 pub mod watermark;
 pub mod work;
+pub mod workflow;
 mod writer;
 
 pub use authority::{

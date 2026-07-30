@@ -4,6 +4,11 @@
 //! authority and child ports must delegate to the canonical Work runtime and
 //! its existing automation authority.
 
+/// Production adapter hook still required before a multi-step workflow journey
+/// can run without test doubles. The canonical Work runtime owner must implement
+/// these ports; this crate must not scaffold a second scheduler or store.
+pub const MISSING_CANONICAL_WORK_ADAPTER_HOOK: &str = "canonical Work runtime must implement WorkflowExecutionAuthorityPort, WorkflowChildExecutionPort, and WorkflowSynthesisPort for WorkflowFanOutRuntimeService";
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display};
 
@@ -14,6 +19,8 @@ use tracedecay_domain::{
     WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowStepId,
     canonical_sha256,
 };
+
+use crate::context::CancellationContext;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +52,7 @@ pub struct WorkflowFanOutRequestV1 {
     pub run_id: RunId,
     pub step_id: WorkflowStepId,
     pub fence: WorkflowExecutionFenceV1,
+    pub cancellation: CancellationContext,
     pub inputs: Vec<WorkflowFanOutInputV1>,
 }
 
@@ -53,6 +61,7 @@ pub struct WorkflowFanOutRequestV1 {
 pub struct WorkflowChildExecutionRequestV1 {
     pub identity: WorkflowExecutionIdentityV1,
     pub fence: WorkflowExecutionFenceV1,
+    pub cancellation: CancellationContext,
     pub task_id: TaskId,
     pub create_command_id: WorkCommandId,
     pub operation: WorkflowOperationRef,
@@ -63,6 +72,7 @@ pub struct WorkflowChildExecutionRequestV1 {
 #[serde(deny_unknown_fields)]
 pub struct WorkflowChildExecutionBatchV1 {
     pub max_parallel: u32,
+    pub cancellation: CancellationContext,
     pub children: Vec<WorkflowChildExecutionRequestV1>,
 }
 
@@ -123,6 +133,8 @@ pub struct WorkflowSynthesisChildV1 {
 pub struct WorkflowSynthesisRequestV1 {
     pub identity: WorkflowExecutionIdentityV1,
     pub fence: WorkflowExecutionFenceV1,
+    /// Deterministic idempotency identity derived from the immutable plan.
+    pub synthesis_command_id: WorkCommandId,
     pub children: Vec<WorkflowSynthesisChildV1>,
 }
 
@@ -149,6 +161,9 @@ pub enum WorkflowExecutionTruthV1 {
     Interrupted {
         checkpoint: WorkflowFanOutCheckpointV1,
         directive: WorkflowRecoveryDirectiveV1,
+    },
+    Cancelled {
+        cancellation: CancellationContext,
     },
 }
 
@@ -315,17 +330,22 @@ where
                     return Err(WorkflowFanOutRuntimeError::InvalidPlan);
                 }
                 let records = match directive {
-                    WorkflowRecoveryDirectiveV1::ResumeIncomplete => checkpoint
-                        .children
-                        .into_iter()
-                        .filter(|record| {
-                            !matches!(
+                    WorkflowRecoveryDirectiveV1::ResumeIncomplete => {
+                        let mut recovered = BTreeMap::new();
+                        for record in checkpoint.children {
+                            validate_checkpoint_record(&children, &record)?;
+                            if matches!(
                                 record.outcome,
                                 WorkflowChildExecutionOutcomeV1::Interrupted { .. }
-                            )
-                        })
-                        .map(|record| (record.task_id.clone(), record))
-                        .collect(),
+                            ) {
+                                continue;
+                            }
+                            if recovered.insert(record.task_id.clone(), record).is_some() {
+                                return Err(WorkflowFanOutRuntimeError::InvalidPlan);
+                            }
+                        }
+                        recovered
+                    }
                     WorkflowRecoveryDirectiveV1::RestartAll => BTreeMap::new(),
                 };
                 (records, directive)
@@ -346,17 +366,34 @@ where
         if records.keys().any(|task_id| !planned_ids.contains(task_id)) {
             return Err(WorkflowFanOutRuntimeError::InvalidPlan);
         }
+
+        if request.cancellation.is_cancelled() {
+            let truth = WorkflowExecutionTruthV1::Cancelled {
+                cancellation: request.cancellation.clone(),
+            };
+            self.authority
+                .complete(&identity, &request.fence, &truth)
+                .map_err(authority_error)?;
+            return Ok(truth);
+        }
+
         let pending = children
             .into_iter()
             .filter(|child| !records.contains_key(&child.task_id))
             .collect::<Vec<_>>();
+        let pending_ids = pending
+            .iter()
+            .map(|child| child.task_id.clone())
+            .collect::<BTreeSet<_>>();
         let batch = WorkflowChildExecutionBatchV1 {
             max_parallel,
+            cancellation: request.cancellation.clone(),
             children: pending
                 .iter()
                 .map(|child| WorkflowChildExecutionRequestV1 {
                     identity: identity.clone(),
                     fence: request.fence.clone(),
+                    cancellation: request.cancellation.clone(),
                     task_id: child.task_id.clone(),
                     create_command_id: child.create_command_id.clone(),
                     operation: operation.clone(),
@@ -373,7 +410,7 @@ where
             }
             let mut by_task = BTreeMap::new();
             for result in returned {
-                if !planned_ids.contains(&result.task_id)
+                if !pending_ids.contains(&result.task_id)
                     || by_task.insert(result.task_id, result.outcome).is_some()
                 {
                     return Err(WorkflowFanOutRuntimeError::InvalidChildResults);
@@ -416,8 +453,15 @@ where
             });
         }
 
+        let synthesis_command_id = synthesis_command_id(&identity, &plan_digest)?;
         let checkpoint = canonical_checkpoint(plan_digest, records);
-        let truth = synthesize_truth(&self.synthesis, &identity, &request.fence, &checkpoint)?;
+        let truth = synthesize_truth(
+            &self.synthesis,
+            &identity,
+            &request.fence,
+            &synthesis_command_id,
+            &checkpoint,
+        )?;
         self.authority
             .complete(&identity, &request.fence, &truth)
             .map_err(authority_error)?;
@@ -530,6 +574,22 @@ fn prepare_plan(
     ))
 }
 
+fn validate_checkpoint_record(
+    children: &[PlannedChild],
+    record: &WorkflowChildRecordV1,
+) -> Result<(), WorkflowFanOutRuntimeError> {
+    let planned = children
+        .iter()
+        .find(|child| child.task_id == record.task_id)
+        .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
+    if record.input.identity != planned.input.identity
+        || record.input.input_digest != planned.input.input_digest
+    {
+        return Err(WorkflowFanOutRuntimeError::InvalidPlan);
+    }
+    Ok(())
+}
+
 fn canonical_checkpoint(
     plan_digest: ManifestDigest,
     records: BTreeMap<TaskId, WorkflowChildRecordV1>,
@@ -540,10 +600,25 @@ fn canonical_checkpoint(
     }
 }
 
+fn synthesis_command_id(
+    identity: &WorkflowExecutionIdentityV1,
+    plan_digest: &ManifestDigest,
+) -> Result<WorkCommandId, WorkflowFanOutRuntimeError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.application.workflow-synthesis.v1",
+        identity,
+        plan_digest,
+    ))
+    .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
+    WorkCommandId::new(format!("workflow-synthesis:{}", digest.as_str()))
+        .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)
+}
+
 fn synthesize_truth<S>(
     synthesis: &S,
     identity: &WorkflowExecutionIdentityV1,
     fence: &WorkflowExecutionFenceV1,
+    synthesis_command_id: &WorkCommandId,
     checkpoint: &WorkflowFanOutCheckpointV1,
 ) -> Result<WorkflowExecutionTruthV1, WorkflowFanOutRuntimeError>
 where
@@ -580,6 +655,7 @@ where
         match synthesis.synthesize(&WorkflowSynthesisRequestV1 {
             identity: identity.clone(),
             fence: fence.clone(),
+            synthesis_command_id: synthesis_command_id.clone(),
             children: succeeded,
         }) {
             Ok(output_digest) if failed.is_empty() => {

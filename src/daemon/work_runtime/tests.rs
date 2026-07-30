@@ -739,6 +739,51 @@ async fn cancelling_a_provider_that_already_completed_still_terminates_as_cancel
     assert_eq!(runtime.in_flight(), 0);
 }
 
+/// A recorded cancellation is answered from durable state, so an attempt whose
+/// execution this process does not own must still reach its cancelled terminal.
+///
+/// Requiring a claimable settlement first stranded the attempt permanently: the
+/// transition table lets `CancellationRequested` reach only an acknowledged or
+/// escalated cancellation, and no exposed operation could supply either.
+#[tokio::test]
+async fn a_cancellation_resolves_without_an_execution_this_process_owns() {
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let harness = Harness::open("project.work.daemon.foreign-cancel").await;
+    let fixture = harness.path("codex-work-idle-fixture");
+    install_idle_codex_fixture(&fixture);
+    let owner = harness.runtime(&fixture, Duration::from_secs(30), 2);
+    let restarted = harness.runtime(&fixture, Duration::from_secs(30), 2);
+
+    let stranded = identity(&harness.task_id, "foreign-cancel");
+    owner
+        .acquire_lease(&harness.snapshot, stranded.clone(), lease(1))
+        .await
+        .unwrap();
+    owner
+        .start(&stranded, &lease(1), WorkRecoveryStateV1::Fresh)
+        .await
+        .unwrap();
+
+    // `restarted` never admitted this execution, so it has no settlement to
+    // claim — exactly the state a daemon restart or an expiry reap leaves.
+    assert_eq!(restarted.in_flight(), 0);
+    let cancelled = restarted
+        .cancel(&stranded, &lease(1), cancellation_request("foreign", 60))
+        .await
+        .unwrap();
+
+    assert_eq!(cancelled.state(), WorkAttemptStateV1::Cancelled);
+    assert!(matches!(
+        cancelled.cancellation(),
+        WorkCancellationStateV1::Acknowledged(_)
+    ));
+    assert_eq!(
+        owner.shutdown(),
+        1,
+        "the owning runtime still reaps the execution it admitted"
+    );
+}
+
 /// The exposed terminal path must release the execution slot, or the bound
 /// becomes a standing refusal after a few completed attempts.
 #[tokio::test]

@@ -99,14 +99,37 @@ impl AdmittedRoot {
         if root_url.host_str() != document_url.host_str() {
             return false;
         }
-        document_path
+        let lexical_match = document_path
             .strip_prefix(&root_path)
             .is_ok_and(|relative| {
                 !relative.as_os_str().is_empty()
                     && relative
                         .components()
                         .all(|component| matches!(component, Component::Normal(_)))
-            })
+            });
+        if !lexical_match {
+            return false;
+        }
+        let Ok(canonical_root) = root_path.canonicalize() else {
+            return true;
+        };
+        let Some(existing_ancestor) = document_path.ancestors().find(|ancestor| ancestor.exists())
+        else {
+            return false;
+        };
+        existing_ancestor
+            .canonicalize()
+            .is_ok_and(|canonical_ancestor| canonical_ancestor.strip_prefix(canonical_root).is_ok())
+    }
+
+    pub(crate) fn document_root_depth(&self, document_uri: &str) -> Option<usize> {
+        self.contains_document(document_uri).then(|| {
+            strict_file_uri_path(&self.uri)
+                .expect("validated admitted root")
+                .1
+                .components()
+                .count()
+        })
     }
 }
 
@@ -2586,9 +2609,7 @@ where
                 GatewayResponse::Unavailable(unavailable) => {
                     GatewayResponse::Unavailable(unavailable)
                 }
-                GatewayResponse::RequestFailed(failure) => {
-                    GatewayResponse::RequestFailed(failure)
-                }
+                GatewayResponse::RequestFailed(failure) => GatewayResponse::RequestFailed(failure),
             };
         }
         self.route_semantic(

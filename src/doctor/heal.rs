@@ -51,7 +51,7 @@ use crate::global_db::{CodeProjectRecord, RegisteredGlobalDb};
 use crate::migrate::durability::{
     StoreDurabilityClass, StoreShardKind, shard_kind_durability_class,
 };
-use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_code_projects};
+use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_project_contexts};
 use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 
 mod report;
@@ -504,13 +504,21 @@ async fn gc_stale_temp_registry_rows(
     global_db: &Arc<RegisteredGlobalDb>,
     projects: &[CodeProjectRecord],
 ) -> crate::errors::Result<(usize, Vec<String>)> {
-    let stale_ids: Vec<String> = stale_code_projects(
-        projects,
+    // Resolve aliases and store instances before retiring anything. Deleting a
+    // `code_projects` row cascades its aliases and store instances away, so a
+    // roots-only check would silently retire a project another checkout — or a
+    // registered store — is still using, and the daemon's orphan sweep would
+    // then collect the now-unregistered store.
+    let contexts = global_db
+        .project_registry_contexts_for_projects(projects)
+        .await?;
+    let stale_ids: Vec<String> = stale_project_contexts(
+        &contexts,
         &temp_dir_prefixes(),
         StaleRootScope::AllRootsMissing,
     )
     .into_iter()
-    .map(|project| project.project_id.clone())
+    .map(|context| context.project.project_id.clone())
     .collect();
     if stale_ids.is_empty() {
         return Ok((0, stale_ids));

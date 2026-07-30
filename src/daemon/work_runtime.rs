@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_application::{
-    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptPersistencePort,
-    WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
-    WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
-    WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkDispatchBoundsV1,
-    WorkDispatchError, WorkExecutionError, WorkExecutionQueueV1, WorkExecutionService,
-    WorkProviderExecutionError, WorkProviderSettlementV1, WorkStoragePort,
+    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
+    WorkAttemptPersistencePort, WorkAttemptPublishArtifactRequestV1,
+    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
+    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
+    WorkAttemptTerminalizeRequestV1, WorkDispatchBoundsV1, WorkDispatchError, WorkExecutionError,
+    WorkExecutionQueueV1, WorkExecutionService, WorkProviderExecutionError,
+    WorkProviderSettlementV1, WorkStoragePort,
 };
 use tracedecay_domain::{
     AttemptId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
@@ -47,6 +48,7 @@ pub(crate) enum WorkAttemptInvocationV1 {
     PublishArtifact(WorkAttemptPublishArtifactRequestV1),
     Cancel(WorkAttemptCancelRequestV1),
     Recover(WorkAttemptRecoverRequestV1),
+    Finish(WorkAttemptFinishRequestV1),
     Terminalize(WorkAttemptTerminalizeRequestV1),
 }
 
@@ -60,6 +62,7 @@ impl WorkAttemptInvocationV1 {
             Self::PublishArtifact(_) => "attempt_publish_artifact",
             Self::Cancel(_) => "attempt_cancel",
             Self::Recover(_) => "attempt_recover",
+            Self::Finish(_) => "attempt_finish",
             Self::Terminalize(_) => "attempt_terminalize",
         }
     }
@@ -186,6 +189,10 @@ where
                 self.recover(&request.identity, &request.lease, request.reason)
                     .await?
             }
+            WorkAttemptInvocationV1::Finish(request) => {
+                self.finish(&request.identity, &request.lease, request.observed_at)
+                    .await?
+            }
             WorkAttemptInvocationV1::Terminalize(request) => {
                 self.terminalize(&request.identity, &request.lease, request.terminal)
                     .await?
@@ -291,13 +298,14 @@ where
             let _ = self.settle(identity, lease).await?;
             return Ok(current);
         }
-        let Some(settlement) = self.settle(identity, lease).await? else {
-            return Err(WorkProviderExecutionError::Unavailable(
-                "Codex Work execution is not owned by this process".to_owned(),
-            )
-            .into());
-        };
         let terminal = if let WorkCancellationStateV1::Requested(request) = current.cancellation() {
+            // A recorded cancellation admits exactly one terminal, so the
+            // terminal is derived from durable state and draining the execution
+            // is best-effort. Requiring a claimable settlement — or failing on
+            // a drain error — would strand every attempt whose execution this
+            // process no longer owns, and the transition table offers no other
+            // way out of `CancellationRequested`.
+            let _ = self.settle(identity, lease).await;
             self.execution.acknowledge_cancellation(
                 &self.authority,
                 identity,
@@ -310,6 +318,15 @@ where
                 observed_at,
             )?
         } else {
+            // Deriving a terminal from what the provider actually did is the
+            // only path that needs the settlement, so it is the only path that
+            // may refuse without one.
+            let Some(settlement) = self.settle(identity, lease).await? else {
+                return Err(WorkProviderExecutionError::Unavailable(
+                    "Codex Work execution is not owned by this process".to_owned(),
+                )
+                .into());
+            };
             match settlement {
                 WorkProviderSettlementV1::Completed { evidence } => {
                     let digest = canonical_sha256(&evidence).map_err(|error| {
@@ -521,9 +538,9 @@ where
 fn map_dispatch_error(error: WorkDispatchError) -> WorkExecutionError {
     match error {
         WorkDispatchError::Provider(provider) => WorkExecutionError::Provider(provider),
-        other => WorkExecutionError::Provider(WorkProviderExecutionError::Unavailable(
-            other.to_string(),
-        )),
+        other => {
+            WorkExecutionError::Provider(WorkProviderExecutionError::Unavailable(other.to_string()))
+        }
     }
 }
 
@@ -545,12 +562,8 @@ fn cancelled_evidence_digest(
     identity: &WorkAttemptIdentityV1,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_domain::ManifestDigest, WorkProviderExecutionError> {
-    canonical_sha256(&(
-        "tracedecay.work.codex.cancelled.v1",
-        identity,
-        observed_at,
-    ))
-    .map_err(map_evidence_error)
+    canonical_sha256(&("tracedecay.work.codex.cancelled.v1", identity, observed_at))
+        .map_err(map_evidence_error)
 }
 
 fn failed_evidence_digest(

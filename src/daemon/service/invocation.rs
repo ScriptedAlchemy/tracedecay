@@ -79,6 +79,7 @@ use tracedecay_policy::{
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
+use super::project_runtime::ProjectRuntimeRegistryV1;
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
@@ -121,7 +122,6 @@ use crate::application::feedback::{
     Pr12FeedbackCycleLspInput, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
     open_pr12_feedback_cycle_runtime,
 };
-use super::project_runtime::ProjectRuntimeRegistryV1;
 use crate::application::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
     production_semantic_authorities,
@@ -5237,11 +5237,12 @@ impl DaemonConfigurationRuntimeRegistrar {
         self.service
             .project_runtimes
             .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
-                registered.semantic_operation.set(operation).map_err(|_| {
-                    TraceDecayError::Config {
+                registered
+                    .semantic_operation
+                    .set(operation)
+                    .map_err(|_| TraceDecayError::Config {
                         message: "semantic configuration operation is already installed".to_owned(),
-                    }
-                })
+                    })
             })
             .await
             .ok_or_else(|| TraceDecayError::Config {
@@ -10823,10 +10824,10 @@ mod tests {
             UtcMicros(10_000),
             scope.clone(),
             std::collections::BTreeSet::from([
-                CapabilityId::new("capability.work.expire").expect("capability"),
+                CapabilityId::new("capability.work.expire").expect("capability")
             ]),
             std::collections::BTreeSet::from([
-                UseCaseId::new("use-case.work.expire").expect("use case"),
+                UseCaseId::new("use-case.work.expire").expect("use case")
             ]),
             DisclosureClass::Sensitive,
         )
@@ -10874,7 +10875,9 @@ mod tests {
                     proposal_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
                         .expect("proposal digest"),
                     expected_version: tracedecay_domain::WorkVersion::initial(),
-                    command_id: tracedecay_domain::WorkCommandId::new("command.work.expire.proposal")
+                    command_id: tracedecay_domain::WorkCommandId::new(
+                        "command.work.expire.proposal",
+                    )
                     .expect("command id"),
                     occurred_at: UtcMicros(20),
                 },
@@ -10902,8 +10905,11 @@ mod tests {
         .expect("projection snapshot");
 
         let fixture = project.path().join("codex-work-expire-fixture");
-        std::fs::write(&fixture, "#!/usr/bin/env python3\nimport time\nwhile True:\n    time.sleep(1)\n")
-            .expect("fixture");
+        std::fs::write(
+            &fixture,
+            "#!/usr/bin/env python3\nimport time\nwhile True:\n    time.sleep(1)\n",
+        )
+        .expect("fixture");
         let mut permissions = std::fs::metadata(&fixture).expect("metadata").permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
         std::fs::set_permissions(&fixture, permissions).expect("fixture mode");
@@ -10950,7 +10956,11 @@ mod tests {
             .expect("leased attempt");
         registered
             .runtime
-            .start(&identity, &lease, tracedecay_domain::WorkRecoveryStateV1::Fresh)
+            .start(
+                &identity,
+                &lease,
+                tracedecay_domain::WorkRecoveryStateV1::Fresh,
+            )
             .await
             .expect("started attempt");
         assert_eq!(

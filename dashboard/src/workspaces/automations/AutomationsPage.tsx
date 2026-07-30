@@ -114,6 +114,11 @@ function queueReading(
         quality: 'unknown',
         reason: 'the scheduler answered in a shape this dashboard cannot read',
       };
+    case 'unavailable':
+      return {
+        quality: 'unknown',
+        reason: `the scheduler reported it cannot serve this (${result.reason ?? result.status})`,
+      };
     default: {
       const unhandled: never = result;
       return {
@@ -629,6 +634,11 @@ function controlFailure(result: SchedulerControlResult | undefined): string | nu
       return `The daemon refused the change (${result.detail}).`;
     case 'unsupported_schema':
       return 'The daemon answered in a shape this dashboard cannot read, so whether the scheduler changed is unknown — reload to re-read it.';
+    // The daemon answered, in its own contract, that it cannot serve this at
+    // all — so unlike `error` the change definitely did not take effect, and
+    // the reason it gave is the one worth repeating.
+    case 'unavailable':
+      return `The scheduler was not changed: ${result.reason ?? result.status}.`;
     // The gateway refused the write because this project is not the active one.
     // Its own sentence is repeated rather than reworded, and it is stated as a
     // scope fact so the remedy is switching scope rather than retrying.

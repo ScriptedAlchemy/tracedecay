@@ -501,7 +501,14 @@ async function* parseSse(
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) {
-        buffer += decoder.decode();
+        try {
+          buffer += decoder.decode();
+        } catch (cause) {
+          throw new TraceDecayMalformedResponseError(
+            "the daemon returned malformed UTF-8 event-stream data",
+            { payload: cause },
+          );
+        }
         for (const line of lines(true)) {
           const frame = consumeLine(line);
           if (frame !== null) {
@@ -510,7 +517,14 @@ async function* parseSse(
         }
         break;
       }
-      buffer += decoder.decode(chunk.value, { stream: true });
+      try {
+        buffer += decoder.decode(chunk.value, { stream: true });
+      } catch (cause) {
+        throw new TraceDecayMalformedResponseError(
+          "the daemon returned malformed UTF-8 event-stream data",
+          { payload: cause },
+        );
+      }
       for (const line of lines(false)) {
         const frame = consumeLine(line);
         if (frame !== null) {
@@ -530,9 +544,9 @@ async function* parseSse(
     ) {
       throw cause;
     }
-    throw new TraceDecayMalformedResponseError(
-      "the daemon returned malformed UTF-8 event-stream data",
-      { payload: cause },
+    throw new TraceDecayDisconnectedError(
+      "operation stream transport was interrupted",
+      cause,
     );
   } finally {
     reader.releaseLock();
@@ -542,6 +556,7 @@ async function* parseSse(
 function decodeSse(
   frame: SseFrame,
   status: number,
+  expectedCorrelationId: string,
 ): { event: HttpSseEvent<unknown>; sequence?: string; frontier?: StreamFrontier } {
   const value = parseJson(frame.data, status);
   if (
@@ -561,7 +576,7 @@ function decodeSse(
   if (eventName === "open") {
     const frontier = eventData.frontier;
     if (
-      typeof eventData.correlation_id !== "string" ||
+      eventData.correlation_id !== expectedCorrelationId ||
       !isRecord(frontier) ||
       !isSafeUnsignedInteger(frontier.next_sequence) ||
       !isSafeUnsignedInteger(frontier.retained_from_sequence) ||
@@ -707,7 +722,7 @@ export class TraceDecayClient {
       >[]
     ) {
       methods[descriptor.operation] = (request, requestOptions) =>
-        this.requestOperation<unknown, unknown>(
+        this.#requestOperation<unknown, unknown>(
           descriptor,
           request,
           requestOptions,
@@ -806,7 +821,7 @@ export class TraceDecayClient {
     return envelope;
   }
 
-  private async requestOperation<Request, Result>(
+  async #requestOperation<Request, Result>(
     descriptor: OperationDescriptor<string, Request, Result>,
     request: unknown,
     options: OperationRequestOptions = {},
@@ -928,7 +943,7 @@ export class TraceDecayClient {
           if (frame.retryDelayMs !== undefined) {
             reconnectDelayMs = frame.retryDelayMs;
           }
-          const decoded = decodeSse(frame, response.status);
+          const decoded = decodeSse(frame, response.status, operationId);
           if (decoded.frontier !== undefined) {
             nextSequence = decoded.frontier.nextSequence;
             resumeToken = decoded.frontier.resumeToken;

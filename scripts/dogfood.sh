@@ -13,6 +13,7 @@ staged_binary="$stage_dir/tracedecay"
 installed_binary="$install_dir/tracedecay"
 profile_dir=${TRACEDECAY_DOGFOOD_PROFILE_DIR:-"$HOME/.tracedecay"}
 boundary_state="$profile_dir/dogfood-migration-boundary.state"
+verified_backup=${TRACEDECAY_DOGFOOD_BACKUP:-}
 dogfood_started=$SECONDS
 
 if [[ -n "${TRACEDECAY_SKIP_DASHBOARD_BUILD+x}" ]]; then
@@ -534,6 +535,14 @@ if [[ "$marker_boundary" == reached ]]; then
 fi
 attempt_id="$(date +%s)-$$-$RANDOM-$RANDOM"
 
+if [[ -z "$verified_backup" || ! -d "$verified_backup" \
+  || ! -f "$verified_backup/backup-manifest.json" ]]; then
+  printf '%s\n' \
+    'dogfood requires TRACEDECAY_DOGFOOD_BACKUP to name a complete verified profile backup.' \
+    'Create one with tracedecay migrate backup-profile, then rehearse it before retrying.' >&2
+  exit 1
+fi
+
 candidate=$(mktemp "$stage_dir/tracedecay.candidate.XXXXXX")
 previous_installed=
 previous_staged=
@@ -543,6 +552,7 @@ replacement_active=0
 boundary_reached=0
 committed=0
 active_child=
+backup_rehearsal=
 
 restore_path() {
   local backup=$1
@@ -647,6 +657,9 @@ cleanup_install() {
 
   rm -f -- "$candidate"
   rm -f -- "$previous_installed" "$previous_staged"
+  if [[ -n "$backup_rehearsal" ]]; then
+    rm -rf -- "$backup_rehearsal"
+  fi
   if ((cleanup_status != 0)); then
     printf 'Dogfood recovery action also failed with status %d (original status %d)\n' \
       "$cleanup_status" "$status" >&2
@@ -657,6 +670,14 @@ trap cleanup_install EXIT
 trap 'handle_signal 129' HUP
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
+
+backup_rehearsal=$(mktemp -d "$stage_dir/dogfood-backup-rehearsal.XXXXXX")
+rmdir -- "$backup_rehearsal"
+"$source_binary" migrate rehearse-profile-backup \
+  --backup "$verified_backup" \
+  --restore "$backup_rehearsal"
+rm -rf -- "$backup_rehearsal"
+backup_rehearsal=
 
 report_stage forward-boundary-preflight "$preflight_started"
 install_started=$SECONDS

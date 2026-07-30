@@ -165,7 +165,14 @@ function SettingsSurface({
         note="effective configuration · validated changes"
         actions={
           model.stamps.length > 0 ? (
-            <span className="flex shrink-0 flex-wrap items-center gap-1.5">
+            // `min-w-0`, not `shrink-0`: this strip is 494.8px of snapshot,
+            // revision, version and channel, and the header offers 254px at
+            // 320 CSS px. Refusing to shrink did not make it fit — it put
+            // 356.9px of provenance outside the header, most of it past the
+            // screen edge. Allowed to shrink, its own `flex-wrap` lays the
+            // stamps out over as many lines as the width needs and every one
+            // of them stays readable.
+            <span className="flex min-w-0 flex-wrap items-center gap-1.5">
               {model.stamps.map((stamp) => (
                 <span
                   key={`${stamp.label}:${stamp.value}`}

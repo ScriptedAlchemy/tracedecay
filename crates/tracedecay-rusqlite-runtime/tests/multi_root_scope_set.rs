@@ -30,6 +30,10 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 fn context(worktree: &str, suffix: &str) -> RequestContext {
+    context_for_actor(worktree, suffix, "actor.requester")
+}
+
+fn context_for_actor(worktree: &str, suffix: &str, actor: &str) -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>("project.fixture"),
         id::<RepositoryId>("repository.fixture"),
@@ -51,7 +55,7 @@ fn context(worktree: &str, suffix: &str) -> RequestContext {
     )
     .unwrap();
     RequestContext::new(
-        id::<ActorId>("actor.requester"),
+        id::<ActorId>(actor),
         scope,
         grant,
         RequestId::new(format!("request.{suffix}")).unwrap(),
@@ -62,12 +66,16 @@ fn context(worktree: &str, suffix: &str) -> RequestContext {
 }
 
 fn scope_set(revision: u64) -> AuthorizedScopeSet {
+    scope_set_for_actor(revision, "actor.requester")
+}
+
+fn scope_set_for_actor(revision: u64, actor: &str) -> AuthorizedScopeSet {
     AuthorizedScopeSetAuthority::authorize(
         ScopeSetId::new("scope-set.fixture").unwrap(),
         ScopeSetRevision::new(revision).unwrap(),
         vec![
-            context("worktree.main", &format!("main.{revision}")),
-            context("worktree.linked", &format!("linked.{revision}")),
+            context_for_actor("worktree.main", &format!("main.{revision}"), actor),
+            context_for_actor("worktree.linked", &format!("linked.{revision}"), actor),
         ],
         &CapabilityId::new(CAPABILITY).unwrap(),
         &UseCaseId::new(USE_CASE).unwrap(),
@@ -118,4 +126,43 @@ fn scope_set_cas_rejects_stale_revision_and_survives_restart() {
         .unwrap()
         .unwrap();
     assert_eq!(restored, second);
+}
+
+#[test]
+fn scope_set_cas_rejects_cross_actor_update_without_changing_stored_bytes() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    AuthorizedScopeSetExecutor::install_schema(&connection).unwrap();
+    let first = scope_set_for_actor(1, "actor.owner");
+    let takeover = scope_set_for_actor(2, "actor.other");
+    AuthorizedScopeSetExecutor::compare_and_swap(&mut connection, None, &first).unwrap();
+    let before: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_payload FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
+            [first.scope_set_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert!(
+        AuthorizedScopeSetExecutor::compare_and_swap(
+            &mut connection,
+            Some(ScopeSetRevision::new(1).unwrap()),
+            &takeover,
+        )
+        .is_err()
+    );
+    let after: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_payload FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
+            [first.scope_set_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(
+        AuthorizedScopeSetExecutor::read(&connection, first.scope_set_id())
+            .unwrap()
+            .unwrap(),
+        first
+    );
 }

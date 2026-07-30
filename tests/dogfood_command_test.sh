@@ -45,6 +45,10 @@ if [[ "$command_text" == "reinstall --dry-run" ]]; then
   exit 0
 fi
 
+if [[ "$command_text" == migrate\ rehearse-profile-backup* ]]; then
+  exit 0
+fi
+
 printf '%s:%s\n' "$binary_id" "$command_text" \
   >>"${TRACEDECAY_DOGFOOD_TEST_LOG:?}"
 
@@ -226,6 +230,7 @@ setup_case() {
   case_stage="$case_root/stage with spaces"
   case_install="$case_root/install with spaces"
   case_profile="$case_root/profile with spaces"
+  case_backup="$case_root/verified backup with spaces"
   case_source="$case_root/build output/tracedecay candidate"
   case_target="$case_root/target"
   case_dashboard_stamp="$case_target/dogfood-dashboard-source.stamp"
@@ -245,8 +250,9 @@ setup_case() {
   case_marker_fsync_count="$case_root/marker-fsync-count"
   installed="$case_install/tracedecay"
   staged="$case_stage/tracedecay"
-  mkdir -p "$case_home" "$case_stage" "$case_install" "$case_profile" \
+  mkdir -p "$case_home" "$case_stage" "$case_install" "$case_profile" "$case_backup" \
     "$(dirname "$case_source")" "$case_manager_dir" "$case_target"
+  printf '{}\n' >"$case_backup/backup-manifest.json"
   cp "$repo_root/dashboard/app-dist/.source-stamp" "$case_dashboard_stamp"
   : >"$case_log"
 }
@@ -270,6 +276,7 @@ run_case() {
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
     TRACEDECAY_DOGFOOD_PROFILE_DIR="$case_profile" \
+    TRACEDECAY_DOGFOOD_BACKUP="$case_backup" \
     TRACEDECAY_DOGFOOD_TEST_LOG="$case_log" \
     "$@" \
     "$dogfood_script"
@@ -286,6 +293,7 @@ run_case_background() {
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
     TRACEDECAY_DOGFOOD_PROFILE_DIR="$case_profile" \
+    TRACEDECAY_DOGFOOD_BACKUP="$case_backup" \
     TRACEDECAY_DOGFOOD_TEST_LOG="$case_log" \
     "$@" \
     "$dogfood_script"
@@ -738,6 +746,18 @@ assert_crash_recovery() {
     fail "$stage retry executed an old binary"
   fi
 }
+
+# Dogfood must stop before installation or marker publication when no complete
+# profile backup is available for restored-copy rehearsal.
+setup_case missing-complete-profile-backup
+write_fake_binary "$case_source" new
+if run_case TRACEDECAY_DOGFOOD_BACKUP= >"$case_output" 2>&1; then
+  fail "dogfood succeeded without a complete verified profile backup"
+fi
+grep -Fq 'dogfood requires TRACEDECAY_DOGFOOD_BACKUP' "$case_output" ||
+  fail "missing backup refusal was not actionable"
+test ! -e "$case_state" ||
+  fail "missing backup refusal crossed the migration marker boundary"
 
 # Crossing into post-update is irreversible. Even when it fails after opening
 # a store, the new binary remains selected and is the only binary allowed to

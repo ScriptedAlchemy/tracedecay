@@ -424,6 +424,13 @@ fn reject_symlink_components(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::BTreeSet;
+
+    use tracedecay_store::{
+        BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, StoreAuthorityEpochV1,
+        StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
+        VerifiedStoreLocatorV1, WorktreeId,
+    };
 
     use super::*;
     use crate::final_v2::*;
@@ -804,8 +811,45 @@ mod tests {
     }
 
     fn final_source(generation: &str) -> ExactMigrationSourceIdentity {
-        ExactMigrationSourceIdentity::new("project.final-v2", generation, LAST_RELEASED_SCHEMA_ID)
-            .expect("source identity")
+        fn id<T>(value: &str) -> T
+        where
+            T: TryFrom<String>,
+            <T as TryFrom<String>>::Error: std::fmt::Debug,
+        {
+            T::try_from(value.to_owned()).unwrap()
+        }
+        let material = if generation.ends_with('8') { 8 } else { 7 };
+        let shard_id = StoreShardIdV1::code(
+            id::<BrainId>("brain.final-v2"),
+            id::<UserProfileId>("profile.final-v2"),
+            id::<ProjectId>("project.final-v2"),
+            id::<RepositoryId>("repository.final-v2"),
+            CodeShardScopeV1::Worktree {
+                worktree_id: id::<WorktreeId>("worktree.final-v2"),
+            },
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let binding = StoreRuntimeBindingV1::new(
+            shard_id.clone(),
+            incarnation,
+            StoreAuthorityEpochV1::new(1).unwrap(),
+        );
+        let locator = VerifiedStoreLocatorV1::new(
+            shard_id,
+            incarnation,
+            LocatorDigest::new(&format!("{material:064x}")).unwrap(),
+        );
+        ExactMigrationSourceIdentity::new(
+            "profile.final-v2",
+            "repository.final-v2",
+            "project.final-v2",
+            "store.final-v2",
+            binding,
+            locator,
+            [material; 32],
+            LAST_RELEASED_SCHEMA_ID,
+        )
+        .expect("source identity")
     }
 
     fn verified_backup(source: ExactMigrationSourceIdentity) -> VerifiedBackupIdentity {
@@ -813,8 +857,43 @@ mod tests {
             .expect("verified backup")
     }
 
+    fn transformed(source: ExactMigrationSourceIdentity) -> FinalV2TransformReceipt {
+        FinalV2TransformReceipt {
+            schema: FinalV2SchemaEvidence {
+                source: source.clone(),
+                schema_id: FINAL_V2_SCHEMA_ID.to_owned(),
+                project_schema_version: FINAL_PROJECT_SCHEMA_VERSION,
+                lcm_schema_version: FINAL_LCM_SCHEMA_VERSION,
+                store_manifest_schema_version: FINAL_STORE_MANIFEST_SCHEMA_VERSION,
+                repository_identity_schema_version: FINAL_REPOSITORY_IDENTITY_SCHEMA_VERSION,
+                profile_identity_schema_version: FINAL_PROFILE_IDENTITY_SCHEMA_VERSION,
+                durable_families: ReleasedDurableFamily::all(),
+            },
+            preservation: FinalV2PreservationReceipt {
+                source,
+                preserved_families: ReleasedDurableFamily::all(),
+                before_digest: [4; 32],
+                after_digest: [4; 32],
+            },
+            rebuilt_derived_families: BTreeSet::new(),
+        }
+    }
+
+    fn publication_grant(source: ExactMigrationSourceIdentity) -> PublicationCasGrant {
+        PublicationCasGrant::new(
+            "authority-cas.final-v2",
+            "migration.final-v2",
+            "checkpoint.final-v2",
+            source.clone(),
+            transformed(source).schema,
+            0,
+            1,
+        )
+        .expect("publication grant")
+    }
+
     #[test]
-    fn checkpoint_selects_rollback_before_and_roll_forward_after_boundary() {
+    fn checkpoint_derives_publication_boundary_from_receipt() {
         let source = final_source("source-generation.7");
         let backup = verified_backup(source.clone());
         let mut checkpoint = DurableMigrationCheckpoint::before_publication(
@@ -822,29 +901,27 @@ mod tests {
             "migration.final-v2",
             source.clone(),
             backup,
-            110,
+            90,
         )
         .expect("pre-publication checkpoint");
-        assert_eq!(
-            checkpoint.recovery_action(),
-            CutoverRecoveryAction::RollbackBeforePublication
-        );
+        assert!(!checkpoint.is_published());
+        checkpoint
+            .record_transformation(transformed(source.clone()))
+            .expect("verified transformation");
 
-        let receipt = CutoverPublicationReceipt::new(
+        let grant = publication_grant(source.clone());
+        let receipt = CutoverPublicationReceipt::from_cas_grant(
             "publication.final-v2",
             source,
             FINAL_V2_SCHEMA_ID,
-            "authority-cas.final-v2",
+            &grant,
             120,
         )
         .expect("publication receipt");
         checkpoint
-            .record_publication(receipt)
+            .record_publication(receipt, &grant)
             .expect("publish exact source generation");
-        assert_eq!(
-            checkpoint.recovery_action(),
-            CutoverRecoveryAction::RollForwardAfterPublication
-        );
+        assert!(checkpoint.is_published());
         checkpoint.validate().expect("durable published checkpoint");
     }
 
@@ -857,26 +934,29 @@ mod tests {
             "migration.final-v2",
             source,
             backup,
-            110,
+            90,
         )
         .expect("pre-publication checkpoint");
-        let wrong_generation = CutoverPublicationReceipt::new(
+        checkpoint
+            .record_transformation(transformed(checkpoint.source.clone()))
+            .expect("verified transformation");
+        let grant = publication_grant(checkpoint.source.clone());
+        let wrong_source = final_source("source-generation.8");
+        let wrong_grant = publication_grant(wrong_source.clone());
+        let wrong_generation = CutoverPublicationReceipt::from_cas_grant(
             "publication.final-v2",
-            final_source("source-generation.8"),
+            wrong_source,
             FINAL_V2_SCHEMA_ID,
-            "authority-cas.final-v2",
+            &wrong_grant,
             120,
         )
         .expect("well-formed mismatched receipt");
 
         assert_eq!(
-            checkpoint.record_publication(wrong_generation),
-            Err(MigrationContractError::IdentityMismatch)
+            checkpoint.record_publication(wrong_generation, &grant),
+            Err(MigrationContractError::PublicationInvalid)
         );
-        assert_eq!(
-            checkpoint.recovery_action(),
-            CutoverRecoveryAction::RollbackBeforePublication
-        );
+        assert!(!checkpoint.is_published());
     }
 
     #[test]
@@ -888,19 +968,24 @@ mod tests {
             "migration.final-v2",
             source.clone(),
             backup,
-            110,
+            90,
         )
         .expect("pre-publication checkpoint");
         checkpoint
+            .record_transformation(transformed(source.clone()))
+            .expect("verified transformation");
+        let grant = publication_grant(source.clone());
+        checkpoint
             .record_publication(
-                CutoverPublicationReceipt::new(
+                CutoverPublicationReceipt::from_cas_grant(
                     "publication.final-v2",
                     source.clone(),
                     FINAL_V2_SCHEMA_ID,
-                    "authority-cas.final-v2",
+                    &grant,
                     120,
                 )
                 .expect("publication receipt"),
+                &grant,
             )
             .expect("publication");
         let policy = ArchiveExpiryPolicyReceipt::new(

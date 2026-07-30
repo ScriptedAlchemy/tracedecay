@@ -435,8 +435,8 @@ describe('Settings scope authority', () => {
     act(() =>
       useScope.getState().reconcileScope({
         state: 'measured',
-        activeProjectId: 'proj_active',
-        projects: [{ projectId: 'proj_active', label: 'Production' }],
+        label: 'Production',
+        isActive: true,
       }),
     );
 

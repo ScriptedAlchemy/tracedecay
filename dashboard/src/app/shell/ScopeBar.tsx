@@ -1,51 +1,12 @@
 import { useEffect } from 'react';
 import { Command, Moon, Sun, X } from 'lucide-react';
-import { ProjectsPayloadSchema, type ProjectsPayload } from '../../contracts/wire.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
-import type { LegacyResult } from '../../data/query/legacy.ts';
+import {
+  registryAnnotation,
+  registryReading,
+  useProjectEntry,
+} from '../../data/query/projectRegistry.ts';
 import { cn } from '../../ui/cn';
-import { useScope, type RegistryReading } from '../../data/scope/store.ts';
-
-/**
- * What the registry establishes about the projects it lists.
- *
- * `/api/projects` is the only authority for both facts the scope needs — which
- * project is active, and what each project is called — which is why the
- * hand-written schema this file used to hold had to go: it modelled `projects`
- * without `active_project_id`, so one of the two was not even in the parse.
- *
- * Only a `status: "ok"` body is a measurement. A registry that answered with
- * any other status, or did not answer, establishes nothing — and returning
- * `measured` for it would resolve every selected project to "not active",
- * disabling writes that would in fact have been accepted, and would discard
- * the URL's label without having anything to replace it with.
- */
-function registryReading(result: LegacyResult<ProjectsPayload> | undefined): RegistryReading {
-  if (!result) return { state: 'unknown' };
-  switch (result.outcome) {
-    case 'ok':
-      return result.data.status === 'ok'
-        ? {
-            state: 'measured',
-            activeProjectId: result.data.active_project_id,
-            projects: (result.data.projects ?? []).map((project) => ({
-              projectId: project.project_id,
-              label: project.label,
-            })),
-          }
-        : { state: 'unknown' };
-    case 'offline':
-    case 'unauthorized':
-    case 'denied':
-    case 'error':
-    case 'unsupported_schema':
-      return { state: 'unknown' };
-    default: {
-      const exhaustive: never = result;
-      return exhaustive;
-    }
-  }
-}
+import { useScope } from '../../data/scope/store.ts';
 
 function toggleTheme() {
   const root = document.documentElement;
@@ -62,9 +23,13 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
   const scope = useScope((s) => s.scope);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
   const reconcileScope = useScope((s) => s.reconcileScope);
-  const registry = useLegacy(['shell', 'project-registry'], '/api/projects', ProjectsPayloadSchema, {
-    enabled: scope.kind === 'project',
-  });
+  // The bounded registry read: one project by id, rather than a search through
+  // a truncated listing that cannot distinguish "not registered" from "past the
+  // end of the page". Its key is rooted at the registry prefix the daemon's
+  // `project_registry_changed` invalidation names, so a rename or an
+  // active-project switch re-runs the reconciliation below instead of leaving
+  // this — the read every write control depends on — stale until a reload.
+  const entry = useProjectEntry(scope.kind === 'project' ? scope.projectId : null);
 
   // The one place a selected project is reconciled against the registry, for
   // both its activation and its label. Every entry into a project scope — deep
@@ -73,15 +38,14 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
   // `scopeWritable`, so until this lands they report writability as unknown
   // rather than offering a write the gateway would refuse.
   useEffect(() => {
-    reconcileScope(registryReading(registry.data));
-  }, [registry.data, reconcileScope]);
+    reconcileScope(registryReading(entry.data));
+  }, [entry.data, reconcileScope]);
 
   // The label is the reconciled one from the store, not a second lookup: the
   // bar has to call the project what the write-target prose calls it, and two
   // lookups over the same payload are two things to keep in agreement. What
   // the bar adds is why the name may not be canonical yet.
-  const annotation =
-    scope.kind === 'project' ? registryAnnotation(scope.projectId, registry.data) : null;
+  const annotation = scope.kind === 'project' ? registryAnnotation(entry.data) : null;
   const projectLabel = scope.kind === 'project' ? scope.label : undefined;
   return (
     // Every control on this bar is stretched to the bar's own height, so the
@@ -157,49 +121,6 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
       </button>
     </header>
   );
-}
-
-/**
- * Why the displayed name is not a name the registry confirmed, or `null` when
- * it is.
- *
- * An annotation rather than a replacement label. This used to return the whole
- * string — `registry offline · proj_x` in place of a label — which made the bar
- * the only surface with an opinion about whether the name could be trusted,
- * while the write-target prose went on using the URL's claim unqualified. The
- * name now comes from the reconciled scope everywhere; this says what is known
- * about it.
- */
-function registryAnnotation(
-  projectId: string,
-  result: LegacyResult<ProjectsPayload> | undefined,
-): string | null {
-  if (!result) return 'resolving';
-  switch (result.outcome) {
-    case 'ok': {
-      if (result.data.status !== 'ok') return 'registry unavailable';
-      // Answered, and this id is not among the projects it listed — so the
-      // name beside it is the id, and saying nothing here would present that
-      // as an ordinary label.
-      return (result.data.projects ?? []).some((project) => project.project_id === projectId)
-        ? null
-        : 'not in registry';
-    }
-    case 'offline':
-      return 'registry offline';
-    case 'unauthorized':
-      return 'registry unauthorized';
-    case 'denied':
-      return 'registry denied';
-    case 'error':
-      return 'registry error';
-    case 'unsupported_schema':
-      return 'unsupported registry schema';
-    default: {
-      const exhaustive: never = result;
-      return exhaustive;
-    }
-  }
 }
 
 function ScopeField({

@@ -56,6 +56,7 @@ import { CODE_FRESHNESS_SCENARIOS } from './axe-code-freshness.ts';
 import { COSTS_SCENARIOS } from './axe-costs.ts';
 import { EXPLORER_SCENARIOS } from './axe-explorer-absence.ts';
 import { OBSERVATORY_SCENARIOS } from './axe-observatory.ts';
+import { SCOPE_REFUSAL_SCENARIOS } from './axe-scope-refusal.ts';
 import { SESSIONS_SCENARIOS } from './axe-sessions.ts';
 import { WORK_SCENARIOS } from './axe-work.ts';
 import { WORKSPACE_SCENARIOS } from './axe-workspaces.ts';
@@ -71,6 +72,12 @@ const SCENARIOS: readonly Scenario[] = [
   ...CODE_FRESHNESS_SCENARIOS,
   ...SESSIONS_SCENARIOS,
   ...WORK_SCENARIOS,
+
+  // The read-only scope refusal, on the two surfaces a non-active project can
+  // refuse. Placed with the workspace sets rather than inside either one
+  // because it is a single claim about scope authority that happens to be
+  // rendered twice.
+  ...SCOPE_REFUSAL_SCENARIOS,
 
   // The five workspaces this gate did not visit. Their scenarios live in
   // `axe-workspaces.ts`; their canaries stay with the other five in

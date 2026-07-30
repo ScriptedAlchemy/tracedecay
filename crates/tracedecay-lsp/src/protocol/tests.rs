@@ -379,6 +379,7 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
     let result_id = diagnostic_response["result"]["resultId"].as_str().unwrap();
     assert!(result_id.contains(&"c".repeat(64)));
     assert!(result_id.contains(&"a".repeat(64)));
+    assert!(result_id.contains("root=0"));
     assert_eq!(
         *routed.lock().expect("read routed roots"),
         vec![

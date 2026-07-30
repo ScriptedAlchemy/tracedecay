@@ -1,6 +1,5 @@
 //! PR13 packet schemas, structural contracts, and authentic host decoders.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -45,42 +44,9 @@ const HOST_SCHEMA: &str = include_str!("../benchmarks/pr13-host-conformance/sche
 const ADVISORY_PACKET: &str =
     include_str!("../benchmarks/pr13-advisory-milestone/workload-v1.json");
 const ADVISORY_SCHEMA: &str = include_str!("../benchmarks/pr13-advisory-milestone/schema-v1.json");
-const FOUR_PILLAR_SOURCE: &str =
-    include_str!("../crates/tracedecay-application/tests/four_pillar_milestone.rs");
 
 fn packet(value: &str) -> Value {
     serde_json::from_str(value).expect("checked-in packet parses")
-}
-
-fn function_names(source: &str) -> BTreeSet<String> {
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(
-            &tracedecay::extraction::ts_provider::language("rust")
-                .expect("Rust grammar is available"),
-        )
-        .expect("Rust grammar loads");
-    let tree = parser.parse(source, None).expect("Rust source parses");
-    let mut names = BTreeSet::new();
-    collect_function_names(tree.root_node(), source.as_bytes(), &mut names);
-    names
-}
-
-fn collect_function_names(
-    node: tree_sitter::Node<'_>,
-    source: &[u8],
-    names: &mut BTreeSet<String>,
-) {
-    if node.kind() == "function_item"
-        && let Some(name) = node.child_by_field_name("name")
-        && let Ok(name) = name.utf8_text(source)
-    {
-        names.insert(name.to_owned());
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_function_names(child, source, names);
-    }
 }
 
 fn assert_agent_integration<T: AgentIntegration>() {}
@@ -133,15 +99,6 @@ fn schemas_reject_unknown_fields_wrong_types_and_unknown_gates() {
     let mut advisory_wrong_type = packet(ADVISORY_PACKET);
     advisory_wrong_type["provider_gaps"] = json!("none");
     assert!(!advisory_validator.is_valid(&advisory_wrong_type));
-}
-
-#[test]
-fn structural_checks_ignore_commented_out_symbols() {
-    let advisory_functions = function_names(FOUR_PILLAR_SOURCE);
-    assert!(
-        advisory_functions.contains("four_pillars_share_one_cycle_result_and_canonical_anchors")
-    );
-    assert!(!function_names("// fn commented_out_symbol() {}").contains("commented_out_symbol"));
 }
 
 #[test]

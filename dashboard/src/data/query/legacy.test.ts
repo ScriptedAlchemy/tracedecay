@@ -139,3 +139,168 @@ describe('fetchLegacy', () => {
     expect((await fetchLegacy('/api/x', PayloadSchema)).outcome).toBe('offline');
   });
 });
+
+/**
+ * The statuses the canonical project routes actually answer with.
+ *
+ * Verbatim from `src/dashboard/projects.rs`: 503 for `missing_registry` and
+ * `registry_unavailable`, 404 for `not_found`, each with the generated payload
+ * in the body. Reading only the status code discarded that body, so three
+ * conditions with three different remedies all arrived as `HTTP 503`/`HTTP
+ * 404` — and every payload branch written to render them was unreachable.
+ *
+ * Stubbed at those statuses on purpose. A 200 fixture would exercise a shape
+ * the daemon never sends and prove nothing about the path that was broken.
+ */
+describe('fetchLegacy on the canonical failure statuses', () => {
+  const RegistrySchema = z.object({
+    status: z.string(),
+    error: z.string().nullable().optional(),
+    project: z.unknown().optional(),
+  });
+
+  it('carries the 404 not_found body instead of reporting HTTP 404', async () => {
+    stub(404, { status: 'not_found', error: 'no project registered with id proj_ghost', project: null });
+    expect(await fetchLegacy('/api/projects/proj_ghost', RegistrySchema)).toEqual({
+      outcome: 'unavailable',
+      httpStatus: 404,
+      status: 'not_found',
+      reason: 'no project registered with id proj_ghost',
+      data: { status: 'not_found', error: 'no project registered with id proj_ghost', project: null },
+    });
+  });
+
+  it.each(['missing_registry', 'registry_unavailable'])(
+    'carries the 503 %s body and its reason',
+    async (status) => {
+      stub(503, { status, error: 'registry database could not be opened' });
+      const result = await fetchLegacy('/api/projects', RegistrySchema);
+      expect(result).toMatchObject({
+        outcome: 'unavailable',
+        httpStatus: 503,
+        status,
+        reason: 'registry database could not be opened',
+      });
+    },
+  );
+
+  it('reports no reason rather than an empty one when the payload sent none', async () => {
+    stub(503, { status: 'registry_unavailable', error: '' });
+    expect(await fetchLegacy('/api/projects', RegistrySchema)).toMatchObject({
+      outcome: 'unavailable',
+      reason: null,
+    });
+  });
+
+  it('leaves a 404 without a canonical status as a plain error', async () => {
+    // An ordinary not-found from anywhere else in the stack, including a
+    // proxy. Nothing named a condition, so nothing is reported as one — the
+    // open record schemas here would otherwise accept any object at all.
+    stub(404, { detail: 'no route' });
+    expect(await fetchLegacy('/api/x', z.record(z.string(), z.unknown()))).toEqual({
+      outcome: 'error',
+      detail: 'HTTP 404',
+    });
+  });
+
+  it('leaves an unparseable 503 body as a plain error', async () => {
+    stub(503, null, { invalidJson: true });
+    expect(await fetchLegacy('/api/projects', RegistrySchema)).toEqual({
+      outcome: 'error',
+      detail: 'HTTP 503',
+    });
+  });
+
+  it('reports a named condition this build cannot read as a build mismatch', async () => {
+    // The body says which condition it is, but the rest of it does not match
+    // this build's contract. Reporting it as a typed payload would be a claim
+    // about a shape that failed to validate.
+    stub(503, { status: 'registry_unavailable', error: 7 });
+    expect(await fetchLegacy('/api/projects', z.object({ error: z.string() }))).toEqual({
+      outcome: 'unsupported_schema',
+    });
+  });
+
+  it('still reports 401 and 403 as refusals rather than conditions', async () => {
+    stub(401, { status: 'not_found' });
+    expect((await fetchLegacy('/api/projects', RegistrySchema)).outcome).toBe('unauthorized');
+    stub(403, { status: 'not_found' });
+    expect((await fetchLegacy('/api/projects', RegistrySchema)).outcome).toBe('denied');
+  });
+
+  it('still reports a 500 read failure as an error', async () => {
+    // `graph_api.rs` answers 500 `read_failed`, which is not one of the two
+    // admitted statuses. Unknown error behaviour is preserved.
+    stub(500, { status: 'read_failed', error: 'failed to query counts' });
+    expect(await fetchLegacy('/api/plugins/graph/overview', RegistrySchema)).toEqual({
+      outcome: 'error',
+      detail: 'HTTP 500',
+    });
+  });
+});
+
+/**
+ * Cancellation, which is not a reading.
+ *
+ * `fetch` rejects the same way whether the network failed or the caller
+ * aborted, and the caller that aborts here is a scope change: selecting
+ * another project abandons the previous project's in-flight reads. Folding
+ * that into `offline` would mint a daemon-is-down state out of a request this
+ * dashboard cancelled — and cache it against the abandoned scope, so returning
+ * to that project would show a failure nobody ever received.
+ */
+describe('fetchLegacy under cancellation', () => {
+  /** Rejects only once aborted, like a real request in flight. */
+  function stubPendingUntilAbort(): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) return;
+            signal.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted.', 'AbortError')),
+            );
+          }),
+      ),
+    );
+  }
+
+  it('rethrows an abort rather than reporting the daemon offline', async () => {
+    stubPendingUntilAbort();
+    const controller = new AbortController();
+    const pending = fetchLegacy('/api/projects/proj_a', PayloadSchema, {
+      signal: controller.signal,
+    });
+    controller.abort();
+    // The whole point: `offline` here would be a fabricated reading.
+    await expect(pending).rejects.toThrow(/abort/i);
+  });
+
+  it('passes the caller signal to fetch, so an abandoned read is really cancelled', async () => {
+    stubPendingUntilAbort();
+    const controller = new AbortController();
+    const pending = fetchLegacy('/api/projects/proj_a', PayloadSchema, {
+      signal: controller.signal,
+    });
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect((call?.[1] as RequestInit | undefined)?.signal).toBe(controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+  });
+
+  it('still reports a genuine network failure as offline when nothing was aborted', async () => {
+    // The guard keys on the signal, not on the error, so a real failure on a
+    // request that merely *carries* a signal stays a truthful `offline`.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('network down');
+      }),
+    );
+    const controller = new AbortController();
+    const result = await fetchLegacy('/api/x', PayloadSchema, { signal: controller.signal });
+    expect(result.outcome).toBe('offline');
+  });
+});

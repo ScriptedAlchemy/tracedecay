@@ -11,8 +11,8 @@ use tracedecay::application::advisory::ci_runtime::{
     GitHubCiOfficialResponseDecoderV1, ProjectCiCodeAnchorStoreV1,
 };
 use tracedecay::application::advisory::github_runtime::{
-    GITHUB_REVIEW_THREADS_QUERY_V1, GitHubReviewAtomicRefreshStoreV1,
-    GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
+    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
     GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
     GitHubSourceAccessAuthorityV1,
 };
@@ -241,8 +241,6 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
             .is_some()
     );
 
-    assert!(GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename login }"));
-    assert!(!GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename id }"));
     let fixture_anchors = FixtureAnchors::default();
     let graphql_decoder = GitHubOfficialResponseDecoderV1::new(
         GitHubReviewProviderIdentityV1 {
@@ -282,13 +280,20 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     let seeds = fixture_anchors.seeds.lock().unwrap();
     assert_eq!(seeds.len(), 1);
     assert_eq!(
+        seeds[0].author_node_id, "chatgpt-codex-connector",
+        "the production GraphQL decoder must retain the provider author identity used by canonical anchoring"
+    );
+    assert_eq!(
         seeds[0].body_digest.as_str(),
         "sha256:81b743cede9ff0d124beb58731d91c556343545f71c0ba51eb2b5378fdb95652"
     );
-    assert!(
-        seeds[0]
-            .retained_body
-            .contains("Schedule the catalog before generated-metadata consumers")
+    assert_eq!(
+        seeds[0].retained_body,
+        thread
+            .pointer("/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/bodyText")
+            .and_then(Value::as_str)
+            .expect("authentic GraphQL review body"),
+        "canonical body retention must preserve the decoded provider payload exactly"
     );
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(

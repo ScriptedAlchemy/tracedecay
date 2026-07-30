@@ -1164,6 +1164,26 @@ pub enum MigrateAction {
         #[arg(long)]
         json: bool,
     },
+    /// Create a complete checksummed profile backup under a quiesced exclusive lease.
+    #[command(name = "backup-profile")]
+    BackupProfile {
+        /// Backup parent outside the TraceDecay profile.
+        #[arg(long)]
+        to: String,
+        /// Stable backup directory name.
+        #[arg(long = "backup-id")]
+        backup_id: String,
+    },
+    /// Restore and verify a complete backup in an isolated destination.
+    #[command(name = "rehearse-profile-backup")]
+    RehearseProfileBackup {
+        /// Complete backup directory containing `backup-manifest.json`.
+        #[arg(long)]
+        backup: String,
+        /// New isolated restore directory.
+        #[arg(long)]
+        restore: String,
+    },
     /// Roll back a manifest plan when the rollback preconditions are supported.
     Rollback {
         /// Manifest path to roll back.

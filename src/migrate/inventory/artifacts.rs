@@ -2,12 +2,12 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
+use super::project::push_integrity_issue;
+use super::sqlite::sqlite_quick_check;
 use tracedecay_migrate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, SkippedPath, SqliteIntegrityOutcome,
     StoreArtifact, StoreStatus,
 };
-use super::project::push_integrity_issue;
-use super::sqlite::sqlite_quick_check;
 
 const MAX_CONCURRENT_BRANCH_CHECKS: usize = 8;
 

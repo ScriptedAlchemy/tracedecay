@@ -9,8 +9,8 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, RunId, RuntimeEvidenceRef, TaskId,
-    UtcMicros, WorktreeId,
+    ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, RunId, RuntimeEvidenceRef,
+    TaskId, UtcMicros, WorktreeId,
 };
 
 use super::{
@@ -133,7 +133,10 @@ fn assert_equivalent(history: &[WorkEvent]) {
     let folded = incremental(history);
     let shipped = WorkProjection::rebuild(history);
     assert_eq!(folded, reference, "incremental fold diverged from rebuild");
-    assert_eq!(shipped, reference, "shipped rebuild diverged from reference");
+    assert_eq!(
+        shipped, reference,
+        "shipped rebuild diverged from reference"
+    );
     if let (Ok(reference), Ok(folded)) = (&reference, &folded) {
         assert_eq!(
             serde_json::to_vec(reference).unwrap(),
@@ -167,7 +170,12 @@ fn authority() -> WorkAuthority {
 }
 
 fn event(version: u64, kind: WorkEventKind) -> WorkEvent {
-    event_at(version, version as i64, &format!("command.work.fold.{version}"), kind)
+    event_at(
+        version,
+        version as i64,
+        &format!("command.work.fold.{version}"),
+        kind,
+    )
 }
 
 fn event_at(version: u64, occurred_at: i64, command: &str, kind: WorkEventKind) -> WorkEvent {
@@ -335,10 +343,9 @@ fn persisted_fold_state_refuses_an_unrecognised_version() {
     let state = WorkProjectionStateV1::rebuild(&[event(1, created())]).unwrap();
     assert_eq!(state.state_version(), WORK_PROJECTION_STATE_VERSION_V1);
 
-    let mut payload: serde_json::Value = serde_json::from_str(
-        &serde_json::to_string(&state).expect("fold state serializes"),
-    )
-    .unwrap();
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&state).expect("fold state serializes"))
+            .unwrap();
     payload["state_version"] = serde_json::json!(WORK_PROJECTION_STATE_VERSION_V1 + 1);
 
     assert!(serde_json::from_value::<WorkProjectionStateV1>(payload).is_err());

@@ -43,8 +43,9 @@ use tracedecay_application::{
     ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
     RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
     SourceLinesRequest, StreamEvent, StreamEventKind, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptPublishArtifactRequestV1,
-    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
+    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
+    WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
+    WorkAttemptRecoverRequestV1,
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
     WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
@@ -1290,8 +1291,37 @@ async fn invoke_work_operation(
         }
         WorkOperation::AttemptCancel => attempt!(WorkAttemptCancelRequestV1, Cancel),
         WorkOperation::AttemptRecover => attempt!(WorkAttemptRecoverRequestV1, Recover),
+        WorkOperation::AttemptFinish => attempt!(WorkAttemptFinishRequestV1, Finish),
         WorkOperation::AttemptTerminalize => attempt!(WorkAttemptTerminalizeRequestV1, Terminalize),
     }
+}
+
+/// Refuse a Work request that never reached dispatch, in the canonical envelope.
+///
+/// Everything before the executor call is adapter territory: the catalog would
+/// not build, the operation is not advertised, or its binding carries no public
+/// route. A bare status here would answer a Work route with an empty body no
+/// client can read a code, a retry directive or a request id out of, so these
+/// failures are reported as the same `ApplicationProblemEnvelope` the dispatched
+/// path returns, owned by the adapter layer rather than the runtime.
+fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
+    let contract = ResultContractRef::new(
+        SchemaId::new("schema.tracedecay.http.adapter-problem.v1")
+            .expect("the HTTP adapter problem schema id is static"),
+        1,
+    )
+    .expect("the HTTP adapter problem contract is static");
+    tracedecay_api::application_problem_response(
+        ApplicationProblemEnvelope::new(
+            contract,
+            request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: code.to_owned(),
+                message: message.to_owned(),
+            }),
+        )
+        .with_owning_layer(ProblemOwningLayer::Adapter),
+    )
 }
 
 /// Dispatch one Work operation and encode its canonical result.
@@ -1317,27 +1347,53 @@ where
 {
     let registry = match tracedecay_application::work_executable_binding_registry() {
         Ok(registry) => registry,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_) => {
+            return work_adapter_unavailable(
+                request_id,
+                "work.catalog_unavailable",
+                "The Work capability catalog is unavailable",
+            );
+        }
     };
     let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
         Ok(operation_id) => operation_id,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_) => {
+            return work_adapter_unavailable(
+                request_id,
+                "work.operation_identity_unavailable",
+                "The Work operation identity is unavailable",
+            );
+        }
     };
     let Some(binding) = registry
         .get(&operation_id)
         .and_then(|availability| availability.binding())
     else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return work_adapter_unavailable(
+            request_id,
+            "work.binding_unavailable",
+            "The Work operation is not advertised by this build",
+        );
     };
     let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return work_adapter_unavailable(
+            request_id,
+            "work.route_unavailable",
+            "The Work operation binding carries no public route",
+        );
     };
     let result_contract = match ResultContractRef::new(
         binding.result_schema().schema_ref().schema_id().clone(),
         binding.result_schema().schema_ref().revision(),
     ) {
         Ok(contract) => contract,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_) => {
+            return work_adapter_unavailable(
+                request_id,
+                "work.result_contract_unavailable",
+                "The Work operation result contract is unavailable",
+            );
+        }
     };
     let binding_id = binding_id.clone();
     let policy = if operation.is_read_only() {

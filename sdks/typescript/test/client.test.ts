@@ -6,11 +6,11 @@ import {
   type ServerResponse,
 } from "node:http";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import type { OperationDescriptor } from "../src/operations";
 import { OPERATIONS, UNAVAILABLE_OPERATIONS } from "../src/operations";
 import {
+  decodeCanonicalSchema,
   decodeHttpSuccessEnvelope,
   type HttpSuccessEnvelope,
 } from "../src/types";
@@ -131,60 +131,11 @@ function problemEnvelope(
   return { kind: "problem", value };
 }
 
-const TEST_OPERATION: OperationDescriptor<
-  "work_snapshot",
-  Record<string, unknown>,
-  unknown
-> = {
-  operation: "work_snapshot",
-  operationId: "operation.work.snapshot",
-  route: "/application/work/snapshot",
-  method: "POST",
-  bindingId: "binding.http.work.snapshot",
-  requestSchema: {
-    schemaId: "schema.work.snapshot.request",
-    revision: 1,
-  },
-  resultSchema: {
-    schemaId: "schema.work.snapshot.result",
-    revision: 1,
-  },
-  cancellation: {
-    mode: "cooperative",
-    points: ["before_admission", "before_read", "during_read"],
-  },
-  decodeRequest(value) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new TypeError("test request must be an object");
-    }
-    return value as Record<string, unknown>;
-  },
-  decodeResult(value) {
-    return value;
-  },
-  decodeSuccess(value) {
-    return decodeHttpSuccessEnvelope(
-      value,
-      "binding.http.work.snapshot",
-      "schema.work.snapshot.result",
-      1,
-      (payload) => payload,
-    );
-  },
-};
-
 function requestThroughTransport(
   client: ReturnType<typeof createClient>,
   options: OperationRequestOptions = {},
 ): Promise<HttpSuccessEnvelope<unknown>> {
-  const transport = client as unknown as {
-    requestOperation<Request, Result>(
-      descriptor: OperationDescriptor<string, Request, Result>,
-      request: unknown,
-      requestOptions?: OperationRequestOptions,
-    ): Promise<HttpSuccessEnvelope<Result>>;
-  };
-  return transport.requestOperation(TEST_OPERATION, {}, options);
+  return client.operations.work_snapshot({ page_size: 1 }, options);
 }
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -252,6 +203,60 @@ function json(
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
 }
+
+describe("canonical JSON Schema decoding", () => {
+  it("enforces integer formats and rejects unsafe numbers", () => {
+    const uint32 = { type: "integer", format: "uint32" } as const;
+    const uint64 = { type: "integer", format: "uint64" } as const;
+    const int64 = { type: "integer", format: "int64" } as const;
+
+    expect(decodeCanonicalSchema(4_294_967_295, uint32)).toBe(4_294_967_295);
+    expect(decodeCanonicalSchema(Number.MAX_SAFE_INTEGER, uint64)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(decodeCanonicalSchema(Number.MIN_SAFE_INTEGER, int64)).toBe(
+      Number.MIN_SAFE_INTEGER,
+    );
+    expect(() => decodeCanonicalSchema(4_294_967_296, uint32)).toThrow(TypeError);
+    expect(() =>
+      decodeCanonicalSchema(Number.MAX_SAFE_INTEGER + 1, uint64),
+    ).toThrow(TypeError);
+    expect(() => decodeCanonicalSchema(true, uint64)).toThrow(TypeError);
+  });
+
+  it("canonicalizes unique object keys in one serialization per item", () => {
+    const schema = {
+      type: "array",
+      uniqueItems: true,
+      items: { type: "object" },
+    } as const;
+    expect(() =>
+      decodeCanonicalSchema(
+        [
+          { alpha: 1, beta: 2 },
+          { beta: 2, alpha: 1 },
+        ],
+        schema,
+      ),
+    ).toThrow(TypeError);
+
+    let serializations = 0;
+    const originalStringify = JSON.stringify.bind(JSON);
+    const stringify = vi.spyOn(JSON, "stringify").mockImplementation((value: unknown) => {
+      serializations += 1;
+      return originalStringify(value);
+    });
+    try {
+      decodeCanonicalSchema(
+        Array.from({ length: 100 }, (_, index) => ({ index })),
+        schema,
+      );
+    } finally {
+      stringify.mockRestore();
+    }
+    expect(serializations).toBe(100);
+  });
+});
 
 describe("TraceDecayClient generated operation bindings", () => {
   it("publishes typed Work methods and fail-closed base discovery", () => {
@@ -331,6 +336,8 @@ describe("TraceDecayClient generated operation bindings", () => {
     ).rejects.toBeInstanceOf(TypeError);
     expect(fetchCalls).toBe(0);
     expect("invoke" in client).toBe(false);
+    expect("requestOperation" in client).toBe(false);
+    expect(Reflect.get(client, "requestOperation")).toBeUndefined();
   });
 
   it("publishes all mounted Work routes as executable operations", () => {
@@ -514,6 +521,100 @@ describe("TraceDecayClient operation lifecycle", () => {
           ["item", "0"],
           ["completed", "1"],
         ]);
+      },
+    );
+  });
+
+  it("reconnects after a transport interruption following open", async () => {
+    await withServer(
+      [
+        async (_request, response) => {
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            connection: "close",
+          });
+          response.write(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume.interrupted"}}}',
+              "",
+              "",
+            ].join("\n"),
+          );
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          response.destroy(new Error("simulated body interruption"));
+        },
+        (request, response) => {
+          expect(request.url).toBe(
+            "/projects/project.sdk/application/operations/request.operation/events?next_sequence=0&resume_token=resume.interrupted",
+          );
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.operation","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume.interrupted"}}}',
+              "",
+              "event: completed",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "completed",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "completed", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const events = [];
+        for await (const event of client.streamOperation("request.operation", {
+          maxReconnects: 1,
+        })) {
+          events.push(event.event);
+        }
+        expect(events).toEqual(["open", "open", "completed"]);
+      },
+    );
+  });
+
+  it("rejects an open event for a different operation", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: open",
+              'data: {"event":"open","data":{"correlation_id":"request.other","frontier":{"next_sequence":0,"retained_from_sequence":0,"resume_token":"resume"}}}',
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const consume = async () => {
+          for await (const _event of client.streamOperation("request.operation")) {
+            // Drain the stream.
+          }
+        };
+        await expect(consume()).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
       },
     );
   });

@@ -536,21 +536,6 @@ export interface HeaderOverflowChild {
   readonly header: string;
   readonly selector: string;
   readonly text: string;
-  /**
-   * Whether this offender fails the build.
-   *
-   * Only state chips are gated. A chip is a fixed-size indicator whose entire
-   * job is to be read at a glance, so one rendering outside its header is a
-   * defect with no judgement required — and it is the regression this check
-   * exists for. Everything else on the line is reported instead, because the
-   * full 564-scan sweep found a pre-existing 494.8px snapshot/revision strip in
-   * the `/settings` header rendering up to 356.9px outside it (276px of that
-   * off-screen) at 320 and 390 CSS px. That is the same defect class on a
-   * surface this change does not own, and gating it here would convert a
-   * hand-off into a red build for someone else's bug. It is printed with its
-   * measurements so it gets fixed rather than forgotten.
-   */
-  readonly gated: boolean;
   /** CSS pixels past each edge of the header's padding box. 0 means inside. */
   readonly pastRight: number;
   readonly pastLeft: number;
@@ -631,7 +616,6 @@ export const HEADER_BOX_PROBE = `(function () {${PROBE_PRELUDE}
       offenders.push({
         header: describe(header),
         selector: key,
-        gated: el.matches('[data-state]'),
         text: (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 60),
         pastRight: round(Math.max(0, pastRight)),
         pastLeft: round(Math.max(0, pastLeft)),
@@ -649,7 +633,8 @@ export const HEADER_BOX_PROBE = `(function () {${PROBE_PRELUDE}
 })()`;
 
 /**
- * Gated at every width, unlike reflow.
+ * Gated at every width, unlike reflow, and for every child rather than only
+ * state chips.
  *
  * Reflow is gated only at 320 and 400% zoom because the plan's sentence is
  * about those two sizes. This is a different claim with no width in it: content
@@ -658,13 +643,18 @@ export const HEADER_BOX_PROBE = `(function () {${PROBE_PRELUDE}
  * bigger budget, so narrowing this to the reflow-gated viewports would only
  * hide the easier half.
  *
- * Returns the gated offenders only. `HeaderOverflowChild.gated` carries why the
- * rest are reported instead; `axe-report.ts` prints them either way, so nothing
- * measured here goes unsaid.
+ * The chip-only exemption is gone with the bug that motivated it. It existed
+ * because the 564-scan sweep found one pre-existing offender — a 494.8px
+ * snapshot/revision strip in the `/settings` header rendering 356.9px outside
+ * it, 276px of that off-screen — on a surface that change did not own, and
+ * gating it would have turned a hand-off into someone else's red build. That
+ * strip now shrinks and wraps, the same sweep records no offender on any
+ * surface, so the check can finally hold every header child to the invariant
+ * it always claimed to measure. Anything that overruns its header from here is
+ * a new defect, and it fails.
  */
 export function headerBoxFailures(report: HeaderBoxReport, tag: string): string[] {
   return report.offenders
-    .filter((o) => o.gated)
     .map((o) => {
       const past = [
         o.pastRight > 0 ? `${o.pastRight}px past its right edge` : '',

@@ -204,6 +204,21 @@ export interface Scenario {
    */
   readonly assert?: (page: Page) => Promise<void>;
   /**
+   * Asserted on EVERY scan — each viewport, theme and media mode — rather than
+   * once at 1440/light.
+   *
+   * `assert` answers "is the reading true", which does not change with width,
+   * and paying for it thirty more times per scenario would buy nothing. This
+   * answers a question that only has meaning per combination: is the sentence
+   * still on screen and still readable at 320 CSS px, at 400% zoom, under
+   * forced colors. A refusal a control depends on is exactly the kind of text
+   * that survives a 1440 assertion and is clipped away at 320, and no axe rule
+   * measures whether a specific sentence is reachable.
+   *
+   * Receives the combination tag so a failure names where it happened.
+   */
+  readonly assertEachScan?: (page: Page, tag: string) => Promise<void>;
+  /**
    * Axe rule ids this scenario deliberately plants, via `drive`, to prove the
    * scan can still see a violation.
    *
@@ -576,6 +591,9 @@ async function captureAndScan(
   const file = `${scenario.id}__${theme}__${viewport.id}__${media}.png`;
   const tag = `${scenario.id}/${theme}/${viewport.id}/${media}`;
   await assertActuallyVisible(page, tag);
+  // Before the screenshot and the scan, so a failure names the state that was
+  // photographed rather than describing one taken afterwards.
+  if (scenario.assertEachScan !== undefined) await scenario.assertEachScan(page, tag);
   await page.screenshot({ path: path.join(OUT_DIR, file), fullPage: true });
   const scanned = await runAxe(page, media);
   const { real: violations, seeded } = partitionViolations(scanned, scenario.expectViolations, tag);

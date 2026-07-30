@@ -10,6 +10,13 @@ use tracedecay_domain::{
 
 use crate::work_execution::WorkProviderExecutionError;
 
+/// Passes shutdown will drain before it stops chasing new admissions.
+///
+/// One pass cannot see an execution admitted while it was joining, so a second
+/// pass is what makes a racing admission reachable. The count is finite so a
+/// caller that never closes admission cannot hold shutdown open.
+const REAP_DRAIN_PASSES: usize = 2;
+
 /// Upper bound on provider executions this process may run at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkDispatchBoundsV1 {
@@ -65,7 +72,9 @@ pub enum WorkDispatchError {
     /// The durable intent names a route this queue does not run.
     RouteNotMounted,
     /// Every execution slot is taken and this attempt does not hold one.
-    Saturated { capacity: usize },
+    Saturated {
+        capacity: usize,
+    },
     /// A different or older lease fence tried to claim an in-flight execution.
     StaleFence,
     /// This process holds no execution for the attempt; durable state decides.
@@ -89,9 +98,7 @@ impl Display for WorkDispatchError {
             Self::StaleFence => {
                 formatter.write_str("work attempt lease fence cannot claim this execution")
             }
-            Self::Detached => {
-                formatter.write_str("work attempt has no execution in this process")
-            }
+            Self::Detached => formatter.write_str("work attempt has no execution in this process"),
             Self::Provider(error) => Display::fmt(error, formatter),
         }
     }
@@ -156,7 +163,9 @@ where
     /// A panic inside a provider must not brick the queue: a poisoned registry
     /// would make every live execution unstoppable and unclaimable.
     fn registry(&self) -> MutexGuard<'_, BTreeMap<WorkAttemptIdentityV1, InFlightV1<P::Run>>> {
-        self.in_flight.lock().unwrap_or_else(PoisonError::into_inner)
+        self.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Starts the provider execution for an attempt whose running intent is
@@ -240,49 +249,75 @@ where
         identity: &WorkAttemptIdentityV1,
         lease: &WorkLeaseFenceV1,
     ) -> Result<WorkProviderSettlementV1, WorkDispatchError> {
-        let mut in_flight = self.registry();
-        let entry = in_flight
-            .get_mut(identity)
-            .ok_or(WorkDispatchError::Detached)?;
-        entry.fenced_by(lease)?;
-        drop(in_flight);
-        Ok(self.claim(identity))
+        self.claim(identity, Some(lease))
     }
 
     /// Cancels and joins every execution this process still owns.
     ///
     /// Shutdown outranks the lease fence: an execution nobody can renew must
-    /// still be stopped rather than detached.
+    /// still be stopped rather than detached. Draining repeats because an
+    /// admission racing shutdown would survive a single snapshot, and it is
+    /// bounded because a caller that keeps admitting during shutdown must not
+    /// be able to hold the drain open forever.
     pub fn reap(&self) -> usize {
-        let identities = self.registry().keys().cloned().collect::<Vec<_>>();
         let mut reaped = 0;
-        for identity in identities {
-            if let Some(run) = self.registry().get(&identity).map(|entry| Arc::clone(&entry.run)) {
-                run.cancel();
+        for _ in 0..REAP_DRAIN_PASSES {
+            let identities = self.registry().keys().cloned().collect::<Vec<_>>();
+            if identities.is_empty() {
+                break;
             }
-            self.claim(&identity);
-            reaped += 1;
+            for identity in identities {
+                if let Some(run) = self
+                    .registry()
+                    .get(&identity)
+                    .map(|entry| Arc::clone(&entry.run))
+                {
+                    run.cancel();
+                }
+                if self.claim(&identity, None).is_ok() {
+                    reaped += 1;
+                } else {
+                    // Somebody else holds the settlement, so there is nothing to
+                    // join — retire the slot so the drain still terminates.
+                    self.registry().remove(&identity);
+                }
+            }
         }
+        // Anything still registered was admitted while shutdown was draining.
+        // Its slot is retired so capacity cannot leak past this process, but the
+        // execution is not reported as joined, because it was not.
+        self.registry().clear();
         reaped
     }
 
-    /// Joins the worker for an attempt and releases its slot unconditionally,
-    /// so a poisoned lock or a panicking provider can never strand capacity.
-    fn claim(&self, identity: &WorkAttemptIdentityV1) -> WorkProviderSettlementV1 {
-        let worker = self
-            .registry()
-            .get_mut(identity)
-            .and_then(|entry| entry.worker.take());
-        let settlement = match worker {
-            Some(worker) => worker.join().unwrap_or(WorkProviderSettlementV1::Failed {
-                message: "work execution worker panicked".to_owned(),
-            }),
-            None => WorkProviderSettlementV1::Failed {
-                message: "work execution worker was already claimed".to_owned(),
-            },
+    /// Takes an attempt's worker and joins it, releasing the slot afterwards.
+    ///
+    /// Validating the fence and taking the worker in one critical section is
+    /// what makes a settlement claimable exactly once: checking under one lock
+    /// and taking under another let two callers both believe they owned the
+    /// execution, and the loser invented a failure the provider never
+    /// reported. The loser now learns it was detached. The slot is retired only
+    /// after the join, so a draining worker still counts against the bound.
+    fn claim(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        lease: Option<&WorkLeaseFenceV1>,
+    ) -> Result<WorkProviderSettlementV1, WorkDispatchError> {
+        let worker = {
+            let mut in_flight = self.registry();
+            let entry = in_flight
+                .get_mut(identity)
+                .ok_or(WorkDispatchError::Detached)?;
+            if let Some(lease) = lease {
+                entry.fenced_by(lease)?;
+            }
+            entry.worker.take().ok_or(WorkDispatchError::Detached)?
         };
+        let settlement = worker.join().unwrap_or(WorkProviderSettlementV1::Failed {
+            message: "work execution worker panicked".to_owned(),
+        });
         self.registry().remove(identity);
-        settlement
+        Ok(settlement)
     }
 }
 
@@ -482,7 +517,8 @@ mod tests {
     #[test]
     fn saturated_admission_refuses_new_work_and_recovers_after_settlement() {
         let released = Arc::new(AtomicBool::new(false));
-        let queue = WorkExecutionQueueV1::new(BlockingProvider::new(Arc::clone(&released)), bounds(1));
+        let queue =
+            WorkExecutionQueueV1::new(BlockingProvider::new(Arc::clone(&released)), bounds(1));
         let first = running("attempt.work.first", 1);
         let second = attempt(
             "attempt.work.second",
@@ -515,7 +551,8 @@ mod tests {
     #[test]
     fn repeated_admission_reuses_one_execution_and_fences_older_leases() {
         let released = Arc::new(AtomicBool::new(false));
-        let queue = WorkExecutionQueueV1::new(BlockingProvider::new(Arc::clone(&released)), bounds(4));
+        let queue =
+            WorkExecutionQueueV1::new(BlockingProvider::new(Arc::clone(&released)), bounds(4));
         let first = running("attempt.work.idempotent", 1);
         let renewed = running("attempt.work.idempotent", 2);
 
@@ -541,9 +578,7 @@ mod tests {
         );
 
         assert_eq!(
-            queue
-                .settle(renewed.identity(), first.lease())
-                .unwrap_err(),
+            queue.settle(renewed.identity(), first.lease()).unwrap_err(),
             WorkDispatchError::StaleFence,
             "an older fence must not claim the settlement the renewed lease owns"
         );
@@ -554,9 +589,7 @@ mod tests {
         );
 
         released.store(true, Ordering::SeqCst);
-        queue
-            .settle(renewed.identity(), renewed.lease())
-            .unwrap();
+        queue.settle(renewed.identity(), renewed.lease()).unwrap();
     }
 
     #[test]
@@ -574,11 +607,15 @@ mod tests {
             WorkProviderSettlementV1::Cancelled
         );
         assert_eq!(
-            queue.settle(attempt.identity(), attempt.lease()).unwrap_err(),
+            queue
+                .settle(attempt.identity(), attempt.lease())
+                .unwrap_err(),
             WorkDispatchError::Detached
         );
         assert_eq!(
-            queue.cancel(attempt.identity(), attempt.lease()).unwrap_err(),
+            queue
+                .cancel(attempt.identity(), attempt.lease())
+                .unwrap_err(),
             WorkDispatchError::Detached
         );
         assert_eq!(queue.in_flight(), 0);
