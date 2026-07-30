@@ -1330,18 +1330,30 @@ impl DaemonInvocationRequest {
                     (
                         crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
                         crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(_),
-                    )
-                ) || matches!(
-                    (surface_operation, request),
-                    (
+                    ) | (
                         crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
                         crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
-                    )
-                ) || matches!(
-                    (surface_operation, request),
-                    (
+                    ) | (
                         crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
                         crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+                        crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+                        crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+                        crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+                        crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+                        crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
+                        crate::application_surface::CallableCodeSurfaceRequest::References(_),
                     )
                 );
                 if !matches {
@@ -8696,7 +8708,7 @@ mod tests {
     }
 
     #[test]
-    fn callable_code_invocation_accepts_facets_surface_variant() {
+    fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
         let scope = tracedecay_application::CodeQueryScope::new(
             tracedecay_domain::CodeGenerationId::new("generation.callable-code")
                 .expect("generation"),
@@ -8708,28 +8720,133 @@ mod tests {
             order: tracedecay_application::RetrievalOrder::Relevance,
             cursor: None,
         };
-        let request = crate::application_surface::CallableCodeSurfaceRequest::Facets(
-            crate::application_surface::CodeFacetSurfaceRequest {
-                dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
-                scope,
-                meta,
-            },
-        );
+        let navigation = |node_id: &str| crate::application_surface::CodeNavigationSurfaceRequest {
+            node_id: node_id.to_owned(),
+            scope: scope.clone(),
+            meta: meta.clone(),
+        };
+        let cases = [
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence,
+                crate::application_surface::CallableCodeSurfaceRequest::ExactOccurrence(
+                    crate::application_surface::CodeExactOccurrenceSurfaceRequest {
+                        literal: "CallableCode".to_owned(),
+                        kind: None,
+                        scope: scope.clone(),
+                        meta: meta.clone(),
+                    },
+                ),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
+                crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(
+                    crate::application_surface::CodePhraseSearchSurfaceRequest {
+                        query: "callable code".to_owned(),
+                        phrases: vec!["callable code".to_owned()],
+                        field_filters: Vec::new(),
+                        fuzzy_budget: 0,
+                        scope: scope.clone(),
+                        meta: meta.clone(),
+                    },
+                ),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+                crate::application_surface::CallableCodeSurfaceRequest::Callees(
+                    crate::application_surface::CodeCalleesSurfaceRequest {
+                        node_id: "node.callable-code".to_owned(),
+                        maximum_depth: 1,
+                        resolve_trait_dispatch: false,
+                        scope: scope.clone(),
+                        meta: meta.clone(),
+                    },
+                ),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+                crate::application_surface::CallableCodeSurfaceRequest::Facets(
+                    crate::application_surface::CodeFacetSurfaceRequest {
+                        dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
+                        scope: scope.clone(),
+                        meta: meta.clone(),
+                    },
+                ),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+                crate::application_surface::CallableCodeSurfaceRequest::Timeline(
+                    crate::application_surface::CodeTimelineSurfaceRequest {
+                        scope: scope.clone(),
+                        meta: meta.clone(),
+                    },
+                ),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+                crate::application_surface::CallableCodeSurfaceRequest::Declaration(navigation(
+                    "node.declaration",
+                )),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+                crate::application_surface::CallableCodeSurfaceRequest::Definition(navigation(
+                    "node.definition",
+                )),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+                crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(navigation(
+                    "node.type-definition",
+                )),
+            ),
+            (
+                crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
+                crate::application_surface::CallableCodeSurfaceRequest::References(navigation(
+                    "node.references",
+                )),
+            ),
+        ];
+        let page = tracedecay_application::PageRequest::first(16).expect("page");
+        let deadline = Deadline::new(UtcMicros(90)).expect("deadline");
+        let cancellation =
+            CancellationContext::active("cancel.callable-code.matrix").expect("cancellation");
 
-        let invocation = DaemonInvocationRequest::callable_code(
-            "request.callable-code.facets",
-            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
-            request,
-            tracedecay_application::PageRequest::first(16).expect("page"),
-            UtcMicros(30),
-            Deadline::new(UtcMicros(90)).expect("deadline"),
-            CancellationContext::active("cancel.callable-code.facets").expect("cancellation"),
-        );
+        for (request_index, (_, request)) in cases.iter().enumerate() {
+            for (operation_index, (operation, _)) in cases.iter().enumerate() {
+                let invocation = DaemonInvocationRequest {
+                    protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+                    revision: DAEMON_INVOCATION_REVISION,
+                    request_id: format!(
+                        "request.callable-code.matrix.{request_index}.{operation_index}"
+                    ),
+                    delivery_route: None,
+                    payload: DaemonInvocationPayload::CallableCode {
+                        surface_operation: *operation,
+                        request: request.clone(),
+                        page: page.clone(),
+                        observed_at: UtcMicros(30),
+                        deadline: deadline.clone(),
+                        cancellation: cancellation.clone(),
+                    },
+                };
 
-        assert_eq!(
-            invocation.operation(),
-            DaemonInvocationOperation::CodeFacets
-        );
+                if request_index == operation_index {
+                    assert!(
+                        invocation.validate().is_ok(),
+                        "matching callable-code pair {request_index} must validate"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            invocation.validate(),
+                            Err(DaemonInvocationProblem::InvalidRequest)
+                        ),
+                        "cross-pair operation {operation_index} and request {request_index} \
+                         must retain InvalidRequest semantics"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
