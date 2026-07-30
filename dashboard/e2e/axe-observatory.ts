@@ -156,6 +156,34 @@ interface ScopeNote {
   ratio: number;
 }
 
+/**
+ * The name the scope bar displays for the current project, and whether it is
+ * presented as confirmed.
+ *
+ * Read from the bar rather than from the store, because the question is what a
+ * reader is told: the label reaches prose about which project a control acts
+ * on, so a name sourced from a URL is a spoofing surface, and a name the
+ * registry has not confirmed must carry the annotation that says so.
+ */
+const SCOPE_LABEL_PROBE = `(() => {
+  ${CONTRAST_PRELUDE}
+  const value = document.querySelector('header [aria-label^="Clear project scope"] .td-value');
+  if (!value) return { text: '', annotation: null, fontPx: 0, ratio: 0 };
+  const annotation = document.querySelector('[data-scope-label-annotation]');
+  return {
+    text: (value.textContent ?? '').trim(),
+    annotation: annotation ? annotation.getAttribute('data-scope-label-annotation') : null,
+    ...contrast(value),
+  };
+})()`;
+
+interface ScopeLabel {
+  text: string;
+  annotation: string | null;
+  fontPx: number;
+  ratio: number;
+}
+
 const BADGE_CONTRAST_PROBE = `(() => {
   ${CONTRAST_PRELUDE}
   return Array.from(document.querySelectorAll('[data-evidence-state]')).map((badge) => {
@@ -251,14 +279,20 @@ export const OBSERVATORY_SCENARIOS: readonly Scenario[] = [
   },
   {
     id: 'observatory-doctor-read-only-scope',
-    // A deep link into a project the fixture registry does not name active
-    // (`active_project_id` is `tracedecay`), so the scope resolves to
-    // `selected` and the gateway would serve this project read-only. The
+    // A deep link into `hermes`, which the fixture registry does list but does
+    // not name active (`active_project_id` is `tracedecay`), so the scope
+    // resolves to `selected` and the gateway would serve it read-only. The
     // reconciliation runs against the real `/api/projects` payload rather than
     // an override, so the state under audit is one the product can reach.
-    route: '/observatory?scope=other-project&scopeLabel=Other%20project',
+    //
+    // The label in the link is deliberately not what the registry calls this
+    // project. Reconciliation has to replace it, and every sentence naming the
+    // scope has to use the registry's name — a link that could choose the name
+    // shown beside a project's settings and diagnostics is a spoofing surface,
+    // and the whole point of resolving the label is that it stops being one.
+    route: '/observatory?scope=hermes&scopeLabel=tracedecay%20(production)',
     proves:
-      'a read-only scope shows the diagnosis with its remediation controls disabled, and the reason stays legible rather than being carried by the greying alone',
+      'a read-only scope shows the diagnosis with its remediation controls disabled, the reason stays legible rather than being carried by the greying alone, and the scope is named by the registry rather than by the link',
     overrides: {},
     matrix: true,
     assert: async (page) => {
@@ -311,6 +345,51 @@ export const OBSERVATORY_SCENARIOS: readonly Scenario[] = [
       if (notes.every((note) => note.disabledControls === 0)) {
         throw new Error(
           'FALSIFIED: the page states the scope is read-only while offering every remediation control, so it invites a write the gateway will refuse',
+        );
+      }
+
+      // The link claimed this project is called `tracedecay (production)`. The
+      // registry calls it `hermes`. Nothing on the page may repeat the claim.
+      const spoofed = notes.filter((note) => note.text.includes('tracedecay (production)'));
+      if (spoofed.length > 0) {
+        throw new Error(
+          `FALSIFIED: the scope sentence names the project by the link's claim rather than the registry's entry: ${spoofed
+            .map((note) => note.text)
+            .join(' | ')}`,
+        );
+      }
+      const named = notes.filter((note) => note.text.includes('hermes is not the active project'));
+      if (named.length === 0) {
+        throw new Error(
+          `FALSIFIED: no scope sentence names the project as the registry does, so the correction cannot be observed: ${notes
+            .map((note) => note.text)
+            .join(' | ')}`,
+        );
+      }
+      const label = (await page.evaluate(SCOPE_LABEL_PROBE)) as ScopeLabel;
+      console.log(
+        `[axe] reconciled scope label: "${label.text}" annotation=${label.annotation ?? 'none'} at ${label.ratio}:1/${label.fontPx}px`,
+      );
+      if (label.text.includes('tracedecay (production)')) {
+        throw new Error(
+          `FALSIFIED: the scope bar still displays the link's claimed label: "${label.text}"`,
+        );
+      }
+      if (!label.text.includes('hermes')) {
+        throw new Error(
+          `FALSIFIED: the scope bar does not display the registry's label for this project: "${label.text}"`,
+        );
+      }
+      // Listed in the registry, so there is nothing left to qualify. An
+      // annotation here would mark a confirmed name as provisional.
+      if (label.annotation !== null) {
+        throw new Error(
+          `FALSIFIED: a registry-confirmed label is still annotated "${label.annotation}", which presents a settled name as unverified`,
+        );
+      }
+      if (label.ratio < (label.fontPx >= 24 ? 3 : 4.5)) {
+        throw new Error(
+          `FALSIFIED: the scope label naming what every control on this page acts on is below WCAG AA: ${label.ratio}:1 at ${label.fontPx}px`,
         );
       }
     },

@@ -2,7 +2,12 @@ import { act, render, waitFor } from '@testing-library/react';
 import { MemoryRouter, useSearchParams } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ScopeUrlSync } from './UrlSync.tsx';
-import { scopeWritable, useScope } from './store.ts';
+import { scopeWritable, useScope, type RegistryReading } from './store.ts';
+
+/** A measured registry answer naming one project. */
+function measured(activeProjectId: string, label = `label-${activeProjectId}`): RegistryReading {
+  return { state: 'measured', activeProjectId, projects: [{ projectId: activeProjectId, label }] };
+}
 
 let currentSearch = '';
 let setSearch: (next: string) => void = () => {
@@ -56,9 +61,7 @@ describe('ScopeUrlSync', () => {
     await waitFor(() =>
       expect(useScope.getState().scope).toMatchObject({ projectId: 'proj_abc' }),
     );
-    act(() =>
-      useScope.getState().resolveActivation({ state: 'measured', activeProjectId: 'proj_abc' }),
-    );
+    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'tracedecay')));
     expect(scopeWritable(useScope.getState().scope).state).toBe('writable');
 
     act(() => setSearch('scope=proj_abc&scopeLabel=tracedecay&window=7d'));
@@ -67,14 +70,55 @@ describe('ScopeUrlSync', () => {
     expect(scopeWritable(useScope.getState().scope).state).toBe('writable');
   });
 
+  it('keeps a registry-corrected label when an unrelated search param changes', async () => {
+    // The reason the URL->store guard keys on the id alone. Once the registry
+    // replaces the link's label, the store's label no longer matches the URL's
+    // — and a guard that compared labels would read that as a different scope,
+    // re-apply the stale claim, and drop the scope back to `unresolved`. The
+    // correction has to survive a filter change.
+    mount('/costs?scope=proj_abc&scopeLabel=Stale%20Bookmark%20Name');
+    await waitFor(() =>
+      expect(useScope.getState().scope).toMatchObject({ label: 'Stale Bookmark Name' }),
+    );
+    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'Canonical Name')));
+    expect(useScope.getState().scope).toMatchObject({
+      label: 'Canonical Name',
+      activation: 'active',
+    });
+
+    act(() => setSearch('scope=proj_abc&scopeLabel=Stale%20Bookmark%20Name&window=7d'));
+    await waitFor(() => expect(currentSearch).toContain('window=7d'));
+    expect(useScope.getState().scope).toMatchObject({
+      label: 'Canonical Name',
+      activation: 'active',
+    });
+    expect(scopeWritable(useScope.getState().scope)).toEqual({
+      state: 'writable',
+      target: 'Canonical Name',
+    });
+  });
+
+  it('carries a registry-corrected label into the URL', async () => {
+    // So the link stops asserting a name the registry contradicted: without
+    // this the address bar keeps the stale label, and a reload shows it again
+    // until the registry answers.
+    mount('/costs?scope=proj_abc&scopeLabel=Stale%20Bookmark%20Name');
+    await waitFor(() =>
+      expect(useScope.getState().scope).toMatchObject({ label: 'Stale Bookmark Name' }),
+    );
+    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'Canonical Name')));
+    await waitFor(() => expect(currentSearch).toContain('scopeLabel=Canonical+Name'));
+    expect(currentSearch).toContain('scope=proj_abc');
+    // Corrected, not duplicated.
+    expect(currentSearch).not.toContain('Stale');
+  });
+
   it('returns to an unresolved identity when the link names a different project', async () => {
     mount('/costs?scope=proj_abc&scopeLabel=tracedecay');
     await waitFor(() =>
       expect(useScope.getState().scope).toMatchObject({ projectId: 'proj_abc' }),
     );
-    act(() =>
-      useScope.getState().resolveActivation({ state: 'measured', activeProjectId: 'proj_abc' }),
-    );
+    act(() => useScope.getState().reconcileScope(measured('proj_abc', 'tracedecay')));
 
     act(() => setSearch('scope=proj_other&scopeLabel=other'));
     await waitFor(() =>

@@ -30,37 +30,87 @@ export type DashboardScope =
       activation: ProjectActivation;
     };
 
+/** A project as the registry lists it: the id the dashboard routes by, and the
+ * label that id is actually called. */
+export interface RegistryProject {
+  projectId: string;
+  label: string;
+}
+
 /**
- * What the project registry said about which project is active.
+ * What the project registry said, both about which project is active and about
+ * what the listed projects are called.
  *
  * `measured` with a null id is a real answer — the daemon has no active
  * project — and is different from `unknown`, which is the registry declining
  * to answer at all. Folding the second into the first would turn an unread
  * registry into a confident "this project is not active", which is the false
  * negative this union exists to prevent.
+ *
+ * `projects` rides along because the same read settles both facts, and a scope
+ * reconciled against one of them but not the other would route by a canonical
+ * id while calling it by whatever name the URL supplied.
  */
-export type ActiveProjectReading =
-  | { state: 'measured'; activeProjectId: string | null }
+export type RegistryReading =
+  | {
+      state: 'measured';
+      activeProjectId: string | null;
+      projects: readonly RegistryProject[];
+    }
   | { state: 'unknown' };
 
 interface ScopeState {
   scope: DashboardScope;
   selectProject: (projectId: string, label: string, activation?: ProjectActivation) => void;
   selectAllProjects: () => void;
-  /** Reconcile the selected project against the registry's active-project
-   * reading. A no-op unless a project is currently selected. */
-  resolveActivation: (reading: ActiveProjectReading) => void;
+  /** Reconcile the selected project — both its activation and its label —
+   * against the registry. A no-op unless a project is currently selected. */
+  reconcileScope: (reading: RegistryReading) => void;
 }
 
-export function activationFor(
-  projectId: string,
-  reading: ActiveProjectReading,
-): ProjectActivation {
+export function activationFor(projectId: string, reading: RegistryReading): ProjectActivation {
   switch (reading.state) {
     case 'measured':
       return reading.activeProjectId === projectId ? 'active' : 'selected';
     case 'unknown':
       return 'unresolved';
+    default: {
+      const exhaustive: never = reading;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * What this project is called, preferring the registry over the caller.
+ *
+ * A deep link's `scopeLabel` is an unverified claim: it can be stale from
+ * before a rename, or simply be whatever text was pasted next to a real
+ * project id. It is a display string that reaches prose about what a write
+ * will affect, so once the registry has answered, its entry is the label —
+ * anything else lets a URL choose the name the dashboard uses for a project it
+ * is about to write to.
+ *
+ * Two cases are deliberately not the same:
+ *
+ *   the registry did not answer, so the URL label is all there is and is kept
+ *   as the best available name; and
+ *
+ *   the registry answered and does not list this id, so the claimed label has
+ *   been contradicted rather than merely unconfirmed. Keeping it would state a
+ *   name no authority backs, so the id — which is at least what the dashboard
+ *   routes by — stands in for it.
+ */
+export function reconciledLabel(
+  projectId: string,
+  claimed: string,
+  reading: RegistryReading,
+): string {
+  switch (reading.state) {
+    case 'measured':
+      return reading.projects.find((p) => p.projectId === projectId)?.label ?? projectId;
+    case 'unknown':
+      return claimed;
     default: {
       const exhaustive: never = reading;
       return exhaustive;
@@ -75,12 +125,23 @@ export const useScope = create<ScopeState>((set) => ({
   selectProject: (projectId, label, activation = 'unresolved') =>
     set({ scope: { kind: 'project', projectId, label, activation } }),
   selectAllProjects: () => set({ scope: { kind: 'all' } }),
-  resolveActivation: (reading) =>
-    set((state) =>
-      state.scope.kind === 'project'
-        ? { scope: { ...state.scope, activation: activationFor(state.scope.projectId, reading) } }
-        : state,
-    ),
+  reconcileScope: (reading) =>
+    set((state) => {
+      if (state.scope.kind !== 'project') return state;
+      const { projectId, label } = state.scope;
+      const next = {
+        ...state.scope,
+        label: reconciledLabel(projectId, label, reading),
+        activation: activationFor(projectId, reading),
+      };
+      // Identity-stable when nothing moved. Every consumer selects the scope
+      // object, and this runs on each registry read, so returning a fresh one
+      // each time would re-render the shell — and re-key nothing, since the
+      // cache token is the id — on a 30-second poll that changed no fact.
+      return next.label === state.scope.label && next.activation === state.scope.activation
+        ? state
+        : { scope: next };
+    }),
 }));
 
 /**

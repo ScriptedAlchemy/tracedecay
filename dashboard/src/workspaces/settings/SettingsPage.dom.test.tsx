@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
@@ -413,6 +413,38 @@ describe('Settings scope authority', () => {
     const notes = [...document.querySelectorAll('[data-settings-gate="writable"]')];
     expect(notes).toHaveLength(2);
     for (const note of notes) expect(note.textContent).toBe('Applies to Active project.');
+  });
+
+  /**
+   * Both editors take their target from the reconciled scope, so a deep link
+   * cannot choose the name shown beside the settings it is about to change.
+   */
+  it('names the registry label in both write targets, not a spoofed deep-link label', async () => {
+    useScope.getState().selectProject('proj_active', 'Scratch sandbox', 'unresolved');
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
+    renderSettings();
+
+    // Unresolved first: unknown authority, and no claim either way.
+    const unknown = await waitFor(() => {
+      const found = [...document.querySelectorAll('[data-settings-gate="unknown"]')];
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    for (const note of unknown) expect(note.textContent).toContain('not known yet');
+
+    act(() =>
+      useScope.getState().reconcileScope({
+        state: 'measured',
+        activeProjectId: 'proj_active',
+        projects: [{ projectId: 'proj_active', label: 'Production' }],
+      }),
+    );
+
+    await screen.findByRole('button', { name: 'Review project changes' });
+    const notes = [...document.querySelectorAll('[data-settings-gate="writable"]')];
+    expect(notes).toHaveLength(2);
+    for (const note of notes) expect(note.textContent).toBe('Applies to Production.');
+    expect(document.body.textContent).not.toContain('Scratch sandbox');
   });
 });
 
