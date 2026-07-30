@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -20,7 +19,8 @@ use tracedecay_domain::{
 use crate::application::event_lane::{self, ActivityFamilyV1};
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::codex_app_server::{
-    CodexAppServerSummary, CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
+    CodexAppServerCancellation, CodexAppServerSummary, CodexAppServerSummaryConfig,
+    run_prompt_with_codex_app_server_cancellable,
 };
 
 const CODEX_PROVIDER_ID: &str = "provider.work.codex-app-server";
@@ -37,7 +37,7 @@ pub(crate) struct CodexAppServerWorkProviderV1<S> {
             BTreeMap<
                 WorkAttemptIdentityV1,
                 (
-                    Arc<AtomicBool>,
+                    CodexAppServerCancellation,
                     Option<JoinHandle<Result<CodexAppServerSummary, String>>>,
                 ),
             >,
@@ -113,18 +113,18 @@ where
         &self,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<Option<CodexAppServerSummary>, String> {
-        let (cancelled, handle) = {
+        let (cancellation, handle) = {
             let mut executions = self
                 .executions
                 .lock()
                 .map_err(|_| "Codex Work execution registry lock failed".to_owned())?;
-            let (cancelled, handle) = executions
+            let (cancellation, handle) = executions
                 .get_mut(identity)
                 .ok_or_else(|| "Codex Work execution is not active".to_owned())?;
             let handle = handle
                 .take()
                 .ok_or_else(|| "Codex Work execution completion is already claimed".to_owned())?;
-            (Arc::clone(cancelled), handle)
+            (cancellation.clone(), handle)
         };
         let outcome = handle.join();
         let mut executions = self
@@ -133,7 +133,7 @@ where
             .map_err(|_| "Codex Work execution registry lock failed".to_owned())?;
         executions.remove(identity);
         let outcome = outcome.map_err(|_| "Codex Work execution thread panicked".to_owned())?;
-        if cancelled.load(Ordering::Acquire) {
+        if cancellation.is_cancelled() {
             Ok(None)
         } else {
             outcome.map(Some)
@@ -149,10 +149,10 @@ where
                 "Codex Work execution registry lock failed".to_owned(),
             )
         })?;
-        let (cancelled, _) = executions.get(identity).ok_or_else(|| {
+        let (cancellation, _) = executions.get(identity).ok_or_else(|| {
             WorkProviderExecutionError::Rejected("Codex Work execution is not active".to_owned())
         })?;
-        cancelled.store(true, Ordering::Release);
+        cancellation.cancel();
         Ok(())
     }
 }
@@ -188,16 +188,19 @@ where
                 "Codex Work execution is already active".to_owned(),
             ));
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation = CodexAppServerCancellation::default();
+        let cancellation_for_run = cancellation.clone();
         let config = self.config.clone();
         let handle = std::thread::spawn(move || {
-            run_prompt_with_codex_app_server(&prompt, &config, CODEX_THREAD_SOURCE)
-                .map_err(|error| error.to_string())
+            run_prompt_with_codex_app_server_cancellable(
+                &prompt,
+                &config,
+                CODEX_THREAD_SOURCE,
+                &cancellation_for_run,
+            )
+            .map_err(|error| error.to_string())
         });
-        executions.insert(
-            attempt.identity().clone(),
-            (Arc::clone(&cancelled), Some(handle)),
-        );
+        executions.insert(attempt.identity().clone(), (cancellation, Some(handle)));
         Self::route()
     }
 
@@ -423,11 +426,12 @@ where
         lease: &WorkLeaseFenceV1,
         request: WorkCancellationRequestV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let requested =
+        let acknowledged_at = request.requested_at();
+        let _requested =
             self.execution
                 .request_cancellation(&self.authority, identity, lease, request)?;
         self.publish_activity("cancellation_requested").await;
-        Ok(requested)
+        self.finish(identity, lease, acknowledged_at).await
     }
 
     pub(crate) async fn recover(
@@ -555,10 +559,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use rusqlite::Connection;
     use tracedecay_application::{
         AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
         CreateWorkCommand, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
@@ -569,7 +571,7 @@ mod tests {
         RepositoryId, RunId, TaskId, WorkCancellationRequestId, WorkFenceEpochV1, WorkLeaseId,
         WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkVersion, WorktreeId,
     };
-    use tracedecay_rusqlite_runtime::work::{WorkSqliteStorage, install_work_schema};
+    use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
@@ -673,6 +675,44 @@ for line in sys.stdin:
         fs::set_permissions(path, permissions).unwrap();
     }
 
+    fn install_stubborn_codex_fixture(path: &Path, descendant_pid_path: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"#!/usr/bin/env python3
+import json
+import subprocess
+import sys
+import time
+
+descendant = subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+])
+with open({pid_path:?}, "w", encoding="utf-8") as handle:
+    handle.write(str(descendant.pid))
+
+for line in sys.stdin:
+    message = json.loads(line)
+    request_id = message.get("id")
+    if request_id == 0:
+        print(json.dumps({{"jsonrpc": "2.0", "id": 0, "result": {{}}}}), flush=True)
+    elif request_id == 1:
+        print(json.dumps({{"jsonrpc": "2.0", "id": 1, "result": {{"thread": {{"id": "thread.work.stubborn"}}}}}}), flush=True)
+    elif request_id == 2:
+        while True:
+            time.sleep(1)
+"#,
+                pid_path = descendant_pid_path.to_string_lossy(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
     fn prepare_work(
         storage: &WorkSqliteStorage,
         context: &RequestContext,
@@ -741,9 +781,7 @@ for line in sys.stdin:
         .await
         .unwrap();
         let observation_db = host.project_observation_database_for_test().unwrap();
-        let connection = Connection::open_in_memory().unwrap();
-        install_work_schema(&connection).unwrap();
-        let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+        let storage = observation_db.work_storage().unwrap();
         let context = context(project_id);
         let owner = authority(&context);
         let (task_id, snapshot) = prepare_work(&storage, &context);
@@ -834,13 +872,8 @@ for line in sys.stdin:
             UtcMicros(50),
         )
         .unwrap();
-        let requested = runtime
-            .cancel(&cancelled_identity, &lease(1), cancellation)
-            .await
-            .unwrap();
-        assert_eq!(requested.state(), WorkAttemptStateV1::CancellationRequested);
         let cancelled = runtime
-            .finish(&cancelled_identity, &lease(1), UtcMicros(60))
+            .cancel(&cancelled_identity, &lease(1), cancellation)
             .await
             .unwrap();
         assert_eq!(cancelled.state(), WorkAttemptStateV1::Cancelled);
@@ -927,6 +960,88 @@ for line in sys.stdin:
                 .unwrap()
                 .len()
                 >= 6
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_cancel_terminates_and_reaps_stubborn_process_tree() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().unwrap();
+        let project_id = id::<ProjectId>("project.work.daemon.cancel");
+        let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        let observation_db = host.project_observation_database_for_test().unwrap();
+        let storage = observation_db.work_storage().unwrap();
+        let context = context(project_id);
+        let owner = authority(&context);
+        let (task_id, snapshot) = prepare_work(&storage, &context);
+        let fixture = project.path().join("codex-work-stubborn-fixture");
+        let descendant_pid_path = project.path().join("codex-work-descendant.pid");
+        install_stubborn_codex_fixture(&fixture, &descendant_pid_path);
+        let runtime = DaemonWorkRuntimeV1::new(
+            owner,
+            storage,
+            CodexAppServerSummaryConfig {
+                codex_bin: fixture.to_string_lossy().into_owned(),
+                model: None,
+                timeout: Duration::from_secs(2),
+            },
+            observation_db,
+            project.path().to_path_buf(),
+        );
+        let attempt_identity = identity(&task_id, "stubborn-cancel");
+        runtime
+            .acquire_lease(&snapshot, attempt_identity.clone(), lease(1))
+            .await
+            .unwrap();
+        runtime
+            .start(&attempt_identity, &lease(1), WorkRecoveryStateV1::Fresh)
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !descendant_pid_path.is_file() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let descendant_pid = fs::read_to_string(&descendant_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+
+        let cancelled = runtime
+            .cancel(
+                &attempt_identity,
+                &lease(1),
+                WorkCancellationRequestV1::new(
+                    id::<WorkCancellationRequestId>("cancel.work.daemon.stubborn"),
+                    UtcMicros(50),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.state(), WorkAttemptStateV1::Cancelled);
+        assert!(matches!(
+            cancelled.cancellation(),
+            WorkCancellationStateV1::Acknowledged(_)
+        ));
+
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while unsafe { kill(descendant_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_ne!(
+            unsafe { kill(descendant_pid, 0) },
+            0,
+            "Codex Work cancellation must leave no provider descendant alive"
         );
     }
 }
