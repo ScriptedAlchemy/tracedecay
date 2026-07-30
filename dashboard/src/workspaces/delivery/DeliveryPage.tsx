@@ -28,14 +28,13 @@ import {
 import { cn } from '../../ui/cn';
 import { formatCount } from '../../ui/format.ts';
 import { freshnessTier, relativeAge } from '../../ui/time.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
   type DeliveryOverview,
   DeliveryOverviewSchema,
   type ProjectRepoGroup,
-  ProjectsPayloadSchema,
 } from '../../contracts/wire.ts';
 
 /**
@@ -54,11 +53,11 @@ import {
  * otherwise be read as commit recency, which would be a fabrication.
  */
 export function DeliveryPage() {
-  const projects = useLegacy(
-    ['delivery', 'projects'],
-    '/api/projects',
-    ProjectsPayloadSchema,
-  );
+  // The shared registry read, not a private copy of it. Under its own key this
+  // page fetched the same listing a second time and, because the SSE
+  // `project_registry_changed` invalidation names the registry root, was the
+  // one reader a rename never reached.
+  const projects = useProjectRegistry();
   const overview = useQuery({
     queryKey: ['delivery', 'overview'],
     queryFn: () => fetchEnvelope('/api/delivery/overview', DeliveryOverviewSchema),
