@@ -31,7 +31,10 @@ use crate::gateway::operation_table::{
 };
 use crate::protocol::DaemonLspProtocolSession;
 use crate::provider::{AnalyzerCancellationPort, DiagnosticSnapshotPort};
-use crate::session::{LspRequestFailure, LspRequestId, MAX_PENDING_REQUESTS};
+use crate::session::{
+    AuthorizedLspWorkspace, LspRequestFailure, LspRequestId, LspWorkspaceRouteError,
+    MAX_PENDING_REQUESTS,
+};
 
 /// A single root that was authoritatively admitted before the LSP session was
 /// created. The gateway never chooses a root from CWD or client folder order.
@@ -307,6 +310,7 @@ pub enum MethodUnavailableReason {
     ExplicitlyUnavailable,
     CapabilityNotNegotiated,
     OutsideAdmittedRoot,
+    AmbiguousAdmittedRoot,
     ProviderUnavailable,
 }
 
@@ -2069,13 +2073,20 @@ where
     }
 
     pub fn into_session(self, root: AdmittedRoot) -> DaemonLspProtocolSession<F, S, D> {
+        self.into_workspace_session(AuthorizedLspWorkspace::single(root))
+    }
+
+    pub fn into_workspace_session(
+        self,
+        workspace: AuthorizedLspWorkspace,
+    ) -> DaemonLspProtocolSession<F, S, D> {
         let initial_capabilities = negotiate_capabilities(
             &ClientCapabilities::default(),
             &self.gateway_capabilities,
             &self.upstream_capabilities,
         );
-        DaemonLspProtocolSession::from_ports(
-            root,
+        DaemonLspProtocolSession::from_workspace_ports(
+            workspace,
             initial_capabilities,
             self.gateway_capabilities,
             self.upstream_capabilities,
@@ -2094,14 +2105,14 @@ pub struct GatewayDocumentDiagnostics {
     pub omitted_count: usize,
 }
 
-/// A daemon-owned, single-root LSP session.
+/// A daemon-owned LSP workspace session.
 ///
 /// Both application ports are explicit constructor inputs. A retained daemon
 /// must not accidentally mount a whole-session unavailable semantic runtime;
 /// individual provider methods may still return
 /// [`SemanticProviderOutcome::Unavailable`] truthfully.
 pub struct DaemonLspGateway<P, S> {
-    root: AdmittedRoot,
+    workspace: AuthorizedLspWorkspace,
     capabilities: EffectiveCapabilities,
     feedback_cycle: P,
     semantic_provider: S,
@@ -2118,8 +2129,22 @@ where
         feedback_cycle: P,
         semantic_provider: S,
     ) -> Self {
+        Self::for_workspace(
+            AuthorizedLspWorkspace::single(root),
+            capabilities,
+            feedback_cycle,
+            semantic_provider,
+        )
+    }
+
+    pub fn for_workspace(
+        workspace: AuthorizedLspWorkspace,
+        capabilities: EffectiveCapabilities,
+        feedback_cycle: P,
+        semantic_provider: S,
+    ) -> Self {
         Self {
-            root,
+            workspace,
             capabilities,
             feedback_cycle,
             semantic_provider,
@@ -2138,7 +2163,20 @@ where
     }
 
     pub fn root(&self) -> &AdmittedRoot {
-        &self.root
+        self.workspace.primary()
+    }
+
+    pub fn workspace(&self) -> &AuthorizedLspWorkspace {
+        &self.workspace
+    }
+
+    pub fn root_for_document(
+        &self,
+        document_uri: &str,
+    ) -> Result<&AdmittedRoot, MethodUnavailableReason> {
+        self.workspace
+            .resolve_document(document_uri)
+            .map_err(workspace_route_reason)
     }
 
     pub fn capabilities(&self) -> &EffectiveCapabilities {
@@ -2160,7 +2198,7 @@ where
     /// Triggered by `textDocument/didSave`.
     pub fn document_saved(&self, document_uri: impl Into<String>) -> FeedbackCycleResponse {
         let document_uri = document_uri.into();
-        if !self.root.contains_document(&document_uri) {
+        if self.root_for_document(&document_uri).is_err() {
             return FeedbackCycleResponse::Rejected {
                 reason: "document is outside the admitted root".into(),
             };
@@ -2178,11 +2216,8 @@ where
                 MethodUnavailableReason::CapabilityNotNegotiated,
             );
         }
-        if !self.root.contains_document(document_uri) {
-            return GatewayResponse::unavailable(
-                GatewayMethod::TextDocumentDiagnostic,
-                MethodUnavailableReason::OutsideAdmittedRoot,
-            );
+        if let Err(reason) = self.root_for_document(document_uri) {
+            return GatewayResponse::unavailable(GatewayMethod::TextDocumentDiagnostic, reason);
         }
         match self.trigger_feedback_cycle(
             document_uri.to_owned(),
@@ -2215,11 +2250,8 @@ where
                 MethodUnavailableReason::CapabilityNotNegotiated,
             );
         }
-        if !self.root.contains_document(document_uri) {
-            return GatewayResponse::unavailable(
-                GatewayMethod::TextDocumentDiagnostic,
-                MethodUnavailableReason::OutsideAdmittedRoot,
-            );
+        if let Err(reason) = self.root_for_document(document_uri) {
+            return GatewayResponse::unavailable(GatewayMethod::TextDocumentDiagnostic, reason);
         }
         let result_id = result_id.into();
         if result_id.is_empty() {
@@ -2268,7 +2300,7 @@ where
             GatewayMethod::TextDocumentDeclaration,
             SemanticCapability::Declaration,
             Some(document_uri),
-            |provider| provider.declaration(&self.root, document_uri, position),
+            |provider, root| provider.declaration(root, document_uri, position),
         )
     }
 
@@ -2281,7 +2313,7 @@ where
             GatewayMethod::TextDocumentDefinition,
             SemanticCapability::Definition,
             Some(document_uri),
-            |provider| provider.definition(&self.root, document_uri, position),
+            |provider, root| provider.definition(root, document_uri, position),
         )
     }
 
@@ -2294,7 +2326,7 @@ where
             GatewayMethod::TextDocumentTypeDefinition,
             SemanticCapability::TypeDefinition,
             Some(document_uri),
-            |provider| provider.type_definition(&self.root, document_uri, position),
+            |provider, root| provider.type_definition(root, document_uri, position),
         )
     }
 
@@ -2307,7 +2339,7 @@ where
             GatewayMethod::TextDocumentImplementation,
             SemanticCapability::Implementation,
             Some(document_uri),
-            |provider| provider.implementation(&self.root, document_uri, position),
+            |provider, root| provider.implementation(root, document_uri, position),
         )
     }
 
@@ -2320,7 +2352,7 @@ where
             GatewayMethod::TextDocumentReferences,
             SemanticCapability::References,
             Some(document_uri),
-            |provider| provider.references(&self.root, document_uri, position),
+            |provider, root| provider.references(root, document_uri, position),
         )
     }
 
@@ -2333,7 +2365,7 @@ where
             GatewayMethod::TextDocumentHover,
             SemanticCapability::Hover,
             Some(document_uri),
-            |provider| provider.hover(&self.root, document_uri, position),
+            |provider, root| provider.hover(root, document_uri, position),
         )
     }
 
@@ -2342,17 +2374,64 @@ where
             GatewayMethod::TextDocumentDocumentSymbol,
             SemanticCapability::DocumentSymbol,
             Some(document_uri),
-            |provider| provider.document_symbols(&self.root, document_uri),
+            |provider, root| provider.document_symbols(root, document_uri),
         )
     }
 
     pub fn workspace_symbols(&self, query: &str) -> GatewayResponse<Vec<WorkspaceSymbol>> {
-        self.route_semantic(
-            GatewayMethod::WorkspaceSymbol,
-            SemanticCapability::WorkspaceSymbol,
-            None,
-            |provider| provider.workspace_symbols(&self.root, query),
-        )
+        if !self
+            .capabilities
+            .supports_semantic(SemanticCapability::WorkspaceSymbol)
+        {
+            return GatewayResponse::unavailable(
+                GatewayMethod::WorkspaceSymbol,
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            );
+        }
+        let mut symbols = Vec::new();
+        let mut completed = 0_usize;
+        let mut partial = false;
+        let mut pending = false;
+        for root in self.workspace.roots() {
+            match self.semantic_provider.workspace_symbols(root, query) {
+                SemanticProviderOutcome::Complete(mut root_symbols) => {
+                    completed += 1;
+                    symbols.append(&mut root_symbols);
+                }
+                SemanticProviderOutcome::Partial {
+                    value: mut root_symbols,
+                    ..
+                } => {
+                    partial = true;
+                    symbols.append(&mut root_symbols);
+                }
+                SemanticProviderOutcome::Pending => pending = true,
+                SemanticProviderOutcome::Unavailable => {}
+            }
+        }
+        if completed == self.workspace.roots().len() && !partial {
+            GatewayResponse::Value(symbols)
+        } else if completed > 0 || partial {
+            let scope_set = self
+                .workspace
+                .scope_set_digest()
+                .map_or("single-root", ManifestDigest::as_str);
+            GatewayResponse::Partial {
+                value: symbols,
+                coverage: format!(
+                    "scope-set={scope_set};completed={completed}/{}",
+                    self.workspace.roots().len()
+                ),
+                detail: Some("one or more admitted roots were incomplete".to_owned()),
+            }
+        } else if pending {
+            GatewayResponse::Pending
+        } else {
+            GatewayResponse::unavailable(
+                GatewayMethod::WorkspaceSymbol,
+                MethodUnavailableReason::ProviderUnavailable,
+            )
+        }
     }
 
     pub fn prepare_call_hierarchy(
@@ -2364,7 +2443,7 @@ where
             GatewayMethod::TextDocumentPrepareCallHierarchy,
             SemanticCapability::CallHierarchy,
             Some(document_uri),
-            |provider| provider.prepare_call_hierarchy(&self.root, document_uri, position),
+            |provider, root| provider.prepare_call_hierarchy(root, document_uri, position),
         )
     }
 
@@ -2373,7 +2452,7 @@ where
             GatewayMethod::CallHierarchyIncomingCalls,
             SemanticCapability::CallHierarchy,
             Some(&item.uri),
-            |provider| provider.incoming_calls(&self.root, item),
+            |provider, root| provider.incoming_calls(root, item),
         )
     }
 
@@ -2382,7 +2461,7 @@ where
             GatewayMethod::CallHierarchyOutgoingCalls,
             SemanticCapability::CallHierarchy,
             Some(&item.uri),
-            |provider| provider.outgoing_calls(&self.root, item),
+            |provider, root| provider.outgoing_calls(root, item),
         )
     }
 
@@ -2395,7 +2474,7 @@ where
             GatewayMethod::TextDocumentSignatureHelp,
             SemanticCapability::SignatureHelp,
             Some(document_uri),
-            |provider| provider.signature_help(&self.root, document_uri, position),
+            |provider, root| provider.signature_help(root, document_uri, position),
         )
     }
 
@@ -2408,7 +2487,7 @@ where
             GatewayMethod::TextDocumentPrepareTypeHierarchy,
             SemanticCapability::TypeHierarchy,
             Some(document_uri),
-            |provider| provider.prepare_type_hierarchy(&self.root, document_uri, position),
+            |provider, root| provider.prepare_type_hierarchy(root, document_uri, position),
         )
     }
 
@@ -2420,7 +2499,7 @@ where
             GatewayMethod::TypeHierarchySupertypes,
             SemanticCapability::TypeHierarchy,
             Some(&item.uri),
-            |provider| provider.type_hierarchy_supertypes(&self.root, item),
+            |provider, root| provider.type_hierarchy_supertypes(root, item),
         )
     }
 
@@ -2432,7 +2511,7 @@ where
             GatewayMethod::TypeHierarchySubtypes,
             SemanticCapability::TypeHierarchy,
             Some(&item.uri),
-            |provider| provider.type_hierarchy_subtypes(&self.root, item),
+            |provider, root| provider.type_hierarchy_subtypes(root, item),
         )
     }
 
@@ -2489,11 +2568,34 @@ where
         request_id: &LspRequestId,
         request: &SemanticRequest,
     ) -> GatewayResponse<SemanticResponse> {
+        if let SemanticRequest::WorkspaceSymbols { query } = request {
+            return match self.workspace_symbols(query) {
+                GatewayResponse::Value(value) => {
+                    GatewayResponse::Value(SemanticResponse::WorkspaceSymbols(value))
+                }
+                GatewayResponse::Partial {
+                    value,
+                    coverage,
+                    detail,
+                } => GatewayResponse::Partial {
+                    value: SemanticResponse::WorkspaceSymbols(value),
+                    coverage,
+                    detail,
+                },
+                GatewayResponse::Pending => GatewayResponse::Pending,
+                GatewayResponse::Unavailable(unavailable) => {
+                    GatewayResponse::Unavailable(unavailable)
+                }
+                GatewayResponse::RequestFailed(failure) => {
+                    GatewayResponse::RequestFailed(failure)
+                }
+            };
+        }
         self.route_semantic(
             request.method(),
             request.capability(),
             request.document_uri(),
-            |provider| provider.request(&self.root, request_id, request),
+            |provider, root| provider.request(root, request_id, request),
         )
     }
 
@@ -2534,9 +2636,14 @@ where
         document_uri: String,
         trigger: DiagnosticTrigger,
     ) -> FeedbackCycleResponse {
+        let Ok(root) = self.root_for_document(&document_uri) else {
+            return FeedbackCycleResponse::Rejected {
+                reason: "document is outside or ambiguous in the admitted workspace".to_owned(),
+            };
+        };
         self.feedback_cycle
             .request_feedback_cycle(FeedbackCycleRequest {
-                root_uri: self.root.uri.clone(),
+                root_uri: root.uri.clone(),
                 document_uri,
                 trigger,
             })
@@ -2547,7 +2654,7 @@ where
         method: GatewayMethod,
         capability: SemanticCapability,
         document_uri: Option<&str>,
-        route: impl FnOnce(&S) -> SemanticProviderOutcome<T>,
+        route: impl FnOnce(&S, &AdmittedRoot) -> SemanticProviderOutcome<T>,
     ) -> GatewayResponse<T> {
         if !self.capabilities.supports_semantic(capability) {
             return GatewayResponse::unavailable(
@@ -2555,13 +2662,19 @@ where
                 MethodUnavailableReason::CapabilityNotNegotiated,
             );
         }
-        if document_uri.is_some_and(|uri| !self.root.contains_document(uri)) {
-            return GatewayResponse::unavailable(
-                method,
-                MethodUnavailableReason::OutsideAdmittedRoot,
-            );
-        }
-        match route(&self.semantic_provider) {
+        let root = match document_uri {
+            Some(uri) => match self.root_for_document(uri) {
+                Ok(root) => root,
+                Err(reason) => return GatewayResponse::unavailable(method, reason),
+            },
+            None => {
+                return GatewayResponse::unavailable(
+                    method,
+                    MethodUnavailableReason::AmbiguousAdmittedRoot,
+                );
+            }
+        };
+        match route(&self.semantic_provider, root) {
             SemanticProviderOutcome::Complete(value) => GatewayResponse::Value(value),
             SemanticProviderOutcome::Partial {
                 value,
@@ -2581,6 +2694,17 @@ where
 
     fn explicitly_unavailable<T>(method: GatewayMethod) -> GatewayResponse<T> {
         GatewayResponse::unavailable(method, MethodUnavailableReason::ExplicitlyUnavailable)
+    }
+}
+
+fn workspace_route_reason(error: LspWorkspaceRouteError) -> MethodUnavailableReason {
+    match error {
+        LspWorkspaceRouteError::OutsideAdmittedRoots => {
+            MethodUnavailableReason::OutsideAdmittedRoot
+        }
+        LspWorkspaceRouteError::AmbiguousAdmittedRoots => {
+            MethodUnavailableReason::AmbiguousAdmittedRoot
+        }
     }
 }
 

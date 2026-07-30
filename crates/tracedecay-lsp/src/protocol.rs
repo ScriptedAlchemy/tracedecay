@@ -51,14 +51,15 @@ use crate::provider::{
 use crate::request_sequence::{ConnectionLocalRequestSequence, ProcessLocalRequestSequence};
 use crate::rpc::{
     DiagnosticSerializationCapabilities, RpcFailure, diagnostic_result_id, diagnostic_value,
-    document_diagnostic_report_value, error_response, initialized_root_uri, overlay_failure,
+    document_diagnostic_report_value, error_response, initialized_workspace_uris, overlay_failure,
     parse_overlay_change, partial_failure_data, request_id, request_id_value, required_i64,
     required_nonempty_string, required_string, response_value, semantic_response_value,
     success_response, text_document,
 };
 use crate::session::{
-    CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
-    LspSessionControl, MAX_PUBLICATION_BYTES, PublicationAdmission, SessionLifecycle,
+    AuthorizedLspWorkspace, CancellationOutcome, CompletionDisposition, LifecycleError,
+    LspRequestFailure, LspRequestId, LspSessionControl, MAX_PUBLICATION_BYTES,
+    PublicationAdmission, SessionLifecycle,
 };
 
 /// A protocol actor allows bounded synchronous work before returning a typed

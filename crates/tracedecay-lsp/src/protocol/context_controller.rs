@@ -340,7 +340,9 @@ where
                 MethodUnavailableReason::CapabilityNotNegotiated,
             ));
         };
-        let outcome = context.snapshot(self.lifecycle.gateway.root(), request_id, request);
+        let root = self
+            .optional_document_root(request.document_uri.as_deref(), TRACEDECAY_CONTEXT_METHOD)?;
+        let outcome = context.snapshot(&root, request_id, request);
         self.context_projection_value(request, revision, outcome)
     }
 
@@ -435,8 +437,21 @@ where
             else {
                 continue;
             };
-            let Some(outcome) = context.poll_snapshot(self.lifecycle.gateway.root(), &operation_id)
+            let Some(root) = self
+                .context
+                .pending_requests
+                .get(&request_id)
+                .and_then(|pending| {
+                    self.optional_document_root(
+                        pending.request.document_uri.as_deref(),
+                        TRACEDECAY_CONTEXT_METHOD,
+                    )
+                    .ok()
+                })
             else {
+                continue;
+            };
+            let Some(outcome) = context.poll_snapshot(&root, &operation_id) else {
                 continue;
             };
             if outcome == ContextProjectionOutcome::Pending {
@@ -490,11 +505,8 @@ where
                 MethodUnavailableReason::CapabilityNotNegotiated,
             ));
         };
-        self.context_expansion_outcome_value(context.expand(
-            self.lifecycle.gateway.root(),
-            request_id,
-            request,
-        ))
+        let root = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD)?;
+        self.context_expansion_outcome_value(context.expand(&root, request_id, request))
     }
 
     pub(super) fn context_expansion_outcome_value(
@@ -555,9 +567,10 @@ where
             else {
                 continue;
             };
-            let Some(outcome) =
-                context.poll_expansion(self.lifecycle.gateway.root(), &operation_id)
-            else {
+            let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD) else {
+                continue;
+            };
+            let Some(outcome) = context.poll_expansion(&root, &operation_id) else {
                 continue;
             };
             if outcome == ContextExpansionOutcome::Pending {
@@ -582,13 +595,24 @@ where
             .context_projections
             .get(&envelope.kind)
             == Some(&envelope.revision);
-        let valid_scope = envelope.root_uri == self.lifecycle.gateway.root().uri()
+        let routed_root = envelope
+            .document_uri
+            .as_deref()
+            .map_or_else(
+                || self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD),
+                |uri| self.document_root(uri),
+            )
+            .ok();
+        let valid_scope = routed_root
+            .as_ref()
+            .is_some_and(|root| envelope.root_uri == root.uri())
             && is_supported_context_projection(&envelope.kind)
             && envelope.generation > 0
-            && envelope
-                .document_uri
-                .as_deref()
-                .is_none_or(|uri| self.lifecycle.gateway.root().contains_document(uri))
+            && envelope.document_uri.as_deref().is_none_or(|uri| {
+                routed_root
+                    .as_ref()
+                    .is_some_and(|root| root.contains_document(uri))
+            })
             && !envelope.scope.scope_digest.is_empty()
             && valid_context_projection_identity(&envelope.scope.identity)
             && match (
@@ -661,8 +685,9 @@ where
         }
         self.context.subscriptions = subscriptions;
         if let Some(context) = &self.context.port {
-            context
-                .update_subscriptions(self.lifecycle.gateway.root(), &self.context.subscriptions);
+            for root in self.lifecycle.gateway.workspace().roots() {
+                context.update_subscriptions(root, &self.context.subscriptions);
+            }
         }
         Ok(json!({
             "projections": self.context.subscriptions.iter().collect::<Vec<_>>(),
@@ -675,14 +700,25 @@ where
         revision: u32,
         envelope: &ContextProjectionEnvelope,
     ) -> Result<(), RpcFailure> {
-        let valid_scope = envelope.root_uri == self.lifecycle.gateway.root().uri()
+        let routed_root = envelope
+            .document_uri
+            .as_deref()
+            .map_or_else(
+                || self.workspace_root(TRACEDECAY_CONTEXT_METHOD),
+                |uri| self.document_root(uri),
+            )
+            .ok();
+        let valid_scope = routed_root
+            .as_ref()
+            .is_some_and(|root| envelope.root_uri == root.uri())
             && is_supported_context_projection(&envelope.kind)
             && envelope.generation > 0
             && envelope.document_uri == request.document_uri
-            && envelope
-                .document_uri
-                .as_deref()
-                .is_none_or(|uri| self.lifecycle.gateway.root().contains_document(uri))
+            && envelope.document_uri.as_deref().is_none_or(|uri| {
+                routed_root
+                    .as_ref()
+                    .is_some_and(|root| root.contains_document(uri))
+            })
             && valid_context_projection_identity(&envelope.identity)
             && match (
                 envelope.document_uri.is_some(),
@@ -760,8 +796,14 @@ where
         let Some(context) = self.context.port.clone() else {
             return;
         };
-        let changes =
-            context.poll_changes(self.lifecycle.gateway.root(), &self.context.subscriptions);
+        let changes = self
+            .lifecycle
+            .gateway
+            .workspace()
+            .roots()
+            .iter()
+            .flat_map(|root| context.poll_changes(root, &self.context.subscriptions))
+            .collect::<Vec<_>>();
         for mut change in changes.into_iter().take(MAX_CONTEXT_CHANGES_PER_POLL) {
             if !self.valid_context_change(&change) {
                 continue;
@@ -815,13 +857,24 @@ where
     }
 
     pub(super) fn valid_context_change(&self, change: &ContextProjectionChange) -> bool {
-        change.root_uri == self.lifecycle.gateway.root().uri()
+        let routed_root = change
+            .document_uri
+            .as_deref()
+            .map_or_else(
+                || self.workspace_root(TRACEDECAY_CONTEXT_CHANGED_METHOD),
+                |uri| self.document_root(uri),
+            )
+            .ok();
+        routed_root
+            .as_ref()
+            .is_some_and(|root| change.root_uri == root.uri())
             && is_supported_context_projection(&change.kind)
             && change.generation > 0
-            && change
-                .document_uri
-                .as_deref()
-                .is_none_or(|uri| self.lifecycle.gateway.root().contains_document(uri))
+            && change.document_uri.as_deref().is_none_or(|uri| {
+                routed_root
+                    .as_ref()
+                    .is_some_and(|root| root.contains_document(uri))
+            })
             && valid_context_projection_identity(&change.identity)
             && match (
                 change.document_uri.is_some(),
