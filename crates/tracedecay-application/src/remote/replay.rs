@@ -599,15 +599,17 @@ fn replay_effect_envelope(
         outcome.caller.revision,
     ))
     .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let event_digest_id = event_digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(RemoteProtocolFailureV1::AuthorityUnavailable)?;
     let operation = UseCaseId::new("use-case.remote.replay")
         .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-    let effect_id = EffectId::new(format!("effect.remote.replay.{}", event_digest.as_str()))
+    let effect_id = EffectId::new(format!("effect.remote.replay.{event_digest_id}"))
         .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-    let idempotency_key = IdempotencyKey::new(format!(
-        "idempotency.remote.replay.{}",
-        event_digest.as_str()
-    ))
-    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let idempotency_key =
+        IdempotencyKey::new(format!("idempotency.remote.replay.{event_digest_id}"))
+            .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
     let mut authority = outcome.caller_admission.admission.authority().clone();
     authority.policy = outcome.policy.policy.clone();
     authority
