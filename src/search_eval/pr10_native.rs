@@ -19,15 +19,15 @@ use tracedecay_domain::{
 };
 
 use super::candidate_output::{CandidateWorkloadV1, ProfileSpecV1, ResourceSampleV1};
-use crate::query::retrieval::fusion::{
+use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageError, FusionStageInput,
 };
-use crate::query::retrieval::rerank::{
+use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1,
     LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
     RerankViewOutcomeV1, RerankViewPermitV1,
 };
-use crate::query::retrieval::semantic::{
+use tracedecay_query::retrieval::semantic::{
     CodeSemanticEvidenceV1, SemanticLaneRetriever, SemanticRetrievalRequestV1, SemanticSearchKindV1,
 };
 
