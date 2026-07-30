@@ -16,38 +16,40 @@ use tracedecay_application::retrieval::{
     TypeHierarchyRecord,
 };
 use tracedecay_application::{
-    CallableCodeQueryFuture, CallableCodeQueryPort, CodeHierarchyRequest, CodeImpactRequest,
-    CodeImplementationsRequest, CodeOccurrenceRecord, CodeQueryPage, CodeRelationRequest,
-    CodeSignatureRequest, CodeSymbolSearchRequest, CoverageCompleteness, CoverageDomainState,
-    EvidenceCoverage, EvidenceDomain, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    LexicalOccurrenceRecord, ModuleApiRequest, Omission, OmissionReason, OpaqueCursor,
-    OperationBudgetUsage, PageState, PhraseSearchRequest, QualifiedNameRequest, RequestAdmission,
-    RequestContext, RetrievalEvidence, RetrievalPortContext, RetrievalPortOutcome,
-    SourceMetadataRecord, SourceMetadataRequest, TemporalState,
+    CallableCodeQueryFuture, CallableCodeQueryPort, CancellationObservation, CancellationStage,
+    CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest, CodeOccurrenceRecord,
+    CodeQueryPage, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
+    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain,
+    ExactOccurrenceRecord, ExactOccurrenceRequest, FreshnessState, LexicalOccurrenceRecord,
+    ModuleApiRequest, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageState,
+    PhraseSearchRequest, QualifiedNameRequest, RequestAdmission, RequestContext, RetrievalEvidence,
+    RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord, SourceMetadataRequest,
+    TemporalState,
 };
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, ComponentRevision, ExactAdmissionRuleRevision,
-    FreshnessVectorDigest, ManifestDigest, PrincipalId, QueryNormalizationRevision,
-    RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalFailure, RetrievalRequest,
-    RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId, SymbolOccurrenceId, TemporalModeV1,
-    UtcMicros, VectorWatermark, canonical_sha256,
+    AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
+    ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest,
+    PrincipalId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId,
+    RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId,
+    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
 use tracedecay_query::retrieval::exact::{
-    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest,
-    ExactLaneRetriever,
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest, ExactLaneRetriever,
 };
-use tracedecay_query::retrieval::graph::{GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use tracedecay_query::retrieval::lexical::{
-    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever,
+    LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, LexicalLaneRetriever,
 };
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
 use tracedecay_query::retrieval::{
-    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1, inspect_prepared_query_cursor,
+    AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
+    NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
+    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
+    inspect_prepared_query_cursor,
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
@@ -531,128 +533,200 @@ fn bounded_result<T>(
     }
 }
 
-fn chunk_occurrence(
-    latest: &LatestCompleteCodeIndexV1,
-    binding: &CodeCandidateBindingV1,
-) -> Option<CodeOccurrenceRecord> {
-    let file = latest
-        .generation
-        .snapshot()
-        .files
-        .iter()
-        .find(|file| file.file_occurrence_id == binding.occurrence.file)?;
-    let chunk = binding.occurrence.chunk.as_ref().and_then(|chunk_id| {
-        latest
-            .generation
-            .chunks()
-            .chunks()
-            .iter()
-            .find(|chunk| &chunk.id == chunk_id)
-    });
-    Some(CodeOccurrenceRecord {
-        file: binding.occurrence.file.clone(),
-        symbol: binding.occurrence.symbol.clone(),
-        chunk: binding.occurrence.chunk.clone(),
-        path: file.logical_path.clone(),
-        span: chunk.map_or(
-            tracedecay_domain::SourceSpan {
-                start_byte: 0,
-                end_byte: 0,
-            },
-            |chunk| chunk.anchor.source_span,
-        ),
-    })
-}
-
 fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_application::CodeQueryScope) -> bool {
     crate::path_scope::path_matches_scope(path, scope.path_prefix.as_deref())
 }
 
-fn exact_page(
-    latest: &LatestCompleteCodeIndexV1,
-    served_generation: &CodeGenerationId,
-    request: &ExactOccurrenceRequest,
-    batch: RetrieverBatch<ExactLaneEvidence>,
-) -> CodeQueryPage<ExactOccurrenceRecord> {
-    let mut items = Vec::new();
-    for candidate in &batch.candidates {
-        let Some(evidence) = batch
-            .evidence_by_occurrence
-            .get(&candidate.source_occurrence_id)
-        else {
-            continue;
-        };
-        let Some(matched_kind) = evidence
-            .binding
-            .matched_term_kinds
-            .iter()
-            .copied()
-            .find(|kind| request.kind.is_none_or(|expected| expected == *kind))
-        else {
-            continue;
-        };
-        let Some(occurrence) = chunk_occurrence(latest, &evidence.binding) else {
-            continue;
-        };
-        if !path_is_in_code_query_scope(&occurrence.path, &request.scope) {
-            continue;
-        }
-        items.push(ExactOccurrenceRecord {
-            occurrence,
-            matched_kind,
-            matched_literal: request.literal.clone(),
-        });
-    }
-    CodeQueryPage::new(
-        served_generation.clone(),
-        items,
-        Some(batch.coverage.eligible),
-        None,
-        None,
-    )
-    .unwrap_or_else(|_| panic!("validated exact lane creates a valid page"))
+struct LatestCompleteNativeRecordReadPortV1<'a> {
+    latest: &'a LatestCompleteCodeIndexV1,
 }
 
-fn lexical_page(
-    latest: &LatestCompleteCodeIndexV1,
-    served_generation: &CodeGenerationId,
-    request: &PhraseSearchRequest,
-    batch: RetrieverBatch<LexicalLaneEvidence>,
-) -> CodeQueryPage<LexicalOccurrenceRecord> {
-    let mut items = Vec::new();
-    for candidate in &batch.candidates {
-        let Some(evidence) = batch
-            .evidence_by_occurrence
-            .get(&candidate.source_occurrence_id)
-        else {
-            continue;
-        };
-        let Some(occurrence) = chunk_occurrence(latest, &evidence.binding) else {
-            continue;
-        };
-        if !path_is_in_code_query_scope(&occurrence.path, &request.scope) {
-            continue;
-        }
-        items.push(LexicalOccurrenceRecord {
-            occurrence,
-            score_micros: candidate.raw_score.0,
-            matched_phrases: request.phrases.clone(),
-            matched_terms: evidence
-                .matched_whole_terms
-                .iter()
-                .chain(&evidence.matched_subtokens)
-                .cloned()
-                .collect(),
-        });
+impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
+    fn generation(&self) -> &CodeGenerationId {
+        &self.latest.generation.manifest().generation_id
     }
-    CodeQueryPage::new(
-        served_generation.clone(),
-        items,
-        Some(batch.coverage.eligible),
-        None,
-        None,
-    )
-    .unwrap_or_else(|_| panic!("validated lexical lane creates a valid page"))
+
+    fn occurrence(&self, binding: &CodeCandidateBindingV1) -> Option<NativeCodeOccurrenceV1> {
+        if &binding.occurrence.generation != self.generation() {
+            return None;
+        }
+        let file = self
+            .latest
+            .generation
+            .snapshot()
+            .files
+            .iter()
+            .find(|file| file.file_occurrence_id == binding.occurrence.file)?;
+        let chunk = binding.occurrence.chunk.as_ref().and_then(|chunk_id| {
+            self.latest
+                .generation
+                .chunks()
+                .chunks()
+                .iter()
+                .find(|chunk| &chunk.id == chunk_id)
+        });
+        Some(NativeCodeOccurrenceV1 {
+            file: binding.occurrence.file.clone(),
+            symbol: binding.occurrence.symbol.clone(),
+            chunk: binding.occurrence.chunk.clone(),
+            path: file.logical_path.clone(),
+            span: chunk.map_or(
+                tracedecay_domain::SourceSpan {
+                    start_byte: 0,
+                    end_byte: 0,
+                },
+                |chunk| chunk.anchor.source_span,
+            ),
+        })
+    }
+
+    fn occurrence_by_chunk(&self, chunk_id: &CodeSearchChunkId) -> Option<NativeCodeOccurrenceV1> {
+        let chunk = self
+            .latest
+            .generation
+            .chunks()
+            .chunks()
+            .iter()
+            .find(|chunk| &chunk.id == chunk_id)?;
+        let file = self
+            .latest
+            .generation
+            .snapshot()
+            .files
+            .iter()
+            .find(|file| file.file_occurrence_id == chunk.anchor.file_occurrence_id)?;
+        Some(NativeCodeOccurrenceV1 {
+            file: chunk.anchor.file_occurrence_id.clone(),
+            symbol: chunk.anchor.symbol_occurrence_id.clone(),
+            chunk: Some(chunk.id.clone()),
+            path: file.logical_path.clone(),
+            span: chunk.anchor.source_span,
+        })
+    }
+
+    fn symbol(
+        &self,
+        symbol: &SymbolOccurrenceId,
+        file: &FileOccurrenceId,
+    ) -> Option<NativeSymbolRecordV1> {
+        let lineage = self
+            .latest
+            .generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|record| &record.occurrence == symbol)?;
+        let source = self
+            .latest
+            .generation
+            .snapshot()
+            .files
+            .iter()
+            .find(|source| &source.file_occurrence_id == file)?;
+        let chunk = self
+            .latest
+            .generation
+            .chunks()
+            .chunks()
+            .iter()
+            .find(|chunk| {
+                &chunk.anchor.file_occurrence_id == file
+                    && chunk.anchor.symbol_occurrence_id.as_ref() == Some(symbol)
+            });
+        let signature = chunk
+            .and_then(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+            })
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned);
+        let is_async = signature
+            .as_deref()
+            .is_some_and(|line| line.split_whitespace().any(|part| part == "async"));
+        let qualified_name = lineage.qualified_name.clone();
+        let name = qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(&qualified_name)
+            .to_owned();
+        Some(NativeSymbolRecordV1 {
+            occurrence: symbol.clone(),
+            name,
+            qualified_name,
+            kind: lineage.kind.clone(),
+            path: source.logical_path.clone(),
+            span: chunk.map_or(
+                tracedecay_domain::SourceSpan {
+                    start_byte: 0,
+                    end_byte: 0,
+                },
+                |chunk| chunk.anchor.source_span,
+            ),
+            signature,
+            is_async,
+        })
+    }
+}
+
+fn application_occurrence(record: NativeCodeOccurrenceV1) -> CodeOccurrenceRecord {
+    CodeOccurrenceRecord {
+        file: record.file,
+        symbol: record.symbol,
+        chunk: record.chunk,
+        path: record.path,
+        span: record.span,
+    }
+}
+
+fn application_exact_record(record: NativeExactRecordV1) -> ExactOccurrenceRecord {
+    ExactOccurrenceRecord {
+        occurrence: application_occurrence(record.occurrence),
+        matched_kind: record.matched_kind,
+        matched_literal: record.matched_literal,
+    }
+}
+
+fn application_lexical_record(record: NativeLexicalRecordV1) -> LexicalOccurrenceRecord {
+    LexicalOccurrenceRecord {
+        occurrence: application_occurrence(record.occurrence),
+        score_micros: record.score_micros,
+        matched_phrases: record.matched_phrases,
+        matched_terms: record.matched_terms,
+    }
+}
+
+fn application_symbol_record(record: NativeSymbolRecordV1) -> SymbolPrimitiveRecord {
+    SymbolPrimitiveRecord {
+        node_id: record.occurrence.as_str().to_owned(),
+        name: record.name,
+        qualified_name: record.qualified_name,
+        kind: record.kind,
+        file: record.path,
+        start_line_zero_based: 0,
+        end_line_zero_based: 0,
+        line: 1,
+        end_line: 1,
+        signature: record.signature,
+        is_async: record.is_async,
+        score: None,
+    }
+}
+
+fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord {
+    SymbolRelationRecord {
+        symbol: application_symbol_record(record.symbol),
+        edge_kind: record.edge_kind.map_or_else(
+            || "unknown".to_owned(),
+            |edge| format!("{edge:?}").to_ascii_lowercase(),
+        ),
+        dispatch_via_trait: false,
+        dispatch_from: None,
+        depth: Some(record.depth),
+    }
 }
 
 fn symbol_record(
@@ -660,38 +734,8 @@ fn symbol_record(
     symbol: &SymbolOccurrenceId,
     file: &tracedecay_domain::FileOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
-    let lineage = latest
-        .generation
-        .symbols()
-        .symbols
-        .iter()
-        .find(|record| &record.occurrence == symbol)?;
-    let source = latest
-        .generation
-        .snapshot()
-        .files
-        .iter()
-        .find(|source| &source.file_occurrence_id == file)?;
-    let qualified_name = lineage.qualified_name.clone();
-    let name = qualified_name
-        .rsplit("::")
-        .next()
-        .unwrap_or(&qualified_name)
-        .to_owned();
-    Some(SymbolPrimitiveRecord {
-        node_id: symbol.as_str().to_owned(),
-        name,
-        qualified_name,
-        kind: lineage.kind.clone(),
-        file: source.logical_path.clone(),
-        start_line_zero_based: 0,
-        end_line_zero_based: 0,
-        line: 1,
-        end_line: 1,
-        signature: None,
-        is_async: false,
-        score: None,
-    })
+    let records = LatestCompleteNativeRecordReadPortV1 { latest };
+    records.symbol(symbol, file).map(application_symbol_record)
 }
 
 fn symbol_record_by_id(
@@ -704,20 +748,7 @@ fn symbol_record_by_id(
         .chunks()
         .iter()
         .find(|chunk| chunk.anchor.symbol_occurrence_id.as_ref() == Some(symbol))?;
-    let mut record = symbol_record(latest, symbol, &chunk.anchor.file_occurrence_id)?;
-    let signature = chunk
-        .sanitized_text
-        .as_str()
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned);
-    record.is_async = signature
-        .as_deref()
-        .is_some_and(|line| line.split_whitespace().any(|part| part == "async"));
-    record.signature = signature;
-    Some(record)
+    symbol_record(latest, symbol, &chunk.anchor.file_occurrence_id)
 }
 
 fn symbol_page(
@@ -797,6 +828,33 @@ fn finish_direct_query<T: serde::Serialize>(
     requested_page: &tracedecay_application::PageRequest,
     eligible: u64,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    finish_query_with_coverage(
+        prepared,
+        context,
+        operation,
+        query_binding_digest,
+        page,
+        requested_page,
+        tracedecay_domain::RetrieverCoverage {
+            eligible,
+            examined: eligible,
+            excluded: 0,
+            capped: 0,
+            unknown: 0,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_query_with_coverage<T: serde::Serialize>(
+    prepared: &PreparedCallableQueryV1,
+    context: &RetrievalPortContext<'_>,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    page: CodeQueryPage<T>,
+    requested_page: &tracedecay_application::PageRequest,
+    coverage: tracedecay_domain::RetrieverCoverage,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let finished_at = query_finished_at();
     let generation = prepared.latest.generation.manifest().generation_id.clone();
     let bindings = PreparedQueryBindingsV1::new(
@@ -825,21 +883,10 @@ fn finish_direct_query<T: serde::Serialize>(
                 pagination.items,
                 Some(pagination.total),
                 next_cursor,
-                page.previous_cursor,
+                page.pr9_fallback,
             )
             .unwrap_or_else(|_| panic!("prepared query creates a valid application page"));
-            bounded_result(
-                page,
-                tracedecay_domain::RetrieverCoverage {
-                    eligible,
-                    examined: eligible,
-                    excluded: 0,
-                    capped: 0,
-                    unknown: 0,
-                },
-                finished_at,
-                None,
-            )
+            bounded_result(page, coverage, finished_at, None)
         }
         Err(error) => rejected_cursor(finished_at, generation, error),
     }
@@ -901,113 +948,185 @@ fn relation_records(
     records
 }
 
-fn graph_page(
-    latest: &LatestCompleteCodeIndexV1,
-    served_generation: &CodeGenerationId,
-    request: &CodeRelationRequest,
-    batch: RetrieverBatch<GraphLaneEvidence>,
-) -> CodeQueryPage<SymbolRelationRecord> {
-    let mut items = Vec::new();
-    for candidate in &batch.candidates {
-        let Some(evidence) = batch
-            .evidence_by_occurrence
-            .get(&candidate.source_occurrence_id)
-        else {
-            continue;
-        };
-        let Some(symbol) = evidence.binding.occurrence.symbol.as_ref() else {
-            continue;
-        };
-        let Some(record) = symbol_record(latest, symbol, &evidence.binding.occurrence.file) else {
-            continue;
-        };
-        if !path_is_in_code_query_scope(&record.file, &request.scope) {
-            continue;
+fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
+    match reason {
+        RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
+        RetrievalFailure::IncompatibleProjection { .. } => OmissionReason::Unsupported,
+        RetrievalFailure::StaleSource => OmissionReason::Stale,
+        RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
+            OmissionReason::Failed
         }
-        let edge_kind = evidence.path.last().map_or_else(
-            || "unknown".to_owned(),
-            |edge| format!("{:?}", edge.edge_kind).to_ascii_lowercase(),
-        );
-        items.push(SymbolRelationRecord {
-            symbol: record,
-            edge_kind,
-            dispatch_via_trait: false,
-            dispatch_from: None,
-            depth: Some(evidence.path.len() as u32),
-        });
     }
-    CodeQueryPage::new(
-        served_generation.clone(),
-        items,
-        Some(batch.coverage.eligible),
-        None,
-        None,
-    )
-    .unwrap_or_else(|_| panic!("validated graph lane creates a valid page"))
+}
+
+fn terminal_lane_evidence<T>(
+    finished_at: UtcMicros,
+    generation: CodeGenerationId,
+    reason: OmissionReason,
+) -> RetrievalEvidence<CodeQueryPage<T>> {
+    let RetrievalPortOutcome::Unavailable(mut evidence) =
+        unavailable_for_generation::<CodeQueryPage<T>>(finished_at, generation)
+    else {
+        unreachable!("generation unavailable helper returns unavailable evidence")
+    };
+    evidence.omissions[0].reason = reason;
+    if reason == OmissionReason::Stale {
+        evidence.temporal.freshness = FreshnessState::Stale;
+    }
+    evidence
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish_lane_query<T, E>(
+fn finish_native_lane_page<T, N>(
     prepared: &PreparedCallableQueryV1,
     context: &RetrievalPortContext<'_>,
     operation: &'static str,
     query_binding_digest: ManifestDigest,
     requested_page: &tracedecay_application::PageRequest,
-    outcome: RetrieverOutcome<RetrieverBatch<E>>,
-    map: impl FnOnce(RetrieverBatch<E>) -> CodeQueryPage<T>,
+    page: NativeLanePageV1<N>,
+    map: impl FnMut(N) -> T,
+) -> RetrievalPortOutcome<CodeQueryPage<T>>
+where
+    T: serde::Serialize,
+{
+    let coverage = page.coverage;
+    let page = CodeQueryPage::new(
+        page.generation,
+        page.items.into_iter().map(map).collect(),
+        Some(page.total_eligible),
+        None,
+        None,
+    )
+    .unwrap_or_else(|_| panic!("query-native lane creates a valid application page"));
+    finish_query_with_coverage(
+        prepared,
+        context,
+        operation,
+        query_binding_digest,
+        page,
+        requested_page,
+        coverage,
+    )
+}
+
+fn mark_lane_partial<T>(
+    outcome: RetrievalPortOutcome<CodeQueryPage<T>>,
+    coverage: tracedecay_domain::RetrieverCoverage,
+    reason: OmissionReason,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    match outcome {
+        RetrievalPortOutcome::Completed(mut evidence)
+        | RetrievalPortOutcome::Partial(mut evidence) => {
+            evidence.omissions.push(Omission {
+                domain: EvidenceDomain::Symbol,
+                count: coverage.eligible.saturating_sub(evidence.coverage.returned),
+                reason,
+            });
+            evidence.coverage.completeness = CoverageCompleteness::Partial;
+            for domain in &mut evidence.coverage.domains {
+                domain.completeness = CoverageCompleteness::Partial;
+            }
+            RetrievalPortOutcome::Partial(evidence)
+        }
+        outcome => outcome,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_native_lane_query<T, N>(
+    prepared: &PreparedCallableQueryV1,
+    context: &RetrievalPortContext<'_>,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    requested_page: &tracedecay_application::PageRequest,
+    outcome: NativeLaneOutcomeV1<N>,
+    mut map: impl FnMut(N) -> T,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>>
 where
     T: serde::Serialize,
 {
     let finished_at = query_finished_at();
     match outcome {
-        RetrieverOutcome::Complete(batch) => {
-            let coverage = batch.coverage;
-            finish_direct_query(
+        NativeLaneOutcomeV1::Complete(page) => finish_native_lane_page(
+            prepared,
+            context,
+            operation,
+            query_binding_digest,
+            requested_page,
+            page,
+            &mut map,
+        ),
+        NativeLaneOutcomeV1::Partial { page, reason } => {
+            let coverage = page.coverage;
+            let omission = retrieval_failure_omission(&reason);
+            let outcome = finish_native_lane_page(
                 prepared,
                 context,
                 operation,
                 query_binding_digest,
-                map(batch),
                 requested_page,
-                coverage.eligible,
-            )
-        }
-        RetrieverOutcome::Partial { value, reason } => {
-            let coverage = value.coverage;
-            let outcome = finish_direct_query(
-                prepared,
-                context,
-                operation,
-                query_binding_digest,
-                map(value),
-                requested_page,
-                coverage.eligible,
+                page,
+                &mut map,
             );
-            let partial_reason = match reason {
-                RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
-                RetrievalFailure::IncompatibleProjection { .. } => OmissionReason::Unsupported,
-                RetrievalFailure::StaleSource => OmissionReason::Stale,
+            mark_lane_partial(outcome, coverage, omission)
+        }
+        NativeLaneOutcomeV1::Unavailable(reason) => {
+            let omission = retrieval_failure_omission(&reason);
+            let evidence = terminal_lane_evidence(
+                finished_at,
+                prepared.latest.generation.manifest().generation_id.clone(),
+                omission,
+            );
+            match reason {
                 RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
-                    OmissionReason::Failed
+                    RetrievalPortOutcome::Failed(evidence)
                 }
-            };
-            match outcome {
-                RetrievalPortOutcome::Completed(evidence)
-                | RetrievalPortOutcome::Partial(evidence) => {
-                    let mut evidence = evidence;
-                    evidence.omissions.push(Omission {
-                        domain: EvidenceDomain::Symbol,
-                        count: coverage.eligible.saturating_sub(evidence.coverage.returned),
-                        reason: partial_reason,
-                    });
-                    evidence.coverage.completeness = CoverageCompleteness::Partial;
-                    RetrievalPortOutcome::Partial(evidence)
-                }
-                outcome => outcome,
+                RetrievalFailure::AuthorityUnavailable { .. }
+                | RetrievalFailure::IncompatibleProjection { .. }
+                | RetrievalFailure::StaleSource => RetrievalPortOutcome::Unavailable(evidence),
             }
         }
-        _ => unavailable(finished_at),
+        NativeLaneOutcomeV1::Denied => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
+            finished_at,
+            prepared.latest.generation.manifest().generation_id.clone(),
+            OmissionReason::Unavailable,
+        )),
+        NativeLaneOutcomeV1::Stale(_) => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
+            finished_at,
+            prepared.latest.generation.manifest().generation_id.clone(),
+            OmissionReason::Stale,
+        )),
+        NativeLaneOutcomeV1::BudgetExceeded(usage) => {
+            let mut evidence = terminal_lane_evidence(
+                finished_at,
+                prepared.latest.generation.manifest().generation_id.clone(),
+                OmissionReason::Budget,
+            );
+            evidence.budget = application_budget_usage(usage);
+            RetrievalPortOutcome::Partial(evidence)
+        }
+        NativeLaneOutcomeV1::Cancelled => {
+            let mut evidence = terminal_lane_evidence(
+                finished_at,
+                prepared.latest.generation.manifest().generation_id.clone(),
+                OmissionReason::Cancelled,
+            );
+            evidence.cancellation = Some(CancellationObservation {
+                stage: CancellationStage::DuringRead,
+                observed_at: finished_at,
+            });
+            RetrievalPortOutcome::Cancelled(evidence)
+        }
+    }
+}
+
+fn application_budget_usage(usage: RetrievalBudgetUsage) -> OperationBudgetUsage {
+    OperationBudgetUsage {
+        units_consumed: usage
+            .candidates_examined
+            .saturating_add(usage.hydrated_results),
+        bytes_consumed: usage.hydration_bytes,
+        elapsed_micros: usage.elapsed_micros,
     }
 }
 
@@ -1059,17 +1178,29 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(owners) = latest.production_query_owners() else {
                 return unavailable(finished_at);
             };
+            let records = LatestCompleteNativeRecordReadPortV1 { latest };
+            let Ok(native_context) =
+                AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
+            else {
+                return unavailable_for_generation(finished_at, served_generation);
+            };
             let outcome = owners.exact.retrieve_exact(&lane_request);
             match outcome {
-                Ok(outcome) => finish_lane_query(
-                    &prepared,
-                    &context,
-                    "code_exact_occurrence",
-                    query_binding_digest,
-                    &request.meta.page,
-                    outcome,
-                    |batch| exact_page(latest, &served_generation, request, batch),
-                ),
+                Ok(outcome) => {
+                    let outcome =
+                        native_context.exact(outcome, &request.literal, request.kind, |path| {
+                            path_is_in_code_query_scope(path, &request.scope)
+                        });
+                    finish_native_lane_query(
+                        &prepared,
+                        &context,
+                        "code_exact_occurrence",
+                        query_binding_digest,
+                        &request.meta.page,
+                        outcome,
+                        application_exact_record,
+                    )
+                }
                 Err(_) => unavailable(finished_at),
             }
         })
@@ -1144,17 +1275,28 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(owners) = latest.production_query_owners() else {
                 return unavailable(finished_at);
             };
+            let records = LatestCompleteNativeRecordReadPortV1 { latest };
+            let Ok(native_context) =
+                AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
+            else {
+                return unavailable_for_generation(finished_at, served_generation);
+            };
             let outcome = owners.lexical.retrieve_lexical(&lane_request);
             match outcome {
-                Ok(outcome) => finish_lane_query(
-                    &prepared,
-                    &context,
-                    "code_phrase_search",
-                    query_binding_digest,
-                    &request.meta.page,
-                    outcome,
-                    |batch| lexical_page(latest, &served_generation, request, batch),
-                ),
+                Ok(outcome) => {
+                    let outcome = native_context.lexical(outcome, &request.phrases, |path| {
+                        path_is_in_code_query_scope(path, &request.scope)
+                    });
+                    finish_native_lane_query(
+                        &prepared,
+                        &context,
+                        "code_phrase_search",
+                        query_binding_digest,
+                        &request.meta.page,
+                        outcome,
+                        application_lexical_record,
+                    )
+                }
                 Err(_) => unavailable(finished_at),
             }
         })
@@ -1224,17 +1366,28 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let Ok(owners) = latest.production_query_owners() else {
                 return unavailable(finished_at);
             };
+            let records = LatestCompleteNativeRecordReadPortV1 { latest };
+            let Ok(native_context) =
+                AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
+            else {
+                return unavailable_for_generation(finished_at, served_generation);
+            };
             let outcome = owners.graph.retrieve_graph(&lane_request);
             match outcome {
-                Ok(outcome) => finish_lane_query(
-                    &prepared,
-                    &context,
-                    "code_callees",
-                    query_binding_digest,
-                    &request.meta.page,
-                    outcome,
-                    |batch| graph_page(latest, &served_generation, request, batch),
-                ),
+                Ok(outcome) => {
+                    let outcome = native_context.graph(outcome, |path| {
+                        path_is_in_code_query_scope(path, &request.scope)
+                    });
+                    finish_native_lane_query(
+                        &prepared,
+                        &context,
+                        "code_callees",
+                        query_binding_digest,
+                        &request.meta.page,
+                        outcome,
+                        application_graph_record,
+                    )
+                }
                 Err(_) => unavailable(finished_at),
             }
         })
