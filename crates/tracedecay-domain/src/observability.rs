@@ -104,7 +104,7 @@ pub enum ObservabilityPayloadV1 {
     AdoptionEligibility(AdoptionEligibilityObservedV1),
     AdoptionOutcome(AdoptionOutcomeLinkedV1),
     AnalyticsConsent(AnalyticsConsentChangedV1),
-    OperationResource(OperationResourceObservedV1),
+    OperationResource(Box<OperationResourceObservedV1>),
     TelemetryDrop(TelemetryDropObservedV1),
     HealthSnapshot(HealthSnapshotObservedV1),
     Activity(ActivityObservedV1),
@@ -618,6 +618,27 @@ pub enum PerformanceDispositionV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schemars::schema_for;
+
+    #[derive(JsonSchema, Serialize)]
+    #[schemars(rename = "ObservabilityPayloadV1")]
+    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+    enum DirectOperationResourceSchemaV1 {
+        OperationResource(CoverageStateV1),
+    }
+
+    #[derive(JsonSchema, Serialize)]
+    #[schemars(rename = "ObservabilityPayloadV1")]
+    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+    enum BoxedOperationResourceSchemaV1 {
+        OperationResource(Box<CoverageStateV1>),
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+    enum DirectOperationResourceWireV1<'a> {
+        OperationResource(&'a OperationResourceObservedV1),
+    }
 
     fn stage(stage: OperationStageV1, elapsed_micros: u64) -> OperationStageTimingV1 {
         OperationStageTimingV1 {
@@ -693,8 +714,45 @@ mod tests {
             dropped_count: 0,
             process_boot_id: "boot:1".into(),
             producer_sequence: 1,
-            payload: ObservabilityPayloadV1::OperationResource(operation_resource(stage_timings)),
+            payload: ObservabilityPayloadV1::OperationResource(Box::new(operation_resource(
+                stage_timings,
+            ))),
         }
+    }
+
+    #[test]
+    fn boxed_operation_resource_preserves_wire_shape_and_round_trips() {
+        let resource = operation_resource(Vec::new());
+        let direct =
+            serde_json::to_value(DirectOperationResourceWireV1::OperationResource(&resource))
+                .unwrap();
+        let payload = ObservabilityPayloadV1::OperationResource(Box::new(resource));
+        let boxed = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(boxed, direct);
+        assert_eq!(
+            serde_json::from_value::<ObservabilityPayloadV1>(boxed).unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn boxing_is_transparent_to_schemars_tagged_enum_shape() {
+        let direct_wire = serde_json::to_value(DirectOperationResourceSchemaV1::OperationResource(
+            CoverageStateV1::Known,
+        ))
+        .unwrap();
+        let boxed_wire = serde_json::to_value(BoxedOperationResourceSchemaV1::OperationResource(
+            Box::new(CoverageStateV1::Known),
+        ))
+        .unwrap();
+        let direct_schema = serde_json::to_value(schema_for!(DirectOperationResourceSchemaV1))
+            .expect("direct schema must serialize");
+        let boxed_schema = serde_json::to_value(schema_for!(BoxedOperationResourceSchemaV1))
+            .expect("boxed schema must serialize");
+
+        assert_eq!(boxed_wire, direct_wire);
+        assert_eq!(boxed_schema, direct_schema);
     }
 
     #[test]
