@@ -1119,9 +1119,8 @@ mod tests {
             vec![HostBundleComponentV1::ContextMcp]
         );
         assert_eq!(
-            tracedecay_domain::integration::descriptor::host_descriptor_v1(HostKindV1::Kiro)
-                .components(),
-            &[tracedecay_domain::integration::descriptor::HostComponentV1::ContextMcp]
+            tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Kiro).components(),
+            &[tracedecay_domain::integration::HostComponentV1::ContextMcp]
         );
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Kiro,

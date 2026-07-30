@@ -486,7 +486,6 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
 fn unsupported_host_components_are_not_advertised_or_constructible() {
     for host in [
         HostKindV1::CursorCloud,
-        HostKindV1::Kiro,
         HostKindV1::ClineFamily,
         HostKindV1::Cline,
         HostKindV1::RooCode,
