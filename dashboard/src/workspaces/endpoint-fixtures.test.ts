@@ -28,8 +28,10 @@ import { AnyObject } from '../data/query/legacy.ts';
 import {
   AnalyticsOverviewPayloadSchema,
   AnalyticsUsageSummarySchema,
+  AutomationSchedulerStatusV1Schema,
   CodeIndexFreshnessPayloadSchema,
   CostsReadModelSchema,
+  DoctorEvidenceStateSchema,
   DoctorFindingsPayloadSchema,
   DoctorStorageFindingKindSchema,
   EnvelopeSchema,
@@ -201,20 +203,20 @@ const DiagnosticsPayload = z
   })
   .passthrough();
 
-// AutomationsPage.tsx: SchedulerStatusSchema.
-const SchedulerStatusSchema = z
-  .object({
-    status: z.string(),
-    paused: z.boolean(),
-    enabled: z.boolean().optional(),
-    scheduler_tick_secs: z.number().optional(),
-    pending_fact_proposals: z.number().optional(),
-    pending_skills: z.number().optional(),
-    last_session_activity: z.number().nullable().optional(),
-  })
-  .passthrough();
+// The three automation list routes still answer with a bare `Value`, so these
+// stay mirrors. Their scheduler sibling does not: `automation_scheduler_api.rs`
+// is typed now, the page reads the generated `AutomationSchedulerStatusV1Schema`
+// directly, and the hand-written copy that used to sit here — every field
+// `optional()`, no `pending_review` at all — was mirroring a page schema that no
+// longer exists. It is gone rather than rewritten; a generated contract needs no
+// mirror, and keeping one would be the drift this suite exists to catch.
+//
+// Every field below is required because the handler's `json!` literal writes it
+// unconditionally, matching the page after 73d1b85be. That requiredness is the
+// contract under test: an optional collection is what let a body missing its
+// real key parse clean and render as a queue read and found empty.
 
-// AutomationsPage.tsx: JobsPayloadSchema.
+// AutomationsPage.tsx: JobsPayloadSchema (automation_jobs_api.rs::list).
 const JobsPayloadSchema = z
   .object({
     jobs: z.array(
@@ -232,9 +234,44 @@ const JobsPayloadSchema = z
   })
   .passthrough();
 
-// AutomationsPage.tsx: SkillsPayloadSchema.
+// AutomationsPage.tsx: SkillsPayloadSchema (automation_skills_api.rs::list).
+// `metadata.id`, `.title` and `.state` are plain required members of
+// `ManagedSkillMetadata`; the page reads them directly rather than through the
+// fallback chain it used to carry.
 const SkillsPayloadSchema = z
-  .object({ skills: z.array(AnyObject).optional(), items: z.array(AnyObject).optional() })
+  .object({
+    skills: z.array(
+      z
+        .object({
+          metadata: z
+            .object({ id: z.string(), title: z.string(), state: z.string() })
+            .passthrough(),
+        })
+        .passthrough(),
+    ),
+    count: z.number(),
+  })
+  .passthrough();
+
+// AutomationsPage.tsx: FactProposalsPayloadSchema
+// (automation_fact_proposals_api.rs::list). `add_fact_request` is the one
+// optional member — `skip_serializing_if = "Option::is_none"` on
+// `FactProposalRecord` — so a record without one omits the key entirely.
+const FactProposalsPayloadSchema = z
+  .object({
+    proposals: z.array(
+      z
+        .object({
+          proposal_id: z.string(),
+          state: z.string(),
+          add_fact_request: z.object({ content: z.string() }).passthrough().optional(),
+        })
+        .passthrough(),
+    ),
+    count: z.number(),
+    limit: z.number(),
+    error: z.string(),
+  })
   .passthrough();
 
 describe('endpoint fixtures parse against their consuming contracts', () => {
@@ -578,12 +615,23 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect([...stamps].sort((a, b) => b - a)).toEqual(stamps);
   });
 
-  it('GET /api/automation/scheduler/status — automations (SchedulerStatusSchema)', () => {
-    const data = parse(SchedulerStatusSchema, '/api/automation/scheduler/status');
+  it('GET /api/automation/scheduler/status — automations (generated contract)', () => {
+    const data = parse(AutomationSchedulerStatusV1Schema, '/api/automation/scheduler/status');
     expect(data.paused).toBe(false);
     expect(data.status.length).toBeGreaterThan(0);
+    // Both queues measured. This is the reading a mounted profile produces, and
+    // it is also what the list panels consult before they will call themselves
+    // empty — an `unreadable` fixture here would put every automation
+    // screenshot into the deferred state instead of the populated one.
+    expect(data.pending_review.fact_proposals.state).toBe('measured');
+    expect(data.pending_review.skills.state).toBe('measured');
   });
 
+  // The three list gates below assert the wire invariant each panel's
+  // completeness check keys off — the handler derives `count` from the very
+  // vector it serializes — rather than re-deriving the page's reconciliation.
+  // A fixture that broke the invariant would render a partial-list notice in
+  // every screenshot of a healthy surface.
   it('GET /api/automation/jobs — automations (JobsPayloadSchema)', () => {
     const data = parse(JobsPayloadSchema, '/api/automation/jobs');
     expect(data.jobs.length).toBeGreaterThanOrEqual(3);
@@ -592,12 +640,17 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
 
   it('GET /api/automation/skills — automations (SkillsPayloadSchema)', () => {
     const data = parse(SkillsPayloadSchema, '/api/automation/skills');
-    expect((data.skills ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(data.skills.length).toBeGreaterThanOrEqual(3);
+    expect(data.count).toBe(data.skills.length);
   });
 
-  it('GET /api/automation/fact-proposals — automations (AnyObject)', () => {
-    const data = parse(AnyObject, '/api/automation/fact-proposals');
-    expect(Array.isArray(data['proposals'])).toBe(true);
+  it('GET /api/automation/fact-proposals — automations (FactProposalsPayloadSchema)', () => {
+    const data = parse(FactProposalsPayloadSchema, '/api/automation/fact-proposals');
+    expect(data.proposals.length).toBeGreaterThanOrEqual(3);
+    expect(data.count).toBe(data.proposals.length);
+    // Strictly under the cap the route ran the query with, so the fixture is a
+    // complete answer rather than a full page that may have more behind it.
+    expect(data.count).toBeLessThan(data.limit);
   });
 
   // Validated against the generated `SettingsPayloadV1Schema` inside the
@@ -653,15 +706,48 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     }
   });
 
-  it('GET /api/doctor/findings — observatory doctor envelope (wire-true unsupported)', () => {
-    // Wire-true default: no admitted Doctor reader → typed unsupported envelope
-    // with no entries (doctor_findings_api.rs). Populated findings are avoided
-    // because the DoctorInspector badge tokens fail light-theme contrast.
+  it('GET /api/doctor/findings — observatory doctor envelope (populated report)', () => {
     const env = parse(EnvelopeSchema(DoctorFindingsPayloadSchema), '/api/doctor/findings');
-    expect(env.domain_state).toBe('unsupported');
-    expect(env.payload.entries.length).toBe(0);
     expect(env.payload.family_filter).toBeNull();
     expect(env.payload.known_families.length).toBe(7);
+
+    // Every evidence state exactly once. This fixture is what puts the
+    // inspector's badges on screen for the axe scan, and it used to be empty
+    // precisely so they would not be — so "one badge per state" is the density
+    // spec, not a nicety. A ninth state added in Rust makes this fail rather
+    // than silently going unscanned.
+    const states = env.payload.entries.map((e) => e.finding.state);
+    expect(new Set(states).size).toBe(states.length);
+    expect(new Set(states)).toEqual(new Set(DoctorEvidenceStateSchema.options.map((o) => o.value)));
+
+    // The kernel invariant the projection enforces: only a healthy finding may
+    // claim complete coverage of a healthy result.
+    for (const { finding } of env.payload.entries) {
+      if (finding.state === 'healthy_complete_coverage') {
+        expect(finding.coverage.completeness).toBe('complete');
+      }
+      expect(finding.coverage.statement.length).toBeGreaterThan(0);
+      expect(finding.evidence.length).toBeGreaterThan(0);
+    }
+
+    // Families that answered nothing are reported as unavailable rather than
+    // dropped, which is what renders the coverage-gap chips.
+    const unavailable =
+      env.payload.report_coverage?.families.filter(
+        (family) => family.consultation.status === 'unavailable',
+      ) ?? [];
+    expect(unavailable.length).toBeGreaterThan(0);
+    expect(env.payload.report_coverage?.completeness).toBe('partial');
+    expect(env.domain_state).toBe('partial');
+
+    // Every finding that references a remediation resolves to a descriptor, and
+    // at least one is non-dispatchable — the owning surface supplies the change.
+    const operations = new Set(env.payload.remediations.map((r) => r.operation));
+    for (const { finding } of env.payload.entries) {
+      if (finding.remediation) expect(operations.has(finding.remediation.owning_operation)).toBe(true);
+    }
+    expect(env.payload.remediations.some((r) => r.target === null)).toBe(true);
+    expect(env.payload.remediations.some((r) => r.target !== null)).toBe(true);
   });
 
   // The two Plan 26 canonical read models. The density assertions here are

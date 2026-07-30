@@ -1,10 +1,25 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, FileSearch, RefreshCw, ShieldCheck, X } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  CircleSlash,
+  Clock,
+  FileSearch,
+  HelpCircle,
+  RefreshCw,
+  ShieldCheck,
+  ShieldX,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   assertNever,
   type DashboardDoctorRemediationDescriptorV1,
+  type DoctorEvidenceState,
   type DoctorFindingsPayload,
   type DoctorOwningSurface,
   type DoctorRemediationOperation,
@@ -29,6 +44,7 @@ import { mintBrowserIdempotencyKey } from '../../data/identity.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
+import { cn } from '../../ui/cn.ts';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid.tsx';
 import {
   availableRemediationActions,
@@ -378,17 +394,11 @@ function FindingCard({
   onInspect: () => void;
 }) {
   const { finding } = entry;
-  const evidence = doctorEvidencePresentation(finding.state);
   const authorized = actions.canPreview || actions.canApply;
   return (
     <OverviewCard title={doctorFamilyLabel(finding.family)}>
       <div className="flex flex-col gap-2">
-        <span
-          className={`inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium ${evidence.tokenClass}`}
-          data-evidence-state={finding.state}
-        >
-          {evidence.label}
-        </span>
+        <EvidenceBadge state={finding.state} />
         <EvidenceTruthStrip
           coverage={{ completeness: finding.coverage.completeness }}
           citations={finding.evidence.length}
@@ -430,6 +440,62 @@ function FindingCard({
         ) : null}
       </div>
     </OverviewCard>
+  );
+}
+
+/** The lucide glyph for each evidence state, matching what `StateChip` draws
+ * for the domain state that evidence state maps to — so a Doctor finding and
+ * the chip beside it never disagree about what `stale` looks like. */
+const EVIDENCE_ICON: Record<DoctorEvidenceState, LucideIcon> = {
+  unsupported: CircleSlash,
+  absent: HelpCircle,
+  stale: Clock,
+  degraded: XCircle,
+  partial: AlertTriangle,
+  unknown: HelpCircle,
+  denied: ShieldX,
+  healthy_complete_coverage: CheckCircle2,
+};
+
+/**
+ * A finding's evidence state, drawn the way `StateChip` draws a domain state:
+ * the hue rides a lamp bar and an icon, and the label text sits on an
+ * AA-contrast token.
+ *
+ * The badge used to paint its own label in `evidence.tokenClass`. Those are
+ * indicator hues, chosen to read as a lamp against a panel, and as 11px label
+ * text on `--surface-2` five of them miss WCAG AA — 4.5:1 is the threshold
+ * that applies, since large-text 3:1 needs 18.66px bold or 24px:
+ *
+ *   light   state-partial 3.91:1 · state-stale 4.08:1 · state-ready 4.23:1
+ *   dark    state-error   4.41:1 · state-unknown 4.44:1
+ *
+ * The light figures are read out of Chromium by `axe-observatory.ts`; the dark
+ * pair is computed from the tokens, and axe's own `color-contrast` rule reports
+ * three serious violations per dark scan against the old markup, so the theme
+ * that comment threads used to call clean was never clean either.
+ *
+ * `text-text-secondary` measures 8.64:1 on that same surface. The hue is not
+ * lost — it moves to the lamp and the glyph, where it is decoration beside a
+ * text label rather than the only carrier of meaning, which is the rule the
+ * whole state taxonomy is built on.
+ *
+ * This is why `stories/fixtures/data.ts` served an empty Doctor envelope: a
+ * populated one put these badges on screen and the axe gate could not pass with
+ * them there. The fixture is populated now, and the gate scans them.
+ */
+function EvidenceBadge({ state }: { state: DoctorEvidenceState }) {
+  const evidence = doctorEvidencePresentation(state);
+  const Icon = EVIDENCE_ICON[state];
+  return (
+    <span
+      className="relative inline-flex w-fit items-center gap-1.5 border border-edge-subtle bg-surface-2 py-[3px] pl-2.5 pr-2 text-2xs font-medium"
+      data-evidence-state={state}
+    >
+      <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[2px]', evidence.dotClass)} />
+      <Icon aria-hidden size={11} className={evidence.tokenClass} />
+      <span className="text-text-secondary">{evidence.label}</span>
+    </span>
   );
 }
 
