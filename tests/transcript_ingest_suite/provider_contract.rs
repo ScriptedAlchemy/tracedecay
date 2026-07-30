@@ -4,7 +4,7 @@ use tracedecay::sessions::SessionProvider;
 use tracedecay_domain::HostIntegrationIdV1;
 
 #[test]
-fn direct_hosts_and_transcript_only_providers_partition_host_admission() {
+fn provider_capture_and_direct_host_admission_remain_distinct() {
     let catalogued = HostIntegrationIdV1::ALL
         .into_iter()
         .map(HostIntegrationIdV1::as_str)
@@ -16,17 +16,21 @@ fn direct_hosts_and_transcript_only_providers_partition_host_admission() {
         .collect::<BTreeSet<_>>();
     assert_eq!(catalogued, direct_from_providers);
 
-    let transcript_only = SessionProvider::ALL
+    let admitted_without_host_integration = SessionProvider::ALL
         .into_iter()
         .filter(|provider| provider.supports_host_admission())
         .filter(|provider| HostIntegrationIdV1::from_wire(provider.id()).is_none())
         .collect::<Vec<_>>();
     assert_eq!(
-        transcript_only,
+        admitted_without_host_integration,
         [
             SessionProvider::Cline,
             SessionProvider::RooCode,
             SessionProvider::Kilo,
         ]
+    );
+    assert!(
+        !SessionProvider::Vibe.supports_host_admission(),
+        "Vibe canonical capture runs through provider ingestion, not direct host admission"
     );
 }
