@@ -1,8 +1,8 @@
-//! Independent fielded lexical/BM25 lane contracts (Plan 15: fielded BM25
-//! over typed result grains, character-level typo recovery, query/tool/
-//! protocol echo penalties, and exact phrase support; Plan 25:
-//! `src/query/retrieval/lexical.rs` consumes whole-term and
-//! language-profiled subtoken postings independently).
+//! Independent fielded lexical/BM25 lane contracts.
+//!
+//! The lane supports typed result grains, character-level typo recovery,
+//! query/tool/protocol echo penalties, and exact phrases. Whole-term and
+//! language-profiled subtoken postings remain independent.
 //!
 //! The lexical lane is separate from the exact lane; exact and lexical are
 //! independently disableable and inspectable.
@@ -43,7 +43,7 @@ pub struct LexicalQueryPartsV1 {
     pub phrases: Vec<String>,
 }
 
-/// One shared tokenizer for production PR9 and its direct evaluator.
+/// Shared tokenizer for production retrieval and its direct evaluator.
 ///
 /// Multi-token sanitized input is also retained as a phrase. This gives exact
 /// diagnostic/error text and natural-language queries a bounded lexical phrase
@@ -120,9 +120,9 @@ fn split_identifier_parts(token: &str) -> impl Iterator<Item = String> + '_ {
     parts.into_iter()
 }
 
-/// Typed lexical fields over code-search result grains (Plan 15: typed
-/// result grains; Plan 25: whole exact terms and language-profiled subtokens
-/// are distinct fields).
+/// Typed lexical fields over code-search result grains.
+///
+/// Whole exact terms and language-profiled subtokens are distinct fields.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LexicalFieldV1 {
     SymbolName,
@@ -142,8 +142,8 @@ pub struct LexicalFieldFilterV1 {
     pub include: bool,
 }
 
-/// Typed lexical-lane request (Plan 05: exact identifier, phrase, token,
-/// field, and bounded fuzzy requests).
+/// Typed lexical-lane request for identifier, phrase, token, field, and
+/// bounded fuzzy retrieval.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
@@ -154,18 +154,18 @@ pub struct LexicalLaneRequest<'a> {
     pub phrases: Vec<String>,
     pub field_filters: Vec<LexicalFieldFilterV1>,
     /// Bounded fuzzy-term budget; the profile revision pins tokenizer and
-    /// normalization versions (Plan 05: lexical ranking centralizes
-    /// tokenizer/profile versions).
+    /// normalization versions.
     pub fuzzy_budget: u32,
     pub lexical_profile_revision: ComponentRevision,
     pub score_domain: ScoreDomainId,
     pub budget: RetrievalBudget,
 }
 
-/// Per-occurrence lexical-lane evidence with its field score breakdown
-/// (Plan 05: return each channel's raw score, rank, normalized feature, and
-/// fusion contribution; none is a probability unless a valid cohort-bound
-/// calibrator says so).
+/// Per-occurrence lexical-lane evidence with its field score breakdown.
+///
+/// Each channel reports its raw score, rank, normalized feature, and fusion
+/// contribution. None is a probability without a valid cohort-bound
+/// calibrator.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LexicalLaneEvidence {
@@ -178,9 +178,9 @@ pub struct LexicalLaneEvidence {
     pub echo_penalty_applied: bool,
 }
 
-/// The lexical-lane retriever contract (Plan 25: independently disableable;
-/// missing lexical authority rejects the request as unavailable — Plan 15
-/// pipeline step 3).
+/// The independently disableable lexical-lane retriever contract.
+///
+/// Missing lexical authority rejects the request as unavailable.
 pub trait LexicalLaneRetriever {
     /// Retrieve the committed lexical candidate prefix for `request`.
     fn retrieve_lexical(
@@ -304,9 +304,10 @@ fn field_admitted(filters: &[LexicalFieldFilterV1], field: LexicalFieldV1) -> bo
     whitelisted && !excluded
 }
 
-/// The independent fielded lexical/BM25 lane (Plan 15: fielded BM25 over
-/// typed result grains; Plan 25: whole-term and language-profiled subtoken
-/// postings independently of the exact lane).
+/// The independent fielded lexical/BM25 lane over typed result grains.
+///
+/// Whole-term and language-profiled subtoken postings remain independent of
+/// the exact lane.
 ///
 /// The lane composes the store-side [`LexicalPostingReadPort`]. It enforces
 /// field filters, recomputes every candidate's raw score as the checked
@@ -455,9 +456,8 @@ where
         request.validate()?;
         let outcome = match self.postings.read_lexical_postings(request) {
             Ok(outcome) => outcome,
-            // Plan 15 pipeline step 3: a missing lexical authority rejects
-            // the request as a typed unavailable outcome, never a
-            // substitution.
+            // A missing lexical authority rejects the request as a typed
+            // unavailable outcome, never a substitution.
             Err(RetrievalPortError::AuthorityUnavailable(detail)) => {
                 return Ok(RetrieverOutcome::Unavailable(
                     RetrievalFailure::AuthorityUnavailable { detail },
@@ -503,9 +503,10 @@ where
     }
 }
 
-/// Deterministic digest of the lexical lane's committed prefix (Plan 15: a
-/// lane contributes its admitted prefix with a committed checkpoint; cursor
-/// replay binds the completed set, it never recomputes).
+/// Deterministic digest of the lexical lane's committed prefix.
+///
+/// A lane contributes its admitted prefix with a committed checkpoint; cursor
+/// replay binds the completed set and never recomputes it.
 fn lexical_checkpoint_digest(
     generation: &CodeGenerationId,
     candidates: &[CompactCandidate],

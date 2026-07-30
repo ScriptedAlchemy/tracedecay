@@ -1,18 +1,17 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use tracedecay_domain::{
+    AuthorizationRevision, CodeGenerationId, EphemeralSanitizedQueryViewV1, ExactAdmissionProof,
+    ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FreshnessVectorDigest,
+    PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RepositoryId, RetrievalAnchorId,
+    RetrievalBudget, RetrievalContractError, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    SanitizerRevision, SingleRootScopeV1, SourceOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorWatermark,
+};
 use tracedecay_query::retrieval::exact::{ExactLaneEvidence, ExactLaneRequest, ExactLiteralV1};
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, CompactCandidateEmission, EmitsCompactCandidates,
-    RetrievalPortError,
-};
-use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, CompactCandidate, EphemeralSanitizedQueryViewV1,
-    ExactAdmissionProof, ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1,
-    FreshnessVectorDigest, PrincipalId, PrivacyDomainId, QueryNormalizationRevision, RepositoryId,
-    RetrievalAnchorId, RetrievalBudget, RetrievalContractError, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, SanitizerRevision, SingleRootScopeV1, SourceOccurrenceId, TemporalModeV1,
-    UtcMicros, VectorWatermark,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
 
 fn id<T>(value: &str) -> T
@@ -142,15 +141,4 @@ fn exact_evidence_matches_the_frozen_generation_and_literal() {
         evidence.validate(&request),
         Err(RetrievalPortError::GenerationMismatch)
     );
-}
-
-#[test]
-fn code_lanes_emit_only_the_shared_compact_candidate() {
-    fn assert_shared_candidate<T>()
-    where
-        T: EmitsCompactCandidates<Candidate = CompactCandidate>,
-    {
-    }
-
-    assert_shared_candidate::<CompactCandidateEmission>();
 }

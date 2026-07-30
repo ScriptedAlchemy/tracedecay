@@ -1,6 +1,7 @@
-//! Independent exact-literal lane contracts (Plan 15: the exact tier is
-//! non-demotable; Plan 25: `src/query/retrieval/exact.rs` consumes only whole
-//! exact technical terms and a central `ExactAdmissionProof`).
+//! Independent exact-literal lane contracts.
+//!
+//! The exact tier is non-demotable and consumes only whole exact technical
+//! terms plus a central `ExactAdmissionProof`.
 //!
 //! The exact lane is a true independent lane, separate from the fielded
 //! lexical/BM25 lane. An approximate, graph-only, or later semantic candidate
@@ -22,9 +23,10 @@ use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, ExactTermPostingReadPort, RetrievalPortError,
 };
 
-/// Typed exact-lane request (Plan 15 pipeline step 2: exact technical
-/// literals are parsed under a versioned exact-admission specification before
-/// any lane executes).
+/// Typed exact-lane request.
+///
+/// Exact technical literals are parsed under a versioned exact-admission
+/// specification before any lane executes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExactLaneRequest<'a> {
     pub base: RetrievalRequest,
@@ -85,8 +87,9 @@ impl ExactLiteralV1 {
     }
 }
 
-/// Per-occurrence exact-lane evidence (Plan 15: exactly one typed evidence
-/// value per returned `source_occurrence_id`).
+/// Per-occurrence exact-lane evidence.
+///
+/// Each returned `source_occurrence_id` has exactly one typed evidence value.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactLaneEvidence {
@@ -129,7 +132,7 @@ impl ExactLaneEvidence {
 
 /// The exact-lane retriever contract. Implementations adapt the store-side
 /// `ExactTermPostingReadPort` into `CompactCandidate` values for one frozen
-/// generation (Plan 25).
+/// generation.
 pub trait ExactLaneRetriever {
     /// Retrieve the committed exact-tier candidate prefix for `request`.
     fn retrieve_exact(
@@ -138,9 +141,10 @@ pub trait ExactLaneRetriever {
     ) -> Result<RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>, RetrievalPortError>;
 }
 
-/// The sole exact-admission authority surface (Plan 15: only the central
-/// exact-admission validator can mint `ExactAdmissionProof`; retrievers
-/// cannot assign an exact tier).
+/// The sole exact-admission authority surface.
+///
+/// Only the central exact-admission validator can mint
+/// `ExactAdmissionProof`; retrievers cannot assign an exact tier.
 pub trait ExactAdmissionAuthority: ExactAdmissionValidator {
     /// Parse `request.query` into typed literal candidates under the
     /// versioned admission specification, preserving original bytes and
@@ -152,7 +156,7 @@ pub trait ExactAdmissionAuthority: ExactAdmissionValidator {
     ) -> Vec<ExactLiteralV1>;
 }
 
-/// Versioned central exact-admission authority for PR9 code queries.
+/// Versioned central exact-admission authority for code queries.
 ///
 /// Query parsing and proof minting intentionally live on the same authority.
 /// Posting readers can ask this value to mint a proof, but cannot construct or
@@ -521,15 +525,17 @@ fn is_known_tool(value: &str) -> bool {
     )
 }
 
-/// Fixed-point score contributed by one admitted matched literal (Plan 15:
-/// the exact tier is non-demotable and its identity is the validated proof;
-/// the lane's raw score is a deterministic count of admitted literals, never
-/// a float and never a port-supplied ranking signal).
+/// Fixed-point score contributed by one admitted matched literal.
+///
+/// The exact tier is non-demotable and its identity is the validated proof.
+/// The lane's raw score is a deterministic count of admitted literals, never a
+/// float or a port-supplied ranking signal.
 const ADMITTED_LITERAL_SCORE_MICROS: u64 = 1_000_000;
 
-/// The independent exact-literal lane (Plan 15 pipeline steps 2-3; Plan 25:
-/// the exact lane consumes only whole exact technical terms plus the
-/// centrally minted `ExactAdmissionProof`).
+/// The independent exact-literal lane.
+///
+/// The lane consumes only whole exact technical terms plus the centrally
+/// minted `ExactAdmissionProof`.
 ///
 /// The lane composes the central [`ExactAdmissionAuthority`] with the
 /// store-side [`ExactTermPostingReadPort`]. It never constructs an admission
@@ -746,8 +752,8 @@ where
         self.enforce_request_literals(request)?;
         let outcome = match self.postings.read_exact_postings(request) {
             Ok(outcome) => outcome,
-            // Plan 15 pipeline step 3: a missing exact authority rejects the
-            // request as a typed unavailable outcome, never a substitution.
+            // A missing exact authority rejects the request as a typed
+            // unavailable outcome, never a substitution.
             Err(RetrievalPortError::AuthorityUnavailable(detail)) => {
                 return Ok(RetrieverOutcome::Unavailable(
                     RetrievalFailure::AuthorityUnavailable { detail },
@@ -795,9 +801,10 @@ where
     }
 }
 
-/// Deterministic digest of the exact lane's committed prefix (Plan 15: a
-/// lane contributes its admitted prefix with a committed checkpoint; cursor
-/// replay binds the completed set, it never recomputes).
+/// Deterministic digest of the exact lane's committed prefix.
+///
+/// A lane contributes its admitted prefix with a committed checkpoint; cursor
+/// replay binds the completed set and never recomputes it.
 fn exact_checkpoint_digest(
     generation: &CodeGenerationId,
     candidates: &[CompactCandidate],
