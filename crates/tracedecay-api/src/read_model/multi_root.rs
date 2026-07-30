@@ -42,7 +42,10 @@ impl MultiRootCapabilityV1 {
 /// reconstruct or flatten it.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(transparent)]
-pub struct MultiRootQueryReadModelV1<T>(pub MultiRootQueryPageV1<T>);
+#[schemars(rename = "MultiRootQueryReadModelV1")]
+pub struct MultiRootQueryReadModelV1<T>(
+    #[schemars(with = "MultiRootQueryPageV1<serde_json::Value>")] pub MultiRootQueryPageV1<T>,
+);
 
 impl<T> From<MultiRootQueryPageV1<T>> for MultiRootQueryReadModelV1<T> {
     fn from(page: MultiRootQueryPageV1<T>) -> Self {

@@ -1,3 +1,5 @@
+use schemars::{JsonSchema, schema_for};
+use serde_json::Value;
 use tracedecay_api::read_model::multi_root::MultiRootQueryReadModelV1;
 use tracedecay_application::{MultiRootContinuationV1, MultiRootQueryPageV1};
 use tracedecay_domain::{
@@ -57,4 +59,73 @@ fn dashboard_read_model_preserves_per_root_partial_truth() {
     assert_eq!(wire["roots"][0]["outcome"]["outcome"], "exact");
     assert_eq!(wire["roots"][1]["outcome"]["outcome"], "unavailable");
     assert_eq!(wire["continuation"]["next_page"], 1);
+}
+
+#[derive(JsonSchema)]
+struct DashboardPayloadMarkerV1;
+
+#[test]
+fn dashboard_multi_root_schema_has_stable_resolved_concrete_names() {
+    let schema = serde_json::to_value(schema_for!(
+        MultiRootQueryReadModelV1<DashboardPayloadMarkerV1>
+    ))
+    .unwrap();
+    let definitions = schema["$defs"].as_object().unwrap();
+
+    assert!(
+        definitions
+            .keys()
+            .any(|name| name.starts_with("ScopeOutcome_for_"))
+    );
+    assert!(
+        definitions
+            .keys()
+            .any(|name| name.starts_with("RootScopeOutcomeV1_for_"))
+    );
+    assert!(!definitions.contains_key("ScopeOutcome2"));
+    assert!(!definitions.contains_key("RootScopeOutcomeV12"));
+    assert_all_local_refs_resolve(&schema, definitions);
+    assert!(
+        !contains_ref_to(&schema, "DashboardPayloadMarkerV1"),
+        "catalog placeholder payloads must be inlined instead of creating order-dependent refs"
+    );
+}
+
+fn assert_all_local_refs_resolve(value: &Value, definitions: &serde_json::Map<String, Value>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+                && let Some(name) = reference.strip_prefix("#/$defs/")
+            {
+                assert!(
+                    definitions.contains_key(name),
+                    "schema reference {reference} has no definition"
+                );
+            }
+            for child in object.values() {
+                assert_all_local_refs_resolve(child, definitions);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                assert_all_local_refs_resolve(child, definitions);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn contains_ref_to(value: &Value, definition: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.get("$ref").and_then(Value::as_str) == Some(&format!("#/$defs/{definition}"))
+                || object
+                    .values()
+                    .any(|child| contains_ref_to(child, definition))
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|child| contains_ref_to(child, definition)),
+        _ => false,
+    }
 }
