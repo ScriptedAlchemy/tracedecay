@@ -421,6 +421,11 @@ fn test_kimi_install_stages_bundle_but_does_not_mutate_host_registry() {
     let error = KimiIntegration.install(&ctx).unwrap_err().to_string();
     assert!(error.contains("interactive `/plugins` host API"));
     assert!(error.contains("made no current plugin registration changes"));
+    assert!(error.contains(&format!(
+        "/plugins install {}",
+        home.join(".tracedecay/host-bundle-stage/kimi/tracedecay")
+            .display()
+    )));
     assert_eq!(std::fs::read(&installed_path).unwrap(), prior_registry);
     assert!(!kimi_code_home.join("plugins/managed/tracedecay").exists());
 
@@ -496,12 +501,24 @@ fn test_kimi_uninstall_requires_official_host_api_and_preserves_state() {
     let ctx = make_install_ctx(home);
     let error = KimiIntegration.uninstall(&ctx).unwrap_err().to_string();
     assert!(error.contains("interactive `/plugins` host API"));
+    assert!(error.contains("/plugins remove tracedecay"));
     assert_eq!(std::fs::read(&installed_path).unwrap(), registry);
     assert_eq!(
         std::fs::read(managed_dir.join("keep")).unwrap(),
         b"official"
     );
     assert!(KimiIntegration.has_tracedecay(home));
+}
+
+#[test]
+fn kimi_docs_expose_staging_and_exact_host_native_lifecycle_commands() {
+    let readme = include_str!("../../plugin/README-kimi.md");
+
+    assert!(readme.contains(".tracedecay/host-bundle-stage/kimi/tracedecay"));
+    assert!(readme.contains("/plugins install <staged-path>"));
+    assert!(readme.contains("/plugins remove tracedecay"));
+    assert!(readme.contains("install and update"));
+    assert!(readme.contains("uninstall"));
 }
 
 #[test]
