@@ -191,7 +191,7 @@ impl ObservabilityEnvelopeV1 {
                 if activity.units == 0
                     || !matches!(
                         activity.family.as_str(),
-                        "hook" | "session_ingest" | "code_index" | "tool_call"
+                        "hook" | "session_ingest" | "code_index" | "tool_call" | "task"
                     )
                     || activity.detail.as_deref().is_some_and(|detail| {
                         detail.is_empty()
