@@ -49,20 +49,17 @@ fn remote_outcomes_are_the_canonical_application_types() {
 }
 
 #[test]
-fn work_inventory_does_not_claim_unmounted_attempt_routes() {
-    let registry =
-        work::executable_binding_registry(false, false).expect("canonical Work registry");
+fn work_inventory_exposes_every_mounted_route() {
+    let registry = work::executable_binding_registry().expect("canonical Work registry");
     let attempt = registry
         .get(&operation::OperationId::new("operation.work.attempt_start").unwrap())
         .expect("attempt availability");
 
     assert!(matches!(
         attempt,
-        operation::ExecutableBindingAvailabilityV1::Unavailable {
-            disposition: operation::ExecutableUnavailableDispositionV1::RouteUnavailable,
-            ..
-        }
+        operation::ExecutableBindingAvailabilityV1::Available { .. }
     ));
+    assert_eq!(registry.iter().count(), 17);
 }
 
 #[test]

@@ -5,10 +5,6 @@ import {
   type RequestFor,
   type ResultFor,
 } from "./operations";
-import {
-  SERVER_OPERATIONS,
-  type ServerOperationName,
-} from "./server-operations";
 import type {
   ApplicationProblemRecord,
   HttpProblemEnvelope,
@@ -44,11 +40,6 @@ export type OperationMethod<Name extends OperationName> = (
 
 export type OperationMethods = {
   readonly [Name in OperationName]: OperationMethod<Name>;
-} & {
-  readonly [Name in ServerOperationName]: (
-    request: Readonly<Record<string, unknown>>,
-    options?: OperationRequestOptions,
-  ) => Promise<HttpSuccessEnvelope<unknown>>;
 };
 
 export interface OperationStreamResume {
@@ -708,10 +699,6 @@ export class TraceDecayClient {
         requestOptions?: OperationRequestOptions,
       ) => Promise<HttpSuccessEnvelope<unknown>>
     > = {};
-    for (const descriptor of SERVER_OPERATIONS) {
-      methods[descriptor.operation] = (request, requestOptions) =>
-        this.requestServerOperation(descriptor, request, requestOptions);
-    }
     for (
       const descriptor of OPERATIONS as readonly OperationDescriptor<
         string,
@@ -869,44 +856,6 @@ export class TraceDecayClient {
         { status: response.status, payload: { envelope: envelope.value, cause } },
       );
     }
-  }
-
-  private async requestServerOperation(
-    descriptor: (typeof SERVER_OPERATIONS)[number],
-    request: unknown,
-    options: OperationRequestOptions = {},
-  ): Promise<HttpSuccessEnvelope<unknown>> {
-    if (!isRecord(request)) {
-      throw new TraceDecayProtocolError(
-        `${descriptor.operation} request must be a JSON object`,
-      );
-    }
-    const url = this.operationUrl(descriptor.route, options.page);
-    const headers = this.headers("application/json");
-    headers.set("content-type", "application/json");
-    const response = await this.fetchResponse(
-      url,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(request),
-        signal: options.signal,
-      },
-      options.signal,
-    );
-    const envelope = await this.readJson(response);
-    if (
-      !response.ok ||
-      !isRecord(envelope) ||
-      envelope.kind !== "success" ||
-      !isDecodedSuccessEnvelope(envelope.value)
-    ) {
-      throw new TraceDecayMalformedResponseError(
-        `the daemon returned an invalid ${descriptor.operation} success envelope`,
-        { status: response.status, payload: envelope },
-      );
-    }
-    return envelope.value as unknown as HttpSuccessEnvelope<unknown>;
   }
 
   async *streamOperation(

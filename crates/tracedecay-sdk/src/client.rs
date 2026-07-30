@@ -8,9 +8,12 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client as HttpClient, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
-use tracedecay_api::HttpApplicationOperation;
+
+use crate::operations::TypedOperation;
 
 const MAX_PAGE_SIZE: u32 = 1_000;
 const MAX_OPAQUE_BYTES: usize = 4_096;
@@ -148,17 +151,82 @@ impl Client {
         &self.mode
     }
 
-    /// Invokes one member of the closed canonical 64-operation HTTP inventory.
-    pub fn call(
+    /// Invoke one operation admitted by canonical request and result schemas.
+    pub fn execute<Operation>(
         &self,
-        operation: HttpApplicationOperation,
+        request: &Operation::Request,
+        options: RequestOptions,
+    ) -> Result<TypedResponse<Operation::Result>, ClientError>
+    where
+        Operation: TypedOperation,
+        Operation::Request: Serialize,
+        Operation::Result: DeserializeOwned,
+    {
+        let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
+            status: None,
+            message: format!("typed request could not be encoded: {error}"),
+        })?;
+        let response = self.request_route(Operation::ROUTE, &request, options)?;
+        let binding = response
+            .envelope()
+            .get("binding_id")
+            .and_then(Value::as_str);
+        let contract = response.envelope().get("contract");
+        let schema_id = contract
+            .and_then(|value| value.get("schema_id"))
+            .and_then(Value::as_str);
+        let schema_revision = contract
+            .and_then(|value| value.get("schema_revision"))
+            .and_then(Value::as_u64);
+        if binding != Some(Operation::BINDING_ID)
+            || schema_id != Some(Operation::RESULT_SCHEMA_ID)
+            || schema_revision != Some(u64::from(Operation::RESULT_SCHEMA_REVISION))
+        {
+            return Err(ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!(
+                    "daemon returned mismatched contracts for {}",
+                    Operation::OPERATION_ID
+                ),
+            });
+        }
+        let payload = response
+            .payload()
+            .cloned()
+            .ok_or_else(|| ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!("daemon omitted the {} result payload", Operation::OPERATION_ID),
+            })?;
+        let result = serde_json::from_value(payload).map_err(|error| ClientError::Protocol {
+            status: Some(response.status()),
+            message: format!(
+                "daemon returned a malformed {} result: {error}",
+                Operation::OPERATION_ID
+            ),
+        })?;
+        let request_id = response
+            .envelope()
+            .get("request_id")
+            .and_then(Value::as_str)
+            .expect("application response validation requires request_id")
+            .to_owned();
+        Ok(TypedResponse { request_id, result })
+    }
+
+    fn request_route(
+        &self,
+        route: &str,
         request: &Value,
         options: RequestOptions,
     ) -> Result<ApplicationResponse, ClientError> {
+        let route = route
+            .strip_prefix("/application")
+            .ok_or_else(|| ClientError::InvalidConfiguration(
+                "typed operation route must begin with /application".into(),
+            ))?;
         let mut url = reqwest::Url::parse(&format!(
             "{}{}",
-            self.application_root,
-            operation.route_path()
+            self.application_root, route
         ))
         .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
         apply_page_options(&mut url, options.page.as_ref())?;
@@ -321,6 +389,13 @@ impl Client {
             }),
         }
     }
+}
+
+/// One typed operation result with its lifecycle correlation identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedResponse<Result> {
+    pub request_id: String,
+    pub result: Result,
 }
 
 /// Canonical query paging controls.

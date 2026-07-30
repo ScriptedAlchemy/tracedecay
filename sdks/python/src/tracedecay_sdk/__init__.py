@@ -3,7 +3,6 @@
 from .client import (
     JsonObject,
     OperationCancellation,
-    OperationNamespace,
     PageOptions,
     StreamEvent,
     StreamOptions,
@@ -15,13 +14,20 @@ from .client import (
     TraceDecayProtocolError,
     TraceDecayTransportError,
 )
-from .operations import SERVER_OPERATIONS, UNAVAILABLE_OPERATIONS, ServerOperationName
+from .operations import (
+    SERVER_OPERATIONS,
+    UNAVAILABLE_OPERATIONS,
+    WORK_OPERATIONS,
+    OperationResponse,
+    ServerOperationName,
+    WorkOperations,
+)
 
 __all__ = [
     "JsonObject",
     "OperationCancellation",
-    "OperationNamespace",
     "PageOptions",
+    "OperationResponse",
     "SERVER_OPERATIONS",
     "ServerOperationName",
     "StreamEvent",
@@ -34,4 +40,6 @@ __all__ = [
     "TraceDecayProtocolError",
     "TraceDecayTransportError",
     "UNAVAILABLE_OPERATIONS",
+    "WORK_OPERATIONS",
+    "WorkOperations",
 ]

@@ -4,7 +4,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, cast
 
 from tracedecay_sdk import (
     PageOptions,
@@ -13,6 +13,7 @@ from tracedecay_sdk import (
     StreamResume,
     TraceDecayClient,
     UNAVAILABLE_OPERATIONS,
+    WORK_OPERATIONS,
 )
 
 
@@ -20,8 +21,8 @@ def success(payload: object) -> dict[str, object]:
     return {
         "kind": "success",
         "value": {
-            "binding_id": "binding.http.health_read.v1",
-            "contract": {"schema_id": "schema.health.result", "schema_revision": 1},
+            "binding_id": "binding.http.work.create",
+            "contract": {"schema_id": "schema.work.create.result", "schema_revision": 1},
             "request_id": "request.sdk",
             "scope": {},
             "outcome": {
@@ -71,7 +72,29 @@ class Handler(BaseHTTPRequestHandler):
         else:
             length = int(self.headers.get("content-length", "0"))
             json.loads(self.rfile.read(length))
-            self._json(200, success({"status": "ok"}))
+            self._json(
+                200,
+                success(
+                    {
+                        "accepted_proposal": None,
+                        "authority": {
+                            "actor_id": "actor.sdk",
+                            "policy_digest": "sha256:policy",
+                            "project_id": "project.sdk",
+                            "repository_id": "repository.sdk",
+                            "worktree_id": "worktree.sdk",
+                        },
+                        "dependencies": [],
+                        "execution_admitted": False,
+                        "history_len": 1,
+                        "runtime_evidence": [],
+                        "task_accepted": False,
+                        "task_id": "task.sdk",
+                        "title": "SDK task",
+                        "version": 1,
+                    }
+                ),
+            )
 
     def do_GET(self) -> None:
         self.requests.append((self.path, dict(self.headers)))
@@ -120,21 +143,25 @@ class ClientTest(unittest.TestCase):
         cls.thread.join()
 
     def client(self) -> TraceDecayClient:
-        host, port = self.server.server_address
+        host, port = cast(tuple[str, int], self.server.server_address)
         return TraceDecayClient.local(
             f"http://{host}:{port}",
             project_id="project.sdk",
             token="sdk-token",
         )
 
-    def test_call_preserves_paging_and_auth(self) -> None:
-        response = self.client().call(
-            "health_read", {}, page=PageOptions(size=25, cursor="cursor.next")
+    def test_typed_work_call_preserves_paging_and_auth(self) -> None:
+        response = self.client().operations.work_create(
+            {
+                "command_id": "command.sdk",
+                "occurred_at": 1,
+                "task_id": "task.sdk",
+                "title": "SDK task",
+            },
+            page=PageOptions(size=25, cursor="cursor.next"),
         )
 
-        self.assertEqual(
-            response["outcome"]["value"]["payload"], {"status": "ok"}
-        )
+        self.assertEqual(response.result["task_id"], "task.sdk")
         path, headers = Handler.requests[-1]
         self.assertIn("page_size=25&cursor=cursor.next", path)
         self.assertEqual(headers["Authorization"], "Bearer sdk-token")
@@ -146,8 +173,17 @@ class ClientTest(unittest.TestCase):
         unavailable_work = set(UNAVAILABLE_OPERATIONS)
 
         self.assertEqual(len(base_names), 64)
-        self.assertEqual(len(available_work | unavailable_work), 17)
+        self.assertEqual(len(available_work), 17)
+        self.assertEqual(len(unavailable_work), 64)
         self.assertFalse(available_work & unavailable_work)
+        self.assertTrue(
+            all(value == "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values())
+        )
+        self.assertFalse(hasattr(self.client(), "call"))
+
+    def test_generated_result_decoder_rejects_malformed_body(self) -> None:
+        with self.assertRaises(TypeError):
+            WORK_OPERATIONS["work_create"].decode_result({"task_id": "task.sdk"})
 
     def test_cancellation_and_resume_are_real_lifecycle_requests(self) -> None:
         client = self.client()

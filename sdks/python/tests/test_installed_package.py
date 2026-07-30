@@ -22,15 +22,20 @@ def run(
     env: dict[str, str],
     timeout: int = 120,
 ) -> str:
-    return subprocess.run(
+    completed = subprocess.run(
         args,
         cwd=cwd,
         env=env,
-        check=True,
+        check=False,
         text=True,
         capture_output=True,
         timeout=timeout,
-    ).stdout
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"{args[0]} exited {completed.returncode}:\n{completed.stderr}"
+        )
+    return completed.stdout
 
 
 class InstalledPackageConformance(unittest.TestCase):
@@ -121,7 +126,6 @@ class InstalledPackageConformance(unittest.TestCase):
                         "-m",
                         "pip",
                         "install",
-                        "--no-deps",
                         str(wheels[0]),
                     ],
                     cwd=scratch,
@@ -208,6 +212,7 @@ from tracedecay_sdk import (
     StreamResume,
     TraceDecayClient,
     TraceDecayProblemError,
+    UNAVAILABLE_OPERATIONS,
 )
 
 base_url = os.environ["TRACEDECAY_SDK_BASE_URL"]
@@ -224,31 +229,18 @@ for mode in ("local", "remote"):
             base_url, project_id=project_id, token=token, origin=origin
         )
     )
-    if "work_attempt_start" in SERVER_OPERATIONS:
-        try:
-            client.call(
-                "work_attempt_start",
-                {
-                    "identity": {
-                        "task_id": "task.sdk-conformance",
-                        "run_id": "run.sdk-conformance",
-                        "attempt_id": "attempt.sdk-conformance",
-                    },
-                    "lease": {
-                        "lease_id": "lease.sdk-conformance",
-                        "epoch": 1,
-                    },
-                    "recovery": {"state": "fresh"},
-                },
-            )
-        except TraceDecayProblemError:
-            pass
+    if len(SERVER_OPERATIONS) != 81 or len(UNAVAILABLE_OPERATIONS) != 64:
+        raise AssertionError("installed operation availability inventory drifted")
+    if any(value != "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values()):
+        raise AssertionError("base routes must remain typed schema-unavailable")
+    if hasattr(client, "call") or not hasattr(client.operations, "work_snapshot"):
+        raise AssertionError("only typed Work operations may be callable")
     try:
-        response = client.call("test_results", {}, page=PageOptions(size=1))
-        request_id = response["request_id"]
+        response = client.operations.work_snapshot(
+            {"page_size": 1}, page=PageOptions(size=1)
+        )
+        request_id = response.request_id
     except TraceDecayProblemError as error:
-        if error.code != "application.pr12-primitive.unavailable":
-            raise
         request_id = error.envelope["request_id"]
     try:
         initial = client.stream_operation(request_id)

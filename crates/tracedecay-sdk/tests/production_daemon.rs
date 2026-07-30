@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_sdk::api::HttpApplicationOperation;
 use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, PageOptions, RequestOptions,
     StreamOptions, StreamResume,
 };
+use tracedecay_sdk::operations::{TypedOperation, WorkSnapshot};
 
 struct Daemon {
     child: Child,
@@ -110,9 +110,12 @@ fn installed_rust_client_covers_local_remote_paging_resume_and_cancellation() {
             )
             .build()
             .unwrap();
-        let request_id = match client.call(
-            HttpApplicationOperation::TestResults,
-            &json!({}),
+        let request = serde_json::from_value::<<WorkSnapshot as TypedOperation>::Request>(
+            json!({"page_size": 1}),
+        )
+        .unwrap();
+        let request_id = match client.execute::<WorkSnapshot>(
+            &request,
             RequestOptions {
                 page: Some(PageOptions {
                     size: Some(1),
@@ -120,13 +123,8 @@ fn installed_rust_client_covers_local_remote_paging_resume_and_cancellation() {
                 }),
             },
         ) {
-            Ok(response) => response.envelope()["request_id"]
-                .as_str()
-                .unwrap()
-                .to_owned(),
-            Err(ClientError::Problem(problem))
-                if problem.code == "application.pr12-primitive.unavailable" =>
-            {
+            Ok(response) => response.request_id,
+            Err(ClientError::Problem(problem)) => {
                 problem.envelope["request_id"].as_str().unwrap().to_owned()
             }
             Err(error) => panic!("production operation failed unexpectedly: {error}"),

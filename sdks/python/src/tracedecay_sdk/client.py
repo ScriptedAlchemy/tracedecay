@@ -5,17 +5,25 @@ from __future__ import annotations
 import json
 import time
 import unicodedata
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Final, Literal, TypeAlias, TypedDict, cast
+from typing import Any, Final, Literal, TypeAlias, TypeVar, TypedDict, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .operations import SERVER_OPERATIONS, ServerOperationName
+from .operations import (
+    OperationDescriptor,
+    OperationResponse,
+    PageOptionsLike,
+    WorkOperations,
+)
+from .schema import JsonValue
 
-JsonObject: TypeAlias = dict[str, Any]
+JsonObject: TypeAlias = dict[str, JsonValue]
 ConnectionKind: TypeAlias = Literal["local", "remote"]
+RequestT = TypeVar("RequestT")
+ResultT = TypeVar("ResultT")
 
 _MAX_PAGE_SIZE: Final = 1_000
 _MAX_OPAQUE_BYTES: Final = 4_096
@@ -109,21 +117,6 @@ class OperationCancellation(TypedDict):
     status: Literal["requested", "already_requested", "already_terminal"]
 
 
-class OperationNamespace:
-    """Ergonomic namespace backed by the closed generated operation inventory."""
-
-    def __init__(self, client: TraceDecayClient) -> None:
-        self._client = client
-
-    def __getattr__(
-        self, operation: str
-    ) -> Callable[[Mapping[str, Any]], JsonObject]:
-        if operation not in SERVER_OPERATIONS:
-            raise AttributeError(operation)
-        canonical = cast(ServerOperationName, operation)
-        return lambda request: self._client.call(canonical, request)
-
-
 class TraceDecayClient:
     """Synchronous local/remote client with identical lifecycle semantics."""
 
@@ -154,7 +147,7 @@ class TraceDecayClient:
         self._origin = origin or f"{parsed.scheme}://{parsed.netloc}"
         self._timeout = timeout
         self.connection = connection
-        self.operations = OperationNamespace(self)
+        self.operations = WorkOperations(self._request_operation)
 
     @classmethod
     def local(
@@ -192,22 +185,25 @@ class TraceDecayClient:
             timeout=timeout,
         )
 
-    def call(
+    def _request_operation(
         self,
-        operation: ServerOperationName,
-        request: Mapping[str, Any],
+        descriptor: OperationDescriptor[RequestT, ResultT],
+        request: RequestT,
         *,
-        page: PageOptions | None = None,
-    ) -> JsonObject:
-        """Invoke one generated member of the canonical production inventory."""
-        route = SERVER_OPERATIONS.get(operation)
-        if route is None:
-            raise TraceDecayProtocolError(f"unknown canonical operation: {operation}")
+        page: PageOptionsLike | None = None,
+    ) -> OperationResponse[ResultT]:
+        """Invoke one operation admitted by canonical schema-body authority."""
+        try:
+            decoded_request = descriptor.decode_request(request)
+        except TypeError as error:
+            raise TraceDecayProtocolError(
+                f"{descriptor.operation} request violates its canonical schema"
+            ) from error
         query = _page_query(page)
-        url = f"{self._project_root}{route}"
+        url = f"{self._project_root}{descriptor.route}"
         if query:
             url = f"{url}?{query}"
-        body = json.dumps(dict(request), separators=(",", ":")).encode()
+        body = json.dumps(decoded_request, separators=(",", ":")).encode()
         status, response = self._json_request(url, method="POST", body=body)
         kind = response.get("kind")
         value = _object(response.get("value"), "HTTP envelope value")
@@ -218,8 +214,33 @@ class TraceDecayClient:
                 "daemon returned an inconsistent application envelope", status=status
             )
         _string(value.get("request_id"), "success.request_id")
-        _object(value.get("outcome"), "success.outcome")
-        return value
+        if value.get("binding_id") != descriptor.binding_id:
+            raise TraceDecayProtocolError(
+                f"daemon returned a mismatched {descriptor.operation} binding",
+                status=status,
+            )
+        contract = _object(value.get("contract"), "success.contract")
+        if (
+            contract.get("schema_id") != descriptor.result_schema_id
+            or contract.get("schema_revision") != descriptor.result_schema_revision
+        ):
+            raise TraceDecayProtocolError(
+                f"daemon returned a mismatched {descriptor.operation} result contract",
+                status=status,
+            )
+        outcome = _object(value.get("outcome"), "success.outcome")
+        outcome_value = _object(outcome.get("value"), "success.outcome.value")
+        try:
+            result = descriptor.decode_result(outcome_value.get("payload"))
+        except TypeError as error:
+            raise TraceDecayProtocolError(
+                f"daemon returned a malformed {descriptor.operation} result",
+                status=status,
+            ) from error
+        return OperationResponse(
+            request_id=_string(value.get("request_id"), "success.request_id"),
+            result=result,
+        )
 
     def cancel_operation(self, operation_id: str) -> OperationCancellation:
         """Request cancellation of an accepted operation."""
@@ -428,7 +449,7 @@ def _sse_events(response: Any) -> Iterator[StreamEvent]:
         raise TraceDecayTransportError("event stream ended inside an SSE frame")
 
 
-def _page_query(page: PageOptions | None) -> str:
+def _page_query(page: PageOptionsLike | None) -> str:
     if page is None:
         return ""
     query: dict[str, str] = {}
@@ -458,11 +479,12 @@ def _opaque(value: str, maximum: int, field: str) -> str:
 
 
 def _object(value: object, field: str) -> JsonObject:
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict):
         raise TraceDecayProtocolError(f"{field} must be a JSON object")
-    return cast(JsonObject, value)
+    mapping = cast(dict[object, object], value)
+    if not all(isinstance(key, str) for key in mapping):
+        raise TraceDecayProtocolError(f"{field} must be a JSON object")
+    return cast(JsonObject, mapping)
 
 
 def _string(value: object, field: str) -> str:

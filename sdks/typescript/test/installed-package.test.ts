@@ -217,6 +217,10 @@ if (typeof sdk.createClient !== "function" ||
     typeof clientEntry.createClient !== "function" ||
     !Array.isArray(sdk.SERVER_OPERATIONS) ||
     sdk.SERVER_OPERATIONS.length !== 64 ||
+    !sdk.SERVER_OPERATIONS.every(
+      (operation) => operation.sdkAvailability === "unavailable" &&
+        operation.disposition === "schema_unavailable",
+    ) ||
     !Array.isArray(sdk.UNAVAILABLE_OPERATIONS)) {
   throw new Error("installed package exports are incomplete");
 }
@@ -231,12 +235,9 @@ const availabilityClient = sdk.createClient({
   projectId: process.env.TRACEDECAY_SDK_PROJECT_ID,
   token: process.env.TRACEDECAY_SDK_TOKEN,
 });
-if ("work_snapshot" in availabilityClient.operations ||
-    !sdk.UNAVAILABLE_OPERATIONS.some(
-      (operation) => operation.operation === "work_snapshot" &&
-        operation.disposition === "route_unavailable",
-    )) {
-  throw new Error("unmounted Work routes must remain typed unavailable capabilities");
+if (!("work_snapshot" in availabilityClient.operations) ||
+    "test_results" in availabilityClient.operations) {
+  throw new Error("only schema-authorized Work operations may be callable");
 }
 
 const baseUrl = process.env.TRACEDECAY_SDK_BASE_URL;
@@ -247,30 +248,15 @@ for (const mode of ["local", "remote"]) {
     token: process.env.TRACEDECAY_SDK_TOKEN,
     ...(mode === "remote" ? { origin: new URL(baseUrl).origin } : {}),
   });
-  if ("work_attempt_start" in client.operations) {
-    try {
-      await client.operations.work_attempt_start({
-        identity: {
-          task_id: "task.sdk-conformance",
-          run_id: "run.sdk-conformance",
-          attempt_id: "attempt.sdk-conformance",
-        },
-        lease: { lease_id: "lease.sdk-conformance", epoch: 1 },
-        recovery: { state: "fresh" },
-      });
-    } catch (error) {
-      if (!(error instanceof sdk.TraceDecayProblemError)) {
-        throw error;
-      }
-    }
-  }
   let operationId;
   try {
-    const result = await client.operations.test_results({}, { page: { size: 1 } });
+    const result = await client.operations.work_snapshot(
+      { page_size: 1 },
+      { page: { size: 1 } },
+    );
     operationId = result.request_id;
   } catch (error) {
-    if (!(error instanceof sdk.TraceDecayUnavailableError) ||
-        error.problem.code !== "application.pr12-primitive.unavailable") {
+    if (!(error instanceof sdk.TraceDecayProblemError)) {
       throw error;
     }
     operationId = error.envelope.request_id;
