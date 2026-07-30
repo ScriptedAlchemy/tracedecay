@@ -39,12 +39,12 @@ use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
-use crate::query::temporal::TemporalKernelResult;
-use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use crate::query::temporal::ranking::DiversityLimits;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::sessions::lcm::LcmScope;
 use crate::tracedecay::TraceDecay;
+use tracedecay_temporal_query::TemporalKernelResult;
+use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ranking::DiversityLimits;
 
 pub(super) const AUTOMATION_SESSION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const AUTOMATION_SESSION_MAX_RESULTS: u64 = 128;

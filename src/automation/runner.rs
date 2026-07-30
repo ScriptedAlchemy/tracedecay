@@ -51,13 +51,13 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 #[cfg(test)]
-use crate::query::temporal::TemporalKernelResult;
-#[cfg(test)]
-use crate::query::temporal::context::VersionedTokenEstimator;
-#[cfg(test)]
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
+#[cfg(test)]
+use tracedecay_temporal_query::TemporalKernelResult;
+#[cfg(test)]
+use tracedecay_temporal_query::context::VersionedTokenEstimator;
 
 mod evidence;
 mod retrieval;
