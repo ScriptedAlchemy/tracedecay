@@ -783,6 +783,9 @@ mod tests {
             store_id: "store.debris".to_string(),
             canonical_root: PathBuf::from("/repository"),
             display_root: None,
+            git_common_dir: None,
+            alias_roots: Vec::new(),
+            manifest_readable: true,
             data_root: store_root.to_path_buf(),
             manifest_root: None,
             last_write_secs: NOW,
@@ -792,6 +795,7 @@ mod tests {
             expected_last_write_at: None,
             expected_payload_mtime_secs: NOW,
             expected_manifest_bytes: None,
+            graph_scope_relpaths: Vec::new(),
         }
     }
 
