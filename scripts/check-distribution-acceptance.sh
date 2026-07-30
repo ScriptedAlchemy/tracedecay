@@ -105,6 +105,7 @@ assert_required_assets() {
     "src/semantic_code/model_lifecycle.rs"
     "tests/fixtures/packaged_host_events/claude.json"
     "tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+    "tests/fixtures/packaged_host_events/cline-family.json"
     "tests/fixtures/packaged_host_events/codex.json"
     "tests/fixtures/packaged_host_events/cursor.json"
     "tests/fixtures/packaged_host_events/hermes.json"
@@ -360,6 +361,7 @@ run_self_test() {
     src/semantic_code/model_lifecycle.rs \
     tests/fixtures/packaged_host_events/claude.json \
     tests/fixtures/packaged_host_events/claude/post_tool_use_write.json \
+    tests/fixtures/packaged_host_events/cline-family.json \
     tests/fixtures/packaged_host_events/codex.json \
     tests/fixtures/packaged_host_events/cursor.json \
     tests/fixtures/packaged_host_events/hermes.json \
@@ -579,6 +581,7 @@ for fixture in \
   claude.json \
   claude/post_tool_use_write.json \
   codex.json \
+  cline-family.json \
   cursor.json \
   hermes.json \
   hermes/saved-edit.json \
@@ -847,11 +850,12 @@ const REQUIRED_CAPABILITIES: [&str; 10] = [
     "capability.application.feedback.proximity",
 ];
 
-const REQUIRED_HOSTS: [HostKindV1; 6] = [
+const REQUIRED_HOSTS: [HostKindV1; 7] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
     HostKindV1::Hermes,
+    HostKindV1::Kiro,
     HostKindV1::KimiCode,
     HostKindV1::OpenCode,
 ];
