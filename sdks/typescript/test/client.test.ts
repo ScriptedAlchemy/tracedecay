@@ -6,7 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import { OPERATIONS, UNAVAILABLE_OPERATIONS } from "../src/operations";
 import {
@@ -260,26 +260,26 @@ describe("canonical JSON Schema decoding", () => {
 
 describe("TraceDecayClient generated operation bindings", () => {
   it("publishes typed Work methods and fail-closed base discovery", () => {
-    type Equal<Left, Right> =
-      (<Value>() => Value extends Left ? 1 : 2) extends
-      (<Value>() => Value extends Right ? 1 : 2) ? true : false;
-    const requestMatches: Equal<
-      Parameters<ReturnType<typeof createClient>["operations"]["work_snapshot"]>[0],
-      { readonly page_size: number }
-    > = true;
+    expectTypeOf<
+      Parameters<ReturnType<typeof createClient>["operations"]["work_snapshot"]>[0]
+    >().toEqualTypeOf<{ readonly page_size: number }>();
+
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
     });
 
-    expect(requestMatches).toBe(true);
-    expect(SERVER_OPERATIONS).toHaveLength(64);
+    const callableOperations = new Set<string>(
+      OPERATIONS.map((operation) => operation.operation),
+    );
+    expect(SERVER_OPERATIONS.length).toBeGreaterThan(0);
     expect(
       SERVER_OPERATIONS.every(
         (operation) =>
           operation.sdkAvailability === "unavailable" &&
-          operation.disposition === "schema_unavailable",
+          operation.disposition === "schema_unavailable" &&
+          !callableOperations.has(operation.operation),
       ),
     ).toBe(true);
     expect(SERVER_OPERATIONS.map((operation) => operation.operation)).toContain(
@@ -341,9 +341,19 @@ describe("TraceDecayClient generated operation bindings", () => {
   });
 
   it("publishes all mounted Work routes as executable operations", () => {
-    const available = OPERATIONS.map((operation) => operation.operation);
-    expect(OPERATIONS).toHaveLength(18);
-    expect(UNAVAILABLE_OPERATIONS).toHaveLength(0);
+    const available: string[] = OPERATIONS.map((operation) => operation.operation);
+    const unavailable = (
+      UNAVAILABLE_OPERATIONS as readonly { readonly operation: string }[]
+    ).map((operation) => operation.operation);
+    expect(available.length).toBeGreaterThan(0);
+    expect(new Set(available).size).toBe(available.length);
+    expect(new Set(OPERATIONS.map((operation) => operation.operationId)).size).toBe(
+      available.length,
+    );
+    expect(new Set(OPERATIONS.map((operation) => operation.bindingId)).size).toBe(
+      available.length,
+    );
+    expect(unavailable.some((operation) => available.includes(operation))).toBe(false);
     expect(available).toEqual(
       expect.arrayContaining([
         "work_snapshot",
@@ -364,6 +374,32 @@ describe("TraceDecayClient generated operation bindings", () => {
         token: "sdk-secret",
       }).operations,
     ).toBe(true);
+  });
+
+  it("publishes work_attempt_finish with the canonical descriptor identity", () => {
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+    });
+    expect("work_attempt_finish" in client.operations).toBe(true);
+
+    const descriptor = OPERATIONS.find(
+      (operation) => operation.operation === "work_attempt_finish",
+    );
+    expect(descriptor).toBeDefined();
+    expect(descriptor?.operationId).toBe("operation.work.attempt_finish");
+    expect(descriptor?.route).toBe("/application/work/attempt/finish");
+    expect(descriptor?.method).toBe("POST");
+    expect(descriptor?.bindingId).toBe("binding.http.work.attempt_finish");
+    expect(descriptor?.requestSchema).toEqual({
+      schemaId: "schema.work.attempt_finish.request",
+      revision: 1,
+    });
+    expect(descriptor?.resultSchema).toEqual({
+      schemaId: "schema.work.attempt_finish.result",
+      revision: 1,
+    });
   });
 });
 

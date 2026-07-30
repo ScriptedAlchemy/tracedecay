@@ -3,10 +3,11 @@
 `@tracedecay/sdk` provides generated TypeScript contracts and a strict client
 for TraceDecay's public application API.
 
-The generated callable surface includes the 18 mounted Work operations and the
-cancellation/resumable-stream lifecycle. The 64 older production routes remain
-in `SERVER_OPERATIONS` for discovery with `schema_unavailable`; they are not
-exposed as partially typed methods.
+The generated callable surface includes every Work operation admitted by the
+canonical executable binding registry plus the cancellation/resumable-stream
+lifecycle. Base application routes without canonical executable schema bodies
+remain in `SERVER_OPERATIONS` for discovery with `schema_unavailable`; they
+are not exposed as partially typed methods.
 
 ## Requirements
 
@@ -34,3 +35,15 @@ const snapshot = await client.operations.work_snapshot(
 Request and result types, decoders, and operation methods are generated from
 the Rust contracts that own the wire format. Malformed or unavailable
 contracts fail closed.
+
+## Publishing
+
+`npm test` runs the fast, mock-server unit suite only; it does not by itself
+demonstrate that the built package works against a real daemon. `npm publish`
+runs `prepublishOnly`, which additionally requires `npm run test:installed` —
+a check that requires a prebuilt production `tracedecay` executable at
+`target/debug/tracedecay`, or at the absolute path supplied through
+`TRACEDECAY_TEST_BIN`; the check does not build the daemon. It starts that
+binary with an isolated profile, packs the SDK, installs it into an isolated
+consumer project, and exercises it as an installed dependency. Do not treat
+the fast unit suite alone as publish-ready conformance.
