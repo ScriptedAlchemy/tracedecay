@@ -46,11 +46,22 @@ a check that requires a prebuilt production `tracedecay` executable at
 `TRACEDECAY_TEST_BIN`; the check does not build the daemon. It starts that
 binary with an isolated profile, packs the SDK, installs it into an isolated
 consumer project, and exercises it as an installed dependency. Do not treat
-the fast unit suite alone as publish-ready conformance.
+the fast unit suite alone as publish-ready conformance. `prepublishOnly` is a
+local safety net for anyone running `npm publish` by hand from this
+directory; `npm publish <tarball>.tgz` (what the CI publish job does) skips
+package lifecycle scripts entirely, so CI's own build/conformance job is the
+authoritative gate, not this hook.
 
 Actual releases run through the `SDK publish` GitHub Actions workflow
-(`.github/workflows/sdk-publish.yml`, dispatched with `sdk: typescript`), which
-builds the real daemon, runs this same conformance suite, and publishes to npm
-via OIDC trusted publishing (no `NPM_TOKEN`). See
+(`.github/workflows/sdk-publish.yml`, dispatched with `sdk: typescript`),
+split into two jobs so publish credentials are never exposed to build/test
+code: an unprivileged `build-typescript` job packs the tarball exactly once,
+runs typecheck/unit/conformance against that *same* tarball (not a fresh
+rebuild), records its sha256 digest, and uploads both; a separate
+environment-protected `publish-typescript` job (master-only, minimal OIDC)
+downloads the artifact, re-verifies the digest, and publishes those exact,
+unchanged bytes to npm via trusted publishing (no `NPM_TOKEN`). Setting
+`TRACEDECAY_SDK_TARBALL` to a prebuilt tarball path makes
+`test:installed` exercise that tarball instead of packing its own. See
 [`docs/RELEASE-AUTOMATION.md`](../../docs/RELEASE-AUTOMATION.md) for the
 trusted-publisher bootstrap.

@@ -75,24 +75,40 @@ PyPI API token is stored as a repository secret.
 ### npm Trusted Publishing bootstrap
 
 npm cannot attach a trusted publisher to a package that has never been
-published, so a brand-new package name needs a one-time bootstrap:
+published, so a brand-new package name needs a one-time, manually reviewed
+bootstrap. Do not run third-party bootstrap tools such as
+`npx setup-npm-trusted-publish` — that executes an unpinned, unscoped,
+unaudited package while your local npm credentials are live, which is exactly
+the kind of supply-chain exposure trusted publishing exists to eliminate. Use
+the manual path instead:
 
-1. **Preferred — `npx setup-npm-trusted-publish`.** This publishes a placeholder
-   version from a temporary directory using your local npm auth and walks
-   through configuring the trusted publisher, so the working tree state does
-   not matter.
-2. **Fallback — manual bootstrap publish.** Generate a short-lived, scoped npm
-   access token, run `npm publish --access public` once from `sdks/typescript`
-   using that token, then revoke the token immediately.
+1. On <https://www.npmjs.com/settings/~/tokens>, generate a short-lived,
+   *scoped* (single-package, publish-only) npm access token.
+2. From `sdks/typescript`, run `npm run build` followed by
+   `NODE_AUTH_TOKEN=<token> npm publish --access public` once, using that
+   token (never commit it or store it as a repository secret).
+3. Immediately revoke the token on npmjs.com.
 
-Either way, once `@tracedecay/sdk` exists on npm, configure its trusted
-publisher at `https://www.npmjs.com/package/@tracedecay/sdk/access` →
-**Trusted Publisher**: GitHub Actions, organization/user
-`ScriptedAlchemy`, repository `tracedecay`, workflow filename
-`sdk-publish.yml`, environment `npm-tracedecay-sdk`. The `sdk-publish.yml`
-workflow already sets `permissions: id-token: write` on the
-`publish-typescript` job and runs `npm publish --provenance` with no token, so
-publishes succeed the moment the trusted publisher exists.
+Once `@tracedecay/sdk` exists, configure its trusted publisher at
+`https://www.npmjs.com/package/@tracedecay/sdk/access` → **Trusted
+Publisher** → **GitHub Actions**:
+
+- Organization or user: `ScriptedAlchemy`
+- Repository: `tracedecay`
+- Workflow filename: `sdk-publish.yml`
+- Environment name: `npm-tracedecay-sdk`
+- Allowed actions: **Allow npm publish** (staged publishing is not used here)
+
+The `sdk-publish.yml` workflow's `publish-typescript` job already sets
+`permissions: id-token: write` and runs `npm publish --provenance` with no
+token, so publishes succeed the moment the trusted publisher exists. Before
+relying on this for a real release, run one **protected, master-only OIDC
+smoke publish**: dispatch `sdk-publish.yml` with `sdk: typescript` against an
+unused prerelease version (e.g. bump to `0.1.0-oidc-smoke.1` in a throwaway
+commit on a short-lived branch merged to `master`, publish, then deprecate
+that version) to prove the trusted publisher and environment protections work
+end-to-end, before ever dispatching against a real release version. A dry run
+alone (`npm pack`) does not exercise the OIDC exchange and is insufficient.
 
 ### PyPI Trusted Publishing bootstrap
 
@@ -112,12 +128,32 @@ one-time manual `twine upload` from `sdks/python/dist` using a short-lived,
 scoped PyPI API token, then configure the trusted publisher on the now-existing
 project for all subsequent releases.
 
+As with npm, run one **protected, master-only OIDC smoke publish** (dispatch
+`sdk-publish.yml` with `sdk: python` against an unused prerelease version,
+e.g. `0.1.0.dev1`, merged to `master` first) before ever dispatching against a
+real release version, to prove PyPI accepts the OIDC exchange for this exact
+repository/workflow/environment triple.
+
 ### Required GitHub environments
 
 Create the `npm-tracedecay-sdk` and `pypi-tracedecay-sdk` GitHub Actions
-environments (Settings → Environments) referenced by `sdk-publish.yml`.
-Protection rules (required reviewers) are optional but recommended, matching
-the existing `crates-io` environment used by `release-plz.yml`.
+environments (Settings → Environments) referenced by `sdk-publish.yml`. Unlike
+`release-plz.yml`'s `crates-io` environment (which only ever runs from an
+automated release PR merge), these environments guard a *manually dispatched*
+workflow that can target any branch, so their protection rules are required,
+not optional:
+
+- **Deployment branches and tags**: restrict to the `master` branch only. The
+  workflow's own `if: github.ref == 'refs/heads/master'` guard is defense in
+  depth, not a substitute for this — treat both as required.
+- **Required reviewers**: add at least one reviewer who is not the person
+  expected to dispatch the workflow. GitHub does not block the dispatching
+  actor from also being a required reviewer, so this only holds if the
+  reviewer list is enforced by team convention as someone other than whoever
+  ran `workflow_dispatch`.
+- Leave **"Allow administrators to bypass configured protection rules"**
+  disabled, and do not grant repository admins a standing bypass for these two
+  environments.
 
 ## Normal Release Flow
 
