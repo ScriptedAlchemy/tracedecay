@@ -210,6 +210,9 @@ pub(crate) struct DashboardState {
     /// unavailable states from it and never re-resolve scope from paths or
     /// the CWD per request.
     pub(crate) resolved_scope: Option<tracedecay_application::ResolvedScope>,
+    /// Immutable multi-root authority injected by the daemon after every root
+    /// has been resolved and authorized. Paths are never accepted here.
+    pub(crate) authorized_scope_set: Option<tracedecay_application::AuthorizedScopeSet>,
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
@@ -347,6 +350,15 @@ impl DashboardTestProjectGraphsV1 {
 }
 
 impl DashboardState {
+    pub(crate) fn with_authorized_scope_set(
+        mut self,
+        scope_set: tracedecay_application::AuthorizedScopeSet,
+    ) -> std::result::Result<Self, tracedecay_application::AuthorizedScopeSetError> {
+        scope_set.validate()?;
+        self.authorized_scope_set = Some(scope_set);
+        Ok(self)
+    }
+
     pub(crate) fn reconcile_automation_scheduler(&self) {
         if let Some(reconcile) = &self.automation_scheduler_reconciler {
             let reconcile = Arc::clone(reconcile);
@@ -465,6 +477,7 @@ async fn build_state_inner(
             cg.project_root(),
             cg.store_layout().identity.project_id.as_deref(),
         ),
+        authorized_scope_set: None,
         project_graph,
         project_graph_resolver,
         memory_owner,
@@ -1509,6 +1522,18 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "standalone_backend"
     };
     let standalone_automation = automation_mode == "standalone_backend";
+    let multi_root = state.authorized_scope_set.as_ref().map_or_else(
+        || {
+            tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
+                "authorized scope set is not mounted",
+            )
+        },
+        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::mounted,
+    );
+    let multi_root_available = matches!(
+        &multi_root,
+        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::Mounted { .. }
+    );
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": crate::version::build_version(),
@@ -1522,6 +1547,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "graph_db": state.graph_db_path,
         "lcm_db": state.lcm_db_path,
         "lcm_scope": state.lcm_scope,
+        "multi_root": multi_root,
         "features": {
             "memory": true,
             "lcm": has_lcm,
@@ -1544,6 +1570,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             // Settings tab: aggregated project/user config editing plus
             // read-only environment and storage-path display.
             "settings": true,
+            "multi_root": multi_root_available,
         },
         "automation": {
             "enabled": automation.enabled,

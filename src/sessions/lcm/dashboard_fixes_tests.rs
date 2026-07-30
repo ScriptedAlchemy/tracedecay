@@ -83,6 +83,7 @@ impl DashboardFixture {
         let state = DashboardState {
             project_id: Some(project_id.as_str().to_string()),
             resolved_scope,
+            authorized_scope_set: None,
             project_graph: None,
             project_graph_resolver: None,
             memory_owner: FactOwnerV1::Project { project_id },
