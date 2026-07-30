@@ -83,7 +83,8 @@ async function main() {
   let server: ChildProcess | null = null;
   let browser = null;
   try {
-    server = spawn('npx', ['rsbuild', 'dev', '--port', String(PORT)], {
+    const rsbuildCli = path.join(ROOT, 'node_modules', '@rsbuild', 'core', 'bin', 'rsbuild.js');
+    server = spawn(process.execPath, [rsbuildCli, 'dev', '--port', String(PORT)], {
       cwd: ROOT,
       env: { ...process.env, NO_COLOR: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -181,7 +182,7 @@ async function main() {
 
   console.log('\n[qa] ===== interaction QA =====');
   if (problems.length === 0) {
-    console.log('[qa] PASS — 12 surfaces, theme toggle, palette, graph, deep-link scope, 320px reflow');
+    console.log('[qa] PASS — 13 surfaces, theme toggle, palette, graph, deep-link scope, 320px reflow');
   } else {
     for (const problem of problems) {
       console.log(`[qa] ${problem.kind.padEnd(10)} ${problem.surface.padEnd(22)} ${problem.detail}`);
