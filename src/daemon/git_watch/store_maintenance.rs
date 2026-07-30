@@ -164,6 +164,132 @@ fn now_secs_i64() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
+/// Collect superseded code-index generations for one mounted project.
+///
+/// Sealed generations are ordinary files, so no database retention or
+/// compaction pass reclaims them. This runs on the ordinary maintenance cadence
+/// and is independent of the semantic projection lane: the only previous caller
+/// sat inside legacy vector migration, so a profile with semantic search
+/// disabled never collected anything and grew without bound.
+///
+/// Vector-readable source generations are pinned, so the inventory read is
+/// required before any sweep. When the inventory cannot be read this pass
+/// reports failure and collects nothing rather than sweeping with an empty
+/// protection set, which would delete generations vectors still read from.
+pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        run_code_generation_retention as run_retention,
+    };
+    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
+    use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
+
+    let layout = graph.hook_store_layout();
+    let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
+    // No published generation means nothing has been sealed for this project.
+    if !store_root.join("active-code-generation-v1.json").is_file() {
+        return true;
+    }
+
+    let vector_readable_sources = match DatabaseVectorGenerationStoreV1::open_legacy_migration(
+        graph.db(),
+    )
+    .await
+    {
+        Ok(store) => match store.read_legacy_inventory().await {
+            Ok(inventory) => match inventory.read_only_inventory() {
+                Ok(inventory) => inventory.retained_readable_sources(),
+                Err(_) => {
+                    log_code_generation_retention_degraded("vector_inventory_unreadable");
+                    return false;
+                }
+            },
+            Err(_) => {
+                log_code_generation_retention_degraded("vector_inventory_read_failed");
+                return false;
+            }
+        },
+        Err(_) => {
+            log_code_generation_retention_degraded("vector_generation_store_unavailable");
+            return false;
+        }
+    };
+
+    let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
+    let report = tokio::task::spawn_blocking(move || {
+        run_retention(
+            &store_root,
+            &vector_readable_sources,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            CodeGenerationRetentionModeV1::Apply,
+            completed_at,
+        )
+    })
+    .await;
+
+    match report {
+        Ok(Ok(report)) => {
+            let reclaimed = report.receipt.as_ref().map_or_else(
+                || {
+                    report
+                        .deleted_generations
+                        .iter()
+                        .map(|generation| generation.size_bytes)
+                        .sum()
+                },
+                |receipt| receipt.reclaimed_bytes,
+            );
+            if reclaimed > 0 {
+                log_daemon_event(
+                    "retention_code_generations",
+                    &[
+                        ("store", "code-index-v1".to_string()),
+                        ("bytes_reclaimed", reclaimed.to_string()),
+                        (
+                            "generations_collected",
+                            report.deleted_generations.len().to_string(),
+                        ),
+                    ],
+                );
+            }
+            true
+        }
+        Ok(Err(_)) => {
+            log_code_generation_retention_degraded("retention_pass_failed");
+            false
+        }
+        Err(_) => {
+            log_code_generation_retention_degraded("retention_task_panicked");
+            false
+        }
+    }
+}
+
+/// The exact per-project code-index store root this cadence sweeps.
+///
+/// This must stay the scoped root the scheduler publishes into and Doctor
+/// reports on. A cadence pointed at any other directory would find no sealed
+/// generations and silently reclaim nothing, which is the failure this pass
+/// exists to end.
+pub(super) fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
+    crate::retention::code_index_generations::scoped_code_index_store_root(
+        &data_root.join("code-index-v1"),
+        project_root,
+    )
+}
+
+/// Durable failure visibility for the code-generation retention pass. A silent
+/// skip is what let generation growth go unnoticed, so every refusal names why.
+fn log_code_generation_retention_degraded(failure: &str) {
+    log_daemon_event(
+        "retention_degraded",
+        &[
+            ("pass", "code_generations".to_string()),
+            ("failure", failure.to_string()),
+        ],
+    );
+}
+
 pub(super) async fn run_session_retention(
     database: &crate::global_db::RegisteredGlobalDb,
     config: &RetentionConfig,
