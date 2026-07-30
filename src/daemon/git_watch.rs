@@ -1036,6 +1036,14 @@ mod backstop {
                         } else {
                             true
                         };
+                    // Sealed code-index generations are ordinary files that no
+                    // database retention pass reclaims, and they must be
+                    // collected whether or not the semantic lane is active.
+                    let mut code_generations_succeeded = true;
+                    for graph in &project_graphs {
+                        code_generations_succeeded &=
+                            super::store_maintenance::run_code_generation_retention(graph).await;
+                    }
                     let mut compaction_succeeded = true;
                     if let Some(compaction) = &retention.compaction {
                         compaction_succeeded &= super::store_maintenance::run_global_compaction(
@@ -1062,6 +1070,7 @@ mod backstop {
                     session_succeeded
                         && orphan_succeeded
                         && debris_succeeded
+                        && code_generations_succeeded
                         && compaction_succeeded
                 })
                 .await;

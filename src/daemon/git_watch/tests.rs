@@ -39,6 +39,35 @@ fn retention_window_conversion_never_wraps_negative() {
     assert_eq!(store_maintenance::retention_window_secs(u64::MAX), i64::MAX);
 }
 
+/// The ordinary retention cadence must sweep the same scoped code-index root the
+/// scheduler publishes into. A cadence aimed anywhere else would find no sealed
+/// generations and silently reclaim nothing.
+#[test]
+fn code_generation_retention_sweeps_the_scheduler_store_root() {
+    let data_root = std::path::PathBuf::from("/profile/projects/alpha");
+    let project_root = std::path::PathBuf::from("/work/alpha");
+
+    let swept = store_maintenance::code_index_store_root(&data_root, &project_root);
+    let published = super::super::code_index_scheduler::scoped_code_index_store_root(
+        &data_root.join("code-index-v1"),
+        &project_root,
+    );
+
+    assert_eq!(
+        swept, published,
+        "retention cadence must sweep the scheduler's scoped generation root"
+    );
+    assert!(
+        swept.starts_with(data_root.join("code-index-v1")),
+        "generation sweep must stay inside the project's code-index store"
+    );
+    assert_ne!(
+        swept,
+        data_root.join("code-index-v1"),
+        "sweep root must be the per-project scoped subdirectory, not the shared parent"
+    );
+}
+
 #[test]
 fn failed_branch_compaction_keeps_maintenance_retry_eligible() {
     let report = crate::retention::branch_compaction::BranchCompactionReport {
