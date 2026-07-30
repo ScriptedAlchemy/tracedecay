@@ -71,11 +71,24 @@ export const WORK_SCENARIOS: readonly Scenario[] = [
         );
       }
       // The subscribed row has to say which of the three situations it is in, or
-      // a silent stream and an unreachable one read identically.
+      // a silent stream and an unreachable one read identically. Matched against
+      // the exact set of allowed readings rather than the word "subscribed":
+      // every branch contains that word, so a regression collapsing all three
+      // into one reading would sail through a `/subscribed/` test.
       const activity = rows.find((row) => row.id === 'task-activity');
-      if (activity !== undefined && !/subscribed/.test(activity.detail)) {
+      if (activity === undefined) {
+        throw new Error('the subscribed stream row is absent from the ledger');
+      }
+      const stated =
+        [
+          'subscribed · stream unreachable',
+          'subscribed · connecting',
+          'subscribed · none in live window',
+        ].some((reading) => activity.detail.includes(reading))
+        || /subscribed · \d+ in live window/.test(activity.detail);
+      if (!stated) {
         throw new Error(
-          `the subscribed stream row states no reading: ${JSON.stringify(activity)}`,
+          `the subscribed stream row states no known reading: ${JSON.stringify(activity)}`,
         );
       }
       const nameless = rows.filter((row) => row.requires === '');
