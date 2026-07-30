@@ -1,3 +1,4 @@
+use schemars::schema_for;
 use tracedecay_domain::{
     CollectionRevision, ManifestDigest, RootGenerationV1, ScopeOutcome, ScopePartialReasonV1,
     ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,
@@ -36,6 +37,12 @@ fn scope_set_and_root_revision_identities_are_typed_and_nonzero() {
     let mut tampered = serde_json::to_value(generation).unwrap();
     tampered["generation_digest"] = serde_json::json!(digest('f'));
     assert!(serde_json::from_value::<RootGenerationV1>(tampered).is_err());
+}
+
+#[test]
+fn scope_set_revision_schema_rejects_zero() {
+    let schema = serde_json::to_value(schema_for!(ScopeSetRevision)).unwrap();
+    assert_eq!(schema["minimum"], 1);
 }
 
 #[test]
