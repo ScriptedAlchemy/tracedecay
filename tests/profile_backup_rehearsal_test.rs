@@ -153,24 +153,16 @@ fn released_copy_rehearsal_recovers_owned_interrupted_staging() {
     let backup = create_backup(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let staging = temp.path().join(".rehearsed-profile.tracedecay-rehearsal");
-    fs::create_dir(&staging).unwrap();
-    fs::write(staging.join("partial"), b"interrupted copy").unwrap();
-    fs::write(
-        staging.join(".tracedecay-profile-rehearsal.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": 1,
-            "backup_id": "backup.release",
-            "restore_root": restore.clone(),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    set_rehearsal_publication_fault_for_test("before_rename");
+
+    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    assert!(error.contains("injected rehearsal publication fault"));
+    assert!(staging.join(".tracedecay-profile-rehearsal.json").is_file());
 
     rehearse_complete_profile_backup(&backup, &restore).unwrap();
 
     assert!(restore.join("profile-identity.json").is_file());
     assert!(!staging.exists());
-    assert!(!restore.join("partial").exists());
 }
 
 #[test]
@@ -220,4 +212,39 @@ fn released_copy_rehearsal_resumes_after_rename_before_marker_removal() {
     rehearse_complete_profile_backup(&backup, &restore).unwrap();
     assert!(restore.join("profile-identity.json").is_file());
     assert!(!restore.join(".tracedecay-profile-rehearsal.json").exists());
+}
+
+#[test]
+fn released_copy_rehearsal_rejects_same_id_from_another_backup_root() {
+    let original_temp = TempDir::new().unwrap();
+    let original_fixture = seed_released_profile(&original_temp);
+    let original_backup = create_backup(&original_temp, &original_fixture);
+    let restore = original_temp.path().join("rehearsed-profile");
+    let marker_path = restore.join(".tracedecay-profile-rehearsal.json");
+    let expected_identity = read_bytes(&original_fixture.profile, "profile-identity.json");
+    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
+
+    rehearse_complete_profile_backup(&original_backup, &restore).unwrap_err();
+    let expected_marker = fs::read(&marker_path).unwrap();
+
+    let foreign_temp = TempDir::new().unwrap();
+    let foreign_fixture = seed_released_profile(&foreign_temp);
+    fs::write(
+        foreign_fixture.profile.join("profile-identity.json"),
+        b"foreign profile identity",
+    )
+    .unwrap();
+    let foreign_backup = create_backup(&foreign_temp, &foreign_fixture);
+
+    let error = rehearse_complete_profile_backup(&foreign_backup, &restore).unwrap_err();
+
+    assert!(
+        error.contains("belongs to another restore attempt"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(fs::read(&marker_path).unwrap(), expected_marker);
+    assert_eq!(
+        read_bytes(&restore, "profile-identity.json"),
+        expected_identity
+    );
 }
