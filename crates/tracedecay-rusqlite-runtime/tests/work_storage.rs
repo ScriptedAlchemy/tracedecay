@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use tracedecay_application::{
     AcceptProposalCommand, CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand,
     Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, ReviewProposalCommand,
-    WorkService,
+    WorkProjectionReadPort, WorkService,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
@@ -83,6 +83,51 @@ fn create(service: &WorkService<WorkSqliteStorage>, context: &RequestContext, ta
             },
         )
         .unwrap();
+}
+
+#[test]
+fn projection_reads_are_scope_exact_generation_bound_and_incremental() {
+    let connection = Connection::open_in_memory().unwrap();
+    install_work_schema(&connection).unwrap();
+    let storage = WorkSqliteStorage::new(Arc::new(Mutex::new(connection)));
+    let service = WorkService::new(storage.clone());
+    let owner = context("project.work.read-port", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.read-port");
+    create(&service, &owner, task_id.as_str());
+
+    let owner_authority = authority(&owner);
+    let snapshot = WorkProjectionReadPort::snapshot(&storage, &owner_authority, 100).unwrap();
+    assert_eq!(snapshot.projections().len(), 1);
+    assert_eq!(snapshot.projections()[0].task_id(), &task_id);
+    assert_eq!(snapshot.sequence().get(), 1);
+
+    let other = context("project.work.read-port.other", "actor.work.owner");
+    let other_snapshot =
+        WorkProjectionReadPort::snapshot(&storage, &authority(&other), 100).unwrap();
+    assert!(other_snapshot.projections().is_empty());
+    assert_ne!(other_snapshot.generation_id(), snapshot.generation_id());
+
+    service
+        .accept_proposal(
+            &owner,
+            AcceptProposalCommand {
+                review: ReviewProposalCommand {
+                    task_id: task_id.clone(),
+                    proposal_id: id("proposal.work.read-port"),
+                    proposal_digest: digest('b'),
+                    expected_version: WorkVersion::initial(),
+                    command_id: id("command.accept-proposal.work.read-port"),
+                    occurred_at: UtcMicros(20),
+                },
+            },
+        )
+        .unwrap();
+    let cursor = WorkSqliteStorage::resume_cursor(&snapshot).unwrap();
+    let delta = WorkProjectionReadPort::delta(&storage, &owner_authority, &cursor, 100).unwrap();
+    assert_eq!(delta.from_sequence(), snapshot.sequence());
+    assert_eq!(delta.to_sequence().get(), 2);
+    assert_eq!(delta.changed().len(), 1);
+    assert_eq!(delta.changed()[0].task_id(), &task_id);
 }
 
 #[test]

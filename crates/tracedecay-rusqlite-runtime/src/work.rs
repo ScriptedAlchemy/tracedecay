@@ -1,15 +1,20 @@
 //! Concrete SQLite persistence for the application-owned Work authority.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tracedecay_application::{
     WorkAppendOutcome, WorkAppendRequest, WorkAttemptPersistencePort,
-    WorkExecutionPersistenceError, WorkStorageError, WorkStoragePort,
+    WorkExecutionPersistenceError, WorkProjectionPortError, WorkProjectionReadPort,
+    WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
-    ManifestDigest, TaskId, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1,
-    WorkAuthority, WorkCommandId, WorkEvent, WorkProjection, WorkVersion, canonical_sha256,
+    ManifestDigest, ProjectionGenerationId, TaskId, WorkAttemptIdentityV1, WorkAttemptStateV1,
+    WorkAttemptV1, WorkAuthority, WorkCommandId, WorkEvent, WorkProjection,
+    WorkProjectionCoverageV1, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1,
+    WorkProjectionSequenceRangeV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkVersion,
+    canonical_sha256,
 };
 
 const WORK_SCHEMA_V1: &str = "
@@ -221,6 +226,12 @@ impl WorkSqliteStorage {
             .unwrap_or(0);
         u64::try_from(sequence).map_err(|_| invalid_storage("negative Work owner cursor"))
     }
+
+    pub fn resume_cursor(
+        snapshot: &WorkProjectionSnapshotV1,
+    ) -> Result<WorkProjectionResumeCursorV1, WorkProjectionPortError> {
+        projection_cursor(snapshot.generation_id().clone(), snapshot.sequence())
+    }
 }
 
 impl WorkStoragePort for WorkSqliteStorage {
@@ -285,6 +296,242 @@ impl WorkStoragePort for WorkSqliteStorage {
         transaction.commit().map_err(map_sqlite)?;
         Ok(WorkAppendOutcome::Appended(history))
     }
+}
+
+impl WorkProjectionReadPort for WorkSqliteStorage {
+    fn snapshot(
+        &self,
+        authority: &WorkAuthority,
+        page_size: u32,
+    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let generation_id = projection_generation(authority)?;
+        let sequence = WorkProjectionSequenceV1::new(
+            Self::owner_cursor(&connection, authority)
+                .map_err(|_| WorkProjectionPortError::Unavailable)?,
+        );
+        let total = connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM work_projection_snapshots_v1
+                 WHERE project_id = ?1
+                   AND repository_id = ?2
+                   AND worktree_id = ?3
+                   AND actor_id = ?4
+                   AND policy_digest = ?5",
+                authority_params(authority),
+                |row| row.get::<_, u32>(0),
+            )
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT projection_payload
+                 FROM work_projection_snapshots_v1
+                 WHERE project_id = ?1
+                   AND repository_id = ?2
+                   AND worktree_id = ?3
+                   AND actor_id = ?4
+                   AND policy_digest = ?5
+                 ORDER BY task_id
+                 LIMIT ?6",
+            )
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let rows = statement
+            .query_map(
+                params![
+                    authority.project_id().as_str(),
+                    authority.repository_id().as_str(),
+                    authority.worktree_id().as_str(),
+                    authority.actor_id().as_str(),
+                    authority.policy_digest().as_str(),
+                    page_size,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let mut projections = Vec::new();
+        for row in rows {
+            let payload = row.map_err(|_| WorkProjectionPortError::Unavailable)?;
+            projections.push(
+                serde_json::from_str(&payload).map_err(|_| WorkProjectionPortError::Unavailable)?,
+            );
+        }
+        let returned =
+            u32::try_from(projections.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let coverage = if returned == total {
+            WorkProjectionCoverageV1::complete(returned, total)
+                .map_err(|_| WorkProjectionPortError::Unavailable)?
+        } else {
+            let range =
+                WorkProjectionSequenceRangeV1::new(WorkProjectionSequenceV1::new(0), sequence)
+                    .map_err(|_| WorkProjectionPortError::Unavailable)?;
+            let cursor = projection_cursor(generation_id.clone(), sequence)?;
+            WorkProjectionCoverageV1::capped(returned, total, page_size, range, cursor)
+                .map_err(|_| WorkProjectionPortError::Unavailable)?
+        };
+        WorkProjectionSnapshotV1::new(generation_id, sequence, projections, coverage)
+            .map_err(|_| WorkProjectionPortError::Unavailable)
+    }
+
+    fn delta(
+        &self,
+        authority: &WorkAuthority,
+        cursor: &WorkProjectionResumeCursorV1,
+        page_size: u32,
+    ) -> Result<WorkProjectionDeltaV1, WorkProjectionPortError> {
+        let generation_id = projection_generation(authority)?;
+        if cursor.generation_id() != &generation_id {
+            return Err(WorkProjectionPortError::StaleCursor);
+        }
+        let from_sequence = parse_projection_cursor(cursor)?;
+        let from_sequence_sql =
+            i64::try_from(from_sequence).map_err(|_| WorkProjectionPortError::StaleCursor)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let current_sequence = Self::owner_cursor(&connection, authority)
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        if from_sequence >= current_sequence {
+            return Err(WorkProjectionPortError::StaleCursor);
+        }
+        let total = connection
+            .query_row(
+                "SELECT COUNT(DISTINCT task_id)
+                 FROM work_projection_deltas_v1
+                 WHERE project_id = ?1
+                   AND repository_id = ?2
+                   AND worktree_id = ?3
+                   AND actor_id = ?4
+                   AND policy_digest = ?5
+                   AND owner_sequence > ?6",
+                params![
+                    authority.project_id().as_str(),
+                    authority.repository_id().as_str(),
+                    authority.worktree_id().as_str(),
+                    authority.actor_id().as_str(),
+                    authority.policy_digest().as_str(),
+                    from_sequence_sql,
+                ],
+                |row| row.get::<_, u32>(0),
+            )
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let mut statement = connection
+            .prepare(
+                "WITH latest AS (
+                    SELECT task_id, MAX(owner_sequence) AS owner_sequence
+                    FROM work_projection_deltas_v1
+                    WHERE project_id = ?1
+                      AND repository_id = ?2
+                      AND worktree_id = ?3
+                      AND actor_id = ?4
+                      AND policy_digest = ?5
+                      AND owner_sequence > ?6
+                    GROUP BY task_id
+                 )
+                 SELECT delta.projection_payload, latest.owner_sequence
+                 FROM latest
+                 JOIN work_projection_deltas_v1 AS delta
+                   ON delta.project_id = ?1
+                  AND delta.repository_id = ?2
+                  AND delta.worktree_id = ?3
+                  AND delta.actor_id = ?4
+                  AND delta.policy_digest = ?5
+                  AND delta.task_id = latest.task_id
+                  AND delta.owner_sequence = latest.owner_sequence
+                 ORDER BY latest.owner_sequence
+                 LIMIT ?7",
+            )
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let rows = statement
+            .query_map(
+                params![
+                    authority.project_id().as_str(),
+                    authority.repository_id().as_str(),
+                    authority.worktree_id().as_str(),
+                    authority.actor_id().as_str(),
+                    authority.policy_digest().as_str(),
+                    from_sequence_sql,
+                    page_size,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|_| WorkProjectionPortError::Unavailable)?;
+        let mut changed = Vec::new();
+        let mut to_sequence = from_sequence;
+        for row in rows {
+            let (payload, owner_sequence) =
+                row.map_err(|_| WorkProjectionPortError::Unavailable)?;
+            let owner_sequence =
+                u64::try_from(owner_sequence).map_err(|_| WorkProjectionPortError::Unavailable)?;
+            changed.push(
+                serde_json::from_str(&payload).map_err(|_| WorkProjectionPortError::Unavailable)?,
+            );
+            to_sequence = to_sequence.max(owner_sequence);
+        }
+        let returned =
+            u32::try_from(changed.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
+        if returned == total {
+            to_sequence = current_sequence;
+        }
+        let from_sequence = WorkProjectionSequenceV1::new(from_sequence);
+        let to_sequence = WorkProjectionSequenceV1::new(to_sequence);
+        let coverage = if returned == total {
+            WorkProjectionCoverageV1::complete(returned, total)
+                .map_err(|_| WorkProjectionPortError::Unavailable)?
+        } else {
+            let range = WorkProjectionSequenceRangeV1::new(from_sequence, to_sequence)
+                .map_err(|_| WorkProjectionPortError::Unavailable)?;
+            let cursor = projection_cursor(generation_id.clone(), to_sequence)?;
+            WorkProjectionCoverageV1::capped(returned, total, page_size, range, cursor)
+                .map_err(|_| WorkProjectionPortError::Unavailable)?
+        };
+        WorkProjectionDeltaV1::new(
+            generation_id,
+            from_sequence,
+            to_sequence,
+            changed,
+            BTreeSet::new(),
+            coverage,
+        )
+        .map_err(|_| WorkProjectionPortError::Unavailable)
+    }
+}
+
+fn projection_generation(
+    authority: &WorkAuthority,
+) -> Result<ProjectionGenerationId, WorkProjectionPortError> {
+    let digest = canonical_sha256(&("tracedecay.work.projection.generation.v1", authority))
+        .map_err(|_| WorkProjectionPortError::Unavailable)?;
+    ProjectionGenerationId::try_from(format!(
+        "generation.work.{}",
+        digest.as_str().trim_start_matches("sha256:")
+    ))
+    .map_err(|_| WorkProjectionPortError::Unavailable)
+}
+
+fn projection_cursor(
+    generation_id: ProjectionGenerationId,
+    sequence: WorkProjectionSequenceV1,
+) -> Result<WorkProjectionResumeCursorV1, WorkProjectionPortError> {
+    WorkProjectionResumeCursorV1::new(
+        generation_id,
+        format!("work-projection-sequence.v1:{}", sequence.get()),
+    )
+    .map_err(|_| WorkProjectionPortError::Unavailable)
+}
+
+fn parse_projection_cursor(
+    cursor: &WorkProjectionResumeCursorV1,
+) -> Result<u64, WorkProjectionPortError> {
+    cursor
+        .token()
+        .strip_prefix("work-projection-sequence.v1:")
+        .and_then(|sequence| sequence.parse::<u64>().ok())
+        .ok_or(WorkProjectionPortError::StaleCursor)
 }
 
 impl WorkSqliteStorage {
