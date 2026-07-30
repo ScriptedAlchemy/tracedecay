@@ -131,6 +131,18 @@ impl Pr9QueryAuthorityV1 {
         Ok(self.keyring.digest_active_query(request, query_view)?)
     }
 
+    /// Authenticate one prepared-query cursor payload with the daemon-owned key.
+    pub fn authenticate_prepared_cursor_payload(
+        &self,
+        request: &RetrievalRequest,
+        payload_bytes: &[u8],
+    ) -> Result<QueryDigest, Pr9QueryAuthorityErrorV1> {
+        self.validate_request(request)?;
+        Ok(self
+            .keyring
+            .digest_active_prepared_cursor_payload(request, payload_bytes)?)
+    }
+
     pub fn active_query_key_id(&self) -> RetrievalCursorKeyId {
         self.keyring.active_query_key_id()
     }
@@ -145,6 +157,19 @@ impl Pr9QueryAuthorityV1 {
         self.validate_request(request)?;
         self.keyring
             .verify_query_digest_for(key_id, request, query_view, digest)?;
+        Ok(())
+    }
+
+    pub fn verify_prepared_cursor_payload(
+        &self,
+        key_id: &RetrievalCursorKeyId,
+        request: &RetrievalRequest,
+        payload_bytes: &[u8],
+        digest: &QueryDigest,
+    ) -> Result<(), Pr9QueryAuthorityErrorV1> {
+        self.validate_request(request)?;
+        self.keyring
+            .verify_prepared_cursor_payload_for(key_id, request, payload_bytes, digest)?;
         Ok(())
     }
 
