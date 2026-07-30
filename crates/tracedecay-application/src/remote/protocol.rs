@@ -34,6 +34,18 @@ pub trait RemoteProtocolPortV1<Request> {
     ) -> RemoteProtocolResponseV1<Self::Output>;
 }
 
+/// Enrollment requires both the one-time grant credential and the replacement
+/// enrollment credential. Neither secret is serializable or retained by the
+/// protocol request body.
+pub trait RemoteEnrollmentProtocolPortV1: Send + Sync {
+    fn execute_enrollment(
+        &self,
+        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        grant_credential: OpaqueRemoteCredential,
+        enrollment_credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>;
+}
+
 /// Validates canonical protocol metadata before delegating exactly once to the
 /// authenticated transport-neutral remote port.
 pub struct RemoteProtocolServiceV1<Port> {
@@ -43,6 +55,10 @@ pub struct RemoteProtocolServiceV1<Port> {
 impl<Port> RemoteProtocolServiceV1<Port> {
     pub const fn new(port: Port) -> Self {
         Self { port }
+    }
+
+    pub const fn port(&self) -> &Port {
+        &self.port
     }
 
     pub fn execute<Request>(

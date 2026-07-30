@@ -18,6 +18,27 @@ use super::capture::{
     AdmittedRemoteCaptureV1, RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
 
+/// Secret-free replay selector. The authority loads the canonical admitted
+/// capture from its encrypted spool; callers cannot resubmit or alter payload.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteReplayRequestV1 {
+    pub event_id: String,
+}
+
+impl RemoteReplayRequestV1 {
+    pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
+        if self.event_id.len() < 16
+            || self.event_id.len() > 160
+            || self.event_id.trim() != self.event_id
+            || self.event_id.chars().any(char::is_control)
+        {
+            return Err(RemoteReplayApplicationErrorV1::InvalidFrame);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteReplayFrameV1 {
     pub event_id: String,
@@ -183,7 +204,8 @@ pub trait RemoteReplayTransactionPortV1: Send + Sync {
     ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum RemoteReplayOutcomeV1 {
     Acknowledged {
         disposition: RemoteReplayStateV1,
@@ -488,6 +510,24 @@ mod tests {
         assert!(
             !RemoteReplayStateV1::Pending
                 .permits_transition_to(RemoteReplayStateV1::GarbageCollectionEligible)
+        );
+    }
+
+    #[test]
+    fn replay_selector_rejects_noncanonical_event_identity() {
+        assert!(
+            RemoteReplayRequestV1 {
+                event_id: "short".into()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            RemoteReplayRequestV1 {
+                event_id: "remote.event.sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()
+            }
+            .validate()
+            .is_ok()
         );
     }
 }

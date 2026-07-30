@@ -47,6 +47,19 @@ pub struct BackupRequestV1 {
     pub expires_at_micros: i64,
 }
 
+impl BackupRequestV1 {
+    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
+        validate_identifier("backup operation id", &self.operation_id)?;
+        self.expected.validate()?;
+        if now_micros >= self.expires_at_micros {
+            return Err(ApplicationContractError::InvalidRange {
+                field: "backup request expiry",
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum BackupOperationStateV1 {
@@ -102,6 +115,21 @@ pub struct StagedRestoreConfirmationV1 {
     pub manifest_digest: [u8; 32],
     pub expected_authority_epoch: u64,
     pub expected_policy_digest: [u8; 32],
+}
+
+impl StagedRestoreConfirmationV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_identifier("restore preview id", &self.preview_id)?;
+        if self.manifest_digest == [0; 32]
+            || self.expected_authority_epoch == 0
+            || self.expected_policy_digest == [0; 32]
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "restore confirmation",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +200,18 @@ pub struct PromotionConfirmationV1 {
     pub expected_authority_epoch: u64,
     pub expected_placement_revision: u64,
     pub expected_frontier_sequence: u64,
+}
+
+impl PromotionConfirmationV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        validate_identifier("promotion preview id", &self.preview_id)?;
+        if self.expected_authority_epoch == 0 || self.expected_placement_revision == 0 {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "promotion confirmation",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,5 +345,28 @@ mod tests {
         ] {
             assert!(!state.may_accept_writes());
         }
+    }
+
+    #[test]
+    fn restore_and_promotion_confirmations_require_exact_expectations() {
+        let mut restore = StagedRestoreConfirmationV1 {
+            preview_id: "restore.1".into(),
+            manifest_digest: [1; 32],
+            expected_authority_epoch: 8,
+            expected_policy_digest: [2; 32],
+        };
+        assert!(restore.validate().is_ok());
+        restore.expected_authority_epoch = 0;
+        assert!(restore.validate().is_err());
+
+        let mut promotion = PromotionConfirmationV1 {
+            preview_id: "promotion.1".into(),
+            expected_authority_epoch: 8,
+            expected_placement_revision: 4,
+            expected_frontier_sequence: 19,
+        };
+        assert!(promotion.validate().is_ok());
+        promotion.expected_placement_revision = 0;
+        assert!(promotion.validate().is_err());
     }
 }
