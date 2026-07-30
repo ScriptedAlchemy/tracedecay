@@ -1,17 +1,28 @@
 //! Durable SQLite authority, fencing, and publication for Remote Brain recovery.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_application::remote::auth::{
+    RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentAuthorityPortV1,
+};
 use tracedecay_application::remote::capture::{
     RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
-use tracedecay_domain::{CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1};
+use tracedecay_domain::{
+    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, EnrollmentGrantV1, EntityId,
+    RemoteAuthorityUnavailableReasonV1, UtcMicros,
+};
 use tracedecay_store::{AuthorityCasV1, ShardWatermarkV1, StoreRuntimeBindingV1};
 
+use crate::migration_sql::{
+    MigrationSqlError, MigrationSqlHandle, MigrationSqlRows, MigrationSqlStatement,
+    MigrationSqlTransaction, MigrationSqlValue,
+};
 use crate::remote_spool::RemoteAuthorityReachabilityPortV1;
 
 const SCHEMA: &str = r#"
@@ -41,6 +52,223 @@ CREATE TABLE IF NOT EXISTS remote_publication_v1 (
     frontier_json TEXT NOT NULL
 );
 "#;
+
+const REMOTE_ENROLLMENT_SCHEMA_V1: &str = r#"
+CREATE TABLE IF NOT EXISTS remote_enrollment_grants_v1 (
+    grant_id TEXT PRIMARY KEY,
+    grant_revision INTEGER NOT NULL CHECK (grant_revision > 0),
+    grant_json TEXT NOT NULL,
+    consumed_at INTEGER,
+    enrollment_id TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS remote_enrollment_credentials_v1 (
+    enrollment_id TEXT PRIMARY KEY,
+    credential_revision INTEGER NOT NULL CHECK (credential_revision > 0),
+    enrollment_json TEXT NOT NULL
+) STRICT;
+"#;
+
+#[derive(Clone)]
+pub struct RegisteredRemoteEnrollmentAuthorityV1 {
+    handle: MigrationSqlHandle,
+}
+
+impl RegisteredRemoteEnrollmentAuthorityV1 {
+    pub fn from_registered(
+        handle: MigrationSqlHandle,
+    ) -> Result<Self, RemoteEnrollmentAuthorityErrorV1> {
+        handle
+            .execute_batch(REMOTE_ENROLLMENT_SCHEMA_V1.to_owned())
+            .map_err(enrollment_unavailable)?;
+        Ok(Self { handle })
+    }
+
+    /// Trusted local administration provisions an already validated,
+    /// fingerprint-only grant. Inbound protocol requests never call this path.
+    pub fn provision_grant(
+        &self,
+        grant: &EnrollmentGrantV1,
+    ) -> Result<(), RemoteEnrollmentAuthorityErrorV1> {
+        grant
+            .validate()
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let encoded = serde_json::to_string(grant)
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let revision = i64::try_from(grant.revision)
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let transaction = self
+            .handle
+            .begin_immediate()
+            .map_err(enrollment_unavailable)?;
+        let existing = enrollment_query_tx(
+            &transaction,
+            "SELECT grant_json FROM remote_enrollment_grants_v1 WHERE grant_id = ?1",
+            vec![MigrationSqlValue::Text(grant.grant_id.as_str().to_owned())],
+        )?;
+        if let Some(row) = existing.rows.first() {
+            return if enrollment_text(&row.values, 0) == Some(encoded.as_str()) {
+                transaction
+                    .commit()
+                    .map_err(enrollment_unavailable)
+                    .map(|_| ())
+            } else {
+                Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict)
+            };
+        }
+        enrollment_execute_tx(
+            &transaction,
+            "INSERT INTO remote_enrollment_grants_v1 (
+                grant_id, grant_revision, grant_json, consumed_at, enrollment_id
+             ) VALUES (?1, ?2, ?3, NULL, NULL)",
+            vec![
+                MigrationSqlValue::Text(grant.grant_id.as_str().to_owned()),
+                MigrationSqlValue::Integer(revision),
+                MigrationSqlValue::Text(encoded),
+            ],
+        )?;
+        transaction
+            .commit()
+            .map_err(enrollment_unavailable)
+            .map(|_| ())
+    }
+}
+
+impl RemoteEnrollmentAuthorityPortV1 for RegisteredRemoteEnrollmentAuthorityV1 {
+    fn load_grant(
+        &self,
+        grant_id: &EntityId,
+    ) -> Result<EnrollmentGrantV1, RemoteEnrollmentAuthorityErrorV1> {
+        let rows = self
+            .handle
+            .query(
+                enrollment_statement(
+                    "SELECT grant_json, consumed_at FROM remote_enrollment_grants_v1
+                     WHERE grant_id = ?1",
+                    vec![MigrationSqlValue::Text(grant_id.as_str().to_owned())],
+                )?,
+                Duration::from_secs(5),
+            )
+            .map_err(enrollment_unavailable)?;
+        let row = rows
+            .rows
+            .first()
+            .ok_or(RemoteEnrollmentAuthorityErrorV1::GrantNotFound)?;
+        if !matches!(row.values.get(1), Some(MigrationSqlValue::Null)) {
+            return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+        }
+        let encoded = enrollment_text(&row.values, 0)
+            .ok_or(RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        serde_json::from_str(encoded)
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)
+    }
+
+    fn commit_enrollment(
+        &self,
+        grant: &EnrollmentGrantV1,
+        enrollment: &EnrollmentCredentialRecordV1,
+        consumed_at: UtcMicros,
+    ) -> Result<(), RemoteEnrollmentAuthorityErrorV1> {
+        grant
+            .validate()
+            .and_then(|()| enrollment.validate())
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        if grant.brain_id != enrollment.brain_id
+            || grant.node_id != enrollment.node_id
+            || grant.scope != enrollment.scope
+            || !enrollment.capabilities.is_subset(&grant.capabilities)
+            || enrollment.revision != grant.revision
+            || enrollment.issued_at != consumed_at
+            || enrollment.expires_at > grant.expires_at
+        {
+            return Err(RemoteEnrollmentAuthorityErrorV1::IdentityConflict);
+        }
+        let grant_json = serde_json::to_string(grant)
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let enrollment_json = serde_json::to_string(enrollment)
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let revision = i64::try_from(enrollment.revision)
+            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
+        let transaction = self
+            .handle
+            .begin_immediate()
+            .map_err(enrollment_unavailable)?;
+        let updated = transaction
+            .execute(enrollment_statement(
+                "UPDATE remote_enrollment_grants_v1
+                 SET consumed_at = ?1, enrollment_id = ?2
+                 WHERE grant_id = ?3 AND grant_revision = ?4
+                   AND grant_json = ?5 AND consumed_at IS NULL",
+                vec![
+                    MigrationSqlValue::Integer(consumed_at.0),
+                    MigrationSqlValue::Text(enrollment.enrollment_id.as_str().to_owned()),
+                    MigrationSqlValue::Text(grant.grant_id.as_str().to_owned()),
+                    MigrationSqlValue::Integer(
+                        i64::try_from(grant.revision)
+                            .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?,
+                    ),
+                    MigrationSqlValue::Text(grant_json),
+                ],
+            )?)
+            .map_err(enrollment_unavailable)?;
+        if updated.changed_rows != 1 {
+            return Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed);
+        }
+        enrollment_execute_tx(
+            &transaction,
+            "INSERT INTO remote_enrollment_credentials_v1 (
+                enrollment_id, credential_revision, enrollment_json
+             ) VALUES (?1, ?2, ?3)",
+            vec![
+                MigrationSqlValue::Text(enrollment.enrollment_id.as_str().to_owned()),
+                MigrationSqlValue::Integer(revision),
+                MigrationSqlValue::Text(enrollment_json),
+            ],
+        )?;
+        transaction
+            .commit()
+            .map_err(enrollment_unavailable)
+            .map(|_| ())
+    }
+}
+
+fn enrollment_statement(
+    sql: &str,
+    params: Vec<MigrationSqlValue>,
+) -> Result<MigrationSqlStatement, RemoteEnrollmentAuthorityErrorV1> {
+    MigrationSqlStatement::new(sql.to_owned(), params).map_err(enrollment_unavailable)
+}
+
+fn enrollment_query_tx(
+    transaction: &MigrationSqlTransaction,
+    sql: &str,
+    params: Vec<MigrationSqlValue>,
+) -> Result<MigrationSqlRows, RemoteEnrollmentAuthorityErrorV1> {
+    transaction
+        .query(enrollment_statement(sql, params)?)
+        .map_err(enrollment_unavailable)
+}
+
+fn enrollment_execute_tx(
+    transaction: &MigrationSqlTransaction,
+    sql: &str,
+    params: Vec<MigrationSqlValue>,
+) -> Result<(), RemoteEnrollmentAuthorityErrorV1> {
+    transaction
+        .execute(enrollment_statement(sql, params)?)
+        .map(|_| ())
+        .map_err(enrollment_unavailable)
+}
+
+fn enrollment_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
+    match values.get(index)? {
+        MigrationSqlValue::Text(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn enrollment_unavailable(_: MigrationSqlError) -> RemoteEnrollmentAuthorityErrorV1 {
+    RemoteEnrollmentAuthorityErrorV1::Unavailable
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteAuthorityCasCommitV1 {

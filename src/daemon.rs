@@ -1195,6 +1195,7 @@ pub(crate) mod hook_v2_replay;
 pub(crate) mod pr9_authority_provider;
 pub(crate) mod project_open_owners;
 pub(crate) mod remote_brain;
+pub(crate) mod remote_enrollment;
 mod remote_https;
 #[cfg(test)]
 mod remote_https_tests;
