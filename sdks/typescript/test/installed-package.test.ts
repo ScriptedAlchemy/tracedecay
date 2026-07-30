@@ -134,6 +134,7 @@ it(
     const env = isolatedEnvironment(home);
     let daemon: ChildProcess | undefined;
     let tarball: string | undefined;
+    let ownsTarball = false;
     let daemonStderr = "";
 
     try {
@@ -172,25 +173,43 @@ it(
       ) as ProjectContext;
       expect(context.project.project_id).toMatch(/\S/);
 
-      run(NPM, ["run", "build"], { cwd: PACKAGE_ROOT, env: process.env });
-      const packed = JSON.parse(
-        run(NPM, ["pack", "--json", "--ignore-scripts"], {
-          cwd: PACKAGE_ROOT,
-          env: process.env,
-        }),
-      ) as PackedArtifact[];
-      expect(packed).toHaveLength(1);
-      const artifact = packed[0];
-      expect(artifact).toBeDefined();
-      tarball = join(PACKAGE_ROOT, artifact!.filename);
-      expect(artifact!.files.map((file) => file.path)).toEqual(
-        expect.arrayContaining([
-          "dist/index.js",
-          "dist/index.d.ts",
-          "dist/client.js",
-          "dist/client.d.ts",
-        ]),
-      );
+      // Publish-lane callers build and pack exactly once and pass the resulting
+      // tarball in here so conformance exercises the identical bytes that
+      // later get published, rather than a fresh rebuild/repack.
+      const externalTarball = process.env.TRACEDECAY_SDK_TARBALL;
+      if (externalTarball !== undefined) {
+        tarball = resolve(externalTarball);
+        ownsTarball = false;
+        expect(existsSync(tarball), `missing prebuilt tarball: ${tarball}`).toBe(true);
+        const contents = run("tar", ["-tzf", tarball], { cwd: PACKAGE_ROOT, env: process.env });
+        expect(contents).toEqual(
+          expect.stringContaining("package/dist/index.js"),
+        );
+        expect(contents).toEqual(
+          expect.stringContaining("package/dist/client.js"),
+        );
+      } else {
+        ownsTarball = true;
+        run(NPM, ["run", "build"], { cwd: PACKAGE_ROOT, env: process.env });
+        const packed = JSON.parse(
+          run(NPM, ["pack", "--json", "--ignore-scripts"], {
+            cwd: PACKAGE_ROOT,
+            env: process.env,
+          }),
+        ) as PackedArtifact[];
+        expect(packed).toHaveLength(1);
+        const artifact = packed[0];
+        expect(artifact).toBeDefined();
+        tarball = join(PACKAGE_ROOT, artifact!.filename);
+        expect(artifact!.files.map((file) => file.path)).toEqual(
+          expect.arrayContaining([
+            "dist/index.js",
+            "dist/index.d.ts",
+            "dist/client.js",
+            "dist/client.d.ts",
+          ]),
+        );
+      }
 
       writeFileSync(
         join(consumer, "package.json"),
@@ -362,7 +381,7 @@ for (const mode of ["local", "remote"]) {
       if (daemon !== undefined) {
         await stopDaemon(daemon);
       }
-      if (tarball !== undefined) {
+      if (tarball !== undefined && ownsTarball) {
         rmSync(tarball, { force: true });
       }
       rmSync(scratch, { recursive: true, force: true });
