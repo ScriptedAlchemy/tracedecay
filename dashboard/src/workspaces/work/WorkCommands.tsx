@@ -83,7 +83,7 @@ function CommandButton({
         type="button"
         onClick={onRun}
         disabled={disabled}
-        className="min-h-11 rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
+        className="min-h-[44px] rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
       >
         {label}
       </button>
@@ -266,7 +266,7 @@ export function WorkCreate() {
           id="work-create-task-id"
           value={taskId}
           onChange={(event) => setTaskId(event.target.value)}
-          className="min-h-11 rounded-sm border border-edge bg-surface-1 px-2 font-mono text-2xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="min-h-[44px] rounded-sm border border-edge bg-surface-1 px-2 font-mono text-2xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
         />
         <label htmlFor="work-create-title" className="text-2xs text-text-secondary">
           Title
@@ -275,13 +275,13 @@ export function WorkCreate() {
           id="work-create-title"
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          className="min-h-11 rounded-sm border border-edge bg-surface-1 px-2 text-2xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="min-h-[44px] rounded-sm border border-edge bg-surface-1 px-2 text-2xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
         />
         <div className="flex flex-wrap items-center justify-between gap-2">
           <button
             type="submit"
             disabled={!ready || create.isPending}
-            className="min-h-11 rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
+            className="min-h-[44px] rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted"
           >
             Create
           </button>
