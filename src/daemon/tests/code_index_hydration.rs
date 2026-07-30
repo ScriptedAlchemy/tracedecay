@@ -18,7 +18,7 @@ use super::super::code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCod
 use super::super::{code_index_search_display_binding, code_index_search_hydration_budget};
 use crate::mcp::server::CodeIndexSearchDisplayV1;
 use tracedecay_query::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
     HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationUnavailableV1,
     HydrationWorkPermitV1, LateHydrationSource,
 };
@@ -225,7 +225,7 @@ fn revocation_before_hydration_prevents_payload_read() {
     };
 
     let request = request(1);
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate(&request, &[ranked()], &request.budget)
         .expect("typed revocation outcome");
 
@@ -251,7 +251,7 @@ fn hydration_budget_rejects_payload_read_after_preflight() {
     };
 
     let request = request(1);
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate(&request, &[ranked()], &request.budget)
         .expect("typed budget outcome");
 
