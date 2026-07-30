@@ -1,9 +1,19 @@
-# Manual, one-SDK-at-a-time release. There is no changesets/release-plz style
-# version bot for sdks/typescript or sdks/python: a maintainer bumps the
-# version in package.json or pyproject.toml via a normal PR first, merges it,
-# then dispatches this workflow to publish exactly that version. Both jobs
-# require the real-daemon installed-package conformance suite to pass before
-# publishing; the fast mock-server unit suite alone is never sufficient.
+# Manual, one-SDK-at-a-time release, split into an unprivileged build/test/
+# conformance job and a minimal, environment-protected publish job per SDK.
+#
+# The build/test job never holds `id-token: write` or registry credentials —
+# a compromised dependency or test process it runs cannot request an OIDC
+# publish token. It builds the exact artifact (npm tarball / Python sdist+
+# wheel) exactly once, runs typecheck, the fast unit suite, and real-daemon
+# installed-package conformance against that *same* artifact, records its
+# sha256 digest, and uploads both. Only the publish job gets the protected
+# environment and `id-token: write`; it downloads the artifact, re-verifies
+# the digest, and publishes those exact, unchanged bytes.
+#
+# There is no changesets/release-plz style version bot for sdks/typescript or
+# sdks/python: a maintainer bumps the version in package.json or
+# pyproject.toml via a normal PR first, merges it, then dispatches this
+# workflow to publish exactly that version.
 name: SDK publish
 
 on:
@@ -21,28 +31,24 @@ permissions:
   contents: read
 
 jobs:
-  publish-typescript:
-    if: inputs.sdk == 'typescript'
-    name: Publish @tracedecay/sdk to npm
+  build-typescript:
+    if: inputs.sdk == 'typescript' && github.ref == 'refs/heads/master'
+    name: Build & test @tracedecay/sdk (unprivileged)
     runs-on: ubuntu-latest
-    environment: npm-tracedecay-sdk
     permissions:
       contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          node-version: 22
-          registry-url: "https://registry.npmjs.org"
+          toolchain: stable
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
           cache: npm
           cache-dependency-path: sdks/typescript/package-lock.json
-
-      - name: Install npm 11.5.1+ for OIDC trusted publishing
-        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: npm ci
@@ -56,19 +62,153 @@ jobs:
         run: npm test
         working-directory: sdks/typescript
 
-      - name: Build the real production daemon for installed-package conformance
+      - name: Build
+        run: npm run build
+        working-directory: sdks/typescript
+
+      - name: Pack the exact publish artifact once
+        id: pack
+        working-directory: sdks/typescript
+        run: |
+          set -euo pipefail
+          json="$(npm pack --json --ignore-scripts)"
+          filename="$(node -e 'console.log(JSON.parse(process.argv[1])[0].filename)' "$json")"
+          test -f "$filename"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+
+      - name: Build the real production daemon for conformance
         run: cargo build --bin tracedecay
 
-      - name: Real-daemon installed-package conformance
-        run: npm run test:installed
+      - name: Real-daemon conformance against the exact packed tarball
         working-directory: sdks/typescript
+        run: npx vitest run test/installed-package.test.ts
+        env:
+          TRACEDECAY_SDK_TARBALL: ${{ github.workspace }}/sdks/typescript/${{ steps.pack.outputs.filename }}
 
-      - name: Publish (OIDC trusted publishing)
-        run: npm publish --provenance
+      - name: Record the artifact digest
         working-directory: sdks/typescript
+        run: sha256sum -- "${{ steps.pack.outputs.filename }}" > "${{ steps.pack.outputs.filename }}.sha256"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarball
+          path: |
+            sdks/typescript/${{ steps.pack.outputs.filename }}
+            sdks/typescript/${{ steps.pack.outputs.filename }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-typescript:
+    needs: build-typescript
+    if: inputs.sdk == 'typescript' && github.ref == 'refs/heads/master'
+    name: Publish @tracedecay/sdk to npm
+    runs-on: ubuntu-latest
+    environment: npm-tracedecay-sdk
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+          path: artifact
+
+      - name: Verify the downloaded artifact digest
+        working-directory: artifact
+        run: sha256sum -c -- *.sha256
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install the reviewed npm version required for OIDC trusted publishing
+        run: npm install -g npm@12.0.2
+
+      - name: Publish the exact conformance-tested tarball
+        working-directory: artifact
+        run: |
+          set -euo pipefail
+          tarball="$(ls -- *.tgz)"
+          npm publish --provenance -- "$tarball"
+
+  build-python:
+    if: inputs.sdk == 'python' && github.ref == 'refs/heads/master'
+    name: Build & test tracedecay-sdk (unprivileged)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.13"
+
+      - name: Install pinned build tooling
+        run: python -m pip install --upgrade pip==26.2 build==1.5.0 twine==7.0.0
+
+      - name: Typecheck
+        working-directory: sdks/python
+        run: npx --yes pyright@1.1.411
+
+      - name: Build the sdist and wheel exactly once
+        working-directory: sdks/python
+        run: python -m build --outdir dist
+
+      - name: twine check the built artifacts
+        working-directory: sdks/python
+        run: twine check dist/*
+
+      - name: Locate the built wheel
+        id: dist
+        working-directory: sdks/python
+        run: |
+          set -euo pipefail
+          wheel="$(ls dist/*.whl)"
+          test -f "$wheel"
+          echo "wheel=$wheel" >> "$GITHUB_OUTPUT"
+
+      - name: Install the built wheel for the fast unit suite
+        run: python -m pip install "sdks/python/${{ steps.dist.outputs.wheel }}"
+
+      - name: Fast unit suite (against the installed wheel)
+        working-directory: sdks/python
+        run: python -m unittest discover -s tests -p "test_client.py"
+
+      - name: Build the real production daemon for conformance
+        run: cargo build --bin tracedecay
+
+      - name: Real-daemon conformance against the exact built wheel
+        working-directory: sdks/python
+        run: python -m unittest tests/test_installed_package.py
+        env:
+          TRACEDECAY_SDK_WHEEL: ${{ github.workspace }}/sdks/python/${{ steps.dist.outputs.wheel }}
+
+      - name: Record artifact digests
+        working-directory: sdks/python/dist
+        run: sha256sum -- * > ../dist.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pypi-dist
+          path: |
+            sdks/python/dist/*
+            sdks/python/dist.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   publish-python:
-    if: inputs.sdk == 'python'
+    needs: build-python
+    if: inputs.sdk == 'python' && github.ref == 'refs/heads/master'
     name: Publish tracedecay-sdk to PyPI
     runs-on: ubuntu-latest
     environment: pypi-tracedecay-sdk
@@ -76,53 +216,21 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          node-version: 22
+          name: pypi-dist
+          path: artifact
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install build dependency
-        run: python -m pip install --upgrade pip build
-
-      - name: Typecheck
-        run: npx --yes pyright@latest
-        working-directory: sdks/python
-
-      - name: Build wheel for fast unit suite
-        run: python -m pip wheel --no-deps --wheel-dir /tmp/tracedecay-sdk-wheel .
-        working-directory: sdks/python
-
-      - name: Install wheel
+      - name: Verify the downloaded artifact digests
+        working-directory: artifact
         run: |
           set -euo pipefail
-          wheel="$(find /tmp/tracedecay-sdk-wheel -name 'tracedecay_sdk-*.whl')"
-          test -n "$wheel"
-          python -m pip install "$wheel"
+          mv dist.sha256 dist/dist.sha256
+          cd dist
+          sha256sum -c dist.sha256
+          rm dist.sha256
 
-      - name: Fast unit suite (against the installed wheel)
-        run: python -m unittest discover -s tests -p "test_client.py"
-        working-directory: sdks/python
-
-      - name: Build the real production daemon for installed-package conformance
-        run: cargo build --bin tracedecay
-
-      - name: Real-daemon installed-package conformance
-        run: python -m unittest tests/test_installed_package.py
-        working-directory: sdks/python
-
-      - name: Build sdist and wheel for publication
-        run: python -m build --outdir dist
-        working-directory: sdks/python
-
-      - name: Publish (OIDC trusted publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish the exact conformance-tested sdist and wheel
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
-          packages-dir: sdks/python/dist
+          packages-dir: artifact/dist
