@@ -43,18 +43,27 @@ function registryEntry(
   label: string,
   isActive: boolean | null | undefined,
 ): ProjectRegistryEntry {
+  return entryAt(projectId, label, isActive, `/repos/${projectId}`);
+}
+
+function entryAt(
+  projectId: string,
+  label: string,
+  isActive: boolean | null | undefined,
+  root: string,
+): ProjectRegistryEntry {
   return {
     alias_count: 0,
     artifact_count: 0,
     branches: ['master'],
-    canonical_root: `/repos/${projectId}`,
+    canonical_root: root,
     default_branch: 'master',
     graph_scope_count: 1,
     kind: 'repo',
     label,
     last_seen_at: 2,
     project_id: projectId,
-    project_root: `/repos/${projectId}`,
+    project_root: root,
     store_count: 1,
     ...(isActive === undefined ? {} : { is_active: isActive }),
   };
@@ -100,13 +109,16 @@ function stubListing(payload: ProjectsPayload) {
 
 function renderPalette() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter>
-        <CommandPalette open onOpenChange={() => {}} />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <CommandPalette open onOpenChange={() => {}} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 /** The row the input currently points at, by its rendered label. */
@@ -118,8 +130,22 @@ function activeOptionLabel(): string {
   return option?.querySelector('span')?.textContent ?? '(the active id names no row)';
 }
 
+/**
+ * Rows the palette scrolled to, in order.
+ *
+ * jsdom implements no layout and therefore no `scrollIntoView`, so this stands
+ * in for it everywhere in the file rather than only where it is asserted —
+ * without it the palette's keyboard effect throws on every arrow press, for a
+ * method that exists in every browser it will ever run in.
+ */
+let scrolledInto: Element[] = [];
+
 beforeEach(() => {
   useScope.getState().selectAllProjects();
+  scrolledInto = [];
+  Element.prototype.scrollIntoView = function scrollIntoView(this: Element) {
+    scrolledInto.push(this);
+  };
 });
 
 afterEach(() => {
@@ -209,6 +235,116 @@ describe('CommandPalette keyboard operation', () => {
     expect(writability.state).toBe('read_only');
     if (writability.state !== 'read_only') throw new Error('unreachable');
     expect(writability.reason).toContain('Scratch is not the active project');
+  });
+
+  /**
+   * A checkout path with a space in it, which is ordinary and which used to
+   * break the announcement outright.
+   *
+   * The row's DOM id was built from the palette entry id, and a project entry's
+   * id carries its `canonical_root`. HTML forbids ASCII whitespace in `id`, and
+   * `aria-activedescendant` is an IDREF — so for anyone whose repositories live
+   * under `~/My Projects`, the input pointed at an id that could not be
+   * resolved and a screen reader was told nothing about which row was active.
+   * The highlight still moved, so the defect was invisible on screen.
+   */
+  it('announces the active row for a project checked out under a path with spaces', async () => {
+    const user = userEvent.setup();
+    stubListing(
+      listing([
+        entryAt('proj-spaced', 'Spaced Out', true, '/home/dev/My Projects/client work'),
+      ]),
+    );
+    const { findByText } = renderPalette();
+    await findByText('Spaced Out');
+
+    await user.keyboard('Spaced');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Spaced Out'));
+
+    // Resolvable, and a legal id: no whitespace, and `getElementById` finds it.
+    const announced = document
+      .querySelector('input[role="combobox"]')!
+      .getAttribute('aria-activedescendant')!;
+    expect(announced).not.toMatch(/\s/);
+    expect(document.getElementById(announced)).not.toBeNull();
+    // No row carries the path in its id, whatever the entry key is made of.
+    for (const option of document.querySelectorAll('[role="option"]')) {
+      expect(option.id).not.toMatch(/\s/);
+    }
+  });
+
+  it('scrolls the active row into view as the arrows leave the visible window', async () => {
+    // The list is a fixed-height scroller. Arrowing past the last visible row
+    // moved the highlight somewhere the reader could not see, so the palette
+    // silently stopped showing what Enter would do.
+    const user = userEvent.setup();
+    const many = Array.from({ length: 30 }, (_, i) =>
+      registryEntry(`proj-${i}`, `Project ${i}`, false),
+    );
+    stubListing(listing(many));
+    const { findByText } = renderPalette();
+    await findByText('Project 29');
+
+    await user.keyboard('{ArrowDown}'.repeat(20));
+
+    const lastScrolled = scrolledInto[scrolledInto.length - 1];
+    expect(lastScrolled).toBeDefined();
+    // It is the row that is now active that was scrolled to, not just any row.
+    expect(lastScrolled?.getAttribute('aria-selected')).toBe('true');
+    expect(lastScrolled?.textContent).toContain(activeOptionLabel());
+  });
+
+  /**
+   * The list shrinking under a stationary cursor, which nothing resets.
+   *
+   * `active` is reset when the query or the open state changes — neither
+   * happens when the registry read lands, or when a `project_registry_changed`
+   * invalidation returns fewer rows. An index left past the end announces
+   * nothing and activates nothing, so the palette reads as focused and does
+   * not respond to Enter.
+   */
+  it('pulls the cursor back into range when the registry returns fewer rows', async () => {
+    // Deliberately not driven by typing: a query change already resets the
+    // index, so filtering cannot reach this. The list shrinking underneath a
+    // stationary cursor is the case with nothing watching it — the registry
+    // read landing, or a `project_registry_changed` invalidation coming back
+    // with projects removed.
+    const user = userEvent.setup();
+    const many = Array.from({ length: 25 }, (_, i) =>
+      registryEntry(`proj-${i}`, `Project ${i}`, false),
+    );
+    const bodies = [listing(many), listing(many.slice(0, 2))];
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const body = bodies[Math.min(call, bodies.length - 1)]!;
+        call += 1;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+
+    const { client, findByText } = renderPalette();
+    await findByText('Project 24');
+
+    await user.keyboard('{ArrowDown}'.repeat(24));
+    expect(activeOptionLabel()).not.toContain('nothing is announced');
+
+    await client.invalidateQueries();
+    await waitFor(() =>
+      expect(document.querySelectorAll('[role="option"]').length).toBeLessThan(25),
+    );
+
+    expect(activeOptionLabel()).not.toContain('nothing is announced');
+    expect(activeOptionLabel()).not.toContain('names no row');
+    // And Enter still does something: the row it names is really there.
+    const announced = document
+      .querySelector('input[role="combobox"]')!
+      .getAttribute('aria-activedescendant')!;
+    expect(document.getElementById(announced)?.getAttribute('aria-selected')).toBe('true');
   });
 
   it('leaves a row that never said whether it is active unresolved, not inactive', async () => {

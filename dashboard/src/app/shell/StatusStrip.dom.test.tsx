@@ -132,4 +132,51 @@ describe('StatusStrip', () => {
     expect(screen.getByText('no stream')).toBeTruthy();
     expect(screen.queryByText('synced')).toBeNull();
   });
+
+  /**
+   * The state and the reason are one announcement.
+   *
+   * The live region used to wrap the status word by itself, with the sentence
+   * that explains it in a sibling element outside. Both change at the same
+   * moment, so a reader listening to the strip was told "resync failed" and
+   * nothing else — the half that says what to do about it updated silently.
+   */
+  it('announces the reason with the state, not beside it', () => {
+    sync.value = { kind: 'failed', reason: 'invalidation rejected' };
+    render(<StatusStrip />);
+
+    const announced = screen
+      .getAllByRole('status')
+      .map((region) => region.textContent ?? '')
+      .find((text) => text.includes('resync failed'));
+
+    expect(announced).toBeDefined();
+    expect(announced).toContain('invalidation rejected');
+  });
+
+  it('announces the reason a refresh is owed inside the same region', () => {
+    sync.value = { kind: 'stale', reason: 'overflow' };
+    render(<StatusStrip />);
+
+    const announced = screen
+      .getAllByRole('status')
+      .map((region) => region.textContent ?? '')
+      .find((text) => text.includes('stale'));
+
+    expect(announced).toContain('a refresh is owed: overflow');
+  });
+
+  it('leaves the link reading alone, which has no reason to carry', () => {
+    // The two cells are separate regions: folding the feed's sentence into the
+    // link's would announce a transport claim the transport did not make.
+    sync.value = { kind: 'failed', reason: 'invalidation rejected' };
+    render(<StatusStrip />);
+
+    const link = screen
+      .getAllByRole('status')
+      .map((region) => region.textContent ?? '')
+      .find((text) => text.includes('live'));
+
+    expect(link).toBe('live');
+  });
 });

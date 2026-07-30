@@ -73,16 +73,26 @@ export function StatusStrip() {
       </Cell>
       <Cell label="Feed">
         <span aria-hidden className={cn('size-1.5 shrink-0', feed.tone)} />
-        <span className="td-value text-2xs uppercase" role="status">
-          {feed.value}
+        {/*
+         * One region over the state and its reason together.
+         *
+         * They used to be two elements with the live region around the word
+         * alone, so a reader listening to the strip was told "stale" and never
+         * told why — the sentence that says a refresh was rejected sat outside
+         * the announcement, updating silently beside it. Both change at the
+         * same moment and only mean anything together, so they are announced
+         * together.
+         */}
+        <span className="flex min-w-0 items-center gap-1.5" role="status">
+          <span className="td-value text-2xs uppercase">{feed.value}</span>
+          {feed.detail !== null && (
+            // The state is carried by the word, not the swatch; the reason is
+            // the one thing a reader needs to know that the word cannot hold.
+            <span className="td-value min-w-0 truncate text-3xs normal-case text-text-muted">
+              {feed.detail}
+            </span>
+          )}
         </span>
-        {feed.detail !== null && (
-          // The state is carried by the word, not the swatch; the reason is the
-          // one thing a reader needs to know that the word cannot hold.
-          <span className="td-value min-w-0 truncate text-3xs normal-case text-text-muted">
-            {feed.detail}
-          </span>
-        )}
       </Cell>
       <span aria-hidden className="flex-1 border-r border-edge-subtle" />
     </footer>

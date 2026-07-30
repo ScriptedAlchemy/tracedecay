@@ -137,6 +137,80 @@ async function assertNamesTheRegistry(page: Page): Promise<void> {
   }
 }
 
+/**
+ * The scope bar still works as a control, and still says what it says, at
+ * whatever size the row has been asked to render at.
+ *
+ * These scenarios are the only ones that reach the bar in its two-line state —
+ * a project name with a provenance caveat beside it — and that state is the
+ * one that outgrows a fixed row. The bar's own height IS the touch target for
+ * the palette, scope and theme buttons, because every one of them is stretched
+ * to it, so the row shrinking below the minimum takes all three with it. It
+ * used to be pinned to exactly 44px with the contents clipped, which at 200%
+ * text zoom cut the caveat off at precisely the zoom someone would be using in
+ * order to read it.
+ */
+async function assertScopeBarUsable(page: Page, tag: string): Promise<void> {
+  // No named inner functions in here: the harness runs through `tsx`, whose
+  // esbuild pass adds a `__name` call to every function that has a name
+  // binding, and that helper does not exist in the page. It surfaces as
+  // `ReferenceError: __name is not defined` from `page.evaluate`, which reads
+  // like a product failure and is not one.
+  const reading = await page.evaluate(() => {
+    const clear = document.querySelector('button[aria-label^="Clear project scope"]');
+    if (clear === null) return null;
+    const bar = clear.closest('header');
+    const annotation = document.querySelector('[data-scope-label-annotation]');
+    const boxes = [clear, bar, annotation].map((el) => {
+      if (el === null) return null;
+      const r = el.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height };
+    });
+    return {
+      minimum: Number.parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--touch-target-min'),
+      ),
+      clear: boxes[0]!,
+      bar: boxes[1] ?? null,
+      annotation: boxes[2] ?? null,
+      annotationText: (annotation?.textContent ?? '').trim(),
+    };
+  });
+
+  if (reading === null) {
+    throw new Error(`${tag}: the scope bar shows no project scope, so this link did not resolve`);
+  }
+  // The token is the product's own statement of the minimum, read from the
+  // page rather than restated here, so raising it raises this check with it.
+  const minimum = Number.isFinite(reading.minimum) ? reading.minimum : 44;
+  if (reading.clear.height + 0.5 < minimum) {
+    throw new Error(
+      `${tag}: the scope control is ${reading.clear.height.toFixed(1)}px tall against a ` +
+        `${minimum}px minimum — every control on this row is stretched to it, so they are all ` +
+        `under the target together`,
+    );
+  }
+  // The caveat is absent here by design — the registry resolves `hermes`, so
+  // the name on the bar is canonical and nothing qualifies it. It is measured
+  // when it is there rather than required, because the same bar renders it
+  // while a read is in flight and on any surface reached before the registry
+  // answers, and that is the state the fixed row used to cut off.
+  const bar = reading.bar;
+  if (reading.annotation !== null && bar !== null && reading.annotation.bottom > bar.bottom + 0.5) {
+    throw new Error(
+      `${tag}: "${reading.annotationText}" extends ${(reading.annotation.bottom - bar.bottom).toFixed(1)}px ` +
+        `below the scope bar, so the caveat on an unconfirmed name is cut off`,
+    );
+  }
+  // The label itself, which is always there and is the thing the row is for.
+  if (bar !== null && reading.clear.bottom > bar.bottom + 0.5) {
+    throw new Error(
+      `${tag}: the scope control extends ${(reading.clear.bottom - bar.bottom).toFixed(1)}px below ` +
+        `the scope bar, so the project name is cut off by the row it sits in`,
+    );
+  }
+}
+
 /** Every control the surface offers, with whether it is disabled. */
 async function controlStates(page: Page, selector: string): Promise<boolean[]> {
   return page.evaluate(
@@ -197,6 +271,7 @@ export const SCOPE_REFUSAL_SCENARIOS: readonly Scenario[] = [
     },
     assertEachScan: async (page, tag) => {
       await assertReadable(page, '#scheduler-control-scope', tag);
+      await assertScopeBarUsable(page, tag);
     },
   },
   {
@@ -240,6 +315,7 @@ export const SCOPE_REFUSAL_SCENARIOS: readonly Scenario[] = [
       // settings editor that quietly stops explaining itself at 320 is a
       // disabled control with no stated remedy.
       await assertReadable(page, '[data-settings-gate="read_only"]', tag);
+      await assertScopeBarUsable(page, tag);
     },
   },
 ];
