@@ -837,7 +837,7 @@ mod tests {
         let locator = VerifiedStoreLocatorV1::new(
             shard_id,
             incarnation,
-            LocatorDigest::new(&format!("{material:064x}")).unwrap(),
+            LocatorDigest::new(format!("sha256:{material:064x}")).unwrap(),
         );
         ExactMigrationSourceIdentity::new(
             "profile.final-v2",
