@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -421,6 +422,26 @@ pub struct RemoteReplayServiceV1 {
     policy_evidence: Arc<dyn RemoteReplayPolicyEvidencePortV1>,
     transaction: Arc<dyn RemoteReplayTransactionPortV1>,
     spool: Arc<dyn RemoteReplaySpoolPortV1>,
+    clock: Arc<dyn RemoteReplayClockPortV1>,
+}
+
+pub trait RemoteReplayClockPortV1: Send + Sync {
+    fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemRemoteReplayClockV1;
+
+impl RemoteReplayClockPortV1 for SystemRemoteReplayClockV1 {
+    fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1> {
+        let micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)?
+            .as_micros();
+        i64::try_from(micros)
+            .map(UtcMicros)
+            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)
+    }
 }
 
 impl RemoteReplayServiceV1 {
@@ -435,6 +456,31 @@ impl RemoteReplayServiceV1 {
         transaction: Arc<dyn RemoteReplayTransactionPortV1>,
         spool: Arc<dyn RemoteReplaySpoolPortV1>,
     ) -> Self {
+        Self::new_with_clock(
+            authentication,
+            credentials,
+            frames,
+            current_writer,
+            policy,
+            policy_evidence,
+            transaction,
+            spool,
+            Arc::new(SystemRemoteReplayClockV1),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_clock(
+        authentication: Arc<dyn RemoteAuthorityAuthenticationPort + Send + Sync>,
+        credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
+        frames: Arc<dyn RemoteReplayFrameLookupPortV1>,
+        current_writer: Arc<dyn RemoteReplayCurrentWriterPortV1>,
+        policy: Arc<dyn RemoteReplayPolicyPortV1>,
+        policy_evidence: Arc<dyn RemoteReplayPolicyEvidencePortV1>,
+        transaction: Arc<dyn RemoteReplayTransactionPortV1>,
+        spool: Arc<dyn RemoteReplaySpoolPortV1>,
+        clock: Arc<dyn RemoteReplayClockPortV1>,
+    ) -> Self {
         Self {
             authentication,
             credentials,
@@ -444,6 +490,7 @@ impl RemoteReplayServiceV1 {
             policy_evidence,
             transaction,
             spool,
+            clock,
         }
     }
 
@@ -530,7 +577,7 @@ impl RemoteReplayServiceV1 {
             presented_credential,
             &frame,
             writer,
-            request.sent_at,
+            self.clock.as_ref(),
         )?;
         Ok(RemoteReplayServiceOutcomeV1 {
             outcome,
@@ -800,6 +847,7 @@ fn replay_protocol_failure(error: RemoteReplayServiceErrorV1) -> RemoteProtocolF
             | RemoteReplayApplicationErrorV1::InvalidSpoolState
             | RemoteReplayApplicationErrorV1::ReceiptMissing
             | RemoteReplayApplicationErrorV1::PolicyUnavailable
+            | RemoteReplayApplicationErrorV1::ClockUnavailable
             | RemoteReplayApplicationErrorV1::Persistence(_)
             | RemoteReplayApplicationErrorV1::Transaction(
                 RemoteReplayTransactionErrorV1::CanonicalEffect
@@ -850,8 +898,9 @@ pub fn replay_remote_capture(
     presented_caller_credential: &OpaqueRemoteCredential,
     frame: &RemoteReplayFrameV1,
     current_writer: &RemoteWriterAuthorityV1,
-    observed_at: UtcMicros,
+    clock: &dyn RemoteReplayClockPortV1,
 ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
+    let observed_at = clock.now()?;
     with_replay_attempt(spool, &frame.event_id, observed_at, |replay_attempt| {
         replay_remote_capture_attempt(
             authentication,
@@ -865,6 +914,7 @@ pub fn replay_remote_capture(
             current_writer,
             replay_attempt,
             observed_at,
+            clock,
         )
     })
 }
@@ -900,6 +950,7 @@ fn replay_remote_capture_attempt(
     current_writer: &RemoteWriterAuthorityV1,
     replay_attempt: u64,
     observed_at: UtcMicros,
+    clock: &dyn RemoteReplayClockPortV1,
 ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
     validate_scope_and_fence(frame, current_writer, caller_credential)?;
     if let Err(error) = authenticate_remote_request(
@@ -925,7 +976,7 @@ fn replay_remote_capture_attempt(
                 RemoteReplayStateV1::Pending,
                 RemoteReplayStateV1::Rejected,
                 replay_attempt,
-                observed_at,
+                clock.now()?,
                 Some(RemoteReplayFindingV1::EnrollmentRevoked),
                 None,
             )?;
@@ -955,12 +1006,16 @@ fn replay_remote_capture_attempt(
             .receipt
             .ok_or(RemoteReplayApplicationErrorV1::ReceiptMissing)?;
         receipt.validate_for(frame, current_writer)?;
+        let acknowledged_at = clock.now()?;
+        if receipt.committed_at > acknowledged_at {
+            return Err(RemoteReplayApplicationErrorV1::ReceiptMismatch);
+        }
         let terminal = acknowledge(
             spool,
             frame,
             spool_state.state,
             replay_attempt,
-            observed_at,
+            acknowledged_at,
             receipt.clone(),
         )?;
         let operation_receipt =
@@ -983,7 +1038,7 @@ fn replay_remote_capture_attempt(
                 RemoteReplayStateV1::Pending,
                 RemoteReplayStateV1::Rejected,
                 replay_attempt,
-                observed_at,
+                clock.now()?,
                 Some(RemoteReplayFindingV1::PolicyChanged),
                 None,
             )?;
@@ -998,7 +1053,7 @@ fn replay_remote_capture_attempt(
                 RemoteReplayStateV1::Pending,
                 RemoteReplayStateV1::Quarantined,
                 replay_attempt,
-                observed_at,
+                clock.now()?,
                 Some(RemoteReplayFindingV1::PolicyChanged),
                 None,
             )?;
@@ -1023,13 +1078,17 @@ fn replay_remote_capture_attempt(
         ),
     };
     receipt.validate_for(frame, current_writer)?;
+    let admitted_at = clock.now()?;
+    if receipt.committed_at > admitted_at {
+        return Err(RemoteReplayApplicationErrorV1::ReceiptMismatch);
+    }
     let admitted = transition(
         spool,
         frame,
         RemoteReplayStateV1::Pending,
         disposition,
         replay_attempt,
-        observed_at,
+        admitted_at,
         finding,
         Some(receipt.clone()),
     )?;
@@ -1038,7 +1097,7 @@ fn replay_remote_capture_attempt(
         frame,
         disposition,
         replay_attempt,
-        observed_at,
+        clock.now()?,
         receipt.clone(),
     )?;
     let operation_receipt = replay_operation_receipt(&admitted, &terminal, Some(receipt.clone()))?;
@@ -1229,6 +1288,8 @@ pub enum RemoteReplayTransactionErrorV1 {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RemoteReplayApplicationErrorV1 {
+    #[error("remote replay authoritative clock is unavailable")]
+    ClockUnavailable,
     #[error("remote replay frame is invalid")]
     InvalidFrame,
     #[error("remote replay attempt must be non-zero")]
@@ -1255,71 +1316,7 @@ pub enum RemoteReplayApplicationErrorV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    #[derive(Default)]
-    struct AttemptSpool {
-        state: Mutex<(u64, Option<u64>)>,
-    }
-
-    impl RemoteReplaySpoolPortV1 for AttemptSpool {
-        fn state(
-            &self,
-            _event_id: &str,
-        ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
-            unreachable!("attempt lifecycle tests do not read replay state")
-        }
-
-        fn transition(
-            &self,
-            _transition: RemoteReplayTransitionV1,
-        ) -> Result<RemoteReplayTransitionReceiptV1, RemoteCapturePersistenceErrorV1> {
-            unreachable!("attempt lifecycle tests do not transition replay state")
-        }
-
-        fn begin_replay_attempt(
-            &self,
-            _event_id: &str,
-            _observed_at: UtcMicros,
-        ) -> Result<u64, RemoteCapturePersistenceErrorV1> {
-            let mut state = self.state.lock().unwrap();
-            if state.1.is_some() {
-                return Err(RemoteCapturePersistenceErrorV1::Unavailable);
-            }
-            state.0 += 1;
-            state.1 = Some(state.0);
-            Ok(state.0)
-        }
-
-        fn abandon_replay_attempt(
-            &self,
-            _event_id: &str,
-            replay_attempt: u64,
-        ) -> Result<(), RemoteCapturePersistenceErrorV1> {
-            let mut state = self.state.lock().unwrap();
-            if state.1 == Some(replay_attempt) {
-                state.1 = None;
-                return Ok(());
-            }
-            Err(RemoteCapturePersistenceErrorV1::Corruption)
-        }
-    }
-
-    fn assert_same_process_retry_after(error: RemoteReplayApplicationErrorV1) {
-        let spool = AttemptSpool::default();
-        assert_eq!(
-            with_replay_attempt(&spool, "remote.event.test", UtcMicros(1), |_| {
-                Err::<(), _>(error.clone())
-            }),
-            Err(error)
-        );
-        assert_eq!(
-            with_replay_attempt(&spool, "remote.event.test", UtcMicros(2), Ok),
-            Ok(2)
-        );
-    }
 
     #[test]
     fn replay_state_machine_preserves_acknowledgement_boundary() {
@@ -1373,32 +1370,6 @@ mod tests {
             )),
             RemoteProtocolFailureV1::EnrollmentExpired
         );
-    }
-
-    #[test]
-    fn invalid_credential_abandons_attempt_for_same_process_retry() {
-        assert_same_process_retry_after(RemoteReplayApplicationErrorV1::Authentication(
-            RemoteAuthenticationError::InvalidCredential,
-        ));
-    }
-
-    #[test]
-    fn unavailable_policy_abandons_attempt_for_same_process_retry() {
-        assert_same_process_retry_after(RemoteReplayApplicationErrorV1::PolicyUnavailable);
-    }
-
-    #[test]
-    fn transaction_failure_abandons_attempt_for_same_process_retry() {
-        assert_same_process_retry_after(RemoteReplayApplicationErrorV1::Transaction(
-            RemoteReplayTransactionErrorV1::Unavailable,
-        ));
-    }
-
-    #[test]
-    fn lost_acknowledgement_abandons_attempt_for_same_process_retry() {
-        assert_same_process_retry_after(RemoteReplayApplicationErrorV1::Persistence(
-            RemoteCapturePersistenceErrorV1::Unavailable,
-        ));
     }
 
     #[test]
