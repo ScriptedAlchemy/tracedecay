@@ -20,7 +20,7 @@
 //! inputs force a full rebuild with typed triggers instead of disguising all
 //! chunks as ordinary edits.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -394,15 +394,25 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         let mut carried_forward = 0_u64;
         let mut reextract = 0_u64;
         let mut deleted = 0_u64;
+        let prior_files_by_path: BTreeMap<&str, &SanitizedCodeFileV1> = prior_snapshot
+            .files
+            .iter()
+            .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+            .map(|file| (file.logical_path.as_str(), file))
+            .collect();
+        let current_paths: BTreeSet<&str> = current
+            .snapshot
+            .files
+            .iter()
+            .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+            .map(|file| file.logical_path.as_str())
+            .collect();
 
         for file in &current.snapshot.files {
             if file.disposition != SnapshotFileDispositionV1::Present {
                 continue;
             }
-            let prior_file = prior_snapshot.files.iter().find(|prior| {
-                prior.logical_path == file.logical_path
-                    && prior.disposition == SnapshotFileDispositionV1::Present
-            });
+            let prior_file = prior_files_by_path.get(file.logical_path.as_str()).copied();
             let action = match prior_file {
                 Some(prior) if !full_rebuild && prior.content_digest == file.content_digest => {
                     carried_forward += 1;
@@ -426,11 +436,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             if prior.disposition != SnapshotFileDispositionV1::Present {
                 continue;
             }
-            let still_present = current.snapshot.files.iter().any(|file| {
-                file.logical_path == prior.logical_path
-                    && file.disposition == SnapshotFileDispositionV1::Present
-            });
-            if !still_present {
+            if !current_paths.contains(prior.logical_path.as_str()) {
                 deleted += 1;
                 plans.push(FileExtractionPlanV1 {
                     logical_path: prior.logical_path.clone(),

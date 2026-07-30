@@ -137,7 +137,7 @@ impl Database {
 /// Maps a file path to a human-readable language label used in
 /// `GraphStats::files_by_language`. Anything we don't recognise lands in
 /// `"Other"`. The label set must stay in sync with the language extractors
-/// registered in `crate::extraction::LanguageRegistry`; the test
+/// registered in `tracedecay_code_extraction::LanguageRegistry`; the test
 /// `files_by_language_covers_known_extensions` guards the mapping.
 fn display_language_for_path(path: &str) -> &'static str {
     // Special-case extensionless files we still recognise by name.

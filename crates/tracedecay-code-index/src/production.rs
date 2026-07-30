@@ -20,10 +20,10 @@ use tracedecay_domain::{
     ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
     IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
-    RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
     SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1, SymbolOccurrenceId,
     TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1,
-    canonical_sha256,
+    WorktreeId, canonical_sha256,
 };
 
 use super::{
@@ -143,16 +143,57 @@ pub enum CodeIndexPublicationStoreErrorV1 {
     Unavailable(String),
 }
 
-/// The only persistence seam for this production owner. Implementations must
-/// make the complete generation and verified projection receipt visible as one
-/// compare-and-swap operation, and return the same immutable value on restart.
+/// Canonical active-generation slot inside one repository-owned code-index
+/// store. Paths are deliberately absent: linked worktrees share the repository
+/// store while their branch/worktree generations remain independently active.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexGenerationScopeV1 {
+    pub repository: RepositoryId,
+    pub reference: Option<RefId>,
+    pub worktree: Option<WorktreeId>,
+}
+
+impl CodeIndexGenerationScopeV1 {
+    pub fn for_snapshot(snapshot: &SanitizedCodeSnapshotV1) -> Self {
+        Self {
+            repository: snapshot.repository.clone(),
+            reference: snapshot.reference.clone(),
+            worktree: snapshot.worktree.clone(),
+        }
+    }
+
+    pub fn for_branch_stack_node(node: &tracedecay_domain::BranchStackNodeV1) -> Self {
+        Self {
+            repository: node.repository_id.clone(),
+            reference: Some(node.reference.clone()),
+            worktree: node.worktree_id.clone(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        self.repository
+            .validate()
+            .and_then(|()| self.reference.as_ref().map_or(Ok(()), RefId::validate))
+            .and_then(|()| self.worktree.as_ref().map_or(Ok(()), WorktreeId::validate))
+            .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))
+    }
+}
+
+/// The only persistence seam for this production owner. Implementations retain
+/// one physical store per canonical repository and partition only active
+/// generation pointers by [`CodeIndexGenerationScopeV1`]. They must make the
+/// complete generation and verified projection receipt visible as one scoped
+/// compare-and-swap operation and return the same immutable value on restart.
 pub trait CodeIndexAtomicPublicationPort {
     fn load_active(
         &self,
+        scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1>;
 
     fn publish_atomically(
         &mut self,
+        scope: &CodeIndexGenerationScopeV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1>;
@@ -977,11 +1018,18 @@ where
     /// resumes from the publication authority rather than mutable worker state.
     pub fn active_generation(
         &self,
+        scope: &CodeIndexGenerationScopeV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
-        let active = self.publication.load_active()?;
+        scope.validate()?;
+        if scope.repository != self.config.repository {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "generation scope is foreign to the production owner's repository store".to_owned(),
+            ));
+        }
+        let active = self.publication.load_active(scope)?;
         if let Some(active) = &active {
             active.validate()?;
-            if active.snapshot.repository != self.config.repository
+            if CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot) != *scope
                 || active.manifest.sanitizer_revision != self.config.sanitizer_revision
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain
@@ -1010,7 +1058,8 @@ where
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
         Self::checkpoint(control)?;
-        let active = self.active_generation()?;
+        let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
+        let active = self.active_generation(&scope)?;
         Self::checkpoint(control)?;
 
         let intake = self.intake_at(request.sealed_at, registry_for_snapshot(&request.snapshot)?);
@@ -1073,7 +1122,7 @@ where
         };
         Self::checkpoint(control)?;
 
-        let parser_registry = Arc::new(crate::extraction::LanguageRegistry::new());
+        let parser_registry = Arc::new(tracedecay_code_extraction::LanguageRegistry::new());
         let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
         let chunker = DeterministicCodeChunker::from_shared_registry(
             manifest.generation_id.clone(),
@@ -1155,7 +1204,7 @@ where
             .as_ref()
             .map(|generation| generation.manifest.generation_id.clone());
         self.publication
-            .publish_atomically(expected.as_ref(), candidate.clone())?;
+            .publish_atomically(&scope, expected.as_ref(), candidate.clone())?;
         Ok(candidate)
     }
 

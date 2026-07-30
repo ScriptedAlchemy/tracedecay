@@ -13,8 +13,8 @@ use std::sync::Arc;
 use crate::config::TraceDecayConfig;
 use crate::db::Database;
 use crate::errors::Result;
-use crate::extraction::LanguageRegistry;
 use crate::storage::{self, StoreLayout};
+use tracedecay_code_extraction::LanguageRegistry;
 
 mod diagnostics;
 mod edits;

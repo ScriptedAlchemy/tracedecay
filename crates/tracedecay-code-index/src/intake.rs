@@ -6,12 +6,12 @@
 //! Filesystem watching, repository reads, snapshot coalescing, and redaction
 //! belong to capture, not this boundary (Plan 25, "Does not own").
 
-use std::ops::Deref;
+use std::{collections::BTreeMap, ops::Deref};
 
 use tracedecay_domain::{
-    ContentDigest, DomainError, IntakeRejectionV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1,
-    canonical_sha256,
+    ContentDigest, DomainError, FileOccurrenceId, IntakeRejectionV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
+    ValidatedCodeSnapshotV1, canonical_sha256,
 };
 
 use super::languages::LanguageRegistry;
@@ -56,9 +56,24 @@ pub fn content_digest(bytes: &[u8]) -> ContentDigest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SanitizedSnapshotCapabilityV1 {
     snapshot: ValidatedCodeSnapshotV1,
+    files_by_occurrence: BTreeMap<FileOccurrenceId, usize>,
 }
 
 impl SanitizedSnapshotCapabilityV1 {
+    fn new(snapshot: ValidatedCodeSnapshotV1) -> Self {
+        let files_by_occurrence = snapshot
+            .snapshot
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.file_occurrence_id.clone(), index))
+            .collect();
+        Self {
+            snapshot,
+            files_by_occurrence,
+        }
+    }
+
     /// The immutable validated snapshot bound to this capability.
     pub fn snapshot(&self) -> &ValidatedCodeSnapshotV1 {
         &self.snapshot
@@ -228,7 +243,7 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
         snapshot: SanitizedCodeSnapshotV1,
     ) -> Result<SanitizedSnapshotCapabilityV1, IntakeRejectionV1> {
         self.validate_snapshot(snapshot)
-            .map(|snapshot| SanitizedSnapshotCapabilityV1 { snapshot })
+            .map(SanitizedSnapshotCapabilityV1::new)
     }
 
     fn bind_file(
@@ -236,23 +251,18 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
         capability: &SanitizedSnapshotCapabilityV1,
         file: ValidatedCodeFileV1,
     ) -> Result<ReceiptBoundCodeFileV1, IntakeRejectionV1> {
-        let expected = self.validate_snapshot(capability.snapshot.snapshot.clone())?;
-        if expected != capability.snapshot
-            || file.snapshot_digest != capability.snapshot.intake_digest
+        if file.snapshot_digest != capability.snapshot.intake_digest
             || file.file.disposition != SnapshotFileDispositionV1::Present
             || content_digest(&file.sanitized_bytes) != file.file.content_digest
             || std::str::from_utf8(&file.sanitized_bytes).is_err()
         {
             return Err(IntakeRejectionV1::UnsanitizedInput);
         }
-        if capability
-            .snapshot
-            .snapshot
-            .files
-            .iter()
-            .find(|candidate| candidate.file_occurrence_id == file.file.file_occurrence_id)
-            != Some(&file.file)
-        {
+        let admitted_file = capability
+            .files_by_occurrence
+            .get(&file.file.file_occurrence_id)
+            .and_then(|index| capability.snapshot.snapshot.files.get(*index));
+        if admitted_file != Some(&file.file) {
             return Err(IntakeRejectionV1::UnsanitizedInput);
         }
         Ok(ReceiptBoundCodeFileV1 { file })
@@ -263,8 +273,8 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        CommitId, ContentDigest, FileOccurrenceId, LanguageId, RefId, RepositoryId,
-        SanitizationReceiptId, SanitizedCodeFileV1, WorktreeId,
+        CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, LanguageId, RefId,
+        RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, WorktreeId,
     };
 
     use crate::languages::StaticLanguageRegistry;
@@ -475,5 +485,34 @@ mod tests {
                 .validate(snapshot(vec![file]))
                 .unwrap_or_else(|_| panic!("{} admitted", descriptor.language));
         }
+    }
+
+    #[test]
+    fn file_binding_consumes_the_admitted_capability_without_revalidating_snapshot() {
+        let bytes = b"fn main() {}\n".to_vec();
+        let mut descriptor = present_file("one", "src/main.rs", "rust");
+        descriptor.content_digest = content_digest(&bytes);
+        let capability = intake()
+            .admit(snapshot(vec![descriptor.clone()]))
+            .expect("snapshot capability");
+        let late_binder = SanitizedCodeIntake::new(
+            StaticLanguageRegistry::new(),
+            SanitizerRevision::new("sanitizer.v1").expect("valid revision"),
+            UtcMicros(10_000_000),
+        )
+        .with_max_snapshot_age_micros(1);
+
+        late_binder
+            .bind_file(
+                &capability,
+                ValidatedCodeFileV1 {
+                    generation_id: CodeGenerationId::new("generation.fixture")
+                        .expect("valid generation"),
+                    file: descriptor,
+                    snapshot_digest: capability.snapshot().intake_digest.clone(),
+                    sanitized_bytes: bytes,
+                },
+            )
+            .expect("opaque capability remains authoritative after admission");
     }
 }

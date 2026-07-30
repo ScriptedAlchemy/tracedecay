@@ -11,8 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use tree_sitter::{Node as TsNode, Parser};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::extraction::source_mask::{MaskOptions, masked_rust_source_with};
 use crate::types::{MoveHint, MoveResult, Node, NodeKind, Visibility};
+use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_with};
 
 use super::TraceDecay;
 use super::edits::{
@@ -880,7 +880,7 @@ fn parent_module_candidates(dest_rel: &str) -> Vec<String> {
 /// alone are unsafe here: comments, strings, and inline `mod name { ... }`
 /// blocks do not connect `name.rs` to the module tree.
 fn source_declares_external_module(source: &str, expected: &str) -> bool {
-    let Ok(language) = crate::extraction::ts_provider::try_language("rust") else {
+    let Ok(language) = tracedecay_code_extraction::ts_provider::try_language("rust") else {
         return false;
     };
     let mut parser = Parser::new();
@@ -988,7 +988,7 @@ fn portable_dependency_import(statement: &str) -> Option<String> {
 /// grammar cannot be loaded so the caller can fall back to the line scan.
 fn parse_use_statements_ts(source: &str) -> Option<Vec<UseStatement>> {
     let mut parser = Parser::new();
-    let language = crate::extraction::ts_provider::try_language("rust").ok()?;
+    let language = tracedecay_code_extraction::ts_provider::try_language("rust").ok()?;
     parser.set_language(&language).ok()?;
     let tree = parser.parse(source, None)?;
     let mut out = Vec::new();

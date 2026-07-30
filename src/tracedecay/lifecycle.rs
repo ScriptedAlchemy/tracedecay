@@ -20,11 +20,11 @@ use crate::config::{
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
-use crate::extraction::LanguageRegistry;
 use crate::global_db::{
     GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use crate::storage::{self, StoreLayout};
+use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_store::ProjectId;
 
 use super::locking::{
