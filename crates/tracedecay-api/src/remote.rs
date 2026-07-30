@@ -297,14 +297,13 @@ where
     Request: DeserializeOwned + RemoteProtocolBodyV1 + Send + 'static,
     Port::Output: Serialize,
 {
+    let authorization = match authorization_header(&headers) {
+        Ok(authorization) => authorization,
+        Err(_) => return concealed_authentication_response(concealed_request_id()),
+    };
     let Json(request) = match payload {
         Ok(payload) => payload,
         Err(_) => return invalid_remote_request_response(),
-    };
-    let request_id = request.request.request_id.clone();
-    let authorization = match authorization_header(&headers) {
-        Ok(authorization) => authorization,
-        Err(_) => return concealed_authentication_response(request_id),
     };
     match state.transport.execute(request, authorization) {
         Ok(response) => remote_protocol_response(response),
@@ -320,14 +319,13 @@ async fn enrollment_route<Port>(
 where
     Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static,
 {
+    let credentials = match enrollment_credentials(&headers) {
+        Ok(credentials) => credentials,
+        Err(_) => return concealed_authentication_response(concealed_request_id()),
+    };
     let Json(request) = match payload {
         Ok(payload) => payload,
         Err(_) => return invalid_remote_request_response(),
-    };
-    let request_id = request.request.request_id.clone();
-    let credentials = match enrollment_credentials(&headers) {
-        Ok(credentials) => credentials,
-        Err(_) => return concealed_authentication_response(request_id),
     };
     match state.transport.execute_enrollment(request, credentials) {
         Ok(response) => remote_protocol_response(response),
@@ -386,6 +384,11 @@ fn concealed_authentication_response(request_id: RequestId) -> Response {
     ))
 }
 
+fn concealed_request_id() -> RequestId {
+    RequestId::new("request.remote.unauthenticated")
+        .expect("static concealed remote request id is canonical")
+}
+
 fn invalid_remote_request_response() -> Response {
     crate::application_problem_response(crate::http::invalid_request_problem(
         RequestId::new("request.remote.invalid").expect("static remote request id is canonical"),
@@ -413,6 +416,9 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     use super::*;
+    use axum::body::Body;
+    use axum::extract::FromRequest;
+    use axum::http::Request;
     use tracedecay_application::remote::protocol::{
         RemoteProtocolFailureV1, RemoteProtocolPortV1, remote_protocol_problem,
     };
@@ -434,12 +440,23 @@ mod tests {
 
     struct CountingProtocolPort(Arc<AtomicUsize>);
 
-    impl RemoteProtocolPortV1<()> for CountingProtocolPort {
+    struct EmptyTestBody;
+
+    impl RemoteProtocolBodyV1 for EmptyTestBody {
+        fn validate_remote_protocol_body(
+            &self,
+            _sent_at: UtcMicros,
+        ) -> Result<(), tracedecay_application::ApplicationContractError> {
+            Ok(())
+        }
+    }
+
+    impl RemoteProtocolPortV1<EmptyTestBody> for CountingProtocolPort {
         type Output = ();
 
         fn execute(
             &self,
-            request: RemoteProtocolRequestV1<()>,
+            request: RemoteProtocolRequestV1<EmptyTestBody>,
             _credential: OpaqueRemoteCredential,
         ) -> RemoteProtocolResponseV1<Self::Output> {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -533,7 +550,7 @@ mod tests {
                 1,
                 None,
                 UtcMicros(10),
-                (),
+                EmptyTestBody,
             )
             .unwrap(),
         };
@@ -913,6 +930,70 @@ mod tests {
         .status()
     }
 
+    fn protocol_rejection_status(
+        calls: &Arc<AtomicUsize>,
+        raw_body: &str,
+        authorized: bool,
+    ) -> StatusCode {
+        let payload = block_on(Json::<RemoteHttpRequestV1<TestQuery>>::from_request(
+            Request::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(raw_body.to_owned()))
+                .unwrap(),
+            &(),
+        ));
+        assert!(payload.is_err());
+        let state = RemoteProtocolRouterStateV1 {
+            transport: Arc::new(RemoteHttpProtocolTransportV1::new(ValidationPort(
+                Arc::clone(calls),
+            ))),
+        };
+        let headers = if authorized {
+            authenticated_headers(false)
+        } else {
+            HeaderMap::new()
+        };
+        block_on(protocol_route::<ValidationPort, TestQuery>(
+            State(state),
+            headers,
+            payload,
+        ))
+        .status()
+    }
+
+    fn enrollment_rejection_status(
+        calls: &Arc<AtomicUsize>,
+        raw_body: &str,
+        authorized: bool,
+    ) -> StatusCode {
+        let payload = block_on(
+            Json::<RemoteHttpRequestV1<EnrollmentRequestV1>>::from_request(
+                Request::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(raw_body.to_owned()))
+                    .unwrap(),
+                &(),
+            ),
+        );
+        assert!(payload.is_err());
+        let state = RemoteProtocolRouterStateV1 {
+            transport: Arc::new(RemoteHttpProtocolTransportV1::new(ValidationPort(
+                Arc::clone(calls),
+            ))),
+        };
+        let headers = if authorized {
+            authenticated_headers(true)
+        } else {
+            HeaderMap::new()
+        };
+        block_on(enrollment_route::<ValidationPort>(
+            State(state),
+            headers,
+            payload,
+        ))
+        .status()
+    }
+
     fn route_status(outcome: RouteOutcome, authorized: bool) -> StatusCode {
         let state = RemoteProtocolRouterStateV1 {
             transport: Arc::new(RemoteHttpProtocolTransportV1::new(RoutePort { outcome })),
@@ -1062,6 +1143,44 @@ mod tests {
                 false,
             ),
             StatusCode::NOT_FOUND
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn authentication_conceals_json_and_shape_rejections() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let unknown_query_field = serde_json::json!({
+            "request": {
+                "protocol_version": 1,
+                "request_id": "request.remote.unknown",
+                "brain_id": "brain.remote",
+                "caller_node_id": "node.remote",
+                "enrollment_revision": 1,
+                "expected_authority": null,
+                "sent_at": 10,
+                "body": {"term": "needle", "unexpected": true}
+            }
+        })
+        .to_string();
+        for raw_body in ["{", &unknown_query_field, r#"{"request":[]}"#] {
+            assert_eq!(
+                protocol_rejection_status(&calls, raw_body, false),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                protocol_rejection_status(&calls, raw_body, true),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let wrong_enrollment_shape = r#"{"request":{"body":[]}}"#;
+        assert_eq!(
+            enrollment_rejection_status(&calls, wrong_enrollment_shape, false),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            enrollment_rejection_status(&calls, wrong_enrollment_shape, true),
+            StatusCode::BAD_REQUEST
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }

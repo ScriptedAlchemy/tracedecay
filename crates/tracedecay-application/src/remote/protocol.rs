@@ -101,15 +101,6 @@ impl<Port> RemoteProtocolServiceV1<Port> {
     }
 }
 
-impl RemoteProtocolBodyV1 for () {
-    fn validate_remote_protocol_body(
-        &self,
-        _sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
-        Ok(())
-    }
-}
-
 /// Versioned request metadata common to enrollment, authority discovery,
 /// rotation, revocation, and subsequent remote operations.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -482,12 +473,23 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    impl RemoteProtocolPortV1<()> for FakeProtocolPort {
+    struct EmptyTestBody;
+
+    impl RemoteProtocolBodyV1 for EmptyTestBody {
+        fn validate_remote_protocol_body(
+            &self,
+            _sent_at: UtcMicros,
+        ) -> Result<(), ApplicationContractError> {
+            Ok(())
+        }
+    }
+
+    impl RemoteProtocolPortV1<EmptyTestBody> for FakeProtocolPort {
         type Output = ();
 
         fn execute(
             &self,
-            request: RemoteProtocolRequestV1<()>,
+            request: RemoteProtocolRequestV1<EmptyTestBody>,
             _credential: OpaqueRemoteCredential,
         ) -> RemoteProtocolResponseV1<Self::Output> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -522,7 +524,7 @@ mod tests {
             1,
             None,
             UtcMicros(10),
-            (),
+            EmptyTestBody,
         )
         .unwrap();
 
