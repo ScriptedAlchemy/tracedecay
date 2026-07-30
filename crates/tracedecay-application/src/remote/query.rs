@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{RemoteRepositoryScopeV1, UtcMicros};
 
-use super::composition::{ExpectedRemoteShardV1, RemoteQueryCompositionV1};
+use super::composition::{ExpectedRemoteShardV1, RemoteQueryCompositionV1, ShardCoverageStateV1};
 use super::protocol::RemoteProtocolBodyV1;
 use crate::ApplicationContractError;
 
@@ -29,10 +29,7 @@ pub struct RemoteQueryPageBoundsV1 {
 }
 
 impl RemoteQueryPageBoundsV1 {
-    pub fn new(
-        page_size: u16,
-        cursor: Option<String>,
-    ) -> Result<Self, ApplicationContractError> {
+    pub fn new(page_size: u16, cursor: Option<String>) -> Result<Self, ApplicationContractError> {
         let value = Self { page_size, cursor };
         value.validate()?;
         Ok(value)
@@ -89,7 +86,10 @@ impl RemoteQueryRequestV1 {
             for (field, value) in [
                 ("remote query Brain identity", shard.brain_id.as_str()),
                 ("remote query shard identity", shard.shard_id.as_str()),
-                ("remote query generation identity", shard.generation_id.as_str()),
+                (
+                    "remote query generation identity",
+                    shard.generation_id.as_str(),
+                ),
             ] {
                 if value.is_empty()
                     || value.len() > 512
@@ -113,7 +113,49 @@ impl RemoteProtocolBodyV1 for RemoteQueryRequestV1 {
     }
 }
 
-/// Canonical Remote Brain composition response. Its generic payload is
-/// deliberately `()` until a concrete existing product query contract is
-/// admitted; coverage, denial, partiality, and unavailability remain explicit.
-pub type RemoteQueryResultV1 = RemoteQueryCompositionV1<()>;
+/// A wire-distinct marker that proves an authorized shard supplied a complete
+/// query value. It must not collapse to JSON `null`, which is reserved for a
+/// denied, partial, or unavailable contribution with no disclosable value.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteQueryCompleteValueV1 {
+    pub complete_value_present: bool,
+}
+
+impl RemoteQueryCompleteValueV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if !self.complete_value_present {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "remote complete query value marker",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Canonical Remote Brain composition response. Per-shard `null` means no
+/// disclosed value; a complete value is the explicit object above.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteQueryResultV1 {
+    pub composition: RemoteQueryCompositionV1<RemoteQueryCompleteValueV1>,
+}
+
+impl RemoteQueryResultV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        for contribution in &self.composition.contributions {
+            contribution.validate()?;
+            if let Some(value) = &contribution.value {
+                value.validate()?;
+            }
+            if contribution.coverage == ShardCoverageStateV1::Complete
+                && contribution.value.is_none()
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "remote complete query value",
+                });
+            }
+        }
+        Ok(())
+    }
+}
