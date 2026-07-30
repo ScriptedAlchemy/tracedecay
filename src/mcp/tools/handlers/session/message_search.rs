@@ -8,6 +8,7 @@ use tracedecay_domain::{
     CompactContextLineageEdgeV1, CursorManifestLimitKindV1, HydrationStateV1, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
+use tracedecay_sessions::lcm::contracts::LcmRetrievalOutcome;
 
 use super::lcm_args::{
     message_search_time_range, parse_git_scope_filter, parse_message_search_provider_scope,
@@ -601,6 +602,19 @@ pub(crate) enum LcmDescribeServiceOutcome {
         grain: RetrievalGrainV1,
         state: HydrationStateV1,
         lineage: Vec<CompactContextLineageEdgeV1>,
+        retrieval: LcmRetrievalOutcome,
+    },
+    Partial {
+        description: Option<LcmDescribeResponse>,
+        temporal: SessionTemporalMetadataView,
+        grain: RetrievalGrainV1,
+        state: Option<HydrationStateV1>,
+        lineage: Vec<CompactContextLineageEdgeV1>,
+        retrieval: LcmRetrievalOutcome,
+    },
+    Stale {
+        temporal: SessionTemporalMetadataView,
+        retrieval: LcmRetrievalOutcome,
     },
     WrongScope,
     Locked,
@@ -621,6 +635,18 @@ pub(crate) enum LcmExpandServiceOutcome {
         temporal: SessionTemporalMetadataView,
         grain: RetrievalGrainV1,
         state: HydrationStateV1,
+        retrieval: LcmRetrievalOutcome,
+    },
+    Partial {
+        expansion: Option<LcmExpandResponse>,
+        temporal: SessionTemporalMetadataView,
+        grain: RetrievalGrainV1,
+        state: Option<HydrationStateV1>,
+        retrieval: LcmRetrievalOutcome,
+    },
+    Stale {
+        temporal: SessionTemporalMetadataView,
+        retrieval: LcmRetrievalOutcome,
     },
     WrongScope,
     Locked,
