@@ -6555,25 +6555,20 @@ async fn serve_broker_socket_client(
         None
     };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
-        let report_ready = if request.doctor_report_requested() {
-            engine
-                .cached_project_server(&handshake)
-                .await?
-                .is_some_and(|server| server.doctor_report_ready())
-        } else {
-            false
-        };
-        if request.should_serve_from_core(report_ready) {
-            drop(setup_activity);
-            write_doctor_runtime_response(
-                &mut transport,
-                &handshake,
-                &engine.store_administration,
-                request,
-            )
-            .await?;
-            return Ok(());
-        }
+        let project_runtime_ready = engine
+            .cached_project_server(&handshake)
+            .await?
+            .is_some_and(|server| server.doctor_report_ready());
+        drop(setup_activity);
+        write_doctor_runtime_response(
+            &mut transport,
+            &handshake,
+            &engine.store_administration,
+            project_runtime_ready,
+            request,
+        )
+        .await?;
+        return Ok(());
     }
     engine.log_client_version_skew(&handshake).await;
     ensure_user_profile_host_admission_replay_for_identity(
@@ -6917,30 +6912,25 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         None
     };
     if let Some(request) = doctor_runtime_request(&first_request_line) {
-        let report_ready = if request.doctor_report_requested() {
-            let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
-            portable_cached_project_server(
-                &store_administration,
-                &canonical_project_path,
-                &handshake,
-                ProjectServerRequirement::Core,
-            )
-            .await?
-            .is_some_and(|server| server.doctor_report_ready())
-        } else {
-            false
-        };
-        if request.should_serve_from_core(report_ready) {
-            drop(setup_activity);
-            write_doctor_runtime_response(
-                &mut transport,
-                &handshake,
-                &store_administration,
-                request,
-            )
-            .await?;
-            return Ok(());
-        }
+        let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
+        let project_runtime_ready = portable_cached_project_server(
+            &store_administration,
+            &canonical_project_path,
+            &handshake,
+            ProjectServerRequirement::Core,
+        )
+        .await?
+        .is_some_and(|server| server.doctor_report_ready());
+        drop(setup_activity);
+        write_doctor_runtime_response(
+            &mut transport,
+            &handshake,
+            &store_administration,
+            project_runtime_ready,
+            request,
+        )
+        .await?;
+        return Ok(());
     }
     ensure_user_profile_host_admission_replay_for_identity(
         &store_administration,
