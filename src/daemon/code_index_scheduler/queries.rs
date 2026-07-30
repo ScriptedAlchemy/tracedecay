@@ -48,8 +48,7 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
 use tracedecay_query::retrieval::{
-    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
-    inspect_prepared_query_cursor,
+    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1, inspect_prepared_query_cursor,
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
@@ -785,10 +784,7 @@ impl CodeIndexSchedulerRegistryV1 {
             base,
             page.cursor.as_ref().map(OpaqueCursor::as_str),
         )?;
-        Ok(PreparedCallableQueryV1 {
-            latest,
-            query,
-        })
+        Ok(PreparedCallableQueryV1 { latest, query })
     }
 }
 
@@ -811,12 +807,9 @@ fn finish_direct_query<T: serde::Serialize>(
         query_binding_digest,
     );
     let pagination = bindings.and_then(|bindings| {
-        prepared.query.paginate(
-            &bindings,
-            page.items,
-            requested_page.page_size,
-            finished_at,
-        )
+        prepared
+            .query
+            .paginate(&bindings, page.items, requested_page.page_size, finished_at)
     });
     match pagination {
         Ok(pagination) => {
@@ -826,11 +819,7 @@ fn finish_direct_query<T: serde::Serialize>(
                 .transpose()
                 .map_err(|_| PreparedQueryErrorV1::Unavailable);
             let Ok(next_cursor) = next_cursor else {
-                return rejected_cursor(
-                    finished_at,
-                    generation,
-                    PreparedQueryErrorV1::Unavailable,
-                );
+                return rejected_cursor(finished_at, generation, PreparedQueryErrorV1::Unavailable);
             };
             let page = CodeQueryPage::new(
                 generation,
@@ -842,15 +831,15 @@ fn finish_direct_query<T: serde::Serialize>(
             .unwrap_or_else(|_| panic!("prepared query creates a valid application page"));
             bounded_result(
                 page,
-            tracedecay_domain::RetrieverCoverage {
-                eligible,
-                examined: eligible,
-                excluded: 0,
-                capped: 0,
-                unknown: 0,
-            },
-            finished_at,
-            None,
+                tracedecay_domain::RetrieverCoverage {
+                    eligible,
+                    examined: eligible,
+                    excluded: 0,
+                    capped: 0,
+                    unknown: 0,
+                },
+                finished_at,
+                None,
             )
         }
         Err(error) => rejected_cursor(finished_at, generation, error),
@@ -1010,9 +999,7 @@ where
                     let mut evidence = evidence;
                     evidence.omissions.push(Omission {
                         domain: EvidenceDomain::Symbol,
-                        count: coverage
-                            .eligible
-                            .saturating_sub(evidence.coverage.returned),
+                        count: coverage.eligible.saturating_sub(evidence.coverage.returned),
                         reason: partial_reason,
                     });
                     evidence.coverage.completeness = CoverageCompleteness::Partial;
