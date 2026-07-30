@@ -12,7 +12,7 @@ use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, RequestOptions, StreamOptions,
     StreamResume,
 };
-use tracedecay_sdk::operations::{TypedOperation, WorkSnapshot};
+use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish, WorkSnapshot};
 
 struct Daemon {
     child: Child,
@@ -107,6 +107,7 @@ fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability()
             )
             .build()
             .unwrap();
+        assert_work_attempt_finish_route_admits_missing_attempt(&client);
         let request = serde_json::from_value::<<WorkSnapshot as TypedOperation>::Request>(
             json!({"page_size": 1}),
         )
@@ -170,6 +171,45 @@ fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability()
             Err(error) => panic!("production cancellation failed unexpectedly: {error}"),
         }
     }
+}
+
+fn assert_work_attempt_finish_route_admits_missing_attempt(client: &Client) {
+    let request = serde_json::from_value::<<WorkAttemptFinish as TypedOperation>::Request>(json!({
+        "identity": {
+            "attempt_id": "attempt.sdk.missing",
+            "run_id": "run.sdk.missing",
+            "task_id": "task.sdk.missing"
+        },
+        "lease": {
+            "epoch": 1,
+            "lease_id": "lease.sdk.missing"
+        },
+        "observed_at": 1
+    }))
+    .expect("canonical missing-attempt finish request");
+    let error = client
+        .execute::<WorkAttemptFinish>(&request, RequestOptions)
+        .expect_err("a nonexistent Work attempt must not finish");
+    let ClientError::Problem(problem) = error else {
+        panic!("mounted attempt_finish route must return a typed Work problem: {error}");
+    };
+
+    assert_eq!(problem.status, 404);
+    assert_eq!(problem.kind, "not_found_or_not_authorized");
+    assert_eq!(problem.code, "not_found_or_not_authorized");
+    assert_eq!(problem.retry, "never");
+    assert_eq!(
+        problem.envelope["binding_id"],
+        json!(WorkAttemptFinish::BINDING_ID)
+    );
+    assert_eq!(
+        problem.envelope["contract"]["schema_id"],
+        json!(WorkAttemptFinish::RESULT_SCHEMA_ID)
+    );
+    assert_eq!(
+        problem.envelope["contract"]["schema_revision"],
+        json!(WorkAttemptFinish::RESULT_SCHEMA_REVISION)
+    );
 }
 
 fn production_binary() -> PathBuf {

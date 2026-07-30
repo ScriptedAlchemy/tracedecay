@@ -238,7 +238,11 @@ fn typed_work_descriptors_close_the_public_operation_surface() {
     assert_typed_contract::<WorkCreate>();
     assert_eq!(WorkCreate::OPERATION_ID, "operation.work.create");
     let capabilities = base_operation_capabilities().collect::<Vec<_>>();
-    assert_eq!(capabilities.len(), 64);
+    assert_eq!(
+        capabilities.len(),
+        tracedecay_sdk::api::HttpApplicationOperation::ALL.len(),
+        "every base HTTP application operation must surface as a capability"
+    );
     assert!(capabilities.iter().all(|capability| capability.disposition
         == tracedecay_sdk::operation::ExecutableUnavailableDispositionV1::SchemaUnavailable));
 }
