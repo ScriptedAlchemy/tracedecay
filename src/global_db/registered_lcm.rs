@@ -12,7 +12,7 @@ use crate::{
             LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
             LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
             LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-            LcmPayloadExpansion, LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage,
+            LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage,
             LcmRecentSession, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
             LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef, LcmStatus,
             LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
