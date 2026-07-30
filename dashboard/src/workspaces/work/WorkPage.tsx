@@ -62,7 +62,11 @@ export function WorkPage() {
       <WorkspaceHeader
         path="work"
         title="Work"
-        note="canonical task graph · nine mounted routes"
+        // Whose work this is, said outright. The routes answer for the active
+        // project whatever the scope bar is set to, so a board captioned only
+        // "Work" would be an aggregate everywhere else in this dashboard and is
+        // one project's here.
+        note="canonical task graph · the active project · nine mounted routes"
         actions={<WorkTaskActivity kind="partial" />}
       />
 

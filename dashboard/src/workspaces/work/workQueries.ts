@@ -6,7 +6,7 @@ import type {
   WorkProjectionResumeCursorV1,
   WorkProjectionSnapshotV1,
 } from '../../contracts/index.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
+import { type DashboardScope, scopeKey, useScope } from '../../data/scope/store.ts';
 import { callWork, type WorkResult, type WorkRoute } from './workApi.ts';
 import {
   WORK_DELTA_ROUTE,
@@ -16,14 +16,48 @@ import {
 /**
  * Work reads and commands as queries.
  *
- * Scoped through `scopedUrl` like every other surface. That matters more here
- * than elsewhere: the Work routes are nested straight onto an application router
- * that is bound to the *active* project at construction, so calling them
- * unscoped while the scope bar names a different project would draw one
- * project's tasks under another project's name. Routing a selected project
- * through the gateway means the answer is either that project's or a refusal,
- * and never silently the wrong one.
+ * These routes are the one dashboard surface that is not project-scopable, and
+ * the scope handling below exists entirely because of it.
+ *
+ * `src/dashboard/mod.rs` nests `/api/work` straight onto an application router
+ * built with the *active* project's id, and it does not add those routes to
+ * `project_api_router`. So the project gateway cannot serve them: a
+ * `/api/projects/{id}/work/...` request is rewritten into a router with no such
+ * path and comes back 404, for the active project as much as for any other.
+ *
+ * That leaves one honest arrangement. Where the active project is what the
+ * scope bar is asking about, call the route unprefixed and get real data. Where
+ * it is not, do not call at all and say why — sending the request anyway would
+ * either 404 as "not authorized", which is not what happened, or, if the
+ * mounting ever changed, quietly answer with the active project's tasks under
+ * another project's name.
  */
+
+/** Whether this scope is one the Work routes can answer for, and the reason
+ * when it is not. */
+export function workScopeAvailability(
+  scope: DashboardScope,
+): { available: true } | { available: false; detail: string } {
+  if (scope.kind === 'all') return { available: true };
+  switch (scope.activation) {
+    case 'active':
+      return { available: true };
+    case 'selected':
+      return {
+        available: false,
+        detail: `Work is served only for the active project, and ${scope.label} is selected rather than active`,
+      };
+    case 'unresolved':
+      return {
+        available: false,
+        detail: `whether ${scope.label} is the active project is still unresolved`,
+      };
+    default: {
+      const unhandled: never = scope.activation;
+      return unhandled;
+    }
+  }
+}
 
 /** How many projections a page asks for. The daemon decides what it can
  * actually return and says so in `coverage`; this is a request, not a promise. */
@@ -55,17 +89,25 @@ export function resumeCursor(
   }
 }
 
+/** The refusal an out-of-scope read reports, without issuing a request.
+ *
+ * `locked` rather than `denied`: nothing was refused by an authority, the
+ * surface simply will not answer for this scope, and the remedy is to change
+ * scope rather than to gain permission. */
+function outOfScope<T>(detail: string): WorkResult<T> {
+  return { outcome: 'refused', state: 'locked', detail };
+}
+
 export function useWorkSnapshot(pageSize: number = WORK_PAGE_SIZE) {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
+  const availability = workScopeAvailability(scope);
   return useQuery<WorkResult<WorkProjectionSnapshotV1>>({
     queryKey: workQueryKey(key, 'snapshot', pageSize),
     queryFn: () =>
-      callWork(
-        WORK_SNAPSHOT_ROUTE,
-        { page_size: pageSize },
-        scopedUrl(scope, WORK_SNAPSHOT_ROUTE.path),
-      ),
+      availability.available
+        ? callWork(WORK_SNAPSHOT_ROUTE, { page_size: pageSize }, WORK_SNAPSHOT_ROUTE.path)
+        : Promise.resolve(outOfScope<WorkProjectionSnapshotV1>(availability.detail)),
   });
 }
 
@@ -82,14 +124,15 @@ export function useWorkDelta(
 ) {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
+  const availability = workScopeAvailability(scope);
   return useQuery<WorkResult<WorkProjectionDeltaV1>>({
     queryKey: workQueryKey(key, 'delta', cursor?.token ?? null, pageSize),
-    enabled: cursor !== undefined,
+    enabled: cursor !== undefined && availability.available,
     queryFn: () =>
       callWork(
         WORK_DELTA_ROUTE,
         { cursor: cursor as WorkProjectionResumeCursorV1, page_size: pageSize },
-        scopedUrl(scope, WORK_DELTA_ROUTE.path),
+        WORK_DELTA_ROUTE.path,
       ),
   });
 }
@@ -111,9 +154,13 @@ export function useWorkDelta(
 export function useWorkCommand<Request, Response>(route: WorkRoute<Request, Response>) {
   const scope = useScope((state) => state.scope);
   const client = useQueryClient();
+  const availability = workScopeAvailability(scope);
   return useMutation<WorkResult<Response>, never, Request>({
     mutationKey: ['work', 'command', route.operation, scopeKey(scope)],
-    mutationFn: (request: Request) => callWork(route, request, scopedUrl(scope, route.path)),
+    mutationFn: (request: Request) =>
+      availability.available
+        ? callWork(route, request, route.path)
+        : Promise.resolve(outOfScope<Response>(availability.detail)),
     onSuccess: (result) => {
       // Only a committed command changes what a read would return. Invalidating
       // on a refusal would refetch on every rejected keystroke and, worse, make
