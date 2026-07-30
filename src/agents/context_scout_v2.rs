@@ -856,13 +856,13 @@ fn safe_suggestion_text(value: &str) -> bool {
 }
 
 #[cfg(feature = "token-counting")]
-fn serialized_token_count(value: &impl Serialize) -> Option<usize> {
+pub(super) fn serialized_token_count(value: &impl Serialize) -> Option<usize> {
     let json = serde_json::to_string(value).ok()?;
     Some(o200k_base_singleton().encode_ordinary(&json).len())
 }
 
 #[cfg(not(feature = "token-counting"))]
-fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
+pub(super) fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
     None
 }
 

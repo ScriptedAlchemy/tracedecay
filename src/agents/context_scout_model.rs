@@ -6,6 +6,7 @@ use super::context_scout_v2::{
     ContextScoutModelAssistantV1, ContextScoutModelBackendV1, ContextScoutModelCandidateV1,
     ContextScoutModelErrorV1, ContextScoutModelExecutionV1, ContextScoutModelFuture,
     ContextScoutModelProposalV1, ContextScoutModelReceiptV1, ContextScoutModelRequestV1,
+    serialized_token_count,
 };
 use crate::accounting::pricing::cost_of_turn;
 use crate::automation::backend::{
@@ -93,6 +94,8 @@ impl ContextScoutModelAssistantV1 for ProductionContextScoutModelAssistantV1 {
         Box::pin(async move {
             execution.checkpoint()?;
             execution.validate_input(&request)?;
+            let measured_input_tokens =
+                serialized_token_count(&request).and_then(|tokens| u64::try_from(tokens).ok());
             let backend_request = backend_request(request, execution.max_output_tokens)?;
             let cancellation = execution.cancellation.clone();
             let deadline = tokio::time::Instant::from_std(execution.deadline.instant());
@@ -111,7 +114,12 @@ impl ContextScoutModelAssistantV1 for ProductionContextScoutModelAssistantV1 {
                 }
             };
             execution.checkpoint()?;
-            response_to_proposal(response, requested_backend, &execution)
+            response_to_proposal(
+                response,
+                requested_backend,
+                measured_input_tokens,
+                &execution,
+            )
         })
     }
 }
@@ -194,35 +202,33 @@ fn response_schema() -> Value {
 fn response_to_proposal(
     response: AgentTaskResponse,
     requested_backend: ContextScoutModelBackendV1,
+    measured_input_tokens: Option<u64>,
     execution: &ContextScoutModelExecutionV1,
 ) -> Result<ContextScoutModelProposalV1, ContextScoutModelErrorV1> {
-    if response
-        .input_tokens
-        .is_some_and(|tokens| tokens > execution.max_input_tokens as u64)
-        || response
-            .output_tokens
-            .is_some_and(|tokens| tokens > execution.max_output_tokens as u64)
-    {
-        return Err(ContextScoutModelErrorV1::TokenBudgetExceeded);
-    }
+    let input_tokens = response.input_tokens.or(measured_input_tokens);
     let value = response
         .output_json
         .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
     let candidate: ContextScoutModelCandidateV1 =
         serde_json::from_value(value).map_err(|_| ContextScoutModelErrorV1::InvalidOutput)?;
+    let measured_output_tokens =
+        serialized_token_count(&candidate).and_then(|tokens| u64::try_from(tokens).ok());
+    let output_tokens = response.output_tokens.or(measured_output_tokens);
+    if input_tokens.is_some_and(|tokens| tokens > execution.max_input_tokens as u64)
+        || output_tokens.is_some_and(|tokens| tokens > execution.max_output_tokens as u64)
+    {
+        return Err(ContextScoutModelErrorV1::TokenBudgetExceeded);
+    }
     execution.validate_output(&candidate)?;
-    let estimated_cost_microusd = estimated_cost_microusd(
-        response.model.as_deref(),
-        response.input_tokens,
-        response.output_tokens,
-    );
+    let estimated_cost_microusd =
+        estimated_cost_microusd(response.model.as_deref(), input_tokens, output_tokens);
     Ok(ContextScoutModelProposalV1 {
         candidate,
         receipt: ContextScoutModelReceiptV1 {
             requested_backend,
             actual_model: response.model,
-            input_tokens: response.input_tokens,
-            output_tokens: response.output_tokens,
+            input_tokens,
+            output_tokens,
             estimated_cost_microusd,
         },
     })
@@ -266,6 +272,22 @@ mod tests {
                 model: Some("gpt-5.6-test".to_string()),
                 input_tokens: Some(32),
                 output_tokens: Some(16),
+            })
+        }
+    }
+
+    struct MissingUsageBackend;
+
+    impl AgentTaskBackend for MissingUsageBackend {
+        fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
+            Ok(AgentTaskResponse {
+                run_id: request.run_id.clone(),
+                task: request.task,
+                output_text: serde_json::to_string(&valid_candidate()).unwrap(),
+                output_json: Some(serde_json::to_value(valid_candidate()).unwrap()),
+                model: Some("gpt-5.6-test".to_string()),
+                input_tokens: None,
+                output_tokens: None,
             })
         }
     }
@@ -392,5 +414,33 @@ mod tests {
         assert!(backend_request.contract.strict_json);
         assert_eq!(backend_request.contract.task_key, "context_scout_v1");
         assert!(backend_request.prompt.contains("Do not call tools"));
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn configured_model_measures_usage_when_backend_omits_token_counts() {
+        let assistant = ProductionContextScoutModelAssistantV1::new(
+            Arc::new(MissingUsageBackend),
+            ContextScoutModelBackendV1::CodexAppServer,
+        );
+
+        let proposal = assistant
+            .propose(request(), execution(CancellationToken::new()))
+            .await
+            .unwrap();
+
+        assert!(
+            proposal
+                .receipt
+                .input_tokens
+                .is_some_and(|tokens| tokens > 0)
+        );
+        assert!(
+            proposal
+                .receipt
+                .output_tokens
+                .is_some_and(|tokens| tokens > 0)
+        );
+        assert!(proposal.receipt.estimated_cost_microusd.is_some());
     }
 }
