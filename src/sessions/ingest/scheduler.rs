@@ -1,13 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracedecay_store::ParseOffset;
 
 use crate::application::host_admission::DEFAULT_MAX_RECORDS;
 use crate::sessions::SessionProvider;
 use crate::sessions::snapshot_observation::MAX_SNAPSHOT_CAPTURE_UNIT_BYTES;
-use crate::sessions::source::{
-    MAX_JSONL_RECORD_BYTES, TranscriptCursorKey, TranscriptSource,
-};
+use crate::sessions::source::MAX_JSONL_RECORD_BYTES;
 use crate::store::TranscriptIngestStore;
 
 use super::failure::{
@@ -116,57 +114,6 @@ pub(super) fn finish_user_provider_coverage(
         IngestPassCoverage::Partial {
             deferred_units: u64::try_from(rejected).unwrap_or(u64::MAX),
         }
-    }
-}
-
-/// Restrict an existing [`TranscriptSource`] to a single admitted path so fair
-/// rotation can interleave work units without a fallback writer or private sink.
-pub(super) struct SinglePathSource<'a> {
-    inner: &'a dyn TranscriptSource,
-    path: PathBuf,
-}
-
-impl<'a> SinglePathSource<'a> {
-    pub(super) fn new(inner: &'a dyn TranscriptSource, path: PathBuf) -> Self {
-        Self { inner, path }
-    }
-}
-
-impl TranscriptSource for SinglePathSource<'_> {
-    fn provider(&self) -> &'static str {
-        self.inner.provider()
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        vec![self.path.clone()]
-    }
-
-    fn cursor_key(&self, transcript_path: &Path) -> TranscriptCursorKey {
-        self.inner.cursor_key(transcript_path)
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: crate::sessions::shared::StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<crate::sessions::source::ParsedTranscript> {
-        self.inner
-            .parse_new(path, prev, project_root, max_new_bytes)
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: crate::sessions::shared::StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> crate::sessions::source::TranscriptIngestResult<
-        Option<crate::sessions::source::ParsedTranscript>,
-    > {
-        self.inner
-            .try_parse_new(path, prev, project_root, max_new_bytes)
     }
 }
 

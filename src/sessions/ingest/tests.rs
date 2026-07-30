@@ -8,7 +8,6 @@ use tracedecay_domain::ProjectId;
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::observation::ObservationCancellation;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{StoredCursor, TranscriptSource};
 use crate::sessions::{SessionProvider, claude_observation, codex, git_correlation, source};
 
 use super::failure::{
@@ -23,7 +22,7 @@ use super::project::{
 };
 use super::scheduler::{
     USER_INGEST_PROVIDER_FRONTIER_KEY, finish_user_provider_coverage,
-    merge_project_provider_backpressure, plan_user_provider_admission, SinglePathSource,
+    merge_project_provider_backpressure, plan_user_provider_admission,
 };
 use super::startup::{
     StartupUserIngestGuard, TranscriptIngestOutcome,
@@ -835,39 +834,3 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
     );
 }
 
-
-#[test]
-fn single_path_source_restricts_discovery_to_one_admitted_path() {
-    struct MultiPathSource;
-
-    impl TranscriptSource for MultiPathSource {
-        fn provider(&self) -> &'static str {
-            "fixture"
-        }
-
-        fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-            vec![
-                PathBuf::from("/tmp/a.jsonl"),
-                PathBuf::from("/tmp/b.jsonl"),
-            ]
-        }
-
-        fn parse_new(
-            &self,
-            _path: &Path,
-            _prev: StoredCursor,
-            _project_root: &Path,
-            _max_new_bytes: Option<u64>,
-        ) -> Option<crate::sessions::source::ParsedTranscript> {
-            None
-        }
-    }
-
-    let inner = MultiPathSource;
-    let single = SinglePathSource::new(&inner, PathBuf::from("/tmp/b.jsonl"));
-    assert_eq!(single.provider(), "fixture");
-    assert_eq!(
-        single.transcript_paths(Path::new("/project")),
-        vec![PathBuf::from("/tmp/b.jsonl")]
-    );
-}

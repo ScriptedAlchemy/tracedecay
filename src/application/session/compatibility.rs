@@ -224,6 +224,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn derived_index_text_caps_without_mutating_source_content() {
+        // Deterministic replacement for the deleted LCM ingest source-scan
+        // guard: derived index text is capped through the application contract
+        // while the authoritative raw payload remains lossless.
+        let content = format!("{}{}", "a".repeat(300_000), "::lossless-tail");
+        let derived = derived_text_for_index(&content);
+        assert!(
+            derived.chars().count() <= MAX_DERIVED_TEXT_CHARS,
+            "derived index text must honor MAX_DERIVED_TEXT_CHARS"
+        );
+        assert!(
+            derived.contains(DERIVED_TRUNCATION_MARKER),
+            "oversized derived text must carry the application truncation marker"
+        );
+        assert!(
+            content.ends_with("::lossless-tail"),
+            "source content must remain byte-exact after derivation"
+        );
+        assert_eq!(content.chars().count(), 300_000 + "::lossless-tail".chars().count());
+        assert_eq!(
+            crate::sessions::lcm::MAX_DERIVED_TEXT_CHARS,
+            MAX_DERIVED_TEXT_CHARS,
+            "LCM must re-export the application derived-text cap, not redefine it"
+        );
+        assert_eq!(
+            crate::sessions::lcm::DERIVED_TRUNCATION_MARKER,
+            DERIVED_TRUNCATION_MARKER
+        );
+        assert_eq!(
+            crate::sessions::lcm::derived_text_for_index(&content),
+            derived,
+            "LCM derived_text_for_index must be the application helper"
+        );
+    }
+
+    #[test]
     fn rerank_fetch_limit_never_panics_when_limit_exceeds_cap() {
         assert_eq!(rerank_fetch_limit(500, 200), 500);
         assert_eq!(rerank_fetch_limit(10, 200), 40);

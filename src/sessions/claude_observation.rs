@@ -940,6 +940,8 @@ mod tests {
         capture_calls: std::sync::atomic::AtomicUsize,
         cursor_reads: std::sync::atomic::AtomicUsize,
         drain_calls: std::sync::atomic::AtomicUsize,
+        last_drain_provider: std::sync::Mutex<Option<String>>,
+        last_drain_max: std::sync::atomic::AtomicUsize,
     }
 
     impl ObservationCaptureAdmissionPort for CapturePortSpy {
@@ -978,15 +980,25 @@ mod tests {
 
         fn drain_projection_queue<'a>(
             &'a self,
-            _provider: &'a str,
+            provider: &'a str,
             _scope: &'a ObservationScopeV1,
             _cancellation: &'a ObservationCancellation,
-            _max: usize,
+            max: usize,
         ) -> impl Future<Output = Result<HostProjectionDrainOutcome, HostAdmissionOutcome>> + Send + 'a
         {
             self.drain_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async { Err(HostAdmissionOutcome::retained_unavailable("unused")) }
+            self.last_drain_max
+                .store(max, std::sync::atomic::Ordering::SeqCst);
+            *self
+                .last_drain_provider
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provider.to_string());
+            async {
+                Err(HostAdmissionOutcome::retained_unavailable(
+                    "projection_drain_spy",
+                ))
+            }
         }
     }
 
@@ -1075,6 +1087,36 @@ mod tests {
             spy.cursor_reads.load(std::sync::atomic::Ordering::SeqCst) >= 1,
             "scheduling must read the durable frontier through TranscriptCursorAdmissionPort"
         );
+    }
+
+    #[tokio::test]
+    async fn drain_projection_queue_routes_through_observation_capture_port() {
+        let spy = CapturePortSpy::default();
+        let scope = ObservationScopeV1::Profile;
+        let cancellation = ObservationCancellation::default();
+        let result = drain_projection_queue(&spy, &scope, &cancellation).await;
+
+        assert_eq!(spy.drain_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            spy.last_drain_max.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_PROJECTIONS_PER_PASS
+        );
+        assert_eq!(
+            spy.last_drain_provider
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_deref(),
+            Some("claude")
+        );
+        match result {
+            Err(ClaudeObservationIngestError::Transcript(
+                crate::sessions::source::TranscriptIngestError::NonDurableRecord { reason, .. },
+            )) => assert_eq!(reason, "projection_drain_spy"),
+            Ok(_) => panic!("spy must reject projection drain through the admission port"),
+            Err(other) => {
+                panic!("drain_projection_queue must surface the drain-port rejection: {other}")
+            }
+        }
     }
 
     struct Fixture {
