@@ -73,3 +73,33 @@ fn extracted_workspace_crates_do_not_depend_on_the_root_package() {
         violations.join(", ")
     );
 }
+
+#[test]
+fn foundation_domain_dependency_boundary_remains_pure() {
+    let metadata = cargo_metadata();
+    let domain = metadata
+        .packages
+        .iter()
+        .find(|package| {
+            package.name == "tracedecay-domain" && metadata.workspace_members.contains(&package.id)
+        })
+        .expect("tracedecay-domain must remain a workspace package");
+    let actual = domain
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::from([
+        "schemars",
+        "serde",
+        "serde_json",
+        "sha2",
+        "thiserror",
+        "url",
+    ]);
+
+    assert_eq!(
+        actual, expected,
+        "tracedecay-domain must remain a pure value-and-validation crate; review any dependency addition for I/O, database, transport, provider, settings, credential, lifecycle, UI, or root coupling"
+    );
+}
