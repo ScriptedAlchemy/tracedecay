@@ -686,10 +686,7 @@ fn validate_released_inspection(
         || inspection.project_structural_members != project.structural_members
         || inspection.lcm_structural_members != lcm.structural_members
         || inspection.durable_families != crate::ReleasedDurableFamily::all()
-        || inspection.profile_id != request.source.profile_id
-        || inspection.repository_id != request.source.repository_id
-        || inspection.project_id != request.source.project_id
-        || inspection.store_id != request.source.store_id
+        || inspection.source != request.source
     {
         return Err(FinalV2ExecutionError::Contract(
             MigrationContractError::SourceSchemaMismatch,
@@ -861,6 +858,7 @@ mod tests {
         fn inspect_released_source(&self) -> Result<ReadOnlyReleasedSchemaInspection, String> {
             self.calls.borrow_mut().push("inspect");
             Ok(ReadOnlyReleasedSchemaInspection {
+                source: source_identity(3),
                 project_schema: Some(18),
                 lcm_schema: Some(5),
                 store_manifest_schema: Some(1),
@@ -872,10 +870,6 @@ mod tests {
                 lcm_structural_members: ReleasedSchemaFixture::for_kind(ReleasedStoreKind::Lcm)
                     .structural_members,
                 durable_families: ReleasedDurableFamily::all(),
-                profile_id: "project.release".to_owned(),
-                repository_id: "project.release".to_owned(),
-                project_id: "project.release".to_owned(),
-                store_id: "project.release".to_owned(),
             })
         }
 
