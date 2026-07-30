@@ -907,19 +907,45 @@ fn candidate_and_record_cursors_are_stable_and_bounded() {
     assert!(record.encode(8).is_err());
 }
 
-#[test]
-fn snapshot_uniqueness_probe_reads_at_most_two_rows() {
-    let source = include_str!("../retrieval.rs");
-    let start = source
-        .find("async fn validate_snapshot(")
-        .expect("validator");
-    let end = source[start..]
-        .find("async fn produce_candidates(")
-        .map(|offset| start + offset)
-        .expect("validator end");
-    let validator = &source[start..end];
-    assert!(validator.contains("LIMIT 2"));
-    assert!(validator.contains("frozen generation is not unique"));
+#[tokio::test]
+async fn duplicate_frozen_generation_rows_fail_closed_as_not_unique() {
+    let dir = tempdir().expect("temporary directory");
+    let conn = TestConnection::open(&dir.path().join("ambiguous-generation.db"));
+    let frozen = serde_json::json!({
+        "active_generation": 1,
+        "cursor_key": null,
+        "projection_frontier": 0,
+        "source_frontier": 0,
+        "summary_frontier": 0
+    })
+    .to_string();
+    // No primary key: the production uniqueness probe must still fail closed
+    // when two matching generation rows are visible under LIMIT 2.
+    conn.execute_batch(
+        &format!(
+            "CREATE TABLE session_temporal_generations (
+                session_id TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                frozen_watermarks_json TEXT NOT NULL
+             );
+             INSERT INTO session_temporal_generations VALUES
+                ('session-snapshot', 1, 'active', '{frozen}'),
+                ('session-snapshot', 1, 'active', '{frozen}');"
+        ),
+    )
+    .await
+    .expect("ambiguous generation fixture");
+
+    let adapter = GlobalDbTemporalReadPort::new(&conn);
+    let error = adapter
+        .validate_snapshot(&snapshot(1))
+        .await
+        .expect_err("duplicate frozen generation rows must fail closed");
+    assert!(
+        error.to_string().contains("frozen generation is not unique"),
+        "unexpected ambiguity error: {error:?}"
+    );
 }
 
 #[test]
@@ -1483,16 +1509,37 @@ fn record_union_filters_provider_and_large_fields_before_materialization() {
         assert!(records.contains(field));
     }
     assert!(records.contains("json_group_array"));
-    let source = include_str!("records.rs");
-    let builder_start = source.find("fn build_record_query(").expect("builder");
-    let builder_end = source[builder_start..]
-        .find("struct RecordModeSql")
-        .map(|offset| builder_start + offset)
-        .expect("builder end");
-    let builder = &source[builder_start..builder_end];
-    assert!(builder.contains("source_count_cap_param"));
-    assert!(builder.contains("source_byte_cap_param"));
-    assert!(!builder.contains("LIMIT ?{source_byte_cap_param}"));
+    let request = record_request();
+    let byte_cap = i64::try_from(request.max_item_bytes().max(1)).expect("byte cap");
+    let count_cap = i64::try_from(super::MAX_SUMMARY_SOURCES_PER_RECORD).expect("count cap");
+    assert!(
+        query.sql.contains("ss.source_ordinal < ?") || query.sql.contains("source_ordinal < ?"),
+        "summary source fan-in must bind a count cap predicate"
+    );
+    assert!(
+        query.sql.contains("length(CAST(") && query.sql.contains(") <= ?"),
+        "summary source fan-in must bind a byte-length cap predicate"
+    );
+    assert!(
+        query
+            .params
+            .iter()
+            .any(|param| matches!(param, SqlValue::Integer(value) if *value == byte_cap)),
+        "record query must bind the source byte cap"
+    );
+    assert!(
+        query
+            .params
+            .iter()
+            .any(|param| matches!(param, SqlValue::Integer(value) if *value == count_cap)),
+        "record query must bind the source count cap"
+    );
+    // Byte caps are length predicates; count/probe caps may use LIMIT, but the
+    // byte budget itself must never become a row LIMIT.
+    assert!(
+        !query.sql.contains(&format!("LIMIT {byte_cap}")),
+        "byte cap {byte_cap} must not appear as a LIMIT literal"
+    );
 }
 
 #[tokio::test]
@@ -2211,17 +2258,83 @@ fn iso_day_bounds_are_micros_and_half_open() {
 
 #[test]
 fn record_query_has_no_offset_or_per_candidate_subqueries() {
-    let source = include_str!("records.rs");
-    let start = source.find("fn build_record_query(").unwrap();
-    let end = source[start..]
-        .find("struct RecordModeSql")
-        .map(|offset| start + offset)
-        .unwrap();
-    let builder = &source[start..end];
-    assert!(!builder.to_ascii_uppercase().contains(" OFFSET "));
-    assert!(!builder.contains("for candidate in candidates {\n        conn.query"));
-    assert!(builder.contains("ordinal, session_id, anchor_id, derived_kind, retriever_record_id"));
-    assert!(builder.contains("ORDER BY ordinal, kind_rank, scope_session, stable_id"));
+    let candidates = [
+        record_candidate(),
+        RankingCandidate {
+            stable_id: "exact:occurrence-2".to_string(),
+            anchor_id: RetrievalAnchorId::new("anchor-2").expect("anchor"),
+            retriever_record_id: "occurrence-2".to_string(),
+            channel: CandidateChannel::ExactMessage,
+            raw_score: 900,
+            knowledge_at_micros: 2,
+            logical_message: Some("message-2".to_string()),
+            turn: None,
+            session: Some("session-snapshot".to_string()),
+            source: Some("claude".to_string()),
+            evidence_role: Some("assistant".to_string()),
+            exact_ranges: Vec::new(),
+        },
+    ];
+    let query = build_record_query(
+        &TemporalRetrievalScope::Session(SessionId::new("session-snapshot").expect("session")),
+        &scoped_snapshot(1, Some("claude")),
+        &candidates,
+        0,
+        &RecordCursor {
+            candidate: 0,
+            kind: 0,
+            session_id: String::new(),
+            stable_id: String::new(),
+        },
+        33,
+        &record_request(),
+    )
+    .expect("multi-candidate record query");
+
+    assert!(
+        !query.sql.to_ascii_uppercase().contains(" OFFSET "),
+        "record hydration must keyset-paginate rather than OFFSET"
+    );
+    assert!(
+        query
+            .sql
+            .contains("WITH candidate_input(\n             ordinal, session_id, anchor_id, derived_kind, retriever_record_id")
+            || query
+                .sql
+                .contains("ordinal, session_id, anchor_id, derived_kind, retriever_record_id"),
+        "all candidates must hydrate through one candidate_input table"
+    );
+    assert!(
+        query.sql.matches("VALUES (").count() >= 1,
+        "candidate rows must be bound in one VALUES list, not per-candidate queries"
+    );
+    assert!(
+        query
+            .sql
+            .contains("ORDER BY ordinal, kind_rank, scope_session, stable_id"),
+        "record pages must stay keyset-ordered"
+    );
+    // Two candidates contribute session/anchor/derived/retriever bindings plus
+    // ordinals — observable proof the builder did not loop into N queries.
+    let candidate_text_params = query
+        .params
+        .iter()
+        .filter(|param| {
+            matches!(
+                param,
+                SqlValue::Text(value)
+                    if value == "session-snapshot"
+                        || value == "anchor-1"
+                        || value == "anchor-2"
+                        || value == "occurrence-1"
+                        || value == "occurrence-2"
+            )
+        })
+        .count();
+    assert!(
+        candidate_text_params >= 6,
+        "one query must bind every candidate identity field; got {candidate_text_params}"
+    );
 }
 
 #[test]
@@ -2269,7 +2382,4 @@ fn root_record_query_carries_session_identity_through_hydration() {
             .sql
             .contains("ORDER BY ordinal, kind_rank, scope_session, stable_id")
     );
-    let adapter = include_str!("../retrieval.rs");
-    assert!(adapter.contains("fn produce_candidate_page_for_scope<'a>("));
-    assert!(adapter.contains("fn produce_temporal_record_page_for_scope<'a>("));
 }
