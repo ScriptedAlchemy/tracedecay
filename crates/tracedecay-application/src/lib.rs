@@ -22,6 +22,7 @@ pub mod historical_query;
 pub mod invocation;
 pub mod lsp_context_catalog;
 pub mod memory;
+pub mod multi_root;
 pub mod observability;
 pub mod policy;
 pub mod remote;
@@ -131,6 +132,11 @@ pub use memory::{
     DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1,
     DerivedMemoryFeedbackHistoryRepairV1, DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1,
     converge_derived_memory,
+};
+pub use multi_root::{
+    AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
+    AuthorizedScopeSetError, MultiRootContinuationV1, MultiRootQueryError, MultiRootQueryPageV1,
+    MultiRootQueryPort, MultiRootQueryRequestV1,
 };
 pub use observability::*;
 pub use policy::{

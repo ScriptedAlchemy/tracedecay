@@ -17,6 +17,7 @@ mod operation;
 mod outbox;
 mod ports;
 mod repository_read;
+mod scope_set;
 mod telemetry;
 
 pub use consistency::*;
@@ -27,4 +28,5 @@ pub use operation::*;
 pub use outbox::*;
 pub use ports::*;
 pub use repository_read::*;
+pub use scope_set::*;
 pub use telemetry::*;
