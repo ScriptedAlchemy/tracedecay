@@ -255,12 +255,21 @@ impl RemoteCaptureSpool {
     }
 
     pub fn pending(&self) -> Result<Vec<(String, AdmittedRemoteCaptureV1)>, RemoteSpoolError> {
-        Ok(self
+        let mut pending = self
             .snapshot()?
             .into_values()
-            .filter(|event| event.state == RemoteReplayStateV1::Pending)
+            .filter(|event| {
+                matches!(
+                    event.state,
+                    RemoteReplayStateV1::Pending
+                        | RemoteReplayStateV1::Admitted
+                        | RemoteReplayStateV1::Duplicate
+                )
+            })
             .map(|event| (event.capture.event_id.clone(), event.capture.admitted()))
-            .collect())
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|(_, capture)| capture.sequence.sequence);
+        Ok(pending)
     }
 
     fn capture(
@@ -282,7 +291,12 @@ impl RemoteCaptureSpool {
             }
             return Err(RemoteSpoolError::EventIdentityConflict);
         }
-        if snapshot.len() >= self.config.maximum_events {
+        if snapshot
+            .values()
+            .filter(|event| event.state != RemoteReplayStateV1::GarbageCollectionEligible)
+            .count()
+            >= self.config.maximum_events
+        {
             return Err(RemoteSpoolError::Overflow);
         }
         validate_next_sequence(&snapshot, &capture)?;
@@ -405,10 +419,10 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
         if let Some(receipt) = &transition.receipt {
+            let captured_fence = &event.capture.writer.authority.fence;
             if receipt.event_id != event.capture.event_id
-                || !receipt
-                    .writer_fence
-                    .same_mutable_shard(&event.capture.writer.authority.fence)
+                || !(receipt.writer_fence == *captured_fence
+                    || receipt.writer_fence.fences(captured_fence))
                 || receipt.commit_sequence == 0
             {
                 return Err(RemoteCapturePersistenceErrorV1::Corruption);
@@ -610,13 +624,14 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_domain::{
-        AuthorityEpoch, BrainId, ComponentVersion, EntityVersionId, ObservationId,
+        AuthorityEpoch, BrainId, ComponentVersion, ObservationId,
         ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
         ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
         PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RefId,
-        RemoteAuthorityUnavailableReasonV1, RepositoryId, RepositoryStateSnapshotId,
-        RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-        SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, WorktreeId,
+        RemoteAuthorityUnavailableReasonV1, RemotePlacementRevisionV1, RepositoryId,
+        RepositoryStateSnapshotId, RetentionClass, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+        SessionId, ShardId, WorktreeId,
     };
     use tracedecay_store::{RepositoryWritePayloadV1, StoreRuntimeBindingV1};
 
@@ -694,6 +709,7 @@ mod tests {
         RemoteWriterAuthorityV1 {
             project_id: ProjectId::new("project.remote-test").unwrap(),
             scope: tracedecay_domain::RemoteRepositoryScopeV1 {
+                project_id: ProjectId::new("project.remote-test").unwrap(),
                 repository_id: RepositoryId::new("repository.remote-test").unwrap(),
                 worktree_id: WorktreeId::new("worktree.remote-test").unwrap(),
                 reference: Some(RefId::new("refs/heads/main").unwrap()),
@@ -704,7 +720,7 @@ mod tests {
                     brain_id: BrainId::new("brain.remote-test").unwrap(),
                     shard_id: ShardId::new("shard.remote-test").unwrap(),
                     generation_id: ProjectionGenerationId::new("generation.remote-test").unwrap(),
-                    placement_revision: EntityVersionId::new("placement.remote-test").unwrap(),
+                    placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
                     authority_epoch: AuthorityEpoch(1),
                     authority_node_id: BrainNodeId::new("node.remote-test").unwrap(),
                 },

@@ -430,11 +430,10 @@ mod tests {
     };
     use tracedecay_domain::{
         AuthorityEpoch, BrainId, BrainNodeId, ComponentVersion, CurrentRemoteAuthorityStateV1,
-        CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EntityId, EntityVersionId,
-        ManifestDigest, ProjectId, ProjectionGenerationId, RefId,
-        RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1, RemoteRepositoryScopeV1,
-        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, UtcMicros,
-        WorktreeId,
+        CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EntityId, ManifestDigest,
+        ProjectId, ProjectionGenerationId, RefId, RemoteAuthorityUnavailableReasonV1,
+        RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
+        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{SchemaId, SortContractId};
 
@@ -790,7 +789,7 @@ mod tests {
                 brain_id: BrainId::new("brain.remote").unwrap(),
                 shard_id: ShardId::new("shard.remote").unwrap(),
                 generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
-                placement_revision: EntityVersionId::new("placement.remote").unwrap(),
+                placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
                 authority_epoch: AuthorityEpoch(1),
                 authority_node_id: BrainNodeId::new("node.authority").unwrap(),
             },
@@ -841,6 +840,7 @@ mod tests {
             expires_at,
             capabilities: BTreeSet::from([RemoteCapabilityV1::Query]),
             scope: RemoteRepositoryScopeV1 {
+                project_id: ProjectId::new("project.remote").unwrap(),
                 repository_id: RepositoryId::new("repository.remote").unwrap(),
                 worktree_id: WorktreeId::new("worktree.remote").unwrap(),
                 reference: Some(RefId::new("refs/heads/main").unwrap()),
@@ -919,13 +919,13 @@ mod tests {
         } else {
             HeaderMap::new()
         };
+        let mut request =
+            protocol_request("request.remote.enrollment-validation", request);
+        request.enrollment_revision = 0;
         block_on(enrollment_route::<ValidationPort>(
             State(state),
             headers,
-            Ok(Json(protocol_request(
-                "request.remote.enrollment-validation",
-                request,
-            ))),
+            Ok(Json(request)),
         ))
         .status()
     }

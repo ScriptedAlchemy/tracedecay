@@ -4,10 +4,13 @@ use tracedecay_application::remote::auth::{
     EnrollmentIssueRequestV1, OpaqueRemoteCredential, RemoteAuthenticationError,
     authenticate_caller, issue_enrollment,
 };
+use tracedecay_application::remote::capture::{
+    RemoteCapturePersistenceErrorV1, RemoteCaptureStateV1, RemoteWriterAuthorityV1,
+};
 use tracedecay_application::remote::composition::{
-    AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalObservationsV1,
-    QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1, RemoteQueryCompositionV1,
-    ShardCoverageStateV1, ShardQueryContributionV1,
+    AuthenticityClaimV1, AuthorizationClaimV1, ExpectedRemoteShardV1, IntegrityClaimV1,
+    PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1,
+    RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
 use tracedecay_application::remote::recovery::{
     AuthorityRejoinStateV1, PromotionCasReceiptV1 as ApplicationPromotionReceiptV1,
@@ -15,18 +18,19 @@ use tracedecay_application::remote::recovery::{
     StagedRestoreProgressV1,
 };
 use tracedecay_domain::remote::{
-    EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, RemoteCapabilityV1,
-    RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
+    EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EnrollmentGrantV1,
+    RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemotePlacementRevisionV1,
+    RemoteRepositoryScopeV1, RemoteWriterFenceV1,
 };
 use tracedecay_domain::{
-    BrainId, BrainNodeId, EntityId, RefId, RepositoryId, RepositoryStateSnapshotId, UserProfileId,
+    AuthorityEpoch, BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, EntityId, ProjectId,
+    ProjectionGenerationId, RefId, RepositoryId, RepositoryStateSnapshotId, ShardId, UserProfileId,
     UtcMicros, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::remote_spool::{
-    RemoteCaptureSpool, RemoteSpoolConfig, RemoteSpoolEncryption, RemoteSpoolEncryptionError,
-    RemoteSpoolError,
+    RemoteAuthorityReachabilityPortV1, RemoteCaptureSpool, RemoteSpoolConfig,
+    RemoteSpoolEncryption, RemoteSpoolEncryptionError, RemoteSpoolError,
 };
-use tracedecay_store::remote_capture::RemoteCaptureStateV1;
 use tracedecay_store::remote_recovery::{
     AuthenticatedManifestContextV1, AuthorityCasV1, BackupArtifactKindV1, BackupArtifactV1,
     BackupCoverageV1, BackupManifestV1, CurrentPolicyReplayV1, PromotionPreviewV1,
@@ -65,9 +69,21 @@ fn watermark(binding: &StoreRuntimeBindingV1, sequence: u64) -> ShardWatermarkV1
 
 fn authentication() -> AuthenticatedManifestContextV1 {
     AuthenticatedManifestContextV1 {
-        authenticated_node_id: "node.standby".into(),
-        enrollment_revision: 4,
+        enrollment: enrollment(b"manifest-enrollment-secret-0001"),
         authorization_revision: 7,
+        authentication_receipt_id: id::<EntityId>("authentication.remote.1"),
+        authenticated_at: UtcMicros(100),
+    }
+}
+
+fn writer(binding: &StoreRuntimeBindingV1, placement: u64) -> RemoteWriterFenceV1 {
+    RemoteWriterFenceV1 {
+        brain_id: binding.shard_id.brain_id.clone(),
+        shard_id: id::<ShardId>("shard.remote"),
+        generation_id: id::<ProjectionGenerationId>("generation.remote.12"),
+        placement_revision: RemotePlacementRevisionV1::new(placement).unwrap(),
+        authority_epoch: AuthorityEpoch(binding.authority_epoch.get()),
+        authority_node_id: id::<BrainNodeId>("node.authority"),
     }
 }
 
@@ -75,8 +91,8 @@ fn replica_manifest(binding: StoreRuntimeBindingV1) -> ReplicaCacheManifestV1 {
     ReplicaCacheManifestV1 {
         authentication: authentication(),
         watermark: watermark(&binding, 41),
-        binding,
-        placement_revision: 9,
+        writer: writer(&binding, 9),
+        runtime: binding,
         schema_digest: [1; 32],
         material_digest: [2; 32],
         material_bytes: 1_024,
@@ -90,8 +106,8 @@ fn backup_manifest(binding: StoreRuntimeBindingV1) -> BackupManifestV1 {
         backup_id: "backup.remote.1".into(),
         authentication: authentication(),
         source_frontier: watermark(&binding, 41),
-        binding,
-        placement_revision: 9,
+        writer: writer(&binding, 9),
+        runtime: binding,
         schema_digest: [3; 32],
         parent_backup_id: None,
         lineage_digest: [4; 32],
@@ -153,10 +169,11 @@ fn promotion_receipt(preview: &PromotionPreviewV1, sequence: u64) -> PromotionRe
 
 fn repository_scope(worktree: &str) -> RemoteRepositoryScopeV1 {
     RemoteRepositoryScopeV1 {
+        project_id: id::<ProjectId>("project.remote"),
         repository_id: id::<RepositoryId>("repository.remote"),
         worktree_id: id::<WorktreeId>(worktree),
         reference: Some(id::<RefId>("refs/heads/main")),
-        snapshot_id: id::<RepositoryStateSnapshotId>("snapshot.remote.1"),
+        snapshot_id: RepositoryStateSnapshotId::new("snapshot.remote.1").unwrap(),
     }
 }
 
@@ -193,6 +210,10 @@ fn query_manifest() -> QueryManifestBindingV1 {
     }
 }
 
+fn expected_query_shards() -> BTreeSet<ExpectedRemoteShardV1> {
+    BTreeSet::from([ExpectedRemoteShardV1::from(&query_manifest())])
+}
+
 fn unavailable_contribution(reason_code: &str) -> ShardQueryContributionV1<String> {
     ShardQueryContributionV1 {
         manifest: query_manifest(),
@@ -212,6 +233,24 @@ fn opaque(byte: u8) -> OpaqueRemoteCredential {
     OpaqueRemoteCredential::new(vec![byte; 32].into_boxed_slice()).unwrap()
 }
 
+fn enrollment_grant(
+    credential_secret: &[u8],
+    capabilities: BTreeSet<RemoteCapabilityV1>,
+) -> EnrollmentGrantV1 {
+    EnrollmentGrantV1 {
+        grant_id: id::<EntityId>("grant.remote.1"),
+        brain_id: id::<BrainId>("brain.remote"),
+        node_id: id::<BrainNodeId>("node.remote"),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(credential_secret).unwrap(),
+        revision: 4,
+        issued_at: UtcMicros(50),
+        expires_at: UtcMicros(250),
+        revoked_at: None,
+        capabilities,
+        scope: repository_scope("worktree.remote"),
+    }
+}
+
 struct UnavailableEncryption;
 
 impl RemoteSpoolEncryption for UnavailableEncryption {
@@ -228,11 +267,26 @@ impl RemoteSpoolEncryption for UnavailableEncryption {
     }
 }
 
+struct UnexpectedReachability;
+
+impl RemoteAuthorityReachabilityPortV1 for UnexpectedReachability {
+    fn current_writer_authority(
+        &self,
+        _writer: &RemoteWriterAuthorityV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
+        panic!("spool open must reject unavailable encryption before probing authority")
+    }
+}
+
 #[test]
 fn replica_manifest_rejects_wrong_brain_project_generation_placement_epoch_schema_and_watermark() {
     let expected = binding("brain.remote", "profile.remote", 12, 21);
+    let expected_writer = writer(&expected, 9);
     let exact = replica_manifest(expected.clone());
-    assert_eq!(exact.validate_for(&expected, 9, [1; 32], 150), Ok(()));
+    assert_eq!(
+        exact.validate_for(&expected_writer, &expected, [1; 32], 150),
+        Ok(())
+    );
 
     for wrong_binding in [
         binding("brain.other", "profile.remote", 12, 21),
@@ -241,23 +295,24 @@ fn replica_manifest_rejects_wrong_brain_project_generation_placement_epoch_schem
         binding("brain.remote", "profile.remote", 12, 22),
     ] {
         assert_eq!(
-            exact.validate_for(&wrong_binding, 9, [1; 32], 150),
+            exact.validate_for(&expected_writer, &wrong_binding, [1; 32], 150),
             Err(RemoteRecoveryContractErrorV1::BindingMismatch)
         );
     }
+    let wrong_placement = writer(&expected, 10);
     assert_eq!(
-        exact.validate_for(&expected, 10, [1; 32], 150),
-        Err(RemoteRecoveryContractErrorV1::PlacementMismatch)
+        exact.validate_for(&wrong_placement, &expected, [1; 32], 150),
+        Err(RemoteRecoveryContractErrorV1::BindingMismatch)
     );
     assert_eq!(
-        exact.validate_for(&expected, 9, [9; 32], 150),
+        exact.validate_for(&expected_writer, &expected, [9; 32], 150),
         Err(RemoteRecoveryContractErrorV1::SchemaMismatch)
     );
 
     let mut wrong_watermark = exact;
     wrong_watermark.watermark = watermark(&binding("brain.remote", "profile.remote", 12, 22), 41);
     assert_eq!(
-        wrong_watermark.validate_for(&expected, 9, [1; 32], 150),
+        wrong_watermark.validate_for(&expected_writer, &expected, [1; 32], 150),
         Err(RemoteRecoveryContractErrorV1::BindingMismatch)
     );
 }
@@ -265,32 +320,48 @@ fn replica_manifest_rejects_wrong_brain_project_generation_placement_epoch_schem
 #[test]
 fn expired_or_unauthenticated_replica_never_appears_available() {
     let expected = binding("brain.remote", "profile.remote", 12, 21);
+    let expected_writer = writer(&expected, 9);
     let mut manifest = replica_manifest(expected.clone());
-    manifest.authentication.enrollment_revision = 0;
+    manifest.authentication.enrollment.revision = 0;
     assert_eq!(
-        manifest.validate_for(&expected, 9, [1; 32], 150),
+        manifest.validate_for(&expected_writer, &expected, [1; 32], 150),
+        Err(RemoteRecoveryContractErrorV1::AuthenticationInvalid)
+    );
+
+    let mut manifest = replica_manifest(expected.clone());
+    manifest.authentication.enrollment.expires_at = UtcMicros(140);
+    assert_eq!(
+        manifest.validate_for(&expected_writer, &expected, [1; 32], 150),
         Err(RemoteRecoveryContractErrorV1::AuthenticationInvalid)
     );
 
     let manifest = replica_manifest(expected.clone());
     assert_eq!(
-        manifest.validate_for(&expected, 9, [1; 32], 200),
+        manifest.validate_for(&expected_writer, &expected, [1; 32], 200),
         Err(RemoteRecoveryContractErrorV1::Expired)
     );
 }
 
 #[test]
 fn stolen_expired_and_revoked_enrollment_grants_fail_closed() {
-    let legitimate = opaque(b'a');
+    let legitimate_secret = [b'a'; 32];
+    let legitimate =
+        OpaqueRemoteCredential::new(legitimate_secret.to_vec().into_boxed_slice()).unwrap();
     let stolen = opaque(b'b');
+    let capabilities = BTreeSet::from([RemoteCapabilityV1::Replay]);
+    let enrollment_grant = enrollment_grant(&legitimate_secret, capabilities.clone());
     let mut grant = issue_enrollment(
+        &enrollment_grant,
+        &legitimate,
         EnrollmentIssueRequestV1 {
+            grant_id: enrollment_grant.grant_id.clone(),
+            grant_revision: enrollment_grant.revision,
             enrollment_id: id::<EntityId>("enrollment.remote.1"),
             brain_id: id::<BrainId>("brain.remote"),
             node_id: id::<BrainNodeId>("node.remote"),
             issued_at: UtcMicros(100),
             expires_at: UtcMicros(200),
-            capabilities: BTreeSet::from([RemoteCapabilityV1::Replay]),
+            capabilities,
             scope: repository_scope("worktree.remote"),
         },
         &legitimate,
@@ -413,6 +484,7 @@ fn offline_spool_fails_closed_without_admitted_at_rest_encryption() {
             maximum_events: 4,
         },
         Box::new(UnavailableEncryption),
+        Box::new(UnexpectedReachability),
     );
     assert!(matches!(
         result,
@@ -429,11 +501,21 @@ fn unavailable_replica_or_shard_is_never_reported_as_complete_or_empty_success()
         has_sequence_gap: false,
         has_quarantined: false,
     };
-    assert!(RemoteQueryCompositionV1::<String>::compose(Vec::new(), pending.clone()).is_err());
+    assert!(
+        RemoteQueryCompositionV1::<String>::compose(
+            expected_query_shards(),
+            Vec::new(),
+            pending.clone(),
+            100,
+        )
+        .is_err()
+    );
 
     let result = RemoteQueryCompositionV1::compose(
+        expected_query_shards(),
         vec![unavailable_contribution("replica_unavailable")],
         pending,
+        100,
     )
     .unwrap();
     assert_eq!(result.coverage, ShardCoverageStateV1::Unavailable);
@@ -453,7 +535,9 @@ fn pending_gap_quarantine_and_stale_cache_keep_query_coverage_honest() {
         has_sequence_gap: true,
         has_quarantined: true,
     };
-    let result = RemoteQueryCompositionV1::compose(vec![stale], pending).unwrap();
+    let result =
+        RemoteQueryCompositionV1::compose(expected_query_shards(), vec![stale], pending, 100)
+            .unwrap();
     assert_eq!(result.coverage, ShardCoverageStateV1::Partial);
     assert!(!result.is_complete());
 }

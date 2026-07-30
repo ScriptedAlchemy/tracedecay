@@ -9,9 +9,9 @@ use tracedecay_application::remote::auth::{
     EnrollmentIssueRequestV1, OpaqueRemoteCredential, authenticate_caller, issue_enrollment,
 };
 use tracedecay_application::remote::composition::{
-    AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalObservationsV1,
-    QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1, RemoteQueryCompositionV1,
-    ShardCoverageStateV1, ShardQueryContributionV1,
+    AuthenticityClaimV1, AuthorizationClaimV1, ExpectedRemoteShardV1, IntegrityClaimV1,
+    PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1,
+    RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
 use tracedecay_application::remote::recovery::AuthorityRejoinStateV1;
 use tracedecay_application::{
@@ -19,10 +19,14 @@ use tracedecay_application::{
     DisclosureClass, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
     ResultContractRef,
 };
-use tracedecay_domain::remote::{RemoteCapabilityV1, RemoteRepositoryScopeV1};
+use tracedecay_domain::remote::{
+    EnrollmentGrantV1, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
+    RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1,
+};
 use tracedecay_domain::{
-    ActorId, BrainId, BrainNodeId, ComponentVersion, EntityId, ManifestDigest, ProjectId, RefId,
-    RepositoryId, RepositoryStateSnapshotId, UserProfileId, UtcMicros, WorktreeId,
+    ActorId, AuthorityEpoch, BrainId, BrainNodeId, ComponentVersion, EntityId, ManifestDigest,
+    ProjectId, ProjectionGenerationId, RefId, RepositoryId, RepositoryStateSnapshotId, ShardId,
+    UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::remote_recovery::{
     CurrentRestorePolicyAuthorityV1, stage_sqlite_restore,
@@ -55,10 +59,11 @@ fn digest(value: &str) -> ManifestDigest {
 
 fn repository_scope() -> RemoteRepositoryScopeV1 {
     RemoteRepositoryScopeV1 {
+        project_id: id::<ProjectId>("project.remote"),
         repository_id: id::<RepositoryId>("repository.remote"),
         worktree_id: id::<WorktreeId>("worktree.remote"),
         reference: Some(id::<RefId>("refs/heads/main")),
-        snapshot_id: id::<RepositoryStateSnapshotId>("snapshot.remote.1"),
+        snapshot_id: RepositoryStateSnapshotId::new("snapshot.remote.1").unwrap(),
     }
 }
 
@@ -129,6 +134,17 @@ fn binding(epoch: u64) -> StoreRuntimeBindingV1 {
     )
 }
 
+fn writer(binding: &StoreRuntimeBindingV1) -> RemoteWriterFenceV1 {
+    RemoteWriterFenceV1 {
+        brain_id: binding.shard_id.brain_id.clone(),
+        shard_id: id::<ShardId>("shard.remote"),
+        generation_id: id::<ProjectionGenerationId>("generation.remote.12"),
+        placement_revision: RemotePlacementRevisionV1::new(9).unwrap(),
+        authority_epoch: AuthorityEpoch(binding.authority_epoch.get()),
+        authority_node_id: id::<BrainNodeId>("node.authority"),
+    }
+}
+
 fn watermark(binding: &StoreRuntimeBindingV1, sequence: u64) -> ShardWatermarkV1 {
     ShardWatermarkV1 {
         shard_id: binding.shard_id.clone(),
@@ -169,22 +185,42 @@ impl CurrentRestorePolicyAuthorityV1 for ExactCurrentPolicy {
 
 #[test]
 fn authenticated_query_verified_restore_and_higher_fence_preserve_exact_watermark() {
+    let grant_secret = [b'g'; 32];
+    let presented_grant =
+        OpaqueRemoteCredential::new(grant_secret.to_vec().into_boxed_slice()).unwrap();
     let secret = OpaqueRemoteCredential::new(vec![b'a'; 32].into_boxed_slice()).unwrap();
+    let capabilities = BTreeSet::from([
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::Replay,
+        RemoteCapabilityV1::Query,
+        RemoteCapabilityV1::ReadBackup,
+        RemoteCapabilityV1::StageRestore,
+        RemoteCapabilityV1::Promote,
+    ]);
+    let grant = EnrollmentGrantV1 {
+        grant_id: id::<EntityId>("grant.remote.1"),
+        brain_id: id::<BrainId>("brain.remote"),
+        node_id: id::<BrainNodeId>("node.remote"),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(&grant_secret).unwrap(),
+        revision: 1,
+        issued_at: UtcMicros(1),
+        expires_at: UtcMicros(1_000),
+        revoked_at: None,
+        capabilities: capabilities.clone(),
+        scope: repository_scope(),
+    };
     let enrollment = issue_enrollment(
+        &grant,
+        &presented_grant,
         EnrollmentIssueRequestV1 {
+            grant_id: grant.grant_id.clone(),
+            grant_revision: grant.revision,
             enrollment_id: id::<EntityId>("enrollment.remote.1"),
             brain_id: id::<BrainId>("brain.remote"),
             node_id: id::<BrainNodeId>("node.remote"),
             issued_at: UtcMicros(10),
             expires_at: UtcMicros(1_000),
-            capabilities: BTreeSet::from([
-                RemoteCapabilityV1::CaptureOffline,
-                RemoteCapabilityV1::Replay,
-                RemoteCapabilityV1::Query,
-                RemoteCapabilityV1::ReadBackup,
-                RemoteCapabilityV1::StageRestore,
-                RemoteCapabilityV1::Promote,
-            ]),
+            capabilities,
             scope: repository_scope(),
         },
         &secret,
@@ -200,19 +236,21 @@ fn authenticated_query_verified_restore_and_higher_fence_preserve_exact_watermar
     )
     .unwrap();
 
+    let query_manifest = QueryManifestBindingV1 {
+        brain_id: "brain.remote".into(),
+        shard_id: "shard.profile".into(),
+        generation_id: "generation.12".into(),
+        schema_digest: [1; 32],
+        watermark_sequence: 41,
+        placement_revision: 9,
+        authority_epoch: 21,
+        cache_age_millis: 0,
+        cache_lag_commits: 0,
+    };
     let query = RemoteQueryCompositionV1::compose(
+        BTreeSet::from([ExpectedRemoteShardV1::from(&query_manifest)]),
         vec![ShardQueryContributionV1 {
-            manifest: QueryManifestBindingV1 {
-                brain_id: "brain.remote".into(),
-                shard_id: "shard.profile".into(),
-                generation_id: "generation.12".into(),
-                schema_digest: [1; 32],
-                watermark_sequence: 41,
-                placement_revision: 9,
-                authority_epoch: 21,
-                cache_age_millis: 0,
-                cache_lag_commits: 0,
-            },
+            manifest: query_manifest,
             integrity: IntegrityClaimV1::Verified,
             authenticity: AuthenticityClaimV1::Authenticated,
             freshness: RemoteFreshnessV1::Current,
@@ -229,6 +267,7 @@ fn authenticated_query_verified_restore_and_higher_fence_preserve_exact_watermar
             has_sequence_gap: false,
             has_quarantined: false,
         },
+        100,
     )
     .unwrap();
     assert!(query.is_complete());
@@ -253,12 +292,13 @@ fn authenticated_query_verified_restore_and_higher_fence_preserve_exact_watermar
     let manifest = BackupManifestV1 {
         backup_id: "backup.remote.1".into(),
         authentication: AuthenticatedManifestContextV1 {
-            authenticated_node_id: "node.remote".into(),
-            enrollment_revision: enrollment.revision,
+            enrollment: enrollment.clone(),
             authorization_revision: 1,
+            authentication_receipt_id: id::<EntityId>("authentication.remote.1"),
+            authenticated_at: UtcMicros(20),
         },
-        binding: old_binding.clone(),
-        placement_revision: 9,
+        writer: writer(&old_binding),
+        runtime: old_binding.clone(),
         schema_digest: [2; 32],
         source_frontier: watermark(&old_binding, 41),
         parent_backup_id: None,
