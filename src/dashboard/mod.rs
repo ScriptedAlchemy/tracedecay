@@ -93,6 +93,8 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+use tracedecay_api::WorkOperation;
+
 use crate::application_surface::{
     dashboard_configuration_application_router_with_executor,
     dashboard_feedback_application_router_with_executor,
@@ -1363,9 +1365,10 @@ async fn project_scoped_api_gateway(
     AxumPath((project_id, tail)): AxumPath<(String, String)>,
     mut req: Request<Body>,
 ) -> Response {
+    let application_read = selected_project_application_read(req.method(), &tail);
     if runtime.active_project_id() != Some(project_id.as_str())
         && !matches!(req.method(), &Method::GET | &Method::HEAD)
-        && !is_feedback_read_request(req.method(), &tail)
+        && application_read.is_none()
     {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -1401,13 +1404,13 @@ async fn project_scoped_api_gateway(
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
-    if is_feedback_read_request(req.method(), &tail) {
+    if let Some(read) = application_read {
         let Some(project_graph) = selected.state.project_graph.as_deref() else {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({
                     "status": "unavailable",
-                    "detail": "selected project feedback authority is unavailable",
+                    "detail": format!("selected project {read} authority is unavailable"),
                     "project_id": project_id,
                 })),
             )
@@ -1423,19 +1426,27 @@ async fn project_scoped_api_gateway(
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(json!({
                         "status": "unavailable",
-                        "detail": format!("selected project feedback authority is unavailable: {err}"),
+                        "detail": format!(
+                            "selected project {read} authority is unavailable: {err}"
+                        ),
                         "project_id": project_id,
                     })),
                 )
                     .into_response();
             }
         };
-        let Some(operation) = tail.strip_prefix("feedback/") else {
+        let (router, family) = match read {
+            SelectedProjectApplicationRead::Feedback => {
+                (application.dashboard_feedback_router, "feedback/")
+            }
+            SelectedProjectApplicationRead::Work => (application.dashboard_work_router, "work/"),
+        };
+        let Some(operation) = tail.strip_prefix(family) else {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "status": "bad_request",
-                    "detail": "invalid project-scoped feedback path",
+                    "detail": format!("invalid project-scoped {read} path"),
                 })),
             )
                 .into_response();
@@ -1444,13 +1455,13 @@ async fn project_scoped_api_gateway(
         return match rewritten.parse::<Uri>() {
             Ok(uri) => {
                 *req.uri_mut() = uri;
-                match application.dashboard_feedback_router.oneshot(req).await {
+                match router.oneshot(req).await {
                     Ok(response) => response,
                     Err(err) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({
                             "status": "error",
-                            "detail": format!("dashboard feedback route failed: {err}"),
+                            "detail": format!("dashboard {read} route failed: {err}"),
                         })),
                     )
                         .into_response(),
@@ -1460,7 +1471,7 @@ async fn project_scoped_api_gateway(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "status": "bad_request",
-                    "detail": format!("invalid project-scoped feedback path: {err}"),
+                    "detail": format!("invalid project-scoped {read} path: {err}"),
                 })),
             )
                 .into_response(),
@@ -1483,8 +1494,44 @@ async fn project_scoped_api_gateway(
     }
 }
 
-fn is_feedback_read_request(method: &Method, tail: &str) -> bool {
-    method == Method::POST && matches!(tail, "feedback/get" | "feedback/expand" | "feedback/list")
+/// A canonical application read a selected project answers for itself.
+///
+/// These are POSTs, so the gateway's read-only rule for non-active projects
+/// would otherwise refuse them. They are admitted because they are served from
+/// the selected project's own graph: the answer belongs to the project the
+/// caller named, and no other project's data can appear under its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedProjectApplicationRead {
+    Feedback,
+    Work,
+}
+
+impl std::fmt::Display for SelectedProjectApplicationRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Feedback => "feedback",
+            Self::Work => "Work",
+        })
+    }
+}
+
+fn selected_project_application_read(
+    method: &Method,
+    tail: &str,
+) -> Option<SelectedProjectApplicationRead> {
+    if method != Method::POST {
+        return None;
+    }
+    match tail {
+        "feedback/get" | "feedback/expand" | "feedback/list" => {
+            Some(SelectedProjectApplicationRead::Feedback)
+        }
+        _ => WorkOperation::CORE
+            .into_iter()
+            .filter(|operation| operation.is_read_only())
+            .any(|operation| tail.strip_prefix("work/") == Some(operation.route_segment()))
+            .then_some(SelectedProjectApplicationRead::Work),
+    }
 }
 
 async fn forward_project_request(
@@ -2043,15 +2090,45 @@ mod authority_tests {
     }
 
     #[test]
-    fn selected_project_feedback_queries_are_the_only_read_only_posts() {
+    fn a_selected_project_answers_feedback_and_work_reads_and_nothing_else_by_post() {
         for tail in ["feedback/get", "feedback/expand", "feedback/list"] {
-            assert!(is_feedback_read_request(&Method::POST, tail));
-            assert!(!is_feedback_read_request(&Method::GET, tail));
+            assert_eq!(
+                selected_project_application_read(&Method::POST, tail),
+                Some(SelectedProjectApplicationRead::Feedback)
+            );
+            assert_eq!(selected_project_application_read(&Method::GET, tail), None);
         }
-        assert!(!is_feedback_read_request(
-            &Method::POST,
-            "doctor/remediations/apply"
-        ));
-        assert!(!is_feedback_read_request(&Method::POST, "feedback/status"));
+        for tail in ["work/snapshot", "work/delta"] {
+            assert_eq!(
+                selected_project_application_read(&Method::POST, tail),
+                Some(SelectedProjectApplicationRead::Work)
+            );
+            assert_eq!(selected_project_application_read(&Method::GET, tail), None);
+        }
+
+        // Every Work command, and every attempt operation, stays refused: a
+        // selected project is read-only through this gateway.
+        for operation in WorkOperation::ALL {
+            if operation.is_read_only() {
+                continue;
+            }
+            let tail = operation
+                .route_path()
+                .strip_prefix("/")
+                .expect("a rooted route path");
+            assert_eq!(
+                selected_project_application_read(&Method::POST, tail),
+                None,
+                "{tail} must not be answerable for a selected project"
+            );
+        }
+        assert_eq!(
+            selected_project_application_read(&Method::POST, "doctor/remediations/apply"),
+            None
+        );
+        assert_eq!(
+            selected_project_application_read(&Method::POST, "feedback/status"),
+            None
+        );
     }
 }

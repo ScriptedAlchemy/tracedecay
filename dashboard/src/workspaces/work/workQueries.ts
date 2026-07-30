@@ -1,70 +1,45 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   WorkProjection,
   WorkProjectionCoverageV1,
   WorkProjectionDeltaV1,
   WorkProjectionResumeCursorV1,
   WorkProjectionSnapshotV1,
-} from '../../contracts/index.ts';
-import { type DashboardScope, scopeKey, useScope } from '../../data/scope/store.ts';
-import { callWork, type WorkResult, type WorkRoute } from './workApi.ts';
+} from "../../contracts/index.ts";
 import {
-  WORK_DELTA_ROUTE,
-  WORK_SNAPSHOT_ROUTE,
-} from './workRoutes.ts';
+  scopeKey,
+  scopedUrl,
+  scopeWritable,
+  useScope,
+} from "../../data/scope/store.ts";
+import { callWork, type WorkResult, type WorkRoute } from "./workApi.ts";
+import { WORK_DELTA_ROUTE, WORK_SNAPSHOT_ROUTE } from "./workRoutes.ts";
 
 /**
  * Work reads and commands as queries.
  *
- * These routes are the one dashboard surface that is not project-scopable, and
- * the scope handling below exists entirely because of it.
+ * Reads go through `scopedUrl`, the same rewrite every other scoped surface
+ * uses: unprefixed for the active project and the aggregate view, and
+ * `/api/projects/{id}/work/...` for a selected one. The project gateway serves
+ * a selected project's Work reads from that project's own graph, so what comes
+ * back belongs to the project the scope bar names.
  *
- * `src/dashboard/mod.rs` nests `/api/work` straight onto an application router
- * built with the *active* project's id, and it does not add those routes to
- * `project_api_router`. So the project gateway cannot serve them: a
- * `/api/projects/{id}/work/...` request is rewritten into a router with no such
- * path and comes back 404, for the active project as much as for any other.
- *
- * That leaves one honest arrangement. Where the active project is what the
- * scope bar is asking about, call the route unprefixed and get real data. Where
- * it is not, do not call at all and say why — sending the request anyway would
- * either 404 as "not authorized", which is not what happened, or, if the
- * mounting ever changed, quietly answer with the active project's tasks under
- * another project's name.
+ * Commands do not follow. The gateway serves every non-active project
+ * read-only, so a command outside the active project would be refused there.
+ * `scopeWritable` is the one place that rule is stated, and Work reads it
+ * rather than keeping a second account of the same thing.
  */
-
-/** Whether this scope is one the Work routes can answer for, and the reason
- * when it is not. */
-export function workScopeAvailability(
-  scope: DashboardScope,
-): { available: true } | { available: false; detail: string } {
-  if (scope.kind === 'all') return { available: true };
-  switch (scope.activation) {
-    case 'active':
-      return { available: true };
-    case 'selected':
-      return {
-        available: false,
-        detail: `Work is served only for the active project, and ${scope.label} is selected rather than active`,
-      };
-    case 'unresolved':
-      return {
-        available: false,
-        detail: `whether ${scope.label} is the active project is still unresolved`,
-      };
-    default: {
-      const unhandled: never = scope.activation;
-      return unhandled;
-    }
-  }
-}
 
 /** How many projections a page asks for. The daemon decides what it can
  * actually return and says so in `coverage`; this is a request, not a promise. */
 export const WORK_PAGE_SIZE = 100;
 
-export function workQueryKey(scope: string, part: string, ...rest: readonly unknown[]) {
-  return ['work', part, scope, ...rest] as const;
+export function workQueryKey(
+  scope: string,
+  part: string,
+  ...rest: readonly unknown[]
+) {
+  return ["work", part, scope, ...rest] as const;
 }
 
 /** The resume cursor a coverage reading carries, or `undefined` when it carries
@@ -77,10 +52,10 @@ export function resumeCursor(
   coverage: WorkProjectionCoverageV1,
 ): WorkProjectionResumeCursorV1 | undefined {
   switch (coverage.state) {
-    case 'capped':
-    case 'partial':
+    case "capped":
+    case "partial":
       return coverage.cursor;
-    case 'complete':
+    case "complete":
       return undefined;
     default: {
       const unhandled: never = coverage;
@@ -89,25 +64,27 @@ export function resumeCursor(
   }
 }
 
-/** The refusal an out-of-scope read reports, without issuing a request.
+/** The refusal a command outside the writable scope reports, without issuing a
+ * request.
  *
  * `locked` rather than `denied`: nothing was refused by an authority, the
- * surface simply will not answer for this scope, and the remedy is to change
- * scope rather than to gain permission. */
-function outOfScope<T>(detail: string): WorkResult<T> {
-  return { outcome: 'refused', state: 'locked', detail };
+ * gateway simply will not accept a write for this scope, and the remedy is to
+ * change scope rather than to gain permission. */
+function notWritable<T>(reason: string): WorkResult<T> {
+  return { outcome: "refused", state: "locked", detail: reason };
 }
 
 export function useWorkSnapshot(pageSize: number = WORK_PAGE_SIZE) {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
-  const availability = workScopeAvailability(scope);
   return useQuery<WorkResult<WorkProjectionSnapshotV1>>({
-    queryKey: workQueryKey(key, 'snapshot', pageSize),
+    queryKey: workQueryKey(key, "snapshot", pageSize),
     queryFn: () =>
-      availability.available
-        ? callWork(WORK_SNAPSHOT_ROUTE, { page_size: pageSize }, WORK_SNAPSHOT_ROUTE.path)
-        : Promise.resolve(outOfScope<WorkProjectionSnapshotV1>(availability.detail)),
+      callWork(
+        WORK_SNAPSHOT_ROUTE,
+        { page_size: pageSize },
+        scopedUrl(scope, WORK_SNAPSHOT_ROUTE.path),
+      ),
   });
 }
 
@@ -124,15 +101,14 @@ export function useWorkDelta(
 ) {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
-  const availability = workScopeAvailability(scope);
   return useQuery<WorkResult<WorkProjectionDeltaV1>>({
-    queryKey: workQueryKey(key, 'delta', cursor?.token ?? null, pageSize),
-    enabled: cursor !== undefined && availability.available,
+    queryKey: workQueryKey(key, "delta", cursor?.token ?? null, pageSize),
+    enabled: cursor !== undefined,
     queryFn: () =>
       callWork(
         WORK_DELTA_ROUTE,
         { cursor: cursor as WorkProjectionResumeCursorV1, page_size: pageSize },
-        WORK_DELTA_ROUTE.path,
+        scopedUrl(scope, WORK_DELTA_ROUTE.path),
       ),
   });
 }
@@ -151,22 +127,24 @@ export function useWorkDelta(
  * The returned projection is still handed back to the caller, so a control can
  * report precisely what it committed while the refetch is in flight.
  */
-export function useWorkCommand<Request, Response>(route: WorkRoute<Request, Response>) {
+export function useWorkCommand<Request, Response>(
+  route: WorkRoute<Request, Response>,
+) {
   const scope = useScope((state) => state.scope);
   const client = useQueryClient();
-  const availability = workScopeAvailability(scope);
+  const writability = scopeWritable(scope);
   return useMutation<WorkResult<Response>, never, Request>({
-    mutationKey: ['work', 'command', route.operation, scopeKey(scope)],
+    mutationKey: ["work", "command", route.operation, scopeKey(scope)],
     mutationFn: (request: Request) =>
-      availability.available
-        ? callWork(route, request, route.path)
-        : Promise.resolve(outOfScope<Response>(availability.detail)),
+      writability.state === "writable"
+        ? callWork(route, request, scopedUrl(scope, route.path))
+        : Promise.resolve(notWritable<Response>(writability.reason)),
     onSuccess: (result) => {
       // Only a committed command changes what a read would return. Invalidating
       // on a refusal would refetch on every rejected keystroke and, worse, make
       // a denied command look like it had moved something.
-      if (result.outcome === 'value') {
-        void client.invalidateQueries({ queryKey: ['work'] });
+      if (result.outcome === "value") {
+        void client.invalidateQueries({ queryKey: ["work"] });
       }
     },
   });
@@ -181,5 +159,7 @@ export function useWorkCommand<Request, Response>(route: WorkRoute<Request, Resp
 export function orderedProjections(
   snapshot: WorkProjectionSnapshotV1,
 ): readonly WorkProjection[] {
-  return [...snapshot.projections].sort((left, right) => left.title.localeCompare(right.title));
+  return [...snapshot.projections].sort((left, right) =>
+    left.title.localeCompare(right.title),
+  );
 }
