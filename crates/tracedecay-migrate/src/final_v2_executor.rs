@@ -55,6 +55,11 @@ pub trait FinalV2MigrationRuntime {
 
     fn verify_final_v2_schema(&self) -> Result<(), String>;
 
+    fn recover_publication_boundary(
+        &self,
+        source: &ExactMigrationSourceIdentity,
+    ) -> Result<Option<CutoverPublicationReceipt>, String>;
+
     fn rollback_before_publication(&self, backup: &VerifiedBackupIdentity) -> Result<(), String>;
 
     fn roll_forward_after_publication(
@@ -106,6 +111,7 @@ pub fn execute_final_v2_migration(
             {
                 return Err(FinalV2ExecutionError::RequestMismatch);
             }
+            validate_journal(&journal)?;
             journal
         }
         None => {
@@ -155,25 +161,49 @@ pub fn execute_final_v2_migration(
                 .map_err(FinalV2ExecutionError::Runtime)?;
         }
         FinalV2ExecutionPhase::Prepared => {
-            if resuming_prepared {
+            let recovered_publication = if resuming_prepared {
                 runtime
-                    .rollback_before_publication(&journal.checkpoint.backup)
+                    .recover_publication_boundary(&journal.source)
+                    .map_err(FinalV2ExecutionError::Runtime)?
+            } else {
+                None
+            };
+            if let Some(receipt) = recovered_publication {
+                journal
+                    .checkpoint
+                    .record_publication(receipt)
+                    .map_err(FinalV2ExecutionError::Contract)?;
+                journal.phase = FinalV2ExecutionPhase::Published;
+                journal_port
+                    .save(&journal)
+                    .map_err(FinalV2ExecutionError::Journal)?;
+                let receipt = journal.checkpoint.publication.as_ref().ok_or(
+                    FinalV2ExecutionError::Contract(MigrationContractError::PublicationInvalid),
+                )?;
+                runtime
+                    .roll_forward_after_publication(receipt)
                     .map_err(FinalV2ExecutionError::Runtime)?;
+            } else {
+                if resuming_prepared {
+                    runtime
+                        .rollback_before_publication(&journal.checkpoint.backup)
+                        .map_err(FinalV2ExecutionError::Runtime)?;
+                }
+                runtime
+                    .transform_release_to_final_v2(&journal.released_schemas)
+                    .map_err(FinalV2ExecutionError::Runtime)?;
+                let receipt = runtime
+                    .publish_registry_and_marker(&journal.source)
+                    .map_err(FinalV2ExecutionError::Runtime)?;
+                journal
+                    .checkpoint
+                    .record_publication(receipt)
+                    .map_err(FinalV2ExecutionError::Contract)?;
+                journal.phase = FinalV2ExecutionPhase::Published;
+                journal_port
+                    .save(&journal)
+                    .map_err(FinalV2ExecutionError::Journal)?;
             }
-            runtime
-                .transform_release_to_final_v2(&journal.released_schemas)
-                .map_err(FinalV2ExecutionError::Runtime)?;
-            let receipt = runtime
-                .publish_registry_and_marker(&journal.source)
-                .map_err(FinalV2ExecutionError::Runtime)?;
-            journal
-                .checkpoint
-                .record_publication(receipt)
-                .map_err(FinalV2ExecutionError::Contract)?;
-            journal.phase = FinalV2ExecutionPhase::Published;
-            journal_port
-                .save(&journal)
-                .map_err(FinalV2ExecutionError::Journal)?;
         }
     }
 
@@ -185,6 +215,23 @@ pub fn execute_final_v2_migration(
         .save(&journal)
         .map_err(FinalV2ExecutionError::Journal)?;
     Ok(FinalV2MigrationStatus::Verified)
+}
+
+fn validate_journal(journal: &FinalV2ExecutionJournal) -> Result<(), FinalV2ExecutionError> {
+    journal
+        .checkpoint
+        .validate()
+        .map_err(FinalV2ExecutionError::Contract)?;
+    if journal.migration_id != journal.checkpoint.migration_id
+        || journal.source != journal.checkpoint.source
+        || matches!(journal.phase, FinalV2ExecutionPhase::Prepared)
+            != journal.checkpoint.publication.is_none()
+    {
+        return Err(FinalV2ExecutionError::Contract(
+            MigrationContractError::IdentityMismatch,
+        ));
+    }
+    Ok(())
 }
 
 fn validate_release_request(
@@ -252,6 +299,8 @@ mod tests {
         calls: RefCell<Vec<&'static str>>,
         fail_transform_once: RefCell<bool>,
         fail_verify_once: RefCell<bool>,
+        fail_publish_after_commit_once: RefCell<bool>,
+        durable_publication: RefCell<Option<crate::CutoverPublicationReceipt>>,
     }
 
     impl RecordingRuntime {
@@ -265,6 +314,13 @@ mod tests {
         fn fail_verify_once() -> Self {
             Self {
                 fail_verify_once: RefCell::new(true),
+                ..Self::default()
+            }
+        }
+
+        fn fail_publish_after_commit_once() -> Self {
+            Self {
+                fail_publish_after_commit_once: RefCell::new(true),
                 ..Self::default()
             }
         }
@@ -303,14 +359,19 @@ mod tests {
             source: &ExactMigrationSourceIdentity,
         ) -> Result<crate::CutoverPublicationReceipt, String> {
             self.calls.borrow_mut().push("publish");
-            crate::CutoverPublicationReceipt::new(
+            let receipt = crate::CutoverPublicationReceipt::new(
                 "publication.release",
                 source.clone(),
                 FINAL_V2_SCHEMA_ID,
                 "authority-cas.release",
                 12,
             )
-            .map_err(|error| format!("{error:?}"))
+            .map_err(|error| format!("{error:?}"))?;
+            self.durable_publication.replace(Some(receipt.clone()));
+            if self.fail_publish_after_commit_once.replace(false) {
+                return Err("publication committed before interruption".to_string());
+            }
+            Ok(receipt)
         }
 
         fn verify_final_v2_schema(&self) -> Result<(), String> {
@@ -319,6 +380,14 @@ mod tests {
                 return Err("verify interrupted".to_string());
             }
             Ok(())
+        }
+
+        fn recover_publication_boundary(
+            &self,
+            _source: &ExactMigrationSourceIdentity,
+        ) -> Result<Option<crate::CutoverPublicationReceipt>, String> {
+            self.calls.borrow_mut().push("recover_publication");
+            Ok(self.durable_publication.borrow().clone())
         }
 
         fn rollback_before_publication(
@@ -397,7 +466,37 @@ mod tests {
         );
         assert_eq!(
             *resumed.calls.borrow(),
-            ["rollback", "transform", "publish", "verify"]
+            [
+                "recover_publication",
+                "rollback",
+                "transform",
+                "publish",
+                "verify"
+            ]
+        );
+    }
+
+    #[test]
+    fn committed_publication_is_discovered_before_prepared_rollback() {
+        let journal = MemoryJournal::default();
+        let interrupted = RecordingRuntime::fail_publish_after_commit_once();
+        assert!(execute_final_v2_migration(&interrupted, &journal, request()).is_err());
+        assert_eq!(
+            journal.0.borrow().as_ref().unwrap().phase,
+            FinalV2ExecutionPhase::Prepared
+        );
+
+        let resumed = RecordingRuntime {
+            durable_publication: RefCell::new(interrupted.durable_publication.borrow().clone()),
+            ..RecordingRuntime::default()
+        };
+        assert_eq!(
+            execute_final_v2_migration(&resumed, &journal, request()).unwrap(),
+            FinalV2MigrationStatus::Verified
+        );
+        assert_eq!(
+            *resumed.calls.borrow(),
+            ["recover_publication", "roll_forward", "verify"]
         );
     }
 
@@ -465,5 +564,30 @@ mod tests {
             decoded.checkpoint.publication.unwrap().source,
             decoded.source
         );
+    }
+
+    #[test]
+    fn malformed_persisted_journal_fails_before_runtime_effects() {
+        let runtime = RecordingRuntime::default();
+        let journal = MemoryJournal::default();
+        execute_final_v2_migration(&runtime, &journal, request()).unwrap();
+        journal
+            .0
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .checkpoint
+            .backup
+            .source
+            .source_generation = "generation.foreign".to_string();
+        let resumed = RecordingRuntime::default();
+
+        let error = execute_final_v2_migration(&resumed, &journal, request()).unwrap_err();
+
+        assert_eq!(
+            error.contract_error(),
+            Some(&MigrationContractError::IdentityMismatch)
+        );
+        assert!(resumed.calls.borrow().is_empty());
     }
 }
