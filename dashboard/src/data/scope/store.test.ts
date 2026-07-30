@@ -18,9 +18,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   READ_ONLY_SCOPE_STATUS,
+  UNSCOPED_CACHE_KEY,
   activationFor,
   readOnlyScopeRefusal,
   reconciledLabel,
+  requestScopeKey,
   scopeKey,
   scopeWritable,
   scopedUrl,
@@ -32,6 +34,11 @@ import {
 
 function project(projectId: string, activation: ProjectActivation): DashboardScope {
   return { kind: 'project', projectId, label: `label-${projectId}`, activation };
+}
+
+/** The all-projects default. */
+function all(): DashboardScope {
+  return { kind: 'all' };
 }
 
 /** A measured answer about the selected project, as `GET /api/projects/{id}`
@@ -396,5 +403,46 @@ describe('scopedUrl and scopeKey', () => {
       '/api/projects/proj_a/observatory',
     );
     expect(scopedUrl(project('proj_a', 'selected'), '/api/projects')).toBe('/api/projects');
+  });
+});
+
+/**
+ * The cache token for one request, which is a question about the ROUTE.
+ *
+ * This was first written as "did `scopedUrl` rewrite this request?", which
+ * reads like the same question and is not. `scopedUrl` rewrites nothing under
+ * the all-projects scope, so every route collapsed into the unscoped bucket
+ * there and stopped agreeing with `scopeKey` — and `useSchedulerControl` writes
+ * the reading it gets back to `scopeKey`. The result was a pause that took
+ * effect on the daemon and never appeared on the button, because the fresh
+ * reading went into a key no reader was watching.
+ */
+describe('requestScopeKey', () => {
+  it('shares one token for a route the gateway never rewrites', () => {
+    // The registry and the chrome: the same URL under every scope, so one entry.
+    for (const url of ['/api/projects', '/api/dashboard']) {
+      expect(requestScopeKey(all(), url)).toBe(UNSCOPED_CACHE_KEY);
+      expect(requestScopeKey(project('proj_a', 'active'), url)).toBe(UNSCOPED_CACHE_KEY);
+      expect(requestScopeKey(project('proj_b', 'selected'), url)).toBe(UNSCOPED_CACHE_KEY);
+    }
+  });
+
+  it('keys a scoped route by scope, and agrees with scopeKey in every scope', () => {
+    // Including `all`, which is the case that regressed: writers that compute
+    // `scopeKey` and readers that compute this must land on the same entry.
+    for (const scope of [all(), project('proj_a', 'active'), project('proj_b', 'selected')]) {
+      expect(requestScopeKey(scope, '/api/automation/scheduler/status')).toBe(scopeKey(scope));
+    }
+  });
+
+  it('separates two projects reading the same scoped route', () => {
+    const a = requestScopeKey(project('proj_a', 'active'), '/api/observatory');
+    const b = requestScopeKey(project('proj_b', 'active'), '/api/observatory');
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(UNSCOPED_CACHE_KEY);
+  });
+
+  it('treats a non-API url as carrying no project', () => {
+    expect(requestScopeKey(project('proj_a', 'active'), '/health')).toBe(UNSCOPED_CACHE_KEY);
   });
 });
