@@ -1497,4 +1497,4 @@ mod query_scope_tests;
 mod staleness_banner_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod writer_test_support;
+pub(crate) mod writer_test_support;
