@@ -1,23 +1,49 @@
 {
   "name": "@tracedecay/sdk",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "TypeScript SDK for the TraceDecay daemon API: handwritten lifecycle facade and workflow definition builder (PR18).",
+  "description": "Generated TraceDecay API contracts with a strict lifecycle client.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ScriptedAlchemy/tracedecay.git",
+    "directory": "sdks/typescript"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./client": "./src/client.ts",
-    "./workflow": "./src/workflow.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    }
   },
   "files": [
-    "src"
+    "dist"
   ],
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --exclude test/installed-package.test.ts",
+    "test:installed": "vitest run test/installed-package.test.ts",
+    "prepack": "npm run build",
+    "pack": "npm pack --dry-run --ignore-scripts"
   },
   "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^2.1.9"
+    "vitest": "^4.1.10"
   }
 }
