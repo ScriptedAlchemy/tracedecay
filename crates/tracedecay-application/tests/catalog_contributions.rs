@@ -118,3 +118,29 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
             .is_empty()
     );
 }
+
+#[test]
+fn application_composition_excludes_planner_and_store_owned_surfaces() {
+    // Cargo.toml already keeps this crate free of store/transport deps; this
+    // composition check proves the public catalog API likewise exposes no
+    // planner/model-runtime ownership.
+    let contributions = application_catalog_contributions().unwrap();
+    assert!(!contributions.is_empty());
+    for capability in contributions
+        .iter()
+        .flat_map(|contribution| contribution.capabilities())
+    {
+        let capability_id = capability.capability_id().as_str();
+        assert!(
+            !capability_id.contains("planner")
+                && !capability_id.contains("model-runtime")
+                && !capability_id.contains("universal-retrieval"),
+            "application catalog must not own {capability_id}"
+        );
+        let use_case = capability.use_case_id().as_str();
+        assert!(
+            !use_case.contains("planner") && !use_case.contains("dispatcher"),
+            "application use cases must not own {use_case}"
+        );
+    }
+}
