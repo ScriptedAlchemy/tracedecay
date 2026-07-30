@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * a rendered projection, and this page still draws no lane, edge or figure.
  */
 vi.mock('../../contracts/index.ts', () => ({
-  WorkSnapshotV1Schema: { parse: (value: unknown) => value },
+  WorkProjectionSnapshotV1Schema: { parse: (value: unknown) => value },
   WorkTopologyPolicyV1Schema: { parse: (value: unknown) => value },
 }));
 
@@ -40,7 +40,7 @@ describe('Work once a contract lands', () => {
 
     const kanban = container.querySelector('[data-work-surface="kanban"]');
     expect(kanban?.querySelector('[data-state]')?.getAttribute('data-state')).toBe('partial');
-    expect(kanban?.textContent).toContain('WorkSnapshotV1Schema');
+    expect(kanban?.textContent).toContain('WorkProjectionSnapshotV1Schema');
 
     // Rows whose contract did not land keep their withheld state: a single
     // arrival must not read as the whole channel opening.

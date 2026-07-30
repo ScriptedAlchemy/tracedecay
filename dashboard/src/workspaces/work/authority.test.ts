@@ -38,45 +38,80 @@ describe('the Work authority ledger', () => {
    * The gate is only worth having if it fails when it should, so both of its
    * error directions are checked against the names codegen actually produces.
    */
-  it('detects a landed read model whatever wire shape carries it', () => {
-    const announced = new Set(['WorkProjectionSnapshotV1Schema', 'WorkEventDeltaV1Schema']);
-    expect(wireStateFor(surface('kanban'), announced)).toMatchObject({
-      kind: 'landed',
-      contract: 'WorkProjectionSnapshotV1Schema',
-    });
-    expect(wireStateFor(surface('history'), announced)).toMatchObject({
-      kind: 'landed',
-      contract: 'WorkEventDeltaV1Schema',
-    });
+  it('detects a landed read model under every suffix codegen produces', () => {
+    // Codegen emits an interface, a `V1` revision and a zod const for one type,
+    // and a read contract arrives beside the request type that calls it. Each is
+    // the same arrival, so each has to flip the row on its own.
+    for (const name of [
+      'WorkProjectionSnapshot',
+      'WorkProjectionSnapshotV1',
+      'WorkProjectionSnapshotV1Schema',
+      'WorkProjectionSnapshotRequestV1Schema',
+    ]) {
+      expect(
+        wireStateFor(surface('kanban'), new Set([name])),
+        `${name} did not read as an arrival`,
+      ).toMatchObject({ kind: 'landed', contract: name });
+    }
   });
 
   /**
    * The failure this gate came closest to shipping with.
    *
-   * The rows are labelled with design names — `WorkProjection`, `WorkEvent`,
-   * `ExecutionAdmission` — and the committed application authority does not use
-   * any of them: it serves `WorkSnapshotV1`, `WorkDeltaV1` and
-   * `AdmitExecutionCommand`. A gate keyed off the labels would have watched for
-   * names nothing will ever emit and left this page claiming absence over live
-   * contracts, so the names actually implemented are asserted here by hand.
+   * The rows are labelled with design names — `WorkProjection`, `WorkEvent` —
+   * and no crate spells its wire that way, so a gate keyed off the labels would
+   * watch for names nothing can emit and leave this page claiming absence over
+   * live contracts. The write names actually implemented are asserted here by
+   * hand, against `crates/tracedecay-application/src/work.rs`.
    */
-  it('detects the names the committed application authority actually uses', () => {
+  it('detects the command names the application authority actually uses', () => {
     const implemented = new Set([
-      'WorkSnapshotV1Schema',
-      'WorkDeltaV1Schema',
       'CreateWorkCommandSchema',
+      'ReplanDependenciesCommandSchema',
       'ReviewProposalCommandSchema',
+      'AcceptProposalCommandSchema',
       'AdmitExecutionCommandSchema',
       'AttachRuntimeEvidenceCommandSchema',
+      'AcceptTaskCommandSchema',
     ]);
 
-    for (const id of ['kanban', 'timeline', 'graph-change', 'proposal-review', 'admission', 'acceptance']) {
+    for (const id of ['graph-change', 'proposal-review', 'admission', 'acceptance']) {
       expect(wireStateFor(surface(id), implemented).kind, `${id} missed its landed contract`).toBe(
         'landed',
       );
     }
 
     expect(resolveWorkWire(resolveWorkStates(implemented)).kind).toBe('opening');
+  });
+
+  /**
+   * A watch on a type no crate defines is indistinguishable from no watch at
+   * all, and it reads as coverage.
+   *
+   * `1fc31a865` deleted the competing `WorkSnapshotV1` and `WorkDeltaV1` wires,
+   * and this ledger went on watching both, so two read rows were waiting on a
+   * name that could never arrive. The others here were never defined anywhere:
+   * they are design labels that had been copied into the watch list.
+   */
+  it('watches no contract name the workspace does not define', () => {
+    const undefinedNames = [
+      'WorkSnapshot',
+      'WorkDelta',
+      'WorkEventDelta',
+      'WorkCommand',
+      'WorkProposal',
+      'ExecutionAdmission',
+      'RunControl',
+    ];
+
+    for (const candidate of SURFACES) {
+      for (const watched of candidate.watches) {
+        expect(
+          undefinedNames,
+          `${candidate.id} watches ${watched}, which no crate emits`,
+        ).not.toContain(watched);
+      }
+    }
   });
 
   /**
@@ -197,23 +232,40 @@ describe('the Work authority ledger', () => {
     }
   });
 
-  it('never presents a withheld surface as available', () => {
-    const reasons: readonly WithheldReason[] = [
+  it('never presents a surface as available', () => {
+    /** The absences. Each must read as unsupported: there is nothing behind it
+     * at all, so no amount of it can have been read. */
+    const absences: readonly WithheldReason[] = [
       'read_model_absent',
       'command_absent',
       'stream_absent',
     ];
+    /** The one reason that is not an absence, and must not be reported as one. */
+    const mounted: readonly WithheldReason[] = ['runtime_not_mounted'];
 
-    for (const reason of reasons) {
+    for (const reason of absences) {
       const presentation = withheldPresentation(reason);
       expect(['unsupported', 'unsupported_schema']).toContain(presentation.state);
       expect(presentation.summary).not.toBe('');
     }
 
+    for (const reason of mounted) {
+      const presentation = withheldPresentation(reason);
+      expect(presentation.state).toBe('partial');
+      expect(presentation.summary).not.toBe('');
+    }
+
+    // Whichever it is, it is never a state that claims the data arrived.
+    for (const reason of [...absences, ...mounted]) {
+      expect(['ready', 'complete_zero_findings']).not.toContain(
+        withheldPresentation(reason).state,
+      );
+    }
+
     // Every row's reason is one the presentation switch handles, so no row can
     // reach the surface without a state.
     for (const candidate of SURFACES) {
-      expect(reasons).toContain(candidate.reason);
+      expect([...absences, ...mounted]).toContain(candidate.reason);
     }
   });
 });

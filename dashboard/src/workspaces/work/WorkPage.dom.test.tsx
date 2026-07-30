@@ -23,7 +23,18 @@ describe('WorkPage contract gate', () => {
     ).not.toBeNull();
     expect(screen.queryByText('Ready')).toBeNull();
     expect(screen.queryByText('Complete · zero findings')).toBeNull();
-    expect(screen.queryByText('Partial')).toBeNull();
+
+    // One row is partial, and exactly one: the task-activity subscription this
+    // build really holds. Pinned to that row rather than asserted away, because
+    // a partial appearing anywhere else would mean a projection had started
+    // claiming half-read data it cannot have.
+    const partials = container.querySelectorAll('[data-state="partial"]');
+    expect(partials).toHaveLength(1);
+    expect(
+      container
+        .querySelector('[data-work-surface="task-activity"]')
+        ?.querySelector('[data-state="partial"]'),
+    ).not.toBeNull();
   });
 
   it('scrolls inside a named region and leaves the shell its own main landmark', () => {
