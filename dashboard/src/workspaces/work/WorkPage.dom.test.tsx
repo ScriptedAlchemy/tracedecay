@@ -239,8 +239,12 @@ describe('the Work page over mounted routes', () => {
     renderPage();
     await screen.findByText('Alpha task');
     const boundary = screen.getByLabelText('Work boundary');
-    expect(boundary.textContent).toContain('8');
+    // Nine, matching `WorkOperation::ATTEMPT`. This asserted eight, which is
+    // what the page said while its list omitted `attempt_finish`; the count
+    // and the list were wrong together, so neither caught the other.
+    expect(boundary.textContent).toContain('9');
     expect(boundary.textContent).toContain('terminalize');
+    expect(boundary.textContent).toContain('finish');
     expect(boundary.textContent).toContain('pending proposals');
   });
 
