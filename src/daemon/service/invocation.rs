@@ -10988,7 +10988,7 @@ mod tests {
             .await
             .expect("started attempt");
         assert_eq!(
-            registered.runtime.in_flight().expect("in-flight count"),
+            registered.runtime.in_flight(),
             1,
             "the registered runtime must own the provider execution"
         );
@@ -10996,7 +10996,7 @@ mod tests {
         service.expire_all().await;
 
         assert_eq!(
-            registered.runtime.in_flight().expect("in-flight count"),
+            registered.runtime.in_flight(),
             0,
             "daemon expiry must stop and join every provider execution"
         );

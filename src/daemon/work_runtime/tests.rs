@@ -493,7 +493,7 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
         recovery
     );
     assert_eq!(
-        runtime.in_flight().unwrap(),
+        runtime.in_flight(),
         0,
         "every settled attempt must release its execution slot"
     );
@@ -539,7 +539,7 @@ async fn codex_cancel_terminates_and_reaps_stubborn_process_tree() {
         cancelled.cancellation(),
         WorkCancellationStateV1::Acknowledged(_)
     ));
-    assert_eq!(runtime.in_flight().unwrap(), 0);
+    assert_eq!(runtime.in_flight(), 0);
     assert!(
         !process_is_alive(descendant_pid).await,
         "Codex Work cancellation must leave no provider descendant alive"
@@ -564,7 +564,7 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
         .start(&occupying, &lease(1), WorkRecoveryStateV1::Fresh)
         .await
         .unwrap();
-    assert_eq!(runtime.in_flight().unwrap(), 1);
+    assert_eq!(runtime.in_flight(), 1);
 
     let refused = identity(&harness.task_id, "refused");
     runtime
@@ -588,7 +588,7 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
         WorkAttemptStateV1::Running,
         "the durable running intent must survive a refused admission"
     );
-    assert_eq!(runtime.in_flight().unwrap(), 1);
+    assert_eq!(runtime.in_flight(), 1);
 
     runtime
         .cancel(
@@ -598,15 +598,15 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
         )
         .await
         .unwrap();
-    assert_eq!(runtime.in_flight().unwrap(), 0);
+    assert_eq!(runtime.in_flight(), 0);
 
     runtime
         .start(&refused, &lease(1), WorkRecoveryStateV1::Fresh)
         .await
         .unwrap();
-    assert_eq!(runtime.in_flight().unwrap(), 1);
+    assert_eq!(runtime.in_flight(), 1);
     assert_eq!(runtime.shutdown(), 1);
-    assert_eq!(runtime.in_flight().unwrap(), 0);
+    assert_eq!(runtime.in_flight(), 0);
 }
 
 /// A rejected durable transition must never leave a provider running.
@@ -631,7 +631,7 @@ async fn a_rejected_transition_starts_no_provider_execution() {
             .unwrap_err(),
         WorkExecutionError::StaleLease
     );
-    assert_eq!(runtime.in_flight().unwrap(), 0);
+    assert_eq!(runtime.in_flight(), 0);
     assert_eq!(
         runtime.attempt(&fenced).unwrap().unwrap().state(),
         WorkAttemptStateV1::Leased
@@ -645,7 +645,7 @@ async fn a_rejected_transition_starts_no_provider_execution() {
             .unwrap_err(),
         WorkExecutionError::NotFound
     );
-    assert_eq!(runtime.in_flight().unwrap(), 0);
+    assert_eq!(runtime.in_flight(), 0);
 }
 
 /// After a restart the durable record is the only execution authority.
@@ -698,8 +698,83 @@ async fn a_restarted_runtime_replays_terminals_and_never_invents_success() {
         cancelled,
         "the durable terminal must be replayed exactly, not re-derived"
     );
-    assert_eq!(before.in_flight().unwrap(), 0);
+    assert_eq!(before.in_flight(), 0);
     assert_eq!(restarted.shutdown(), 0);
+}
+
+/// A provider that finished before it observed the stop request must still
+/// terminate as cancelled: the recorded intent admits no other terminal, and an
+/// attempt must never be stranded in `CancellationRequested`.
+#[tokio::test]
+async fn cancelling_a_provider_that_already_completed_still_terminates_as_cancelled() {
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let harness = Harness::open("project.work.daemon.raced-cancel").await;
+    let fixture = harness.path("codex-work-fixture");
+    install_codex_fixture(&fixture);
+    let runtime = harness.runtime(&fixture, Duration::from_secs(5), 2);
+
+    let raced = identity(&harness.task_id, "raced-cancel");
+    runtime
+        .acquire_lease(&harness.snapshot, raced.clone(), lease(1))
+        .await
+        .unwrap();
+    runtime
+        .start(&raced, &lease(1), WorkRecoveryStateV1::Fresh)
+        .await
+        .unwrap();
+    // Let the fixture run to completion so the settlement is `Completed` while
+    // the durable state will say cancellation was requested.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let cancelled = runtime
+        .cancel(&raced, &lease(1), cancellation_request("raced", 50))
+        .await
+        .unwrap();
+
+    assert_eq!(cancelled.state(), WorkAttemptStateV1::Cancelled);
+    assert!(matches!(
+        cancelled.cancellation(),
+        WorkCancellationStateV1::Acknowledged(_)
+    ));
+    assert_eq!(runtime.in_flight(), 0);
+}
+
+/// The exposed terminal path must release the execution slot, or the bound
+/// becomes a standing refusal after a few completed attempts.
+#[tokio::test]
+async fn terminalizing_an_attempt_releases_its_execution_slot() {
+    let _pin = crate::config::PinnedUserDataDir::new();
+    let harness = Harness::open("project.work.daemon.terminalize").await;
+    let fixture = harness.path("codex-work-idle-fixture");
+    install_idle_codex_fixture(&fixture);
+    let runtime = harness.runtime(&fixture, Duration::from_secs(30), 1);
+
+    for suffix in ["one", "two", "three"] {
+        let attempt = identity(&harness.task_id, suffix);
+        runtime
+            .acquire_lease(&harness.snapshot, attempt.clone(), lease(1))
+            .await
+            .unwrap();
+        runtime
+            .start(&attempt, &lease(1), WorkRecoveryStateV1::Fresh)
+            .await
+            .unwrap();
+        assert_eq!(runtime.in_flight(), 1);
+        let completed = runtime
+            .terminalize(
+                &attempt,
+                &lease(1),
+                WorkTerminalEvidenceV1::failed(digest('d'), UtcMicros(60)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.state(), WorkAttemptStateV1::Failed);
+        assert_eq!(
+            runtime.in_flight(),
+            0,
+            "a terminal attempt must not keep holding a slot in the bound"
+        );
+    }
 }
 
 async fn await_descendant_pid(path: &Path) -> i32 {

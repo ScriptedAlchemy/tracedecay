@@ -378,6 +378,23 @@ mod tests {
         assert_eq!(ActivityFamilyV1::ToolCall.stream_name(), "tool_call");
     }
 
+    /// The canonical envelope validator keeps its own list of admitted activity
+    /// families. A family this lane can publish but that list rejects is
+    /// swallowed by the error-tolerant publish path and renders as no activity.
+    #[test]
+    fn every_published_family_is_admitted_by_the_canonical_envelope() {
+        for family in ActivityFamilyV1::ALL {
+            let envelope = activity_envelope("project.activity.family", family, 1, None)
+                .unwrap_or_else(|| panic!("{family:?} envelope"));
+            assert_eq!(
+                envelope.validate(),
+                Ok(()),
+                "{family:?} publishes label {:?}, which the canonical envelope must admit",
+                family.observation_label()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn registered_activity_replays_without_retaining_project_paths() {
         let _pin = crate::config::PinnedUserDataDir::new();
