@@ -91,6 +91,7 @@ def valid_sample(**overrides: object) -> dict:
             "restart_state": "not_required",
             "daemon_survived": True,
         },
+        "observations": {},
         "outcome": {
             "status": "success",
             "expected_digest": "a" * 64,
@@ -211,6 +212,31 @@ class SampleSchemaTests(unittest.TestCase):
 
         del sample["identity"]["capture_id"]
         with self.assertRaisesRegex(SchemaValidationError, "capture_id"):
+            validate_sample(sample)
+
+    def test_incident_observations_are_preserved_in_raw_samples(self) -> None:
+        sample = valid_sample(
+            observations={
+                "daemon_cpu_time_ns": 10,
+                "daemon_peak_rss_bytes": 20,
+                "wal_bytes": 30,
+                "queue_depth": 2,
+                "generation": 4,
+            }
+        )
+
+        self.assertIs(validate_sample(sample), sample)
+        self.assertEqual(sample["observations"]["wal_bytes"], 30)
+
+    def test_impossible_incident_observations_fail_closed(self) -> None:
+        sample = valid_sample(
+            observations={
+                "renderer_event_count": 1,
+                "consumer_event_count": 2,
+            }
+        )
+
+        with self.assertRaisesRegex(SchemaValidationError, "consumer"):
             validate_sample(sample)
 
     def test_stable_workload_identity_supports_every_crate_lane_and_state(self) -> None:

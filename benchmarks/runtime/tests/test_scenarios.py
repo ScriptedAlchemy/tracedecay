@@ -357,6 +357,7 @@ class ScenarioCatalogTest(unittest.TestCase):
                 "restart_state": "not_applicable",
                 "daemon_survived": True,
             },
+            "observations": {},
             "outcome": {
                 "status": "success",
                 "expected_digest": digest,

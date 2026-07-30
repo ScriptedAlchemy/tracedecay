@@ -178,6 +178,39 @@ class DashboardLifecycleTests(unittest.TestCase):
 
 
 class HostLifecycleTests(unittest.TestCase):
+    def test_missing_daemon_after_shell_fails_without_timeout_and_reaps_tree(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-lifecycle-test-") as directory:
+            root = Path(directory)
+            result = lifecycle.run_host(
+                [
+                    sys.executable,
+                    str(fake_host("after_shell_missing_daemon.py")),
+                ],
+                env=os.environ,
+                log_dir=root / "host-logs",
+                timeout=2.0,
+                termination_grace=0.05,
+                check=False,
+            )
+            try:
+                self.assertEqual(result.evidence.exit_code, 72)
+                self.assertEqual(result.evidence.timeout_phase, None)
+                self.assertEqual(result.evidence.availability_state, "failed")
+                self.assertTrue(result.evidence.term_sent)
+                self.assertTrue(result.evidence.kill_sent)
+                self.assertEqual(result.evidence.process_count_after_cleanup, 0)
+                self.assertEqual(
+                    lifecycle.process_group_process_count(result.process_group_id),
+                    0,
+                )
+            finally:
+                try:
+                    os.killpg(result.process_group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_verbose_hanging_child_is_drained_then_term_killed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-lifecycle-test-") as directory:
             root = Path(directory)

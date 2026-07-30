@@ -119,6 +119,8 @@ class CaptureDispatchTest(unittest.TestCase):
             self.assertEqual(len(samples), 1)
             self.assertEqual(samples[0]["outcome"]["status"], "success")
             self.assertTrue(samples[0]["lifecycle"]["daemon_survived"])
+            self.assertTrue(samples[0]["observations"]["process_tree_reaped"])
+            self.assertIn("wal_bytes", samples[0]["observations"])
             receipt = json.loads(
                 output.with_suffix(".policy.json").read_text(encoding="utf-8")
             )
@@ -191,6 +193,54 @@ class CaptureDispatchTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("tool command failed", result.stderr)
             self.assertFalse(output.exists())
+
+    def test_paired_runs_same_input_abba_and_keeps_p95_pending(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            baseline = root / "baseline-tracedecay"
+            treatment = root / "treatment-tracedecay"
+            make_fake_binary(baseline)
+            make_fake_binary(treatment)
+            treatment.write_text(
+                treatment.read_text(encoding="utf-8") + "\n# treatment\n",
+                encoding="utf-8",
+            )
+            output = root / "paired.json"
+
+            result = run_runner(
+                "paired",
+                "--baseline",
+                baseline,
+                "--treatment",
+                treatment,
+                "--samples-per-variant",
+                "2",
+                "--output",
+                output,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            samples = read_jsonl(output.with_suffix(".samples.jsonl"))
+            self.assertEqual(
+                [sample["identity"]["variant"] for sample in samples],
+                ["baseline", "treatment", "treatment", "baseline"],
+            )
+            self.assertEqual(
+                [sample["identity"]["abba_position"] for sample in samples],
+                [0, 1, 2, 3],
+            )
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["fixture"]["same_input"], True)
+            self.assertEqual(report["variants"]["baseline"]["sample_count"], 2)
+            self.assertIsNotNone(report["variants"]["baseline"]["latency_ns"]["p50"])
+            self.assertEqual(
+                report["variants"]["baseline"]["latency_ns"]["p95"],
+                {
+                    "available": False,
+                    "value": None,
+                    "minimum_samples": 40,
+                },
+            )
 
     def test_prepare_creates_complete_immutable_fixture_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:

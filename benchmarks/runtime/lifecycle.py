@@ -402,7 +402,15 @@ def run_host(
                 evidence,
             )
         else:
-            _reap_process_group(process_group_id)
+            if process_group_process_count(process_group_id):
+                terminate_process_group(
+                    process,
+                    process_group_id,
+                    termination_grace,
+                    evidence,
+                )
+            else:
+                _reap_process_group(process_group_id)
         for thread in threads:
             thread.join(timeout=1.0)
 

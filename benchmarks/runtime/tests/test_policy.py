@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,12 +10,14 @@ from benchmarks.runtime.policy import (
     PolicyViolation,
     evaluate_artifact,
     load_acceptance_policy,
+    load_journey_policy,
     make_policy_receipt,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "policies" / "acceptance-v1.json"
+JOURNEY_POLICY_PATH = ROOT / "policies" / "journey-margins-v1.json"
 
 
 class AcceptancePolicyTests(unittest.TestCase):
@@ -80,6 +83,40 @@ class AcceptancePolicyTests(unittest.TestCase):
             separators=(",", ":"),
         ) + "\n"
         self.assertEqual(POLICY_PATH.read_text(encoding="utf-8"), expected)
+
+    def test_journey_margins_are_independent_and_frozen(self) -> None:
+        policy = load_journey_policy(JOURNEY_POLICY_PATH)
+
+        self.assertEqual(policy.policy_id, "runtime-journey-margins-v1")
+        self.assertEqual(policy.p95_minimum_matching_samples, 40)
+        self.assertEqual(
+            set(policy.journeys),
+            {
+                "cli",
+                "mcp",
+                "query",
+                "dashboard",
+                "host",
+                "storage",
+                "daemon-steady-state",
+                "foreground-under-maintenance",
+            },
+        )
+        self.assertEqual(
+            policy.sha256,
+            hashlib.sha256(JOURNEY_POLICY_PATH.read_bytes()).hexdigest(),
+        )
+
+        changed = json.loads(JOURNEY_POLICY_PATH.read_text(encoding="utf-8"))
+        changed["journeys"]["query"]["p95_regression_margin_pct"] = 10**18
+        with tempfile.TemporaryDirectory(prefix="runtime-policy-test-") as directory:
+            path = Path(directory) / "relaxed.json"
+            path.write_text(
+                json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PolicyViolation, "modified"):
+                load_journey_policy(path)
 
 
 if __name__ == "__main__":
