@@ -10,15 +10,14 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, ManifestDigest, QueryDigest,
-    RetrievalCursorKeyId, RetrievalRequest, UtcMicros, canonical_sha256,
+    CodeGenerationId, ManifestDigest, QueryDigest, RetrievalCursorKeyId, RetrievalRequest,
+    UtcMicros, canonical_sha256,
 };
 
-use super::fusion::QueryDigestAuthenticationError;
-use super::{
-    PR9_QUERY_NORMALIZATION_REVISION_V1, PR9_QUERY_SANITIZER_REVISION_V1, Pr9QueryAuthorityErrorV1,
-    Pr9QueryAuthorityV1,
+use super::fusion::{
+    PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1, QueryDigestAuthenticationError,
 };
+use super::{Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1};
 
 const PREPARED_QUERY_CURSOR_PREFIX_V1: &str = "ccq1.";
 const PREPARED_QUERY_CURSOR_REVISION_V1: u16 = 1;
@@ -191,10 +190,12 @@ impl PreparedQueryV1 {
                 next_offset: u32::try_from(end).map_err(|_| PreparedQueryErrorV1::Unavailable)?,
                 expires_at,
             };
-            let view = cursor_authentication_view(&payload)?;
             let authentication = self
                 .authority
-                .authenticate_query(&self.request, &view)
+                .authenticate_prepared_cursor_payload(
+                    &self.request,
+                    &cursor_authentication_payload_bytes(&payload)?,
+                )
                 .map_err(map_authority_error)?;
             Some(encode_cursor(payload, authentication)?)
         } else {
@@ -224,12 +225,11 @@ fn authenticate_cursor(
     encoded: &str,
 ) -> Result<AuthenticatedPreparedQueryCursorV1, PreparedQueryErrorV1> {
     let cursor = decode_cursor(encoded)?;
-    let view = cursor_authentication_view(&cursor.payload)?;
     authority
-        .verify_authenticated_query(
+        .verify_prepared_cursor_payload(
             &cursor.payload.authentication_key_id,
             request,
-            &view,
+            &cursor_authentication_payload_bytes(&cursor.payload)?,
             &cursor.authentication,
         )
         .map_err(map_authority_error)?;
@@ -249,18 +249,32 @@ fn map_authority_error(error: Pr9QueryAuthorityErrorV1) -> PreparedQueryErrorV1 
     }
 }
 
-fn cursor_authentication_view(
+fn cursor_authentication_payload_bytes(
     payload: &PreparedQueryCursorPayloadV1,
-) -> Result<EphemeralSanitizedQueryViewV1, PreparedQueryErrorV1> {
-    let canonical =
-        serde_json::to_string(payload).map_err(|_| PreparedQueryErrorV1::Unavailable)?;
-    EphemeralSanitizedQueryViewV1::sanitize(
-        canonical,
-        tracedecay_domain::SanitizerRevision::new(PR9_QUERY_SANITIZER_REVISION_V1)
-            .map_err(|_| PreparedQueryErrorV1::Unavailable)?,
-        tracedecay_domain::QueryNormalizationRevision::new(PR9_QUERY_NORMALIZATION_REVISION_V1)
-            .map_err(|_| PreparedQueryErrorV1::Unavailable)?,
-    )
+) -> Result<Vec<u8>, PreparedQueryErrorV1> {
+    #[derive(Serialize)]
+    struct PreparedQueryCursorAuthenticationPayloadV1<'a> {
+        domain: &'static str,
+        revision: u16,
+        operation: &'a str,
+        scope_digest: &'a ManifestDigest,
+        generation: &'a CodeGenerationId,
+        query_binding_digest: &'a ManifestDigest,
+        candidate_set_digest: &'a ManifestDigest,
+        next_offset: u32,
+        expires_at: UtcMicros,
+    }
+    serde_json::to_vec(&PreparedQueryCursorAuthenticationPayloadV1 {
+        domain: PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1,
+        revision: payload.revision,
+        operation: &payload.operation,
+        scope_digest: &payload.scope_digest,
+        generation: &payload.generation,
+        query_binding_digest: &payload.query_binding_digest,
+        candidate_set_digest: &payload.candidate_set_digest,
+        next_offset: payload.next_offset,
+        expires_at: payload.expires_at,
+    })
     .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
@@ -400,5 +414,29 @@ mod tests {
             serde_json::to_vec(&decoded).expect("canonical cursor serialization"),
             first_bytes
         );
+    }
+
+    #[test]
+    fn prepared_cursor_mac_does_not_route_through_query_sanitizer_revisions() {
+        // The authentication payload is domain-separated for prepared cursors and
+        // must never embed query sanitizer/normalization revision strings.
+        let payload = PreparedQueryCursorPayloadV1 {
+            revision: PREPARED_QUERY_CURSOR_REVISION_V1,
+            operation: "code_exact_occurrence".to_owned(),
+            scope_digest: digest("scope"),
+            generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
+            query_binding_digest: digest("query"),
+            candidate_set_digest: digest("candidates"),
+            authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
+                .expect("cursor key"),
+            next_offset: 2,
+            expires_at: UtcMicros(1_000),
+        };
+        let bytes = cursor_authentication_payload_bytes(&payload).expect("payload bytes");
+        let text = String::from_utf8(bytes).expect("utf8 payload");
+        assert!(text.contains(PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1));
+        assert!(!text.contains("query-sanitizer"));
+        assert!(!text.contains("query-normalization"));
+        assert!(!text.contains("EphemeralSanitizedQueryView"));
     }
 }

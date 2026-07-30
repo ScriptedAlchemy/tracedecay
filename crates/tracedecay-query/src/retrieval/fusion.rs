@@ -33,6 +33,10 @@ use super::diversity::{DeterministicDiversity, DiversityDecisionV1, DiversitySta
 
 const QUERY_DIGEST_MAC_DOMAIN: &str = "tracedecay.retrieval-query-mac.v1";
 const RETRIEVAL_CURSOR_MAC_DOMAIN: &str = "tracedecay.retrieval-cursor-mac.v1";
+/// Domain separator for authenticated prepared-query continuation cursors.
+/// Distinct from query-view MAC so cursor bytes never route through query
+/// sanitizer revisions.
+pub const PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1: &str = "tracedecay.prepared-query-cursor-mac.v1";
 const MIN_QUERY_MAC_SECRET_BYTES: usize = 32;
 const MAX_QUERY_MAC_SECRET_BYTES: usize = 256;
 
@@ -171,6 +175,23 @@ impl RetrievalCursorKeyringV1 {
         self.digest_query_for(&self.active.0, self.active.1, request, query_view)
     }
 
+    /// Authenticate one prepared-query cursor payload with the active key.
+    ///
+    /// `payload_bytes` must already be the canonical authenticated cursor
+    /// payload (domain-separated outside the query sanitizer path).
+    pub fn digest_active_prepared_cursor_payload(
+        &self,
+        request: &RetrievalRequest,
+        payload_bytes: &[u8],
+    ) -> Result<QueryDigest, QueryDigestAuthenticationError> {
+        self.digest_prepared_cursor_payload_for(
+            &self.active.0,
+            self.active.1,
+            request,
+            payload_bytes,
+        )
+    }
+
     pub(crate) fn active_query_key_id(&self) -> RetrievalCursorKeyId {
         self.active.0.clone()
     }
@@ -189,6 +210,28 @@ impl RetrievalCursorKeyringV1 {
         }
         let material = self.key_material(key_id, digest.key_epoch)?;
         let bytes = self.query_mac_input_bytes(digest.key_epoch, query_view)?;
+        let signature = query_mac_bytes(&digest.mac)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
+            .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
+        mac.update(&bytes);
+        mac.verify_slice(&signature)
+            .map_err(|_| QueryDigestAuthenticationError::AuthenticationFailed)
+    }
+
+    pub(crate) fn verify_prepared_cursor_payload_for(
+        &self,
+        key_id: &RetrievalCursorKeyId,
+        request: &RetrievalRequest,
+        payload_bytes: &[u8],
+        digest: &QueryDigest,
+    ) -> Result<(), QueryDigestAuthenticationError> {
+        if request.scope.privacy_domain != self.privacy_domain
+            || digest.privacy_domain != self.privacy_domain
+        {
+            return Err(QueryDigestAuthenticationError::PrivacyDomainMismatch);
+        }
+        let material = self.key_material(key_id, digest.key_epoch)?;
+        let bytes = self.prepared_cursor_mac_input_bytes(digest.key_epoch, request, payload_bytes)?;
         let signature = query_mac_bytes(&digest.mac)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
             .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
@@ -223,6 +266,32 @@ impl RetrievalCursorKeyringV1 {
         ))
     }
 
+    fn digest_prepared_cursor_payload_for(
+        &self,
+        key_id: &RetrievalCursorKeyId,
+        key_epoch: u64,
+        request: &RetrievalRequest,
+        payload_bytes: &[u8],
+    ) -> Result<QueryDigest, QueryDigestAuthenticationError> {
+        if request.scope.privacy_domain != self.privacy_domain {
+            return Err(QueryDigestAuthenticationError::PrivacyDomainMismatch);
+        }
+        let material = self.key_material(key_id, key_epoch)?;
+        let bytes = self.prepared_cursor_mac_input_bytes(key_epoch, request, payload_bytes)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&material.secret)
+            .map_err(|_| QueryDigestAuthenticationError::InvalidKeyMaterial)?;
+        mac.update(&bytes);
+        let mac = QueryMac::new(format!(
+            "hmac-sha256:{}",
+            hex::encode(mac.finalize().into_bytes())
+        ))?;
+        Ok(QueryDigest::new(
+            self.privacy_domain.clone(),
+            key_epoch,
+            mac,
+        ))
+    }
+
     fn query_mac_input_bytes(
         &self,
         key_epoch: u64,
@@ -235,6 +304,35 @@ impl RetrievalCursorKeyringV1 {
             query_bytes: query_view.as_bytes(),
             sanitizer_revision: query_view.sanitizer_revision(),
             normalization_revision: query_view.normalization_revision(),
+        };
+        serde_json::to_vec(&input)
+            .map_err(|error| QueryDigestAuthenticationError::Canonicalization(error.to_string()))
+    }
+
+    fn prepared_cursor_mac_input_bytes(
+        &self,
+        key_epoch: u64,
+        request: &RetrievalRequest,
+        payload_bytes: &[u8],
+    ) -> Result<Vec<u8>, QueryDigestAuthenticationError> {
+        #[derive(Serialize)]
+        struct PreparedCursorMacInput<'a> {
+            domain: &'static str,
+            privacy_domain: &'a PrivacyDomainId,
+            key_epoch: u64,
+            profile_id: &'a tracedecay_domain::FusionProfileId,
+            snapshot_freshness_digest: &'a tracedecay_domain::FreshnessVectorDigest,
+            authorization_revision: &'a tracedecay_domain::AuthorizationRevision,
+            cursor_payload: &'a [u8],
+        }
+        let input = PreparedCursorMacInput {
+            domain: PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1,
+            privacy_domain: &self.privacy_domain,
+            key_epoch,
+            profile_id: &request.profile_id,
+            snapshot_freshness_digest: &request.snapshot.freshness_digest,
+            authorization_revision: &request.snapshot.authorization_revision,
+            cursor_payload: payload_bytes,
         };
         serde_json::to_vec(&input)
             .map_err(|error| QueryDigestAuthenticationError::Canonicalization(error.to_string()))
