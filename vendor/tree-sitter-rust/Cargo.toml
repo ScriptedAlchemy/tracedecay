@@ -1,6 +1,6 @@
 [package]
-# TraceDecay carries this narrow grammar patch until upstream accepts attribute
-# items in struct-pattern fields (valid Rust used by cfg-gated destructuring).
+# Workspace-only compatibility wrapper. The canonical patched grammar sources
+# ship inside tracedecay-code-extraction so its registry package is standalone.
 name = "tree-sitter-rust"
 description = "Rust grammar for tree-sitter"
 version = "0.24.2"
@@ -14,10 +14,11 @@ keywords = ["incremental", "parsing", "tree-sitter", "rust"]
 categories = ["parsing", "text-editors"]
 repository = "https://github.com/tree-sitter/tree-sitter-rust"
 edition = "2021"
+publish = false
 autoexamples = false
 
 build = "bindings/rust/build.rs"
-include = ["LICENSE", "bindings/rust/*", "grammar.js", "queries/*", "src/*", "tree-sitter.json"]
+include = ["LICENSE", "README.md", "bindings/rust/*"]
 
 [lib]
 path = "bindings/rust/lib.rs"
@@ -30,3 +31,5 @@ cc = "1.1"
 
 [dev-dependencies]
 tree-sitter = "0.25"
+
+[workspace]

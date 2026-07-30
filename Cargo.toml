@@ -428,8 +428,7 @@ opt-level = 2
 [profile.dev.package.regex]
 opt-level = 2
 
-# Upstream tree-sitter-rust 0.24.2 does not parse attributes on struct-pattern
-# fields. Keep the generated grammar patch local until upstream ships it so
-# source analysis accepts valid cfg-gated destructuring in any repository.
+# Workspace dependencies keep the upstream package API while the canonical
+# patched grammar sources ship inside the standalone code-extraction package.
 [patch.crates-io]
 tree-sitter-rust = { path = "vendor/tree-sitter-rust" }
