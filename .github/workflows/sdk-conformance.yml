@@ -1,0 +1,77 @@
+name: SDK conformance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/sdk-conformance.yml"
+      - "crates/tracedecay-api/**"
+      - "crates/tracedecay-application/**"
+      - "crates/tracedecay-domain/**"
+      - "crates/tracedecay-sdk/**"
+      - "crates/tracedecay-tool-catalog/**"
+      - "sdks/**"
+      - "scripts/check-sdk-codegen.sh"
+      - "src/application_surface.rs"
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: cargo test --manifest-path sdks/codegen/Cargo.toml
+      - run: scripts/check-sdk-codegen.sh
+      - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
+      - run: npm ci
+        working-directory: sdks/typescript
+      - run: npm run typecheck
+        working-directory: sdks/typescript
+      - run: npm test
+        working-directory: sdks/typescript
+      - run: python -m pip wheel --no-deps --wheel-dir /tmp/tracedecay-sdk-wheel .
+        working-directory: sdks/python
+      - run: python -m pip install --no-deps /tmp/tracedecay-sdk-wheel/tracedecay_sdk-*.whl
+      - run: python -m unittest discover -s tests -p "test_client.py"
+        working-directory: sdks/python
+
+  production-router:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            dashboard/package-lock.json
+            sdks/typescript/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+        working-directory: dashboard
+      - run: npm run build
+        working-directory: dashboard
+      - run: cargo build --bin tracedecay
+      - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml --test production_daemon -- --ignored
+      - run: npm ci
+        working-directory: sdks/typescript
+      - run: npm run test:installed
+        working-directory: sdks/typescript
+      - run: python -m unittest tests/test_installed_package.py
+        working-directory: sdks/python
