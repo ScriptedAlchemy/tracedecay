@@ -67,7 +67,7 @@ impl fmt::Display for ScopeSetId {
 /// Monotonic optimistic-concurrency revision of one scope set.
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
-pub struct ScopeSetRevision(u64);
+pub struct ScopeSetRevision(#[schemars(range(min = 1))] u64);
 
 impl ScopeSetRevision {
     pub fn new(value: u64) -> Result<Self, DomainError> {
