@@ -2,17 +2,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use tracedecay_domain::ProjectId;
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::observation::ObservationCancellation;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{
-    FileDiscoveryReport, ParsedTranscript, SessionDraft, StoredCursor, TranscriptDiscoveryBounds,
-    TranscriptIngestResult, TranscriptSource,
-};
+use crate::sessions::source::{StoredCursor, TranscriptSource};
 use crate::sessions::{SessionProvider, claude_observation, codex, git_correlation, source};
 
 use super::failure::{
@@ -21,15 +17,13 @@ use super::failure::{
     plan_round_robin_admission, scheduling_write_required,
 };
 use super::project::{
-    home_dir, ingest_project_sources_for_provider_without_registered_authority,
-    parse_git_log_commits, push_file_source, with_transcript_source_home,
+    home_dir, ingest_project_sources_for_provider,
+    ingest_project_sources_for_provider_without_registered_authority, parse_git_log_commits,
+    with_transcript_source_home,
 };
 use super::scheduler::{
-    DiscoveredIngestUnit, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY, TransientIngestAuthority,
-    admit_fair_ingest_units, discover_ingest_units, finish_user_provider_coverage,
-    ingest_sources_bounded as ingest_sources_bounded_with_store,
-    merge_project_provider_backpressure, plan_user_provider_admission,
-    read_ingest_frontier as read_ingest_frontier_with_store,
+    USER_INGEST_PROVIDER_FRONTIER_KEY, finish_user_provider_coverage,
+    merge_project_provider_backpressure, plan_user_provider_admission, SinglePathSource,
 };
 use super::startup::{
     StartupUserIngestGuard, TranscriptIngestOutcome,
@@ -41,7 +35,6 @@ use super::user::{
     ingest_user_global_sources_for_provider_with_roots_without_registered_authority,
     provider_selected,
 };
-use super::user_provider::try_ingest_file_source_bounded;
 
 const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     discovered_units: 16,
@@ -52,38 +45,6 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
-
-async fn ingest_sources_bounded(
-    db: &crate::global_db::RegisteredGlobalDb,
-    project_root: &Path,
-    project_id: &ProjectId,
-    sources: &[Box<dyn TranscriptSource>],
-    bounds: IngestPassBounds,
-    cancellation: &ObservationCancellation,
-) -> IngestPassOutcome {
-    let store = crate::store::GlobalDbTranscriptStore::new(db);
-    let authority = TransientIngestAuthority::new(
-        db.binding().shard_id.brain_id.clone(),
-        db.binding().shard_id.profile_id.clone(),
-        project_id,
-        sources,
-    );
-    ingest_sources_bounded_with_store(
-        &store,
-        &authority,
-        project_root,
-        sources,
-        bounds,
-        cancellation,
-    )
-    .await
-}
-
-async fn read_ingest_frontier(db: &crate::global_db::RegisteredGlobalDb, key: &str) -> Option<u64> {
-    let store = crate::store::GlobalDbTranscriptStore::new(db);
-    read_ingest_frontier_with_store(&store, key).await
-}
-
 #[tokio::test]
 async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_it() {
     let isolated_home = tempfile::tempdir().unwrap();
@@ -141,12 +102,6 @@ async fn missing_project_identity_fails_before_ingest_writes() {
     assert_eq!(outcome.failures.len(), 1);
     assert_eq!(outcome.failures[0].reason_code, "project_identity_missing");
     assert_eq!(outcome.stats, TranscriptIngestStats::default());
-    assert!(
-        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
-            .await
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -173,16 +128,10 @@ async fn unregistered_project_authority_fails_before_ingest_writes() {
         "registered_authority_unavailable"
     );
     assert_eq!(outcome.stats, TranscriptIngestStats::default());
-    assert!(
-        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
-            .await
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
-async fn mismatched_project_id_fails_before_scheduler_reads_or_writes() {
+async fn mismatched_project_id_fails_before_provider_catch_up() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -193,13 +142,14 @@ async fn mismatched_project_id_fails_before_scheduler_reads_or_writes() {
         .registered_database(HostAdmissionScope::Project)
         .unwrap();
 
-    let outcome = ingest_sources_bounded(
+    let outcome = ingest_project_sources_for_provider(
+        &db.binding().shard_id.brain_id,
+        &db.binding().shard_id.profile_id,
         db,
         &project,
-        &requested_project_id,
-        &[],
-        TEST_INGEST_BOUNDS,
-        &ObservationCancellation::default(),
+        Some(requested_project_id),
+        None,
+        true,
     )
     .await;
 
@@ -208,12 +158,7 @@ async fn mismatched_project_id_fails_before_scheduler_reads_or_writes() {
         outcome.failures[0].reason_code,
         "project_sessions_authority_mismatch"
     );
-    assert_eq!(
-        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
-            .await
-            .unwrap(),
-        None
-    );
+    assert_eq!(outcome.stats, TranscriptIngestStats::default());
     assert_eq!(
         db.binding().shard_id.scope,
         tracedecay_store::StoreShardScopeV1::ProjectSessions {
@@ -245,7 +190,7 @@ async fn unregistered_profile_authority_fails_before_ingest_writes() {
     );
     assert_eq!(outcome.stats, TranscriptIngestStats::default());
     assert!(
-        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
+        db.get_parse_offset_result(USER_INGEST_PROVIDER_FRONTIER_KEY)
             .await
             .unwrap()
             .is_none()
@@ -439,30 +384,6 @@ fn provider_scoped_user_catch_up_excludes_unrelated_providers() {
     assert!(provider_selected(None, SessionProvider::Codex));
     assert!(provider_selected(None, SessionProvider::Hermes));
 }
-
-#[test]
-fn migrated_providers_never_use_legacy_transcript_sources() {
-    for provider in [
-        SessionProvider::Claude,
-        SessionProvider::Codex,
-        SessionProvider::Cursor,
-        SessionProvider::Hermes,
-        SessionProvider::Kiro,
-        SessionProvider::Cline,
-        SessionProvider::RooCode,
-        SessionProvider::Kilo,
-    ] {
-        let mut sources = Vec::new();
-        push_file_source(&mut sources, provider);
-        assert!(
-            sources.is_empty(),
-            "{} used the legacy source",
-            provider.id()
-        );
-    }
-}
-
-#[test]
 fn transcript_failure_classification_is_bounded_and_drives_outcome_success() {
     let error =
         source::TranscriptIngestError::Store(tracedecay_store::TranscriptStoreError::Storage {
@@ -849,104 +770,6 @@ fn cancellation_and_empty_attempt_suppress_scheduling_writes() {
 }
 
 #[test]
-fn fair_admission_interleaves_sources_without_starvation() {
-    let sources = vec![
-        boxed_source(FakeSource {
-            provider: "a",
-            paths: vec![PathBuf::from("a1"), PathBuf::from("a2")],
-            fail: false,
-            budget_log: None,
-        }),
-        boxed_source(FakeSource {
-            provider: "b",
-            paths: vec![PathBuf::from("b1"), PathBuf::from("b2")],
-            fail: false,
-            budget_log: None,
-        }),
-    ];
-    let bounds = IngestPassBounds {
-        units_per_pass: 4,
-        units_per_source: 2,
-        queue_depth: 4,
-        ..TEST_INGEST_BOUNDS
-    };
-    let (units, deferred) = discover_ingest_units(&sources, Path::new("project"), bounds, 0);
-    assert_eq!(deferred, 0);
-    assert_eq!(
-        units
-            .iter()
-            .map(|unit| unit.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        vec!["a1", "b1", "a2", "b2"]
-    );
-    let (admitted, coverage) = admit_fair_ingest_units(&units, 0, bounds);
-    assert_eq!(coverage, IngestPassCoverage::Complete);
-    let sources: Vec<&str> = admitted
-        .iter()
-        .map(|&index| units[index].source_id.as_str())
-        .collect();
-    assert_eq!(sources, vec!["a", "b", "a", "b"]);
-}
-
-#[test]
-fn uneven_queues_make_progress_across_durable_passes() {
-    let units = vec![
-        unit("a", "a1", 0),
-        unit("b", "b1", 1),
-        unit("a", "a2", 0),
-        unit("a", "a3", 0),
-    ];
-    let bounds = IngestPassBounds {
-        units_per_pass: 2,
-        units_per_source: 4,
-        queue_depth: 2,
-        ..TEST_INGEST_BOUNDS
-    };
-    let mut frontier = 0_u64;
-    let mut attempted = Vec::new();
-    for _ in 0..2 {
-        let (admitted, coverage) = admit_fair_ingest_units(&units, frontier, bounds);
-        assert_eq!(coverage, IngestPassCoverage::Partial { deferred_units: 2 });
-        attempted.extend(
-            admitted
-                .iter()
-                .map(|&index| units[index].path.to_string_lossy().into_owned()),
-        );
-        frontier = frontier.saturating_add(u64::try_from(admitted.len()).unwrap());
-    }
-    assert_eq!(attempted, vec!["a1", "b1", "a2", "a3"]);
-}
-
-#[test]
-fn per_source_bound_advances_contiguously_without_starvation() {
-    let units = vec![
-        unit("a", "a1", 0),
-        unit("b", "b1", 1),
-        unit("a", "a2", 0),
-        unit("a", "a3", 0),
-    ];
-    let bounds = IngestPassBounds {
-        units_per_pass: 4,
-        units_per_source: 1,
-        queue_depth: 4,
-        ..TEST_INGEST_BOUNDS
-    };
-    let mut frontier = 0_u64;
-    let mut attempted = Vec::new();
-    for _ in 0..3 {
-        let (admitted, coverage) = admit_fair_ingest_units(&units, frontier, bounds);
-        assert!(matches!(coverage, IngestPassCoverage::Backpressured { .. }));
-        attempted.extend(
-            admitted
-                .iter()
-                .map(|&index| units[index].path.to_string_lossy().into_owned()),
-        );
-        frontier = frontier.saturating_add(u64::try_from(admitted.len()).unwrap());
-    }
-    assert_eq!(attempted, vec!["a1", "b1", "a2", "a3"]);
-}
-
-#[test]
 fn pass_byte_allocations_never_exceed_aggregate_cap() {
     let bounds = IngestPassBounds {
         bytes_per_unit: 4,
@@ -963,38 +786,6 @@ fn pass_byte_allocations_never_exceed_aggregate_cap() {
         ..TEST_INGEST_BOUNDS
     };
     assert!(allocate_pass_byte_budgets(4, zero).is_empty());
-}
-
-#[tokio::test]
-async fn file_provider_reserves_one_aggregate_byte_budget_across_paths() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let paths = (0..3)
-        .map(|index| {
-            let path = temp.path().join(format!("{index}.jsonl"));
-            std::fs::write(&path, b"{}\n").unwrap();
-            path
-        })
-        .collect();
-    let budget_log = Arc::new(Mutex::new(Vec::new()));
-    let source = FakeSource {
-        provider: "bounded",
-        paths,
-        fail: false,
-        budget_log: Some(Arc::clone(&budget_log)),
-    };
-    let runtime = profile_test_runtime(&temp).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    let store = crate::store::GlobalDbTranscriptStore::new(db);
-
-    try_ingest_file_source_bounded(&store, &source, &project, 10)
-        .await
-        .unwrap();
-
-    assert_eq!(*budget_log.lock().unwrap(), vec![3, 3, 4]);
 }
 
 #[test]
@@ -1044,1012 +835,39 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
     );
 }
 
+
 #[test]
-fn bounded_pass_work_backpressures_instead_of_growing() {
-    let units = vec![
-        unit("a", "a1", 0),
-        unit("b", "b1", 1),
-        unit("a", "a2", 0),
-        unit("a", "a3", 0),
-    ];
-    // Per-source cap 2 and queue depth 3 force an explicit overload disposition.
-    let bounds = IngestPassBounds {
-        units_per_source: 2,
-        queue_depth: 3,
-        ..TEST_INGEST_BOUNDS
-    };
-    let (admitted, coverage) = admit_fair_ingest_units(&units, 0, bounds);
-    assert_eq!(
-        coverage,
-        IngestPassCoverage::Backpressured {
-            admitted_units: 3,
-            rejected_units: 1,
+fn single_path_source_restricts_discovery_to_one_admitted_path() {
+    struct MultiPathSource;
+
+    impl TranscriptSource for MultiPathSource {
+        fn provider(&self) -> &'static str {
+            "fixture"
         }
-    );
-    assert_eq!(admitted.len(), 3);
-}
 
-#[derive(Clone)]
-struct FakeSource {
-    provider: &'static str,
-    paths: Vec<PathBuf>,
-    fail: bool,
-    budget_log: Option<Arc<Mutex<Vec<u64>>>>,
-}
-
-impl TranscriptSource for FakeSource {
-    fn provider(&self) -> &'static str {
-        self.provider
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        self.paths.clone()
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        if let (Some(log), Some(max_new_bytes)) = (&self.budget_log, max_new_bytes) {
-            log.lock().unwrap().push(max_new_bytes);
+        fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
+            vec![
+                PathBuf::from("/tmp/a.jsonl"),
+                PathBuf::from("/tmp/b.jsonl"),
+            ]
         }
-        if self.fail {
-            if self.provider == "retryable" {
-                return Err(source::TranscriptIngestError::ScanIo {
-                    operation: "test",
-                    path: path.to_path_buf(),
-                    source: std::io::Error::other("retryable test failure"),
-                });
-            }
-            return Err(source::TranscriptIngestError::InvalidFrameState {
-                provider: self.provider,
-            });
+
+        fn parse_new(
+            &self,
+            _path: &Path,
+            _prev: StoredCursor,
+            _project_root: &Path,
+            _max_new_bytes: Option<u64>,
+        ) -> Option<crate::sessions::source::ParsedTranscript> {
+            None
         }
-        let _ = (path, project_root);
-        Ok(Some(ParsedTranscript {
-            draft: SessionDraft {
-                session_id: format!("{}-{}", self.provider, path.display()),
-                project_key: "project".into(),
-                project_path: project_root.display().to_string(),
-                title: Some("fake".into()),
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-            messages: Vec::new(),
-            new_cursor: StoredCursor {
-                position: prev.position.saturating_add(1),
-                mtime: 1,
-                file_id: 1,
-            },
-        }))
     }
 
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        self.try_parse_new(path, prev, project_root, max_new_bytes)
-            .ok()
-            .flatten()
-    }
-}
-
-fn unit(source_id: &str, path: &str, source_index: usize) -> DiscoveredIngestUnit {
-    DiscoveredIngestUnit {
-        source_id: source_id.to_string(),
-        path: PathBuf::from(path),
-        source_index,
-    }
-}
-
-fn boxed_source(source: FakeSource) -> Box<dyn TranscriptSource> {
-    Box::new(source)
-}
-
-struct PageOrderedSource;
-
-impl TranscriptSource for PageOrderedSource {
-    fn provider(&self) -> &'static str {
-        "page-ordered"
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        Vec::new()
-    }
-
-    fn discover_transcript_paths_page(
-        &self,
-        _project_root: &Path,
-        _bounds: TranscriptDiscoveryBounds,
-        _start_offset: usize,
-    ) -> (FileDiscoveryReport, usize) {
-        (
-            FileDiscoveryReport {
-                paths: vec![
-                    PathBuf::from("z-newest"),
-                    PathBuf::from("a-older"),
-                    PathBuf::from("z-newest"),
-                ],
-                truncated: None,
-                skipped_oversized_entries: 0,
-                bytes_charged: 0,
-            },
-            0,
-        )
-    }
-
-    fn parse_new(
-        &self,
-        _path: &Path,
-        _prev: StoredCursor,
-        _project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        None
-    }
-}
-
-struct NoOpSource {
-    provider: &'static str,
-    path: PathBuf,
-    attempts: Arc<Mutex<usize>>,
-}
-
-fn no_op_source_pair(first_attempts: Arc<Mutex<usize>>) -> Vec<Box<dyn TranscriptSource>> {
-    vec![
-        Box::new(NoOpSource {
-            provider: "first",
-            path: PathBuf::from("first"),
-            attempts: first_attempts,
-        }),
-        Box::new(NoOpSource {
-            provider: "second",
-            path: PathBuf::from("second"),
-            attempts: Arc::new(Mutex::new(0)),
-        }),
-    ]
-}
-
-impl TranscriptSource for NoOpSource {
-    fn provider(&self) -> &'static str {
-        self.provider
-    }
-
-    fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        vec![self.path.clone()]
-    }
-
-    fn try_parse_new(
-        &self,
-        _path: &Path,
-        _prev: StoredCursor,
-        _project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        let mut attempts = self.attempts.lock().unwrap();
-        *attempts = attempts.saturating_add(1);
-        Ok(None)
-    }
-
-    fn parse_new(
-        &self,
-        _path: &Path,
-        _prev: StoredCursor,
-        _project_root: &Path,
-        _max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        None
-    }
-}
-
-struct CancellingSource {
-    inner: FakeSource,
-    cancellation: ObservationCancellation,
-}
-
-impl TranscriptSource for CancellingSource {
-    fn provider(&self) -> &'static str {
-        self.inner.provider()
-    }
-
-    fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
-        self.inner.transcript_paths(project_root)
-    }
-
-    fn try_parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<Option<ParsedTranscript>> {
-        self.cancellation.cancel();
-        self.inner
-            .try_parse_new(path, prev, project_root, max_new_bytes)
-    }
-
-    fn parse_new(
-        &self,
-        path: &Path,
-        prev: StoredCursor,
-        project_root: &Path,
-        max_new_bytes: Option<u64>,
-    ) -> Option<ParsedTranscript> {
-        self.cancellation.cancel();
-        self.inner
-            .parse_new(path, prev, project_root, max_new_bytes)
-    }
-}
-
-#[tokio::test]
-async fn source_failure_is_isolated_and_does_not_block_siblings() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let ok_path = temp.path().join("ok.jsonl");
-    let bad_path = temp.path().join("bad.jsonl");
-    std::fs::write(&ok_path, b"{}\n").unwrap();
-    std::fs::write(&bad_path, b"{}\n").unwrap();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let sources = vec![
-        boxed_source(FakeSource {
-            provider: "alpha",
-            paths: vec![ok_path.clone()],
-            fail: false,
-            budget_log: None,
-        }),
-        boxed_source(FakeSource {
-            provider: "beta",
-            paths: vec![bad_path.clone()],
-            fail: true,
-            budget_log: None,
-        }),
-        boxed_source(FakeSource {
-            provider: "gamma",
-            paths: vec![temp.path().join("gamma.jsonl")],
-            fail: false,
-            budget_log: None,
-        }),
-    ];
-    std::fs::write(temp.path().join("gamma.jsonl"), b"{}\n").unwrap();
-    let bounds = IngestPassBounds {
-        units_per_source: 4,
-        ..TEST_INGEST_BOUNDS
-    };
-    let outcome = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-    assert_eq!(outcome.units_admitted, 3);
-    assert_eq!(outcome.units_failed, 1);
-    assert!(outcome.units_completed >= 1);
-    assert!(!outcome.coverage.is_complete() || !outcome.failures.is_empty());
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|failure| failure.provider == "beta")
-    );
-    assert!(
-        !outcome
-            .failures
-            .iter()
-            .any(|failure| failure.provider == "alpha" || failure.provider == "gamma")
-    );
-    assert_eq!(outcome.coverage, IngestPassCoverage::Complete);
-    assert!(
-        !outcome.scheduling_state_written,
-        "fully covered passes must not persist a scheduling frontier"
-    );
-    assert!(
-        db.get_parse_offset_result(TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY)
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn retryable_source_respects_retry_and_pass_byte_bounds() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let path = temp.path().join("retryable.jsonl");
-    std::fs::write(&path, b"{}\n").unwrap();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let budget_log = Arc::new(Mutex::new(Vec::new()));
-    let sources = vec![boxed_source(FakeSource {
-        provider: "retryable",
-        paths: vec![path],
-        fail: true,
-        budget_log: Some(Arc::clone(&budget_log)),
-    })];
-    let bounds = IngestPassBounds {
-        bytes_per_unit: 4,
-        bytes_per_pass: 12,
-        retries: 2,
-        ..TEST_INGEST_BOUNDS
-    };
-
-    let outcome = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-
-    assert_eq!(*budget_log.lock().unwrap(), vec![4, 4, 4]);
-    assert_eq!(outcome.units_failed, 1);
-    assert_eq!(outcome.failures.len(), 1);
-}
-
-#[tokio::test]
-async fn aggregate_byte_budget_is_granted_once_across_the_pass() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let budget_log = Arc::new(Mutex::new(Vec::new()));
-    let mut sources = Vec::new();
-    for (provider, name) in [("a", "a.jsonl"), ("b", "b.jsonl"), ("c", "c.jsonl")] {
-        let path = temp.path().join(name);
-        std::fs::write(&path, b"{}\n").unwrap();
-        sources.push(boxed_source(FakeSource {
-            provider,
-            paths: vec![path],
-            fail: false,
-            budget_log: Some(Arc::clone(&budget_log)),
-        }));
-    }
-    let bounds = IngestPassBounds {
-        bytes_per_unit: 4,
-        bytes_per_pass: 10,
-        ..TEST_INGEST_BOUNDS
-    };
-    let outcome = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-
-    let grants = budget_log.lock().unwrap().clone();
-    assert_eq!(grants, vec![4, 4, 2]);
-    assert_eq!(grants.iter().copied().sum::<u64>(), 10);
-    assert_eq!(outcome.units_admitted, 3);
-    assert_eq!(outcome.coverage, IngestPassCoverage::Complete);
-    assert!(outcome.byte_bounds_enforced);
-}
-
-#[tokio::test]
-async fn zero_byte_pass_defers_work_without_frontier_advance() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let path = temp.path().join("a.jsonl");
-    std::fs::write(&path, b"{}\n").unwrap();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let budget_log = Arc::new(Mutex::new(Vec::new()));
-    let sources = vec![boxed_source(FakeSource {
-        provider: "a",
-        paths: vec![path],
-        fail: false,
-        budget_log: Some(Arc::clone(&budget_log)),
-    })];
-    let bounds = IngestPassBounds {
-        bytes_per_unit: 4,
-        bytes_per_pass: 0,
-        ..TEST_INGEST_BOUNDS
-    };
-    let outcome = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-
-    assert!(budget_log.lock().unwrap().is_empty());
-    assert_eq!(outcome.units_admitted, 0);
-    assert!(matches!(
-        outcome.coverage,
-        IngestPassCoverage::Backpressured {
-            admitted_units: 0,
-            rejected_units: 1
-        }
-    ));
-    assert!(!outcome.scheduling_state_written);
+    let inner = MultiPathSource;
+    let single = SinglePathSource::new(&inner, PathBuf::from("/tmp/b.jsonl"));
+    assert_eq!(single.provider(), "fixture");
     assert_eq!(
-        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
-        Some(0)
-    );
-}
-
-#[tokio::test]
-async fn cancellation_during_unit_keeps_committed_work_without_frontier_write() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let first_path = temp.path().join("a.jsonl");
-    let second_path = temp.path().join("b.jsonl");
-    std::fs::write(&first_path, b"{}\n").unwrap();
-    std::fs::write(&second_path, b"{}\n").unwrap();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let cancellation = ObservationCancellation::default();
-    let sources: Vec<Box<dyn TranscriptSource>> = vec![
-        Box::new(CancellingSource {
-            inner: FakeSource {
-                provider: "a",
-                paths: vec![first_path],
-                fail: false,
-                budget_log: None,
-            },
-            cancellation: cancellation.clone(),
-        }),
-        boxed_source(FakeSource {
-            provider: "b",
-            paths: vec![second_path],
-            fail: false,
-            budget_log: None,
-        }),
-    ];
-    let bounds = IngestPassBounds {
-        units_per_pass: 1,
-        queue_depth: 1,
-        ..TEST_INGEST_BOUNDS
-    };
-    let outcome =
-        ingest_sources_bounded(db, &project, &project_id, &sources, bounds, &cancellation).await;
-
-    assert_eq!(outcome.units_completed, 1);
-    assert!(cancellation.is_cancelled());
-    assert_eq!(
-        outcome.coverage,
-        IngestPassCoverage::Partial { deferred_units: 1 }
-    );
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
-    );
-    assert!(!outcome.scheduling_state_written);
-    assert_eq!(
-        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
-        Some(0)
-    );
-}
-
-#[tokio::test]
-async fn partial_pass_writes_frontier_cancellation_does_not() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let mut sources = Vec::new();
-    for (provider, name) in [("a", "a.jsonl"), ("b", "b.jsonl"), ("c", "c.jsonl")] {
-        let path = temp.path().join(name);
-        std::fs::write(&path, b"{}\n").unwrap();
-        sources.push(boxed_source(FakeSource {
-            provider,
-            paths: vec![path],
-            fail: false,
-            budget_log: None,
-        }));
-    }
-    let bounds = IngestPassBounds {
-        units_per_pass: 1,
-        units_per_source: 4,
-        ..TEST_INGEST_BOUNDS
-    };
-    let first = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-    assert!(matches!(
-        first.coverage,
-        IngestPassCoverage::Partial { deferred_units: 2 }
-    ));
-    assert!(first.scheduling_state_written);
-    assert_eq!(
-        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
-        Some(1)
-    );
-
-    let cancellation = ObservationCancellation::default();
-    cancellation.cancel();
-    let cancelled =
-        ingest_sources_bounded(db, &project, &project_id, &sources, bounds, &cancellation).await;
-    assert!(
-        cancelled
-            .failures
-            .iter()
-            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
-    );
-    assert!(
-        !cancelled.scheduling_state_written,
-        "cancellation must not advance the scheduling frontier"
-    );
-    assert_eq!(
-        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
-        Some(1)
-    );
-
-    let second = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-    assert_eq!(second.units_admitted, 1);
-    // Frontier advanced past source 0, so the next single-unit pass starts at 1.
-    assert!(second.scheduling_state_written);
-    assert_eq!(
-        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
-        Some(2)
-    );
-}
-
-#[tokio::test]
-async fn production_frontier_rotates_before_a_continuously_busy_source() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let first_log = Arc::new(Mutex::new(Vec::new()));
-    let second_log = Arc::new(Mutex::new(Vec::new()));
-    let sources = vec![
-        boxed_source(FakeSource {
-            provider: "busy",
-            paths: vec!["a1", "a2", "a3"]
-                .into_iter()
-                .map(PathBuf::from)
-                .collect(),
-            fail: false,
-            budget_log: Some(Arc::clone(&first_log)),
-        }),
-        boxed_source(FakeSource {
-            provider: "peer",
-            paths: vec![PathBuf::from("b1")],
-            fail: false,
-            budget_log: Some(Arc::clone(&second_log)),
-        }),
-    ];
-    let bounds = IngestPassBounds {
-        discovered_units: 2,
-        units_per_pass: 1,
-        units_per_source: 1,
-        queue_depth: 1,
-        ..TEST_INGEST_BOUNDS
-    };
-
-    let first = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-    let second = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-
-    assert!(first.scheduling_state_written);
-    assert!(second.scheduling_state_written);
-    assert_eq!(first_log.lock().unwrap().len(), 1);
-    assert_eq!(second_log.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn terminal_source_failure_rotates_to_a_healthy_peer() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let healthy_log = Arc::new(Mutex::new(Vec::new()));
-    let sources = vec![
-        boxed_source(FakeSource {
-            provider: "failed",
-            paths: vec![PathBuf::from("failed")],
-            fail: true,
-            budget_log: None,
-        }),
-        boxed_source(FakeSource {
-            provider: "healthy",
-            paths: vec![PathBuf::from("healthy")],
-            fail: false,
-            budget_log: Some(Arc::clone(&healthy_log)),
-        }),
-    ];
-    let bounds = IngestPassBounds {
-        discovered_units: 2,
-        units_per_pass: 1,
-        units_per_source: 1,
-        queue_depth: 1,
-        ..TEST_INGEST_BOUNDS
-    };
-
-    let failed = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-    let healthy = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-
-    assert_eq!(failed.units_failed, 1);
-    assert!(failed.scheduling_state_written);
-    assert_eq!(healthy.units_completed, 1);
-    assert_eq!(healthy_log.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn attempted_no_op_does_not_write_partial_scheduling_state() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, &project, project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let first_attempts = Arc::new(Mutex::new(0usize));
-    let second_attempts = Arc::new(Mutex::new(0usize));
-    let sources: Vec<Box<dyn TranscriptSource>> = vec![
-        Box::new(NoOpSource {
-            provider: "first",
-            path: PathBuf::from("first"),
-            attempts: Arc::clone(&first_attempts),
-        }),
-        Box::new(NoOpSource {
-            provider: "second",
-            path: PathBuf::from("second"),
-            attempts: Arc::clone(&second_attempts),
-        }),
-    ];
-    let bounds = IngestPassBounds {
-        discovered_units: 2,
-        units_per_pass: 1,
-        units_per_source: 1,
-        queue_depth: 1,
-        ..TEST_INGEST_BOUNDS
-    };
-
-    let first = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-    let second = ingest_sources_bounded(
-        db,
-        &project,
-        &project_id,
-        &sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-
-    assert_eq!(first.units_admitted, 1);
-    assert_eq!(second.units_admitted, 1);
-    assert!(!first.coverage.is_complete());
-    assert!(!second.coverage.is_complete());
-    assert!(!first.scheduling_state_written);
-    assert!(!second.scheduling_state_written);
-    assert_eq!(*first_attempts.lock().unwrap(), 1);
-    assert_eq!(*second_attempts.lock().unwrap(), 1);
-    assert_eq!(
-        read_ingest_frontier(db, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY).await,
-        Some(0)
-    );
-}
-
-#[tokio::test]
-async fn transient_frontier_isolated_by_profile_authority() {
-    let first_temp = tempfile::tempdir().unwrap();
-    let second_temp = tempfile::tempdir().unwrap();
-    let first_project = first_temp.path().join("project");
-    let second_project = second_temp.path().join("project");
-    std::fs::create_dir_all(&first_project).unwrap();
-    std::fs::create_dir_all(&second_project).unwrap();
-    let project_id = scheduler_test_project_id();
-    let first_runtime = project_test_runtime(&first_temp, &first_project, project_id.clone()).await;
-    let second_runtime =
-        project_test_runtime(&second_temp, &second_project, project_id.clone()).await;
-    let first_db = first_runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let second_db = second_runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let first_attempts = Arc::new(Mutex::new(0usize));
-    let second_attempts = Arc::new(Mutex::new(0usize));
-    let first_sources = no_op_source_pair(Arc::clone(&first_attempts));
-    let second_sources = no_op_source_pair(Arc::clone(&second_attempts));
-    let bounds = IngestPassBounds {
-        discovered_units: 2,
-        units_per_pass: 1,
-        units_per_source: 1,
-        queue_depth: 1,
-        ..TEST_INGEST_BOUNDS
-    };
-
-    ingest_sources_bounded(
-        first_db,
-        &first_project,
-        &project_id,
-        &first_sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-    ingest_sources_bounded(
-        second_db,
-        &second_project,
-        &project_id,
-        &second_sources,
-        bounds,
-        &ObservationCancellation::default(),
-    )
-    .await;
-
-    assert_eq!(*first_attempts.lock().unwrap(), 1);
-    assert_eq!(*second_attempts.lock().unwrap(), 1);
-}
-
-#[test]
-fn discovery_respects_per_source_and_total_bounds() {
-    let sources = vec![
-        boxed_source(FakeSource {
-            provider: "a",
-            paths: vec![
-                PathBuf::from("a1"),
-                PathBuf::from("a2"),
-                PathBuf::from("a3"),
-            ],
-            fail: false,
-            budget_log: None,
-        }),
-        boxed_source(FakeSource {
-            provider: "b",
-            paths: vec![PathBuf::from("b1"), PathBuf::from("b2")],
-            fail: false,
-            budget_log: None,
-        }),
-    ];
-    let bounds = IngestPassBounds {
-        discovered_units: 3,
-        units_per_source: 2,
-        ..TEST_INGEST_BOUNDS
-    };
-    let (units, deferred) = discover_ingest_units(&sources, Path::new("/tmp/project"), bounds, 0);
-    assert_eq!(deferred, 2);
-    assert_eq!(units.len(), 3);
-    assert_eq!(units.iter().filter(|unit| unit.source_id == "a").count(), 2);
-    assert_eq!(units.iter().filter(|unit| unit.source_id == "b").count(), 1);
-    assert_eq!(
-        units
-            .iter()
-            .map(|unit| unit.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        vec!["a1", "b1", "a2"],
-        "source zero cannot consume the global discovery cap before source one"
-    );
-}
-
-#[test]
-fn discovery_preserves_provider_page_order_while_deduplicating() {
-    let sources: Vec<Box<dyn TranscriptSource>> = vec![Box::new(PageOrderedSource)];
-    let bounds = IngestPassBounds {
-        discovered_units: 4,
-        units_per_pass: 4,
-        units_per_source: 4,
-        queue_depth: 4,
-        ..TEST_INGEST_BOUNDS
-    };
-
-    let (units, deferred) = discover_ingest_units(&sources, Path::new("/tmp/project"), bounds, 0);
-
-    assert_eq!(deferred, 0);
-    assert_eq!(
-        units
-            .iter()
-            .map(|unit| unit.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        vec!["z-newest", "a-older"],
-        "generic ingest must not replace provider page order with lexical order"
-    );
-}
-
-#[test]
-fn discovery_emits_typed_deferred_backpressure_for_oversized_paths() {
-    let long = "p".repeat(TranscriptDiscoveryBounds::default_walk().max_path_bytes + 8);
-    let sources = vec![boxed_source(FakeSource {
-        provider: "a",
-        paths: vec![PathBuf::from("ok"), PathBuf::from(long)],
-        fail: false,
-        budget_log: None,
-    })];
-    let bounds = IngestPassBounds {
-        discovered_units: 8,
-        ..TEST_INGEST_BOUNDS
-    };
-    let (units, deferred) = discover_ingest_units(&sources, Path::new("/tmp/project"), bounds, 0);
-    assert_eq!(units.len(), 1);
-    assert_eq!(units[0].path, PathBuf::from("ok"));
-    assert!(
-        deferred >= 1,
-        "oversized path must defer with typed backpressure"
-    );
-    let serialized = format!("{units:?}");
-    assert!(
-        !serialized.contains(&"p".repeat(64)),
-        "unit list must not retain oversized path payloads"
-    );
-}
-
-#[test]
-fn over_cap_source_and_single_peer_both_progress_across_discovery_passes() {
-    let sources = vec![
-        boxed_source(FakeSource {
-            provider: "a",
-            paths: vec![
-                PathBuf::from("a1"),
-                PathBuf::from("a2"),
-                PathBuf::from("a3"),
-            ],
-            fail: false,
-            budget_log: None,
-        }),
-        boxed_source(FakeSource {
-            provider: "b",
-            paths: vec![PathBuf::from("b1")],
-            fail: false,
-            budget_log: None,
-        }),
-    ];
-    let bounds = IngestPassBounds {
-        discovered_units: 2,
-        units_per_pass: 2,
-        units_per_source: 2,
-        queue_depth: 2,
-        ..TEST_INGEST_BOUNDS
-    };
-    let (first, first_deferred) = discover_ingest_units(&sources, Path::new("project"), bounds, 0);
-    assert_eq!(first_deferred, 2);
-    assert_eq!(
-        first
-            .iter()
-            .map(|unit| unit.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        vec!["a1", "b1"]
-    );
-
-    let (second, second_deferred) =
-        discover_ingest_units(&sources, Path::new("project"), bounds, 2);
-    assert_eq!(second_deferred, 2);
-    assert_eq!(
-        second
-            .iter()
-            .map(|unit| unit.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        vec!["a2", "a3"]
-    );
-}
-
-#[test]
-fn exhausted_discovery_frontier_restarts_the_bounded_cycle() {
-    let sources = vec![boxed_source(FakeSource {
-        provider: "a",
-        paths: vec![
-            PathBuf::from("a1"),
-            PathBuf::from("a2"),
-            PathBuf::from("a3"),
-        ],
-        fail: false,
-        budget_log: None,
-    })];
-    let bounds = IngestPassBounds {
-        discovered_units: 2,
-        units_per_pass: 2,
-        units_per_source: 2,
-        queue_depth: 2,
-        ..TEST_INGEST_BOUNDS
-    };
-
-    let (units, deferred) = discover_ingest_units(&sources, Path::new("project"), bounds, 3);
-
-    assert_eq!(deferred, 1);
-    assert_eq!(
-        units
-            .iter()
-            .map(|unit| unit.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        vec!["a1", "a2"]
+        single.transcript_paths(Path::new("/project")),
+        vec![PathBuf::from("/tmp/b.jsonl")]
     );
 }

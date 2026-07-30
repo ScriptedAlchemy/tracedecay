@@ -6,22 +6,19 @@ use crate::application::observation::ObservationCancellation;
 use crate::global_db::RegisteredGlobalDb;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::TranscriptSource;
 use crate::sessions::{SessionProvider, claude_observation, git_correlation};
-use crate::store::{GlobalDbGitCorrelationStore, GlobalDbTranscriptStore, GlobalDbWorkflowStore};
+use crate::store::{GlobalDbGitCorrelationStore, GlobalDbWorkflowStore};
 use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
 
-use super::failure::{ProviderRunFold, TranscriptCatchUpFailure, claude_catch_up_failure};
-use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
-use super::scheduler::{
-    TransientIngestAuthority, default_ingest_pass_bounds, ingest_sources_bounded,
-    merge_project_provider_backpressure,
+use super::failure::{
+    IngestPassCoverage, IngestPassOutcome, ProviderRunFold, TranscriptCatchUpFailure,
+    claude_catch_up_failure,
 };
+use super::project_provider::{PROJECT_CATCH_UP_PROVIDERS, ProjectProviderRun};
+use super::scheduler::{default_ingest_pass_bounds, merge_project_provider_backpressure};
 use super::startup::TranscriptIngestOutcome;
 use super::user::provider_selected;
-
-const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[];
 
 tokio::task_local! {
     static TRANSCRIPT_SOURCE_HOME: PathBuf;
@@ -164,31 +161,19 @@ async fn ingest_project_sources_for_provider_inner(
             )],
         );
     }
-    let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
-    match provider {
-        None => {
-            for provider in FILE_TRANSCRIPT_PROVIDERS {
-                push_file_source(&mut sources, *provider);
-            }
-        }
-        Some(provider) => push_file_source(&mut sources, provider),
-    }
-    let transcript_store = GlobalDbTranscriptStore::new(registered);
-    let transcript_authority = TransientIngestAuthority::new(
-        brain_id.clone(),
-        profile_id.clone(),
-        &canonical_project_id,
-        &sources,
-    );
-    let mut source_outcome = Box::pin(ingest_sources_bounded(
-        &transcript_store,
-        &transcript_authority,
-        project_root,
-        &sources,
-        default_ingest_pass_bounds(),
-        cancellation,
-    ))
-    .await;
+    // File-transcript multi-source scheduling is retired: every catch-up
+    // provider is observation/port driven. Start at complete coverage and fold
+    // provider-run backpressure onto that baseline.
+    let mut source_outcome = IngestPassOutcome {
+        stats: TranscriptIngestStats::default(),
+        failures: Vec::new(),
+        coverage: IngestPassCoverage::Complete,
+        scheduling_state_written: false,
+        units_admitted: 0,
+        units_completed: 0,
+        units_failed: 0,
+        byte_bounds_enforced: true,
+    };
     let scope = ObservationScopeV1::Project {
         project_id: canonical_project_id.clone(),
     };
@@ -396,21 +381,4 @@ pub(super) fn parse_git_log_commits(stdout: &str) -> Vec<git_correlation::Scanne
             Some(git_correlation::ScannedCommit { sha, committed_at })
         })
         .collect()
-}
-
-pub(super) fn push_file_source(
-    _sources: &mut Vec<Box<dyn TranscriptSource>>,
-    provider: SessionProvider,
-) {
-    match provider {
-        SessionProvider::Vibe
-        | SessionProvider::Claude
-        | SessionProvider::Codex
-        | SessionProvider::Cursor
-        | SessionProvider::Hermes
-        | SessionProvider::Cline
-        | SessionProvider::RooCode
-        | SessionProvider::Kilo
-        | SessionProvider::Kiro => {}
-    }
 }

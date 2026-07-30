@@ -5,9 +5,6 @@ use tracedecay_domain::ObservationScopeV1;
 use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::ObservationCancellation;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{
-    self, TranscriptDiscoveryBounds, TranscriptSource, try_ingest_source,
-};
 use crate::sessions::{SessionProvider, claude_observation, cline_like, hermes, kiro, vibe};
 use crate::store::TranscriptIngestStore;
 
@@ -15,7 +12,6 @@ use super::failure::{
     ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     warn_transcript_catch_up_failure,
 };
-use super::scheduler::SinglePathSource;
 use super::user::{
     try_ingest_user_codex_sessions_with_db_bounded, try_ingest_user_cursor_sessions_with_db_bounded,
 };
@@ -268,28 +264,4 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             ),
         }
     }
-}
-
-pub(super) async fn try_ingest_file_source_bounded<S: TranscriptIngestStore>(
-    store: &S,
-    transcript_source: &dyn TranscriptSource,
-    project_root: &Path,
-    max_new_bytes: u64,
-) -> source::TranscriptIngestResult<TranscriptIngestStats> {
-    let paths = transcript_source
-        .discover_transcript_paths(project_root, TranscriptDiscoveryBounds::default_walk())
-        .paths;
-    let mut remaining = max_new_bytes;
-    let mut stats = TranscriptIngestStats::default();
-    for (index, path) in paths.iter().enumerate() {
-        let paths_left = u64::try_from(paths.len().saturating_sub(index)).unwrap_or(u64::MAX);
-        let grant = remaining / paths_left.max(1);
-        if grant == 0 {
-            break;
-        }
-        let single = SinglePathSource::new(transcript_source, path.clone());
-        stats = stats.merge(try_ingest_source(store, &single, project_root, Some(grant)).await?);
-        remaining = remaining.saturating_sub(grant);
-    }
-    Ok(stats)
 }
