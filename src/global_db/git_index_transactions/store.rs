@@ -127,9 +127,6 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     /// key without opening a writer. This is the read-only projection of the
     /// same record `begin_or_replay` reconstructs before it decides to start,
     /// replay, or require recovery.
-    // Staged: consumed by the code read-port executor (`super::read`), which is
-    // itself awaiting the daemon read-port dispatcher.
-    #[allow(dead_code)]
     pub(crate) async fn read_record(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
