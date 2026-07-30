@@ -1,6 +1,7 @@
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Corners, Legend, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { WIRE_AUTHORITY, WITHHELD_WORK, type WithheldSurface } from './authority.ts';
+import { WorkTaskActivity } from './WorkTaskActivity.tsx';
 import {
   type WorkWire,
   type WorkWireState,
@@ -130,10 +131,17 @@ function SurfaceRow({ surface }: { surface: WithheldSurface }) {
         * wrap, because a nowrap chip is width the 320px reflow budget does not
         * have. */}
       <td className="px-2 py-1.5 lg:whitespace-nowrap">
-        <StateChip
-          kind={presentation.state}
-          detail={state.kind === 'landed' ? state.contract : undefined}
-        />
+        {/* The live row reads its detail from the stream itself. Keyed on the
+          * reason rather than on the row's id, because what makes it live is
+          * having a mounted subscription and nothing to apply it to. */}
+        {surface.reason === 'runtime_not_mounted' ? (
+          <WorkTaskActivity kind={presentation.state} />
+        ) : (
+          <StateChip
+            kind={presentation.state}
+            detail={state.kind === 'landed' ? state.contract : undefined}
+          />
+        )}
       </td>
     </tr>
   );

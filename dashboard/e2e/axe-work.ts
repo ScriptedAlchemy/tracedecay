@@ -44,15 +44,38 @@ export const WORK_SCENARIOS: readonly Scenario[] = [
           id: row.getAttribute('data-work-surface') ?? '',
           state: row.querySelector('[data-state]')?.getAttribute('data-state') ?? '',
           requires: (row.querySelector('td .td-value')?.textContent ?? '').trim(),
+          detail: (row.querySelector('[data-state]')?.textContent ?? '').trim(),
         })),
       );
       if (rows.length === 0) throw new Error('Work rendered no withheld surfaces at all');
+      // The task-activity row is the one surface this build genuinely consumes:
+      // the daemon emits the family and the dashboard subscribes to it, with no
+      // projection to refetch, which is a partial rather than an absence. Pinned
+      // by id and by count so the allowance cannot spread — any other row going
+      // partial means a projection started claiming half-read data.
+      const partial = rows.filter((row) => row.state === 'partial');
+      if (partial.length !== 1 || partial[0]?.id !== 'task-activity') {
+        throw new Error(
+          `FALSIFIED: partial belongs to the subscribed stream row alone, found ${JSON.stringify(partial)}`,
+        );
+      }
       const unstated = rows.filter(
-        (row) => row.state !== 'unsupported' && row.state !== 'unsupported_schema',
+        (row) =>
+          row.state !== 'unsupported'
+          && row.state !== 'unsupported_schema'
+          && !(row.id === 'task-activity' && row.state === 'partial'),
       );
       if (unstated.length > 0) {
         throw new Error(
           `FALSIFIED: a withheld Work surface carries an available state: ${JSON.stringify(unstated)}`,
+        );
+      }
+      // The subscribed row has to say which of the three situations it is in, or
+      // a silent stream and an unreachable one read identically.
+      const activity = rows.find((row) => row.id === 'task-activity');
+      if (activity !== undefined && !/subscribed/.test(activity.detail)) {
+        throw new Error(
+          `the subscribed stream row states no reading: ${JSON.stringify(activity)}`,
         );
       }
       const nameless = rows.filter((row) => row.requires === '');

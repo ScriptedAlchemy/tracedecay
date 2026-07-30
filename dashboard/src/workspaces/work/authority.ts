@@ -3,10 +3,12 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 /**
  * What Work owes, and what this build is able to honour.
  *
- * Work is the canonical task graph and the execution runtime over it. None of it
- * can be drawn yet: `DashboardContractCatalogV1` carries no Work payload, so the
- * generated contracts module every dashboard read is validated against holds no
- * Work read model, no Work command and no task-activity stream.
+ * Work is the canonical task graph and the execution runtime over it. Almost
+ * none of it can be drawn yet: `DashboardContractCatalogV1` carries no Work
+ * payload, so the generated contracts module every dashboard read is validated
+ * against holds no Work read model and no Work command. The one exception is
+ * the task-activity stream, which is carried by the daemon's event union rather
+ * than by that catalog and so is reachable without one.
  *
  * The rows below are therefore a derivation of plan scope, not a reading of
  * backend state. The only claim they make about the running daemon is the one
@@ -15,10 +17,20 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  * Work contract is generated, so this ledger cannot outlive its own truth.
  */
 
-/** Why one Work surface is withheld. Each value is a different missing piece of
- * the wire boundary, and they are not interchangeable: a projection needs a
- * read model, an action needs a command, a live view needs a stream. */
-export type WithheldReason = 'read_model_absent' | 'command_absent' | 'stream_absent';
+/** Why one Work surface cannot be read yet. Each value is a different missing
+ * piece of the wire boundary, and they are not interchangeable: a projection
+ * needs a read model, an action needs a command, a live view needs a stream.
+ *
+ * `runtime_not_mounted` is the one that is not an absence. The piece exists and
+ * this build consumes it; what is missing is anything for it to act on. It is a
+ * partial rather than an unsupported state, because reporting a working
+ * subscription as unsupported would understate the build as badly as the
+ * reverse would overstate it. */
+export type WithheldReason =
+  | 'read_model_absent'
+  | 'command_absent'
+  | 'stream_absent'
+  | 'runtime_not_mounted';
 
 export interface WithheldSurface {
   readonly id: string;
@@ -35,13 +47,18 @@ export interface WithheldSurface {
    * prefix so a `V1` suffix and the `Schema` const beside it both count.
    *
    * Explicit, because the design name and the implemented name are not the same
-   * string: the application authority calls its projections `WorkSnapshotV1` and
-   * `WorkDeltaV1`, and its writes `AdmitExecutionCommand` rather than
-   * `ExecutionAdmission`. Deriving the key from `requires` would watch for names
-   * nothing will ever emit, and a gate that cannot see its contract arrive is
-   * worse than no gate — it would leave this page claiming absence over live
-   * data. Watching several candidate names costs a false positive that a reader
-   * would immediately notice; missing the real one is the failure that lies.
+   * string: the row labelled `WorkProjection` is served by
+   * `WorkProjectionSnapshotV1`, and the one labelled `ExecutionAdmission` by
+   * `AdmitExecutionCommand`. Deriving the key from `requires` would watch for
+   * names nothing will ever emit, and a gate that cannot see its contract arrive
+   * is worse than no gate — it would leave this page claiming absence over live
+   * data.
+   *
+   * Every name here is one that exists in the workspace today. Watching a
+   * plausible spelling that no crate defines buys nothing and costs the same
+   * silence as watching nothing: the deleted `WorkSnapshotV1` and `WorkDeltaV1`
+   * were watched for exactly that reason until `1fc31a865` proved they were
+   * gone.
    */
   readonly watches: readonly string[];
   readonly reason: WithheldReason;
@@ -69,6 +86,8 @@ export function withheldPresentation(reason: WithheldReason): WithheldPresentati
       return { state: 'unsupported', summary: 'no generated command' };
     case 'stream_absent':
       return { state: 'unsupported', summary: 'no registered stream' };
+    case 'runtime_not_mounted':
+      return { state: 'partial', summary: 'subscribed, with no projection to refetch' };
     default: {
       const unhandled: never = reason;
       return unhandled;
@@ -77,24 +96,22 @@ export function withheldPresentation(reason: WithheldReason): WithheldPresentati
 }
 
 /**
- * The names a landed read contract could arrive under.
+ * The names a landed read contract will arrive under.
  *
- * Canonical first: the domain crate's read contracts are
- * `WorkProjectionSnapshotV1` and `WorkProjectionDeltaV1`, both generation-bound
- * and carrying their own sequence and coverage. The `WorkSnapshot` and
- * `WorkDelta` spellings are the application authority's own, and `WorkEventDelta`
- * is what the boundary was first announced as; all are watched because whichever
- * reaches `DashboardContractCatalogV1` first is the one that must switch these
- * rows off.
+ * There is one spelling for each, and these are it: `crates/tracedecay-domain/
+ * src/work_read.rs` defines `WorkProjectionSnapshotV1` and
+ * `WorkProjectionDeltaV1`, both generation-bound and carrying their own sequence
+ * and coverage. The competing `WorkSnapshotV1` and `WorkDeltaV1` were deleted by
+ * `1fc31a865`, so watching them would be watching for a type no crate can emit.
  *
- * Held as prefixes rather than exact names so a `V1`, a later revision and the
- * zod schema const beside each all count as the same arrival. Deliberately not
- * the bare `WorkProjection`: it is the per-task domain type every one of these
- * wraps, so watching it would collapse every projection row onto whichever
- * contract landed first.
+ * Held as prefixes rather than exact names so a `V1`, a later revision, the
+ * request type beside each and the zod schema const all count as the same
+ * arrival. Deliberately not the bare `WorkProjection`: it is the per-task domain
+ * type every one of these wraps, so watching it would collapse every projection
+ * row onto whichever contract landed first.
  */
-const SNAPSHOT_NAMES = ['WorkProjectionSnapshot', 'WorkSnapshot'] as const;
-const DELTA_NAMES = ['WorkProjectionDelta', 'WorkDelta', 'WorkEventDelta'] as const;
+const SNAPSHOT_NAMES = ['WorkProjectionSnapshot'] as const;
+const DELTA_NAMES = ['WorkProjectionDelta'] as const;
 
 /**
  * The runtime aggregate, from the canonical runtime contracts.
@@ -140,7 +157,9 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'Timeline',
         draws: 'one task’s event order at a chosen graph version',
         requires: 'WorkEvent',
-        watches: DELTA_NAMES,
+        // `WorkEvent` covers the `WorkEventKind` union beside it, so the row
+        // fires whether the ordered event or its discriminant lands first.
+        watches: [...DELTA_NAMES, 'WorkEvent'],
         reason: 'read_model_absent',
       },
       {
@@ -196,7 +215,7 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         name: 'History',
         draws: 'current, as-of, evolution and forensic reads of one TaskId',
         requires: 'WorkEvent',
-        watches: [...DELTA_NAMES, 'WorkProjectionResumeCursor', 'WorkEventKind'],
+        watches: [...DELTA_NAMES, 'WorkProjectionResumeCursor', 'WorkEvent'],
         reason: 'read_model_absent',
       },
     ],
@@ -209,24 +228,29 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         id: 'graph-change',
         name: 'Create and change work',
         draws: 'expected-version graph writes with idempotent receipts',
-        requires: 'WorkCommand',
-        watches: ['CreateWorkCommand', 'ReplanDependenciesCommand', 'AcceptTaskCommand', 'WorkCommand'],
+        requires: 'CreateWorkCommand',
+        watches: ['CreateWorkCommand', 'ReplanDependenciesCommand', 'AcceptTaskCommand'],
         reason: 'command_absent',
       },
       {
         id: 'proposal-review',
         name: 'Review a proposal',
         draws: 'accept, reject or supersede an explained proposal under graph and evidence CAS',
-        requires: 'WorkProposal',
-        watches: ['ReviewProposalCommand', 'AcceptProposalCommand', 'GeneratedWorkProposal', 'GenerateProposalRequest', 'WorkProposal'],
+        requires: 'GeneratedWorkProposal',
+        watches: [
+          'ReviewProposalCommand',
+          'AcceptProposalCommand',
+          'GeneratedWorkProposal',
+          'GenerateProposalRequest',
+        ],
         reason: 'command_absent',
       },
       {
         id: 'admission',
         name: 'Admit execution',
         draws: 'a separate admission naming scope, provider, grants, budget and deadline',
-        requires: 'ExecutionAdmission',
-        watches: ['AdmitExecutionCommand', 'ExecutionAdmission'],
+        requires: 'AdmitExecutionCommand',
+        watches: ['AdmitExecutionCommand'],
         reason: 'command_absent',
       },
       {
@@ -242,7 +266,6 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
           'WorkCancellation',
           'WorkRecoveryState',
           'WorkLeaseFence',
-          'RunControl',
         ],
         reason: 'command_absent',
       },
@@ -271,7 +294,11 @@ export const WITHHELD_WORK: readonly WithheldGroup[] = [
         // stream to subscribe to, let alone this one. The other is the progress
         // payload such a stream would carry.
         watches: ['DashboardEventKind', 'WorkAttemptProgress'],
-        reason: 'stream_absent',
+        // Not absent any more. The daemon enumerates the `task_activity` family
+        // and emits it under a canonical stream name, and this build subscribes
+        // to it, so the row reports a live subscription over a read model that
+        // does not exist yet rather than a missing stream.
+        reason: 'runtime_not_mounted',
       },
     ],
   },

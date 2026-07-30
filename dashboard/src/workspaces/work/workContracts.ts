@@ -37,8 +37,8 @@ export type WorkWireState =
    * lie about a contract that had already landed. */
   | { readonly kind: 'landed'; readonly surface: WithheldSurface; readonly contract: string };
 
-/** Matched by prefix so `WorkSnapshot`, `WorkSnapshotV1` and
- * `WorkSnapshotV1Schema` all count as the same arrival. */
+/** Matched by prefix so `WorkProjectionSnapshot`, `WorkProjectionSnapshotV1` and
+ * `WorkProjectionSnapshotV1Schema` all count as the same arrival. */
 function contractFor(surface: WithheldSurface, exports: ReadonlySet<string>): string | undefined {
   for (const watched of surface.watches) {
     for (const name of exports) {
