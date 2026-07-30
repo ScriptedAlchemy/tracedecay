@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -93,19 +93,69 @@ pub struct WorkflowStepV1 {
     pub fan_out: Option<WorkflowFanOutV1>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDefinitionV1 {
-    pub definition_id: WorkflowDefinitionId,
-    pub definition_version: u64,
-    pub project_id: ProjectId,
-    pub steps: Vec<WorkflowStepV1>,
-    pub pinned_policy_digest: ManifestDigest,
-    pub pinned_configuration_digest: ManifestDigest,
-    pub pinned_catalog_digest: ManifestDigest,
+    definition_id: WorkflowDefinitionId,
+    definition_version: u64,
+    project_id: ProjectId,
+    steps: Vec<WorkflowStepV1>,
+    pinned_policy_digest: ManifestDigest,
+    pinned_configuration_digest: ManifestDigest,
+    pinned_catalog_digest: ManifestDigest,
 }
 
 impl WorkflowDefinitionV1 {
+    pub fn new(
+        definition_id: WorkflowDefinitionId,
+        definition_version: u64,
+        project_id: ProjectId,
+        steps: Vec<WorkflowStepV1>,
+        pinned_policy_digest: ManifestDigest,
+        pinned_configuration_digest: ManifestDigest,
+        pinned_catalog_digest: ManifestDigest,
+    ) -> Result<Self, WorkflowDefinitionError> {
+        let definition = Self {
+            definition_id,
+            definition_version,
+            project_id,
+            steps,
+            pinned_policy_digest,
+            pinned_configuration_digest,
+            pinned_catalog_digest,
+        };
+        definition.validate()?;
+        Ok(definition)
+    }
+
+    pub fn definition_id(&self) -> &WorkflowDefinitionId {
+        &self.definition_id
+    }
+
+    pub const fn definition_version(&self) -> u64 {
+        self.definition_version
+    }
+
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub fn steps(&self) -> &[WorkflowStepV1] {
+        &self.steps
+    }
+
+    pub fn pinned_policy_digest(&self) -> &ManifestDigest {
+        &self.pinned_policy_digest
+    }
+
+    pub fn pinned_configuration_digest(&self) -> &ManifestDigest {
+        &self.pinned_configuration_digest
+    }
+
+    pub fn pinned_catalog_digest(&self) -> &ManifestDigest {
+        &self.pinned_catalog_digest
+    }
+
     pub fn validate(&self) -> Result<(), WorkflowDefinitionError> {
         if self.definition_version == 0 {
             return Err(WorkflowDefinitionError::InvalidDefinitionVersion);
@@ -244,5 +294,36 @@ impl WorkflowDefinitionV1 {
             return Err(WorkflowDefinitionError::PredecessorCycle);
         }
         Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkflowDefinitionV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            definition_id: WorkflowDefinitionId,
+            definition_version: u64,
+            project_id: ProjectId,
+            steps: Vec<WorkflowStepV1>,
+            pinned_policy_digest: ManifestDigest,
+            pinned_configuration_digest: ManifestDigest,
+            pinned_catalog_digest: ManifestDigest,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.definition_id,
+            wire.definition_version,
+            wire.project_id,
+            wire.steps,
+            wire.pinned_policy_digest,
+            wire.pinned_configuration_digest,
+            wire.pinned_catalog_digest,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
