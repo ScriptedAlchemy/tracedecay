@@ -871,6 +871,26 @@ async fn handle_migrate_storage_report(
         return Ok(());
     }
     println!("storage report: {}", report.profile_root);
+    let profile_total = report.profile_total_size();
+    // A partial total is a floor, not the profile size; say which families are
+    // missing rather than printing a number that reads as complete.
+    match profile_total.state {
+        tracedecay::retention::storage_report::ProfileTotalCoverageStateV1::Complete => {
+            println!(
+                "  profile total: {} bytes",
+                format_bytes(profile_total.accounted_bytes)
+            );
+        }
+        tracedecay::retention::storage_report::ProfileTotalCoverageStateV1::Partial => {
+            println!(
+                "  profile total: at least {} bytes (incomplete)",
+                format_bytes(profile_total.accounted_bytes)
+            );
+            for family in &profile_total.excluded_families {
+                println!("    not sized: {family}");
+            }
+        }
+    }
     println!(
         "  global.db: {} bytes",
         format_bytes(report.global_db_bytes)

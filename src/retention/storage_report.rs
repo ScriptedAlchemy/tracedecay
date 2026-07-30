@@ -99,6 +99,80 @@ impl StorageReportCoverage {
     }
 }
 
+/// Whether a profile total accounts for every byte under the profile root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileTotalCoverageStateV1 {
+    /// Every byte family under the profile root was sized.
+    Complete,
+    /// At least one family exists but was not sized; `accounted_bytes` is a
+    /// floor, not the profile size.
+    Partial,
+}
+
+/// Profile-wide on-disk total, with any family it could not size named.
+///
+/// A partial total must never read as the profile size. Plan 38 sizes the
+/// profile to decide whether retention is keeping up, and a total that quietly
+/// omitted a family would understate growth exactly when it matters.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ProfileTotalSizeV1 {
+    pub state: ProfileTotalCoverageStateV1,
+    /// Sum of the families below. A floor when `state` is `Partial`.
+    pub accounted_bytes: u64,
+    /// Graph database families of every registered store in this report.
+    pub registered_store_bytes: u64,
+    pub global_db_bytes: u64,
+    pub unregistered_bytes: u64,
+    /// Families known to exist that this report did not fully size.
+    pub excluded_families: Vec<String>,
+}
+
+impl StorageReport {
+    /// Total on-disk bytes this report accounts for, and what it excludes.
+    pub fn profile_total_size(&self) -> ProfileTotalSizeV1 {
+        let registered_store_bytes = self
+            .stores
+            .iter()
+            .fold(0u64, |total, store| total.saturating_add(store.total_bytes));
+        let accounted_bytes = registered_store_bytes
+            .saturating_add(self.global_db_bytes)
+            .saturating_add(self.unregistered_bytes);
+
+        let mut excluded_families = Vec::new();
+        if self.coverage.state == StorageReportCoverageState::Partial {
+            excluded_families.push("registered stores beyond this page".to_owned());
+        }
+        // Sealed generation files live outside the graph database family, and
+        // only their superseded portion is sized here; the active generation is
+        // not. Naming the gap keeps the total from posing as the profile size.
+        if !self.code_generation_retention.is_empty() {
+            excluded_families.push("code-index generation files".to_owned());
+        }
+        if self
+            .code_generation_retention_availability
+            .iter()
+            .any(|entry| entry.state == StorageReportAvailabilityState::Unavailable)
+        {
+            excluded_families.push("code-index scopes that could not be read".to_owned());
+        }
+
+        let state = if excluded_families.is_empty() {
+            ProfileTotalCoverageStateV1::Complete
+        } else {
+            ProfileTotalCoverageStateV1::Partial
+        };
+        ProfileTotalSizeV1 {
+            state,
+            accounted_bytes,
+            registered_store_bytes,
+            global_db_bytes: self.global_db_bytes,
+            unregistered_bytes: self.unregistered_bytes,
+            excluded_families,
+        }
+    }
+}
+
 /// Read-only mark-and-sweep preview for one code-index scope.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CodeGenerationRetentionDryRunEntry {
@@ -628,6 +702,105 @@ fn report_error(
 mod tests {
     use super::*;
     use crate::db::engine::TestConnection;
+
+    fn store(project_id: &str, total_bytes: u64) -> StoreSizeReportEntry {
+        StoreSizeReportEntry {
+            project_id: project_id.to_owned(),
+            canonical_root: format!("/work/{project_id}"),
+            total_bytes,
+            free_bytes: None,
+            free_page_ratio: None,
+        }
+    }
+
+    #[test]
+    fn profile_total_sums_every_measured_family() {
+        let report = StorageReport {
+            stores: vec![store("alpha", 400), store("beta", 600)],
+            global_db_bytes: 100,
+            unregistered_bytes: 25,
+            ..StorageReport::default()
+        };
+
+        let total = report.profile_total_size();
+        assert_eq!(total.state, ProfileTotalCoverageStateV1::Complete);
+        assert_eq!(total.registered_store_bytes, 1_000);
+        assert_eq!(total.accounted_bytes, 1_125);
+        assert!(total.excluded_families.is_empty());
+    }
+
+    #[test]
+    fn paginated_report_totals_a_floor_and_never_claims_completeness() {
+        let report = StorageReport {
+            stores: vec![store("alpha", 400)],
+            global_db_bytes: 100,
+            coverage: StorageReportCoverage::partial("alpha".to_owned()),
+            ..StorageReport::default()
+        };
+
+        let total = report.profile_total_size();
+        assert_eq!(
+            total.state,
+            ProfileTotalCoverageStateV1::Partial,
+            "a page of stores cannot total the whole profile"
+        );
+        assert_eq!(total.accounted_bytes, 500);
+        assert!(
+            total
+                .excluded_families
+                .iter()
+                .any(|family| family.contains("beyond this page"))
+        );
+    }
+
+    #[test]
+    fn unreadable_code_index_scope_is_named_rather_than_silently_dropped() {
+        let report = StorageReport {
+            stores: vec![store("alpha", 400)],
+            code_generation_retention_availability: vec![
+                CodeGenerationRetentionAvailabilityEntry {
+                    project_id: "alpha".to_owned(),
+                    store_root: "/profile/projects/alpha/code-index-v1/ab".to_owned(),
+                    state: StorageReportAvailabilityState::Unavailable,
+                    reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
+                },
+            ],
+            ..StorageReport::default()
+        };
+
+        let total = report.profile_total_size();
+        assert_eq!(total.state, ProfileTotalCoverageStateV1::Partial);
+        assert!(
+            total
+                .excluded_families
+                .iter()
+                .any(|family| family.contains("could not be read"))
+        );
+    }
+
+    #[test]
+    fn empty_profile_totals_zero_only_when_nothing_is_excluded() {
+        let total = StorageReport::default().profile_total_size();
+        assert_eq!(total.accounted_bytes, 0);
+        assert_eq!(
+            total.state,
+            ProfileTotalCoverageStateV1::Complete,
+            "a genuinely empty profile is a complete zero, not a partial one"
+        );
+    }
+
+    #[test]
+    fn store_byte_overflow_saturates_instead_of_wrapping() {
+        let report = StorageReport {
+            stores: vec![store("alpha", u64::MAX), store("beta", 10)],
+            global_db_bytes: 10,
+            ..StorageReport::default()
+        };
+
+        let total = report.profile_total_size();
+        assert_eq!(total.registered_store_bytes, u64::MAX);
+        assert_eq!(total.accounted_bytes, u64::MAX);
+    }
 
     async fn seed_global_db(profile_root: &Path, projects: &[(&str, &str)]) {
         let conn = TestConnection::open(&profile_root.join(GLOBAL_DB_FILENAME));
