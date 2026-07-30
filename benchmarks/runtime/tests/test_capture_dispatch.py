@@ -54,6 +54,14 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
                     connection, _ = server.accept()
                     connection.close()
 
+            if sys.argv[1:2] == ["--version"]:
+                print("tracedecay 0.0.0")
+                raise SystemExit(0)
+
+            if sys.argv[1:2] == ["--exact"]:
+                print("test result: ok. 1 passed; 0 failed; 0 ignored")
+                raise SystemExit(0)
+
             if sys.argv[1:2] == ["init"]:
                 raise SystemExit(0)
 
@@ -71,6 +79,23 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
 
             if sys.argv[1:2] == ["hook-cursor-after-shell"]:
                 sys.stdin.buffer.read()
+                raise SystemExit(0)
+
+            if sys.argv[1:3] == ["lsp", "bridge"]:
+                sys.stdin.buffer.read()
+                payload = json.dumps({{
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {{
+                        "uri": "file:///fixture/src/catalog.py",
+                        "diagnostics": [],
+                        "version": 1
+                    }}
+                }}, separators=(",", ":"), sort_keys=True).encode()
+                sys.stdout.buffer.write(
+                    f"Content-Length: {{len(payload)}}\\r\\n\\r\\n".encode() + payload
+                )
+                sys.stdout.buffer.flush()
                 raise SystemExit(0)
 
             raise SystemExit("unexpected command")
@@ -311,6 +336,97 @@ class CaptureDispatchTest(unittest.TestCase):
                 all(sample["observations"]["process_tree_reaped"]
                     for sample in samples)
             )
+            self.assertTrue(
+                all(
+                    sample["observations"]["process_startup_control_ns"] >= 0
+                    for sample in samples
+                )
+            )
+            self.assertTrue(
+                all(
+                    sample["observations"]["hook_residual_ns"]
+                    == max(
+                        0,
+                        sample["observations"]["direct_hook_wall_ns"]
+                        - sample["observations"]["process_startup_control_ns"]
+                    )
+                    for sample in samples
+                )
+            )
+            self.assertTrue(
+                all(
+                    sample["observations"]["lifecycle_wrapper_overhead_ns"]
+                    == max(
+                        0,
+                        sample["observations"]["missing_daemon_fail_fast_ns"]
+                        - sample["observations"]["direct_hook_wall_ns"],
+                    )
+                    for sample in samples
+                )
+            )
+
+    def test_diagnostic_flood_driver_records_bounded_event_and_queue_counts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "fake-tracedecay"
+            make_fake_binary(binary)
+            output = root / "diagnostic-flood.json"
+
+            result = run_runner(
+                "incident",
+                "--binary",
+                binary,
+                "--workload",
+                "diagnostic-dedup-batch-rate",
+                "--samples",
+                "1",
+                "--events",
+                "100",
+                "--output",
+                output,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            samples = read_jsonl(output.with_suffix(".samples.jsonl"))
+            self.assertEqual(len(samples), 1)
+            observations = samples[0]["observations"]
+            self.assertEqual(observations["diagnostic_generated_count"], 100)
+            self.assertEqual(observations["diagnostic_deduplicated_count"], 99)
+            self.assertEqual(observations["diagnostic_batch_count"], 1)
+            self.assertEqual(observations["queue_depth"], 1)
+            self.assertTrue(observations["process_tree_reaped"])
+
+    def test_diagnostic_authority_capture_is_typed_and_process_reaped(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "fake-diagnostic-authority"
+            make_fake_binary(binary)
+            output = root / "diagnostic-authority.json"
+
+            result = run_runner(
+                "incident",
+                "--binary",
+                binary,
+                "--workload",
+                "diagnostic-dedup-batch-rate",
+                "--authority-test",
+                "--events",
+                "10000",
+                "--samples",
+                "2",
+                "--output",
+                output,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["sample_count"], 2)
+            self.assertEqual(report["event_counts"]["attempted_total"], 20_000)
+            self.assertEqual(report["event_counts"]["emitted_total"], 2)
+            self.assertEqual(report["event_counts"]["queue_depth_max"], 1)
+            self.assertEqual(report["outcome"]["process_leak_count"], 0)
 
 
 if __name__ == "__main__":

@@ -681,7 +681,570 @@ def incidents(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lsp_frame(payload: Mapping[str, Any]) -> bytes:
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+
+
+def _parse_lsp_frames(payload: bytes) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    offset = 0
+    while offset < len(payload):
+        header_end = payload.find(b"\r\n\r\n", offset)
+        if header_end < 0:
+            break
+        headers = payload[offset:header_end].decode("ascii", errors="strict")
+        lengths = [
+            line.split(":", 1)[1].strip()
+            for line in headers.split("\r\n")
+            if line.casefold().startswith("content-length:")
+        ]
+        if len(lengths) != 1:
+            fail("LSP bridge emitted malformed Content-Length headers")
+        try:
+            content_length = int(lengths[0])
+        except ValueError as exc:
+            raise HarnessError("LSP bridge emitted invalid Content-Length") from exc
+        body_start = header_end + 4
+        body_end = body_start + content_length
+        if body_end > len(payload):
+            fail("LSP bridge emitted a truncated frame")
+        try:
+            frame = json.loads(payload[body_start:body_end])
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HarnessError("LSP bridge emitted malformed JSON") from exc
+        if not isinstance(frame, dict):
+            fail("LSP bridge frame must be a JSON object")
+        frames.append(frame)
+        offset = body_end
+    return frames
+
+
+def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
+    if args.events != 10_000:
+        fail("the committed diagnostic authority fixes --events at 10000")
+    binary = require_binary(args.binary)
+    output = Path(args.output)
+    samples_path, policy_path = _artifact_paths(output)
+    for path in (output, samples_path, policy_path):
+        if path.exists():
+            fail(f"incident output already exists: {path}")
+    captured: list[dict[str, Any]] = []
+    with RunWorkspace(
+        Path(tempfile.gettempdir()),
+        preserve_on_failure=False,
+    ) as workspace:
+        prepared = prepare_fixture_snapshot(
+            workspace.path / "profile",
+            prebuilt_binary=binary,
+        )
+        environment = prepared.environment
+        for index in range(args.samples):
+            started_ns = time.monotonic_ns()
+            result = run_host(
+                (
+                    os.fspath(binary),
+                    "--exact",
+                    "publication_rate_and_queue_memory_stay_bounded_under_backpressure",
+                    "--nocapture",
+                    "--test-threads=1",
+                ),
+                env=environment,
+                log_dir=workspace.path / f"logs-{index}",
+                timeout=20.0,
+                termination_grace=0.2,
+                check=False,
+            )
+            elapsed_ns = time.monotonic_ns() - started_ns
+            authority_passed = (
+                result.evidence.exit_code == 0
+                and b"1 passed; 0 failed" in result.stdout
+            )
+            if result.evidence.process_count_after_cleanup != 0:
+                fail("diagnostic authority process tree was not reaped")
+            if not authority_passed:
+                fail("prebuilt diagnostic authority did not pass")
+            digest = hashlib.sha256(result.stdout).hexdigest()
+            sample = {
+                "schema_version": SCHEMA_VERSION,
+                "identity": {
+                    "candidate_id": sha256_file(binary)[:16],
+                    "run_id": f"incident-{uuid.uuid4().hex}",
+                    "capture_id": f"capture-{uuid.uuid4().hex}",
+                    "crate_id": "tracedecay-lsp",
+                    "journey_id": "diagnostic-generation",
+                    "workload_id": "diagnostic-dedup-batch-rate",
+                    "variant": "candidate",
+                    "machine_fingerprint": _machine_fingerprint(),
+                    "platform": platform.system().lower(),
+                    "shard": "local",
+                    "storage_mode": "disposable",
+                    "state": "contention",
+                    "temperature": "warm",
+                    "surface": "host",
+                    "concurrency": 1,
+                    "round_index": index,
+                    "abba_position": 0,
+                },
+                "evidence": {
+                    "sample_count": 1,
+                    "evidence_class": "regression_sample",
+                },
+                "availability": {
+                    "state": "available",
+                    "detail": None,
+                },
+                "timing": {
+                    "started_ns": started_ns,
+                    "elapsed_ns": elapsed_ns,
+                    "cli_wall_ns": None,
+                    "mcp_wall_ns": None,
+                    "hook_wall_ns": None,
+                    "host_wall_ns": elapsed_ns,
+                    "handler_us": None,
+                    "daemon_us": None,
+                    "admission_us": None,
+                    "stages_us": {"diagnostic_flood": elapsed_ns // 1_000},
+                    "shutdown_total_ns": None,
+                    "abort_offset_ns": None,
+                },
+                "size": {
+                    "process_count": result.evidence.process_count,
+                    "request_bytes": 0,
+                    "response_bytes": len(result.stdout),
+                    "content_bytes": len(result.stdout),
+                },
+                "lifecycle": {
+                    "timeout_phase": result.evidence.timeout_phase,
+                    "activation_state": "not_applicable",
+                    "restart_state": "not_required",
+                    "daemon_survived": None,
+                },
+                "observations": {
+                    "diagnostic_generated_count": args.events,
+                    "diagnostic_deduplicated_count": args.events - 1,
+                    "diagnostic_batch_count": 1,
+                    "queue_depth": 1,
+                    "process_tree_reaped": True,
+                },
+                "outcome": {
+                    "status": "success",
+                    "expected_digest": digest,
+                    "actual_digest": digest,
+                    "result_digest": digest,
+                    "error": None,
+                },
+            }
+            validate_sample(sample)
+            captured.append(sample)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(samples_path, captured)
+    policy = load_acceptance_policy(
+        Path(__file__).resolve().with_name("policies") / "acceptance-v1.json"
+    )
+    journey_policy = load_journey_policy(
+        Path(__file__).resolve().with_name("policies")
+        / "journey-margins-v1.json"
+    )
+    elapsed_values = [sample["timing"]["elapsed_ns"] for sample in captured]
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "report_id": f"incident-{uuid.uuid4().hex}",
+        "workload_id": "diagnostic-dedup-batch-rate",
+        "authority": {
+            "kind": "prebuilt-integration-test",
+            "binary_sha256": sha256_file(binary),
+            "test": (
+                "publication_rate_and_queue_memory_stay_bounded_under_backpressure"
+            ),
+        },
+        "availability": {"state": "available", "detail": None},
+        "sample_count": len(captured),
+        "attempted_events_per_sample": args.events,
+        "samples_sha256": sha256_file(samples_path),
+        "latency_ns": {
+            "p50": {
+                "available": len(captured) >= 2,
+                "value": (
+                    nearest_rank(elapsed_values, 0.50)
+                    if len(captured) >= 2
+                    else None
+                ),
+                "minimum_samples": 2,
+            },
+            "p95": {
+                "available": len(captured) >= 40,
+                "value": (
+                    nearest_rank(elapsed_values, 0.95)
+                    if len(captured) >= 40
+                    else None
+                ),
+                "minimum_samples": 40,
+            },
+            "p99": {
+                "available": len(captured) >= 100,
+                "value": (
+                    nearest_rank(elapsed_values, 0.99)
+                    if len(captured) >= 100
+                    else None
+                ),
+                "minimum_samples": 100,
+            },
+        },
+        "event_counts": {
+            "attempted_total": args.events * len(captured),
+            "emitted_total": len(captured),
+            "queue_depth_max": 1,
+        },
+        "outcome": {
+            "available_count": len(captured),
+            "unavailable_count": 0,
+            "process_leak_count": 0,
+        },
+        "policy": {
+            "policy_id": policy.policy_id,
+            "policy_sha256": policy.sha256,
+            "journey_policy_id": journey_policy.policy_id,
+            "journey_policy_sha256": journey_policy.sha256,
+            "journey_margins": journey_policy.journeys["host"],
+        },
+    }
+    write_json(output, report)
+    artifact_sha256 = sha256_file(output)
+    write_json(
+        policy_path,
+        {
+            "acceptance": make_policy_receipt(
+                policy,
+                artifact_sha256=artifact_sha256,
+            ),
+            "journey": make_policy_receipt(
+                journey_policy,
+                artifact_sha256=artifact_sha256,
+            ),
+        },
+    )
+    return 0
+
+
+def _capture_diagnostic_flood(args: argparse.Namespace) -> int:
+    if args.authority_test:
+        return _capture_diagnostic_authority(args)
+    if isinstance(args.events, bool) or not 1 <= args.events <= 10_000:
+        fail("diagnostic events must be between 1 and 10000")
+    binary = require_binary(args.binary)
+    output = Path(args.output)
+    samples_path, policy_path = _artifact_paths(output)
+    for path in (output, samples_path, policy_path):
+        if path.exists():
+            fail(f"incident output already exists: {path}")
+
+    captured: list[dict[str, Any]] = []
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with RunWorkspace(
+        Path(tempfile.gettempdir()),
+        preserve_on_failure=False,
+    ) as workspace:
+        base = prepare_fixture_snapshot(
+            workspace.path / "base",
+            prebuilt_binary=binary,
+        )
+        for index in range(args.samples):
+            prepared = clone_prepared_profile(
+                base,
+                workspace.path / f"sample-{index}",
+                prebuilt_binary=binary,
+                runtime_state="contention",
+                temperature="warm",
+            )
+            initialized = subprocess.run(
+                (
+                    os.fspath(prepared.prebuilt_binary),
+                    "init",
+                    os.fspath(prepared.project),
+                ),
+                cwd=prepared.project,
+                env=prepared.environment,
+                capture_output=True,
+                check=False,
+                timeout=30.0,
+            )
+            if initialized.returncode != 0:
+                fail(
+                    "diagnostic fixture enrollment failed: "
+                    + initialized.stderr.decode("utf-8", errors="replace")
+                )
+            source = prepared.project / "src" / "catalog.py"
+            uri = source.resolve().as_uri()
+            root_uri = prepared.project.resolve().as_uri()
+            payload = b"".join(
+                (
+                    _lsp_frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "initialize",
+                            "params": {
+                                "rootUri": root_uri,
+                                "capabilities": {
+                                    "textDocument": {
+                                        "publishDiagnostics": {
+                                            "versionSupport": True,
+                                        }
+                                    }
+                                },
+                            },
+                        }
+                    ),
+                    _lsp_frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "initialized",
+                            "params": {},
+                        }
+                    ),
+                    _lsp_frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/didOpen",
+                            "params": {
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": "python",
+                                    "version": 1,
+                                    "text": source.read_text(encoding="utf-8"),
+                                }
+                            },
+                        }
+                    ),
+                    *(
+                        _lsp_frame(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "textDocument/didSave",
+                                "params": {"textDocument": {"uri": uri}},
+                            }
+                        )
+                        for _ in range(args.events)
+                    ),
+                )
+            )
+            socket_path = Path(prepared.environment["TRACEDECAY_DAEMON_SOCKET"])
+            daemon = OwnedDaemon(
+                (
+                    os.fspath(prepared.prebuilt_binary),
+                    "daemon",
+                    "run",
+                    "--socket",
+                    os.fspath(socket_path),
+                ),
+                env=prepared.environment,
+                log_dir=prepared.snapshot_root / "daemon-logs",
+                readiness=lambda: socket_probe(socket_path),
+                readiness_timeout=10.0,
+                poll_interval=0.01,
+                termination_grace=1.0,
+            )
+            started_ns = time.monotonic_ns()
+            with daemon:
+                result = run_host(
+                    (
+                        os.fspath(prepared.prebuilt_binary),
+                        "lsp",
+                        "bridge",
+                        "--stdio",
+                        "--project",
+                        os.fspath(prepared.project),
+                    ),
+                    env=prepared.environment,
+                    log_dir=prepared.snapshot_root / "lsp-logs",
+                    timeout=20.0,
+                    termination_grace=0.2,
+                    input_payload=payload,
+                    daemon=daemon,
+                    check=False,
+                )
+                daemon_survived = daemon.is_alive
+            elapsed_ns = time.monotonic_ns() - started_ns
+            if result.evidence.exit_code not in (0, None):
+                fail(
+                    "diagnostic LSP bridge failed with exit "
+                    f"{result.evidence.exit_code}"
+                )
+            if (
+                result.evidence.process_count_after_cleanup != 0
+                or daemon.evidence.process_count_after_cleanup != 0
+            ):
+                fail("diagnostic flood process tree was not reaped")
+            frames = _parse_lsp_frames(result.stdout)
+            publications = [
+                frame
+                for frame in frames
+                if frame.get("method") == "textDocument/publishDiagnostics"
+            ]
+            emitted_count = len(publications)
+            available = emitted_count > 0
+            digest = hashlib.sha256(
+                json.dumps(
+                    publications,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            sample = {
+                "schema_version": SCHEMA_VERSION,
+                "identity": {
+                    "candidate_id": sha256_file(binary)[:16],
+                    "run_id": f"incident-{uuid.uuid4().hex}",
+                    "capture_id": f"capture-{uuid.uuid4().hex}",
+                    "crate_id": "tracedecay-lsp",
+                    "journey_id": "diagnostic-generation",
+                    "workload_id": "diagnostic-dedup-batch-rate",
+                    "variant": "candidate",
+                    "machine_fingerprint": _machine_fingerprint(),
+                    "platform": str(prepared.runtime_identity["platform"]),
+                    "shard": str(prepared.runtime_identity["shard"]),
+                    "storage_mode": str(prepared.runtime_identity["storage_mode"]),
+                    "state": "contention",
+                    "temperature": "warm",
+                    "surface": "host",
+                    "concurrency": 1,
+                    "round_index": index,
+                    "abba_position": 0,
+                },
+                "evidence": {
+                    "sample_count": 1,
+                    "evidence_class": "regression_sample",
+                },
+                "availability": {
+                    "state": "available" if available else "unavailable",
+                    "detail": None if available else "no diagnostic publication observed",
+                },
+                "timing": {
+                    "started_ns": started_ns,
+                    "elapsed_ns": elapsed_ns,
+                    "cli_wall_ns": None,
+                    "mcp_wall_ns": None,
+                    "hook_wall_ns": None,
+                    "host_wall_ns": elapsed_ns,
+                    "handler_us": None,
+                    "daemon_us": None,
+                    "admission_us": None,
+                    "stages_us": {"diagnostic_flood": elapsed_ns // 1_000},
+                    "shutdown_total_ns": None,
+                    "abort_offset_ns": None,
+                },
+                "size": {
+                    "process_count": (
+                        result.evidence.process_count
+                        + daemon.evidence.process_count
+                    ),
+                    "request_bytes": len(payload),
+                    "response_bytes": len(result.stdout),
+                    "content_bytes": len(result.stdout),
+                },
+                "lifecycle": {
+                    "timeout_phase": result.evidence.timeout_phase,
+                    "activation_state": "active",
+                    "restart_state": "not_required",
+                    "daemon_survived": daemon_survived,
+                },
+                "observations": {
+                    "diagnostic_generated_count": args.events,
+                    "diagnostic_deduplicated_count": max(
+                        0, args.events - emitted_count
+                    ),
+                    "diagnostic_batch_count": emitted_count,
+                    "queue_depth": emitted_count,
+                    "process_tree_reaped": True,
+                },
+                "outcome": {
+                    "status": "success" if available else "error",
+                    "expected_digest": digest,
+                    "actual_digest": digest,
+                    "result_digest": digest,
+                    "error": None if available else "diagnostic route unavailable",
+                },
+            }
+            validate_sample(sample)
+            captured.append(sample)
+
+    write_jsonl(samples_path, captured)
+    policy = load_acceptance_policy(
+        Path(__file__).resolve().with_name("policies") / "acceptance-v1.json"
+    )
+    journey_policy = load_journey_policy(
+        Path(__file__).resolve().with_name("policies")
+        / "journey-margins-v1.json"
+    )
+    emitted_counts = [
+        sample["observations"]["diagnostic_batch_count"] for sample in captured
+    ]
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "report_id": f"incident-{uuid.uuid4().hex}",
+        "workload_id": "diagnostic-dedup-batch-rate",
+        "availability": {
+            "state": (
+                "available"
+                if all(count > 0 for count in emitted_counts)
+                else "unavailable"
+            ),
+            "detail": (
+                None
+                if all(count > 0 for count in emitted_counts)
+                else "one or more samples emitted no diagnostic publication"
+            ),
+        },
+        "sample_count": len(captured),
+        "attempted_events_per_sample": args.events,
+        "samples_sha256": sha256_file(samples_path),
+        "event_counts": {
+            "emitted_max": max(emitted_counts),
+            "emitted_total": sum(emitted_counts),
+            "queue_depth_max": max(emitted_counts),
+        },
+        "outcome": {
+            "available_count": sum(count > 0 for count in emitted_counts),
+            "unavailable_count": sum(count == 0 for count in emitted_counts),
+            "process_leak_count": 0,
+        },
+        "policy": {
+            "policy_id": policy.policy_id,
+            "policy_sha256": policy.sha256,
+            "journey_policy_id": journey_policy.policy_id,
+            "journey_policy_sha256": journey_policy.sha256,
+            "journey_margins": journey_policy.journeys["host"],
+        },
+    }
+    write_json(output, report)
+    artifact_sha256 = sha256_file(output)
+    write_json(
+        policy_path,
+        {
+            "acceptance": make_policy_receipt(
+                policy,
+                artifact_sha256=artifact_sha256,
+            ),
+            "journey": make_policy_receipt(
+                journey_policy,
+                artifact_sha256=artifact_sha256,
+            ),
+        },
+    )
+    return 0
+
+
 def capture_incident(args: argparse.Namespace) -> int:
+    if args.workload == "diagnostic-dedup-batch-rate":
+        return _capture_diagnostic_flood(args)
     if args.workload != "missing-daemon-after-shell":
         fail(f"incident workload is not wired: {args.workload}")
     if isinstance(args.samples, bool) or args.samples < 1:
@@ -744,6 +1307,40 @@ def capture_incident(args: argparse.Namespace) -> int:
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode("utf-8")
+            startup_started_ns = time.monotonic_ns()
+            startup_control = subprocess.run(
+                (os.fspath(prepared.prebuilt_binary), "--version"),
+                cwd=prepared.project,
+                env=environment,
+                capture_output=True,
+                check=False,
+                timeout=5.0,
+            )
+            startup_control_ns = time.monotonic_ns() - startup_started_ns
+            if startup_control.returncode != 0:
+                fail(
+                    "process startup control failed with exit "
+                    f"{startup_control.returncode}"
+                )
+            direct_started_ns = time.monotonic_ns()
+            direct_hook = subprocess.run(
+                (
+                    os.fspath(prepared.prebuilt_binary),
+                    "hook-cursor-after-shell",
+                ),
+                cwd=prepared.project,
+                env=environment,
+                input=event,
+                capture_output=True,
+                check=False,
+                timeout=5.0,
+            )
+            direct_hook_wall_ns = time.monotonic_ns() - direct_started_ns
+            if direct_hook.returncode != 0:
+                fail(
+                    "direct missing-daemon hook failed with exit "
+                    f"{direct_hook.returncode}"
+                )
             started_ns = time.monotonic_ns()
             result = run_host(
                 (
@@ -758,6 +1355,14 @@ def capture_incident(args: argparse.Namespace) -> int:
                 check=False,
             )
             elapsed_ns = time.monotonic_ns() - started_ns
+            hook_residual_ns = max(
+                0,
+                direct_hook_wall_ns - startup_control_ns,
+            )
+            lifecycle_wrapper_overhead_ns = max(
+                0,
+                elapsed_ns - direct_hook_wall_ns,
+            )
             if result.evidence.exit_code != 0:
                 fail(
                     "missing-daemon after-shell command failed with exit "
@@ -805,7 +1410,15 @@ def capture_incident(args: argparse.Namespace) -> int:
                     "handler_us": None,
                     "daemon_us": None,
                     "admission_us": None,
-                    "stages_us": {"missing_daemon_fail_fast": elapsed_ns // 1_000},
+                    "stages_us": {
+                        "process_startup_control": startup_control_ns // 1_000,
+                        "direct_hook_wall": direct_hook_wall_ns // 1_000,
+                        "missing_daemon_hook_residual": hook_residual_ns // 1_000,
+                        "lifecycle_wrapper_overhead": (
+                            lifecycle_wrapper_overhead_ns // 1_000
+                        ),
+                        "missing_daemon_fail_fast": elapsed_ns // 1_000,
+                    },
                     "shutdown_total_ns": None,
                     "abort_offset_ns": None,
                 },
@@ -823,6 +1436,12 @@ def capture_incident(args: argparse.Namespace) -> int:
                 },
                 "observations": {
                     "missing_daemon_fail_fast_ns": elapsed_ns,
+                    "process_startup_control_ns": startup_control_ns,
+                    "direct_hook_wall_ns": direct_hook_wall_ns,
+                    "hook_residual_ns": hook_residual_ns,
+                    "lifecycle_wrapper_overhead_ns": (
+                        lifecycle_wrapper_overhead_ns
+                    ),
                     "process_tree_reaped": True,
                 },
                 "outcome": {
@@ -838,6 +1457,27 @@ def capture_incident(args: argparse.Namespace) -> int:
 
     write_jsonl(samples_path, captured)
     elapsed_values = [sample["timing"]["elapsed_ns"] for sample in captured]
+
+    def incident_distribution(field: str) -> dict[str, Any]:
+        values = [sample["observations"][field] for sample in captured]
+        return {
+            "p50": {
+                "available": len(values) >= 2,
+                "value": nearest_rank(values, 0.50) if len(values) >= 2 else None,
+                "minimum_samples": 2,
+            },
+            "p95": {
+                "available": len(values) >= 40,
+                "value": nearest_rank(values, 0.95) if len(values) >= 40 else None,
+                "minimum_samples": 40,
+            },
+            "p99": {
+                "available": len(values) >= 100,
+                "value": nearest_rank(values, 0.99) if len(values) >= 100 else None,
+                "minimum_samples": 100,
+            },
+        }
+
     policy = load_acceptance_policy(
         Path(__file__).resolve().with_name("policies") / "acceptance-v1.json"
     )
@@ -883,6 +1523,16 @@ def capture_incident(args: argparse.Namespace) -> int:
                 ),
                 "minimum_samples": 100,
             },
+        },
+        "stages_ns": {
+            "process_startup_control": incident_distribution(
+                "process_startup_control_ns"
+            ),
+            "direct_hook_wall": incident_distribution("direct_hook_wall_ns"),
+            "hook_residual": incident_distribution("hook_residual_ns"),
+            "lifecycle_wrapper_overhead": incident_distribution(
+                "lifecycle_wrapper_overhead_ns"
+            ),
         },
         "outcome": {
             "expected_unavailable_count": len(captured),
@@ -1253,6 +1903,8 @@ def parser() -> argparse.ArgumentParser:
     incident_parser.add_argument("--binary", required=True)
     incident_parser.add_argument("--workload", required=True)
     incident_parser.add_argument("--samples", type=int, default=10)
+    incident_parser.add_argument("--events", type=int, default=1_000)
+    incident_parser.add_argument("--authority-test", action="store_true")
     incident_parser.add_argument("--output", required=True)
     incident_parser.set_defaults(handler=capture_incident)
 

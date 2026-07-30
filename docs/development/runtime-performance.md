@@ -1,9 +1,10 @@
 # Runtime performance harness
 
 The runtime harness measures TraceDecay through the same process boundaries that
-agent hosts use. It is a regression instrument, not an SLO gate. Every existing
-number is an `n=1` observation until repeated advisory baselines establish the
-variance on a comparable machine.
+agent hosts use. It is a regression instrument, not an SLO gate. Raw samples
+remain regression observations until a matching population reaches the
+declared percentile threshold; artifacts must keep ineligible percentiles
+unavailable.
 
 Its scope is the final V2 runtime: both per-crate lanes and integrated
 user-visible journeys. Scenario and artifact identities must not depend on
@@ -71,7 +72,20 @@ without reading real host data.
 - `incident --binary BIN --workload missing-daemon-after-shell --samples N
   --output REPORT` invokes the committed `hook-cursor-after-shell` product
   command against an intentionally absent disposable socket, retaining typed
-  unavailable samples and process-tree cleanup evidence.
+  unavailable samples and process-tree cleanup evidence. It also measures a
+  same-binary `--version` startup control, a direct product-command invocation,
+  and the process-owning lifecycle-wrapper invocation. It reports direct hook
+  wall time, the non-negative direct-minus-startup residual, and lifecycle
+  wrapper overhead separately. The residual reconciles process-launch cost but
+  is not claimed as authoritative internal handler timing.
+- `incident --binary BIN --workload diagnostic-dedup-batch-rate --events N
+  --samples N --output REPORT` starts one disposable owned daemon per sample,
+  floods the production `lsp bridge --stdio` route with bounded identical-save
+  events, and records observed diagnostic publications, deduplication, queue
+  depth, and complete process cleanup. `--authority-test` instead requires the
+  explicitly supplied prebuilt `diagnostic_publication_stress` test executable;
+  its committed authority fixes `--events` at 10,000 and proves one retained
+  publication under backpressure without claiming production-route latency.
 
 All output paths are explicit. Existing output must fail safely rather than be
 overwritten or receive another capture. Runner-generated capture identifiers
@@ -158,13 +172,15 @@ The final incident catalog additionally covers missing-daemon after-shell
 failure and descendant reaping, sustained edit/commit indexing coalescence,
 foreground work under maintenance, diagnostic deduplication/batching, daemon
 steady-state CPU/memory/WAL/I/O/queue/generation, and renderer-consumer event
-counts. The missing-daemon after-shell driver is available through the
-committed product command; the remaining entries stay `n=1`, unavailable, and
-non-gating until their production routes are mounted. The paired executable
-driver currently records the integrated CLI exact-query lane; MCP, dashboard,
-storage, maintenance, diagnostic-flood, and renderer-consumer entries remain
-truthfully unavailable until their real driver and authoritative evidence are
-observable.
+counts. The missing-daemon after-shell and diagnostic-flood drivers are
+available through committed product commands. Diagnostic-flood sends a bounded
+set of identical saves through `lsp bridge --stdio` and counts observed
+diagnostic publications after the flood. The remaining entries stay `n=1`,
+unavailable, and non-gating until their production routes are mounted. The
+paired executable driver currently records the integrated CLI exact-query
+lane; MCP, dashboard, storage, maintenance, and renderer-consumer entries
+remain truthfully unavailable until their real driver and authoritative
+evidence are observable.
 
 Correctness is part of every performance sample. Stable expected-result digests
 ignore explicitly volatile timing metadata while preserving each workload's

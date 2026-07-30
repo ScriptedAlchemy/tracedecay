@@ -45,7 +45,14 @@ class IncidentWorkloadCatalogTest(unittest.TestCase):
         self.assertEqual(workload.process_policy, "crash")
         self.assertEqual(
             set(workload.required_observations),
-            {"missing_daemon_fail_fast_ns", "process_tree_reaped"},
+            {
+                "missing_daemon_fail_fast_ns",
+                "process_startup_control_ns",
+                "direct_hook_wall_ns",
+                "hook_residual_ns",
+                "lifecycle_wrapper_overhead_ns",
+                "process_tree_reaped",
+            },
         )
 
     def test_metric_workloads_require_reviewed_raw_observations(self) -> None:
@@ -113,11 +120,16 @@ class IncidentWorkloadCatalogTest(unittest.TestCase):
             for item in document["workloads"]
         }
         self.assertEqual(availability["missing-daemon-after-shell"], "available")
+        self.assertEqual(availability["diagnostic-dedup-batch-rate"], "available")
         self.assertTrue(
             all(
                 state == "unavailable"
                 for workload, state in availability.items()
-                if workload != "missing-daemon-after-shell"
+                if workload
+                not in {
+                    "missing-daemon-after-shell",
+                    "diagnostic-dedup-batch-rate",
+                }
             )
         )
         self.assertTrue(

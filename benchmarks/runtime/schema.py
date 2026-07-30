@@ -467,7 +467,7 @@ def validate_sample(document: Any) -> Document:
     timeout_phase = _optional_string(
         lifecycle["timeout_phase"], "sample.lifecycle.timeout_phase"
     )
-    _enum(
+    activation_state = _enum(
         lifecycle["activation_state"],
         "sample.lifecycle.activation_state",
         ACTIVATION_STATES,
@@ -515,7 +515,7 @@ def validate_sample(document: Any) -> Document:
             raise SchemaValidationError(
                 f"availability state {availability_state!r} cannot have a successful outcome"
             )
-        if not daemon_survived:
+        if activation_state != "not_applicable" and not daemon_survived:
             raise SchemaValidationError(
                 "sample.lifecycle.daemon_survived must be true for a successful outcome"
             )
