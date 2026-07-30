@@ -316,34 +316,30 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect("invoke" in client).toBe(false);
   });
 
-  it("publishes unmounted core Work routes as typed unavailable", () => {
-    const available = OPERATIONS as readonly {
-      readonly operation: string;
-    }[];
-    expect(OPERATIONS.length + UNAVAILABLE_OPERATIONS.length).toBe(17);
-    expect(
-      available.some((availableOperation) =>
-        UNAVAILABLE_OPERATIONS.some(
-          (unavailable) =>
-            unavailable.operation === availableOperation.operation,
-        ),
-      ),
-    ).toBe(false);
-    expect(
-      UNAVAILABLE_OPERATIONS.map((operation) => operation.operation),
-    ).toContain("work_snapshot");
-    expect(
-      UNAVAILABLE_OPERATIONS.find(
-        (operation) => operation.operation === "work_snapshot",
-      )?.disposition,
-    ).toBe("route_unavailable");
+  it("publishes all mounted Work routes as executable operations", () => {
+    const available = OPERATIONS.map((operation) => operation.operation);
+    expect(OPERATIONS).toHaveLength(17);
+    expect(UNAVAILABLE_OPERATIONS).toHaveLength(0);
+    expect(available).toEqual(
+      expect.arrayContaining([
+        "work_snapshot",
+        "work_delta",
+        "work_create",
+        "work_replan_dependencies",
+        "work_review_proposal",
+        "work_accept_proposal",
+        "work_admit_execution",
+        "work_attach_runtime_evidence",
+        "work_accept_task",
+      ]),
+    );
     expect(
       "work_snapshot" in createClient({
         baseUrl: "http://127.0.0.1:43123",
         projectId: "project.sdk",
         token: "sdk-secret",
       }).operations,
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
