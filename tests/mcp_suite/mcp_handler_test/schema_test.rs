@@ -500,7 +500,7 @@ fn message_search_provider_schema_matches_ingested_providers() {
 
     assert_eq!(
         message_search.input_schema["properties"]["provider"]["enum"],
-        serde_json::json!(tracedecay::sessions::providers::MESSAGE_SEARCH_PROVIDER_IDS)
+        serde_json::json!(tracedecay_sessions::MESSAGE_SEARCH_PROVIDER_IDS)
     );
     assert!(
         !message_search

@@ -230,7 +230,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "type": "string",
                     "default": "all",
                     "description": "Optional explicit result scope. Omit or use 'all' for unified cross-provider recall. A scoped freshness precondition applies only to that provider, but this read never catches it up. Use 'hermes' for Hermes agent conversation history already present in the authorized profile store.",
-                    "enum": crate::sessions::providers::MESSAGE_SEARCH_PROVIDER_IDS
+                    "enum": tracedecay_sessions::MESSAGE_SEARCH_PROVIDER_IDS
                 },
                 "project_key": {
                     "type": "string",
