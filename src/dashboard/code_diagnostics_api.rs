@@ -11,10 +11,10 @@ use super::util::{JsonError, http_detail};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
-use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::broker::DiagnosticsSnapshot;
-use crate::diagnostics::lsp::settings::IdleBackfillMode;
 use tracedecay_domain::ManifestDigest;
+use tracedecay_lsp::analyzer::adapters::LspAdapterDefinition;
+use tracedecay_lsp::analyzer::broker::DiagnosticsSnapshot;
+use tracedecay_lsp::analyzer::settings::IdleBackfillMode;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -186,8 +186,8 @@ mod tests {
     use super::*;
     use crate::application::dashboard_diagnostics::diagnostic_broker;
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
-    use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
     use tracedecay_domain::ProjectId;
+    use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
 
     async fn state_for_test() -> (
         tempfile::TempDir,

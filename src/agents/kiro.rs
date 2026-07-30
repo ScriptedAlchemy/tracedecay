@@ -373,7 +373,7 @@ fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
 /// the LSP client's encoder, which additionally handles Windows drive paths and
 /// UNC (`//server/share`) prefixes; POSIX paths encode identically to before.
 fn file_resource_uri(path: &Path) -> String {
-    crate::diagnostics::lsp::client::file_uri_from_path_text(&path.to_string_lossy())
+    tracedecay_lsp::analyzer::client::file_uri_from_path_text(&path.to_string_lossy())
 }
 
 fn managed_agent_config(

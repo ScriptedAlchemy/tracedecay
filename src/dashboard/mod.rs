@@ -435,7 +435,7 @@ async fn build_state_inner(
     code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
     feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     code_diagnostics_broker: Option<
-        Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+        Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
     application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
 ) -> Result<DashboardState> {
@@ -540,7 +540,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
     code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
     feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     code_diagnostics_broker: Option<
-        Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+        Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
     application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
 ) -> Result<DashboardState> {
@@ -1683,7 +1683,7 @@ mod authority_tests {
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
             crate::application::dashboard_diagnostics::diagnostic_broker(
                 cg.project_root().to_path_buf(),
-                crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+                tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings::default(),
             ),
         ));
 
