@@ -80,6 +80,7 @@ ServerOperationName: TypeAlias = Literal[
     "work_attach_runtime_evidence",
     "work_attempt_acquire_lease",
     "work_attempt_cancel",
+    "work_attempt_finish",
     "work_attempt_publish_artifact",
     "work_attempt_publish_progress",
     "work_attempt_recover",
@@ -164,6 +165,7 @@ SERVER_OPERATIONS: Final[dict[ServerOperationName, str]] = {
     "work_attach_runtime_evidence": "/application/work/attach-runtime-evidence",
     "work_attempt_acquire_lease": "/application/work/attempt/acquire-lease",
     "work_attempt_cancel": "/application/work/attempt/cancel",
+    "work_attempt_finish": "/application/work/attempt/finish",
     "work_attempt_publish_artifact": "/application/work/attempt/publish-artifact",
     "work_attempt_publish_progress": "/application/work/attempt/publish-progress",
     "work_attempt_recover": "/application/work/attempt/recover",
@@ -681,6 +683,123 @@ class OperationWorkAttemptCancelResultWorkAttemptV1(TypedDict):
 
 class OperationWorkAttemptCancelResult(TypedDict):
     attempt: OperationWorkAttemptCancelResultWorkAttemptV1
+
+class OperationWorkAttemptFinishRequestWorkAttemptIdentityV1(TypedDict):
+    attempt_id: str
+    run_id: str
+    task_id: str
+
+class OperationWorkAttemptFinishRequestWorkLeaseFenceV1(TypedDict):
+    epoch: int
+    lease_id: str
+
+class OperationWorkAttemptFinishRequest(TypedDict):
+    identity: OperationWorkAttemptFinishRequestWorkAttemptIdentityV1
+    lease: OperationWorkAttemptFinishRequestWorkLeaseFenceV1
+    observed_at: int
+
+class OperationWorkAttemptFinishResultWorkProviderRouteV1(TypedDict):
+    provider_id: str
+    route_id: str
+
+class OperationWorkAttemptFinishResultWorkArtifactRefV1(TypedDict):
+    artifact_id: str
+    byte_length: int
+    digest: str
+
+class OperationWorkAttemptFinishResultWorkCancellationStateV1Variant0(TypedDict):
+    state: Literal["none"]
+
+class OperationWorkAttemptFinishResultWorkCancellationRequestV1(TypedDict):
+    request_id: str
+    requested_at: int
+
+class OperationWorkAttemptFinishResultWorkCancellationStateV1Variant1(TypedDict):
+    state: Literal["requested"]
+    value: OperationWorkAttemptFinishResultWorkCancellationRequestV1
+
+class OperationWorkAttemptFinishResultWorkCancellationAcknowledgementV1(TypedDict):
+    acknowledged_at: int
+    request: OperationWorkAttemptFinishResultWorkCancellationRequestV1
+
+class OperationWorkAttemptFinishResultWorkCancellationStateV1Variant2(TypedDict):
+    state: Literal["acknowledged"]
+    value: OperationWorkAttemptFinishResultWorkCancellationAcknowledgementV1
+
+class OperationWorkAttemptFinishResultWorkCancellationEscalationV1(TypedDict):
+    acknowledgement: OperationWorkAttemptFinishResultWorkCancellationAcknowledgementV1
+    escalated_at: int
+
+class OperationWorkAttemptFinishResultWorkCancellationStateV1Variant3(TypedDict):
+    state: Literal["escalated"]
+    value: OperationWorkAttemptFinishResultWorkCancellationEscalationV1
+
+class OperationWorkAttemptFinishResultWorkAttemptIdentityV1(TypedDict):
+    attempt_id: str
+    run_id: str
+    task_id: str
+
+class OperationWorkAttemptFinishResultWorkLeaseFenceV1(TypedDict):
+    epoch: int
+    lease_id: str
+
+class OperationWorkAttemptFinishResultWorkAttemptProgressV1(TypedDict):
+    completed: int
+    total: int
+
+class OperationWorkAttemptFinishResultWorkAttemptProjectionBindingV1(TypedDict):
+    generation_id: str
+    sequence: int
+    work_version: int
+
+class OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant0(TypedDict):
+    state: Literal["fresh"]
+
+class OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant1(TypedDict):
+    checkpoint: NotRequired[OperationWorkAttemptFinishResultWorkArtifactRefV1 | None]
+    source_attempt_id: str
+    state: Literal["resumed"]
+
+class OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant2(TypedDict):
+    reason: Literal["lease_lost", "provider_unavailable", "process_lost", "checkpoint_rejected"]
+    source_attempt_id: str
+    state: Literal["restarted"]
+
+class OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant3(TypedDict):
+    reason: Literal["lease_lost", "provider_unavailable", "process_lost", "checkpoint_rejected"]
+    source_attempt_id: NotRequired[str | None]
+    state: Literal["recovery_required"]
+
+class OperationWorkAttemptFinishResultWorkTerminalEvidenceV1Variant0(TypedDict):
+    evidence_digest: str
+    observed_at: int
+    outcome: Literal["succeeded"]
+
+class OperationWorkAttemptFinishResultWorkTerminalEvidenceV1Variant1(TypedDict):
+    evidence_digest: str
+    observed_at: int
+    outcome: Literal["failed"]
+
+class OperationWorkAttemptFinishResultWorkTerminalEvidenceV1Variant2(TypedDict):
+    evidence_digest: str
+    observed_at: int
+    outcome: Literal["cancelled"]
+
+class OperationWorkAttemptFinishResultWorkAttemptV1(TypedDict):
+    actual_route: NotRequired[OperationWorkAttemptFinishResultWorkProviderRouteV1 | None]
+    artifacts: list[OperationWorkAttemptFinishResultWorkArtifactRefV1]
+    cancellation: OperationWorkAttemptFinishResultWorkCancellationStateV1Variant0 | OperationWorkAttemptFinishResultWorkCancellationStateV1Variant1 | OperationWorkAttemptFinishResultWorkCancellationStateV1Variant2 | OperationWorkAttemptFinishResultWorkCancellationStateV1Variant3
+    identity: OperationWorkAttemptFinishResultWorkAttemptIdentityV1
+    lease: OperationWorkAttemptFinishResultWorkLeaseFenceV1
+    progress: NotRequired[OperationWorkAttemptFinishResultWorkAttemptProgressV1 | None]
+    projection_binding: OperationWorkAttemptFinishResultWorkAttemptProjectionBindingV1
+    recovery: OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant0 | OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant1 | OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant2 | OperationWorkAttemptFinishResultWorkRecoveryStateV1Variant3
+    requested_route: OperationWorkAttemptFinishResultWorkProviderRouteV1
+    state: Literal["leased", "running", "cancellation_requested", "cancellation_acknowledged", "cancellation_escalated", "recovery_required", "succeeded", "failed", "cancelled"]
+    terminal: NotRequired[OperationWorkAttemptFinishResultWorkTerminalEvidenceV1Variant0 | OperationWorkAttemptFinishResultWorkTerminalEvidenceV1Variant1 | OperationWorkAttemptFinishResultWorkTerminalEvidenceV1Variant2 | None]
+
+class OperationWorkAttemptFinishResult(TypedDict):
+    attempt: OperationWorkAttemptFinishResultWorkAttemptV1
 
 class OperationWorkAttemptPublishArtifactRequestWorkArtifactRefV1(TypedDict):
     artifact_id: str
@@ -1750,6 +1869,16 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
         result_schema={"$defs": {"AttemptId": {"description": "Strongly typed canonical identity: `AttemptId`.", "type": "string"}, "ManifestDigest": {"description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.", "type": "string"}, "ProjectionGenerationId": {"description": "Strongly typed canonical identity: `ProjectionGenerationId`.", "type": "string"}, "ProviderId": {"description": "Strongly typed canonical identity: `ProviderId`.", "type": "string"}, "RunId": {"description": "Strongly typed canonical identity: `RunId`.", "type": "string"}, "TaskId": {"description": "Strongly typed canonical identity: `TaskId`.", "type": "string"}, "UtcMicros": {"description": "UTC timestamp represented as microseconds from the Unix epoch.", "format": "int64", "type": "integer"}, "WorkArtifactId": {"description": "Strongly typed canonical identity: `WorkArtifactId`.", "type": "string"}, "WorkArtifactRefV1": {"additionalProperties": False, "properties": {"artifact_id": {"$ref": "#/$defs/WorkArtifactId"}, "byte_length": {"format": "uint64", "minimum": 0, "type": "integer"}, "digest": {"$ref": "#/$defs/ManifestDigest"}}, "required": ["artifact_id", "digest", "byte_length"], "type": "object"}, "WorkAttemptIdentityV1": {"additionalProperties": False, "properties": {"attempt_id": {"$ref": "#/$defs/AttemptId"}, "run_id": {"$ref": "#/$defs/RunId"}, "task_id": {"$ref": "#/$defs/TaskId"}}, "required": ["task_id", "run_id", "attempt_id"], "type": "object"}, "WorkAttemptProgressV1": {"additionalProperties": False, "properties": {"completed": {"format": "uint64", "minimum": 0, "type": "integer"}, "total": {"format": "uint64", "minimum": 0, "type": "integer"}}, "required": ["completed", "total"], "type": "object"}, "WorkAttemptProjectionBindingV1": {"additionalProperties": False, "properties": {"generation_id": {"$ref": "#/$defs/ProjectionGenerationId"}, "sequence": {"$ref": "#/$defs/WorkProjectionSequenceV1"}, "work_version": {"format": "uint64", "minimum": 0, "type": "integer"}}, "required": ["generation_id", "sequence", "work_version"], "type": "object"}, "WorkAttemptStateV1": {"enum": ["leased", "running", "cancellation_requested", "cancellation_acknowledged", "cancellation_escalated", "recovery_required", "succeeded", "failed", "cancelled"], "type": "string"}, "WorkAttemptV1": {"properties": {"actual_route": {"anyOf": [{"$ref": "#/$defs/WorkProviderRouteV1"}, {"type": "null"}]}, "artifacts": {"items": {"$ref": "#/$defs/WorkArtifactRefV1"}, "type": "array"}, "cancellation": {"$ref": "#/$defs/WorkCancellationStateV1"}, "identity": {"$ref": "#/$defs/WorkAttemptIdentityV1"}, "lease": {"$ref": "#/$defs/WorkLeaseFenceV1"}, "progress": {"anyOf": [{"$ref": "#/$defs/WorkAttemptProgressV1"}, {"type": "null"}]}, "projection_binding": {"$ref": "#/$defs/WorkAttemptProjectionBindingV1"}, "recovery": {"$ref": "#/$defs/WorkRecoveryStateV1"}, "requested_route": {"$ref": "#/$defs/WorkProviderRouteV1"}, "state": {"$ref": "#/$defs/WorkAttemptStateV1"}, "terminal": {"anyOf": [{"$ref": "#/$defs/WorkTerminalEvidenceV1"}, {"type": "null"}]}}, "required": ["identity", "projection_binding", "lease", "state", "artifacts", "cancellation", "recovery", "requested_route"], "type": "object"}, "WorkCancellationAcknowledgementV1": {"additionalProperties": False, "properties": {"acknowledged_at": {"$ref": "#/$defs/UtcMicros"}, "request": {"$ref": "#/$defs/WorkCancellationRequestV1"}}, "required": ["request", "acknowledged_at"], "type": "object"}, "WorkCancellationEscalationV1": {"additionalProperties": False, "properties": {"acknowledgement": {"$ref": "#/$defs/WorkCancellationAcknowledgementV1"}, "escalated_at": {"$ref": "#/$defs/UtcMicros"}}, "required": ["acknowledgement", "escalated_at"], "type": "object"}, "WorkCancellationRequestId": {"description": "Strongly typed canonical identity: `WorkCancellationRequestId`.", "type": "string"}, "WorkCancellationRequestV1": {"additionalProperties": False, "properties": {"request_id": {"$ref": "#/$defs/WorkCancellationRequestId"}, "requested_at": {"$ref": "#/$defs/UtcMicros"}}, "required": ["request_id", "requested_at"], "type": "object"}, "WorkCancellationStateV1": {"oneOf": [{"properties": {"state": {"const": "none", "type": "string"}}, "required": ["state"], "type": "object"}, {"properties": {"state": {"const": "requested", "type": "string"}, "value": {"$ref": "#/$defs/WorkCancellationRequestV1"}}, "required": ["state", "value"], "type": "object"}, {"properties": {"state": {"const": "acknowledged", "type": "string"}, "value": {"$ref": "#/$defs/WorkCancellationAcknowledgementV1"}}, "required": ["state", "value"], "type": "object"}, {"properties": {"state": {"const": "escalated", "type": "string"}, "value": {"$ref": "#/$defs/WorkCancellationEscalationV1"}}, "required": ["state", "value"], "type": "object"}]}, "WorkFenceEpochV1": {"format": "uint64", "minimum": 0, "title": "WorkFenceEpochV1", "type": "integer"}, "WorkLeaseFenceV1": {"additionalProperties": False, "properties": {"epoch": {"$ref": "#/$defs/WorkFenceEpochV1"}, "lease_id": {"$ref": "#/$defs/WorkLeaseId"}}, "required": ["lease_id", "epoch"], "type": "object"}, "WorkLeaseId": {"description": "Strongly typed canonical identity: `WorkLeaseId`.", "type": "string"}, "WorkProjectionSequenceV1": {"format": "uint64", "minimum": 0, "title": "WorkProjectionSequenceV1", "type": "integer"}, "WorkProviderRouteId": {"description": "Strongly typed canonical identity: `WorkProviderRouteId`.", "type": "string"}, "WorkProviderRouteV1": {"additionalProperties": False, "properties": {"provider_id": {"$ref": "#/$defs/ProviderId"}, "route_id": {"$ref": "#/$defs/WorkProviderRouteId"}}, "required": ["provider_id", "route_id"], "type": "object"}, "WorkRecoveryStateV1": {"oneOf": [{"properties": {"state": {"const": "fresh", "type": "string"}}, "required": ["state"], "type": "object"}, {"properties": {"checkpoint": {"anyOf": [{"$ref": "#/$defs/WorkArtifactRefV1"}, {"type": "null"}]}, "source_attempt_id": {"$ref": "#/$defs/AttemptId"}, "state": {"const": "resumed", "type": "string"}}, "required": ["state", "source_attempt_id"], "type": "object"}, {"properties": {"reason": {"$ref": "#/$defs/WorkRestartReasonV1"}, "source_attempt_id": {"$ref": "#/$defs/AttemptId"}, "state": {"const": "restarted", "type": "string"}}, "required": ["state", "source_attempt_id", "reason"], "type": "object"}, {"description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.", "properties": {"reason": {"$ref": "#/$defs/WorkRestartReasonV1"}, "source_attempt_id": {"anyOf": [{"$ref": "#/$defs/AttemptId"}, {"type": "null"}], "default": None}, "state": {"const": "recovery_required", "type": "string"}}, "required": ["state", "reason"], "type": "object"}]}, "WorkRestartReasonV1": {"enum": ["lease_lost", "provider_unavailable", "process_lost", "checkpoint_rejected"], "type": "string"}, "WorkTerminalEvidenceV1": {"oneOf": [{"properties": {"evidence_digest": {"$ref": "#/$defs/ManifestDigest"}, "observed_at": {"$ref": "#/$defs/UtcMicros"}, "outcome": {"const": "succeeded", "type": "string"}}, "required": ["outcome", "evidence_digest", "observed_at"], "type": "object"}, {"properties": {"evidence_digest": {"$ref": "#/$defs/ManifestDigest"}, "observed_at": {"$ref": "#/$defs/UtcMicros"}, "outcome": {"const": "failed", "type": "string"}}, "required": ["outcome", "evidence_digest", "observed_at"], "type": "object"}, {"properties": {"evidence_digest": {"$ref": "#/$defs/ManifestDigest"}, "observed_at": {"$ref": "#/$defs/UtcMicros"}, "outcome": {"const": "cancelled", "type": "string"}}, "required": ["outcome", "evidence_digest", "observed_at"], "type": "object"}]}}, "$schema": "https://json-schema.org/draft/2020-12/schema", "additionalProperties": False, "properties": {"attempt": {"$ref": "#/$defs/WorkAttemptV1"}}, "required": ["attempt"], "title": "WorkAttemptResponseV1", "type": "object"},
         ),
     ),
+    "work_attempt_finish": cast(
+        OperationDescriptor[object, object],
+        OperationDescriptor[OperationWorkAttemptFinishRequest, OperationWorkAttemptFinishResult](
+        operation="work_attempt_finish", operation_id="operation.work.attempt_finish", route="/application/work/attempt/finish",
+        binding_id="binding.http.work.attempt_finish", result_schema_id="schema.work.attempt_finish.result",
+        result_schema_revision=1,
+        request_schema={"$defs": {"AttemptId": {"description": "Strongly typed canonical identity: `AttemptId`.", "type": "string"}, "RunId": {"description": "Strongly typed canonical identity: `RunId`.", "type": "string"}, "TaskId": {"description": "Strongly typed canonical identity: `TaskId`.", "type": "string"}, "UtcMicros": {"description": "UTC timestamp represented as microseconds from the Unix epoch.", "format": "int64", "type": "integer"}, "WorkAttemptIdentityV1": {"additionalProperties": False, "properties": {"attempt_id": {"$ref": "#/$defs/AttemptId"}, "run_id": {"$ref": "#/$defs/RunId"}, "task_id": {"$ref": "#/$defs/TaskId"}}, "required": ["task_id", "run_id", "attempt_id"], "type": "object"}, "WorkFenceEpochV1": {"format": "uint64", "minimum": 0, "title": "WorkFenceEpochV1", "type": "integer"}, "WorkLeaseFenceV1": {"additionalProperties": False, "properties": {"epoch": {"$ref": "#/$defs/WorkFenceEpochV1"}, "lease_id": {"$ref": "#/$defs/WorkLeaseId"}}, "required": ["lease_id", "epoch"], "type": "object"}, "WorkLeaseId": {"description": "Strongly typed canonical identity: `WorkLeaseId`.", "type": "string"}}, "$schema": "https://json-schema.org/draft/2020-12/schema", "additionalProperties": False, "description": "Seals the outcome the provider itself reported.\n\nThis carries no terminal: the caller does not get to say how the attempt\nended, because the digest would then be whatever the caller invented rather\nthan a hash of the evidence the provider produced. The runtime claims the\nsettlement, seals its evidence as an artifact, and derives the terminal.", "properties": {"identity": {"$ref": "#/$defs/WorkAttemptIdentityV1"}, "lease": {"$ref": "#/$defs/WorkLeaseFenceV1"}, "observed_at": {"$ref": "#/$defs/UtcMicros"}}, "required": ["identity", "lease", "observed_at"], "title": "WorkAttemptFinishRequestV1", "type": "object"},
+        result_schema={"$defs": {"AttemptId": {"description": "Strongly typed canonical identity: `AttemptId`.", "type": "string"}, "ManifestDigest": {"description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.", "type": "string"}, "ProjectionGenerationId": {"description": "Strongly typed canonical identity: `ProjectionGenerationId`.", "type": "string"}, "ProviderId": {"description": "Strongly typed canonical identity: `ProviderId`.", "type": "string"}, "RunId": {"description": "Strongly typed canonical identity: `RunId`.", "type": "string"}, "TaskId": {"description": "Strongly typed canonical identity: `TaskId`.", "type": "string"}, "UtcMicros": {"description": "UTC timestamp represented as microseconds from the Unix epoch.", "format": "int64", "type": "integer"}, "WorkArtifactId": {"description": "Strongly typed canonical identity: `WorkArtifactId`.", "type": "string"}, "WorkArtifactRefV1": {"additionalProperties": False, "properties": {"artifact_id": {"$ref": "#/$defs/WorkArtifactId"}, "byte_length": {"format": "uint64", "minimum": 0, "type": "integer"}, "digest": {"$ref": "#/$defs/ManifestDigest"}}, "required": ["artifact_id", "digest", "byte_length"], "type": "object"}, "WorkAttemptIdentityV1": {"additionalProperties": False, "properties": {"attempt_id": {"$ref": "#/$defs/AttemptId"}, "run_id": {"$ref": "#/$defs/RunId"}, "task_id": {"$ref": "#/$defs/TaskId"}}, "required": ["task_id", "run_id", "attempt_id"], "type": "object"}, "WorkAttemptProgressV1": {"additionalProperties": False, "properties": {"completed": {"format": "uint64", "minimum": 0, "type": "integer"}, "total": {"format": "uint64", "minimum": 0, "type": "integer"}}, "required": ["completed", "total"], "type": "object"}, "WorkAttemptProjectionBindingV1": {"additionalProperties": False, "properties": {"generation_id": {"$ref": "#/$defs/ProjectionGenerationId"}, "sequence": {"$ref": "#/$defs/WorkProjectionSequenceV1"}, "work_version": {"format": "uint64", "minimum": 0, "type": "integer"}}, "required": ["generation_id", "sequence", "work_version"], "type": "object"}, "WorkAttemptStateV1": {"enum": ["leased", "running", "cancellation_requested", "cancellation_acknowledged", "cancellation_escalated", "recovery_required", "succeeded", "failed", "cancelled"], "type": "string"}, "WorkAttemptV1": {"properties": {"actual_route": {"anyOf": [{"$ref": "#/$defs/WorkProviderRouteV1"}, {"type": "null"}]}, "artifacts": {"items": {"$ref": "#/$defs/WorkArtifactRefV1"}, "type": "array"}, "cancellation": {"$ref": "#/$defs/WorkCancellationStateV1"}, "identity": {"$ref": "#/$defs/WorkAttemptIdentityV1"}, "lease": {"$ref": "#/$defs/WorkLeaseFenceV1"}, "progress": {"anyOf": [{"$ref": "#/$defs/WorkAttemptProgressV1"}, {"type": "null"}]}, "projection_binding": {"$ref": "#/$defs/WorkAttemptProjectionBindingV1"}, "recovery": {"$ref": "#/$defs/WorkRecoveryStateV1"}, "requested_route": {"$ref": "#/$defs/WorkProviderRouteV1"}, "state": {"$ref": "#/$defs/WorkAttemptStateV1"}, "terminal": {"anyOf": [{"$ref": "#/$defs/WorkTerminalEvidenceV1"}, {"type": "null"}]}}, "required": ["identity", "projection_binding", "lease", "state", "artifacts", "cancellation", "recovery", "requested_route"], "type": "object"}, "WorkCancellationAcknowledgementV1": {"additionalProperties": False, "properties": {"acknowledged_at": {"$ref": "#/$defs/UtcMicros"}, "request": {"$ref": "#/$defs/WorkCancellationRequestV1"}}, "required": ["request", "acknowledged_at"], "type": "object"}, "WorkCancellationEscalationV1": {"additionalProperties": False, "properties": {"acknowledgement": {"$ref": "#/$defs/WorkCancellationAcknowledgementV1"}, "escalated_at": {"$ref": "#/$defs/UtcMicros"}}, "required": ["acknowledgement", "escalated_at"], "type": "object"}, "WorkCancellationRequestId": {"description": "Strongly typed canonical identity: `WorkCancellationRequestId`.", "type": "string"}, "WorkCancellationRequestV1": {"additionalProperties": False, "properties": {"request_id": {"$ref": "#/$defs/WorkCancellationRequestId"}, "requested_at": {"$ref": "#/$defs/UtcMicros"}}, "required": ["request_id", "requested_at"], "type": "object"}, "WorkCancellationStateV1": {"oneOf": [{"properties": {"state": {"const": "none", "type": "string"}}, "required": ["state"], "type": "object"}, {"properties": {"state": {"const": "requested", "type": "string"}, "value": {"$ref": "#/$defs/WorkCancellationRequestV1"}}, "required": ["state", "value"], "type": "object"}, {"properties": {"state": {"const": "acknowledged", "type": "string"}, "value": {"$ref": "#/$defs/WorkCancellationAcknowledgementV1"}}, "required": ["state", "value"], "type": "object"}, {"properties": {"state": {"const": "escalated", "type": "string"}, "value": {"$ref": "#/$defs/WorkCancellationEscalationV1"}}, "required": ["state", "value"], "type": "object"}]}, "WorkFenceEpochV1": {"format": "uint64", "minimum": 0, "title": "WorkFenceEpochV1", "type": "integer"}, "WorkLeaseFenceV1": {"additionalProperties": False, "properties": {"epoch": {"$ref": "#/$defs/WorkFenceEpochV1"}, "lease_id": {"$ref": "#/$defs/WorkLeaseId"}}, "required": ["lease_id", "epoch"], "type": "object"}, "WorkLeaseId": {"description": "Strongly typed canonical identity: `WorkLeaseId`.", "type": "string"}, "WorkProjectionSequenceV1": {"format": "uint64", "minimum": 0, "title": "WorkProjectionSequenceV1", "type": "integer"}, "WorkProviderRouteId": {"description": "Strongly typed canonical identity: `WorkProviderRouteId`.", "type": "string"}, "WorkProviderRouteV1": {"additionalProperties": False, "properties": {"provider_id": {"$ref": "#/$defs/ProviderId"}, "route_id": {"$ref": "#/$defs/WorkProviderRouteId"}}, "required": ["provider_id", "route_id"], "type": "object"}, "WorkRecoveryStateV1": {"oneOf": [{"properties": {"state": {"const": "fresh", "type": "string"}}, "required": ["state"], "type": "object"}, {"properties": {"checkpoint": {"anyOf": [{"$ref": "#/$defs/WorkArtifactRefV1"}, {"type": "null"}]}, "source_attempt_id": {"$ref": "#/$defs/AttemptId"}, "state": {"const": "resumed", "type": "string"}}, "required": ["state", "source_attempt_id"], "type": "object"}, {"properties": {"reason": {"$ref": "#/$defs/WorkRestartReasonV1"}, "source_attempt_id": {"$ref": "#/$defs/AttemptId"}, "state": {"const": "restarted", "type": "string"}}, "required": ["state", "source_attempt_id", "reason"], "type": "object"}, {"description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.", "properties": {"reason": {"$ref": "#/$defs/WorkRestartReasonV1"}, "source_attempt_id": {"anyOf": [{"$ref": "#/$defs/AttemptId"}, {"type": "null"}], "default": None}, "state": {"const": "recovery_required", "type": "string"}}, "required": ["state", "reason"], "type": "object"}]}, "WorkRestartReasonV1": {"enum": ["lease_lost", "provider_unavailable", "process_lost", "checkpoint_rejected"], "type": "string"}, "WorkTerminalEvidenceV1": {"oneOf": [{"properties": {"evidence_digest": {"$ref": "#/$defs/ManifestDigest"}, "observed_at": {"$ref": "#/$defs/UtcMicros"}, "outcome": {"const": "succeeded", "type": "string"}}, "required": ["outcome", "evidence_digest", "observed_at"], "type": "object"}, {"properties": {"evidence_digest": {"$ref": "#/$defs/ManifestDigest"}, "observed_at": {"$ref": "#/$defs/UtcMicros"}, "outcome": {"const": "failed", "type": "string"}}, "required": ["outcome", "evidence_digest", "observed_at"], "type": "object"}, {"properties": {"evidence_digest": {"$ref": "#/$defs/ManifestDigest"}, "observed_at": {"$ref": "#/$defs/UtcMicros"}, "outcome": {"const": "cancelled", "type": "string"}}, "required": ["outcome", "evidence_digest", "observed_at"], "type": "object"}]}}, "$schema": "https://json-schema.org/draft/2020-12/schema", "additionalProperties": False, "properties": {"attempt": {"$ref": "#/$defs/WorkAttemptV1"}}, "required": ["attempt"], "title": "WorkAttemptResponseV1", "type": "object"},
+        ),
+    ),
     "work_attempt_publish_artifact": cast(
         OperationDescriptor[object, object],
         OperationDescriptor[OperationWorkAttemptPublishArtifactRequest, OperationWorkAttemptPublishArtifactResult](
@@ -1946,6 +2075,18 @@ class WorkOperations:
         descriptor = cast(
             OperationDescriptor[OperationWorkAttemptCancelRequest, OperationWorkAttemptCancelResult],
             WORK_OPERATIONS["work_attempt_cancel"],
+        )
+        return self._invoke(descriptor, request, page=page)
+
+    def work_attempt_finish(
+        self,
+        request: OperationWorkAttemptFinishRequest,
+        *,
+        page: PageOptionsLike | None = None,
+    ) -> OperationResponse[OperationWorkAttemptFinishResult]:
+        descriptor = cast(
+            OperationDescriptor[OperationWorkAttemptFinishRequest, OperationWorkAttemptFinishResult],
+            WORK_OPERATIONS["work_attempt_finish"],
         )
         return self._invoke(descriptor, request, page=page)
 
