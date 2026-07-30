@@ -67,7 +67,6 @@ export function WorkPage() {
         // "Work" would be an aggregate everywhere else in this dashboard and is
         // one project's here.
         note="canonical task graph · the active project · nine mounted routes"
-        actions={<WorkTaskActivity kind="partial" />}
       />
 
       <div
@@ -80,6 +79,17 @@ export function WorkPage() {
         <Ticks />
 
         <div className="flex min-w-0 flex-col gap-3">
+          {/* The live stream sits in the body rather than in the header's
+            * actions. `WorkspaceHeader` is a fixed `h-9` row, and this chip
+            * carries a sentence — "subscribed · connecting" and its longer
+            * siblings — which wraps to two and three lines below `md` and at
+            * 400% zoom, rendering outside the header box. It also reads better
+            * here: it is supplementary evidence about a stream, not the state
+            * of the page. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <WorkTaskActivity kind="partial" />
+          </div>
+
           {snapshot.isPending ? (
             <Panel legend="Work read model">
               <StateChip kind="loading" detail="reading the snapshot" />

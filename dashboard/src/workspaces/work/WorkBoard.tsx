@@ -75,11 +75,14 @@ function TaskRow({
       <th scope="row" className="px-2 py-1.5 text-left font-medium text-text-primary">
         {/* A button rather than a row click handler, so the row is reachable by
           * keyboard and announced as the control it is. */}
+        {/* 44px explicitly, not `min-h-11`: this app's root font size is 14px,
+          * so a spacing-11 minimum computes to 38.5px and lands under the
+          * target size the gate measures. */}
         <button
           type="button"
           onClick={() => onSelect(projection.task_id)}
           aria-pressed={selected}
-          className="text-left underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="flex min-h-[44px] w-full items-center text-left underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
         >
           {projection.title}
         </button>
