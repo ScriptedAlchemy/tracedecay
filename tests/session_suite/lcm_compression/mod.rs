@@ -5,8 +5,8 @@ use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::lcm::compression_decision::{
     AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput, PreflightDecisionInput,
-    bounded_leaf_chunk_len, compression_plan, effective_assembly_token_cap,
-    overflow_recovery_assembly_cap, preflight_decision,
+    compression_plan, effective_assembly_token_cap, overflow_recovery_assembly_cap,
+    preflight_decision,
 };
 use tracedecay::sessions::lcm::{
     LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate,
@@ -296,20 +296,6 @@ fn active_multi_tool_transaction() -> Vec<Value> {
             "content": "beta result",
         }),
     ]
-}
-
-fn active_raw_message(store_id: i64, replay: Value) -> LcmRawMessage {
-    let role = replay["role"].as_str().unwrap();
-    let content = replay["content"].as_str().unwrap_or("");
-    let mut message = lcm_raw_message(store_id, role, content);
-    message.metadata_json = Some(
-        json!({
-            "lcm_active_replay": true,
-            "active_replay": replay,
-        })
-        .to_string(),
-    );
-    message
 }
 
 fn lifecycle_state_with_debt(maintenance_debt: Vec<LcmMaintenanceDebt>) -> LcmLifecycleState {
