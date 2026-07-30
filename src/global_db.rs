@@ -124,11 +124,13 @@ impl crate::sessions::git_correlation::AnalyticsSessionTimestampSource for Analy
     fn as_analytics_session_timestamp(
         &self,
     ) -> Option<crate::sessions::git_correlation::AnalyticsSessionTimestamp> {
-        Some(crate::sessions::git_correlation::AnalyticsSessionTimestamp {
-            provider: self.provider.clone(),
-            session_id: self.session_id.clone()?,
-            timestamp: self.timestamp,
-        })
+        Some(
+            crate::sessions::git_correlation::AnalyticsSessionTimestamp {
+                provider: self.provider.clone(),
+                session_id: self.session_id.clone()?,
+                timestamp: self.timestamp,
+            },
+        )
     }
 }
 

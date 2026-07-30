@@ -19,6 +19,7 @@ use tracedecay_domain::{
     ActorId, HydrationStateV1, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalAnchorId,
     RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_store::StoreShardIdV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -950,7 +951,7 @@ impl DaemonSessionRetrievalService {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
-            Err(error) => return describe_execution_error(error),
+            Err(error) => return describe_execution_error(error, self.empty_temporal()),
         };
         let target = command.target().clone();
         let direct_result = executor
@@ -958,7 +959,7 @@ impl DaemonSessionRetrievalService {
             .await;
         let direct = match direct_result {
             Ok(direct) => direct,
-            Err(error) => return describe_execution_error(error),
+            Err(error) => return describe_execution_error(error, self.empty_temporal()),
         };
         let binding = self.lcm_binding(
             "describe",
@@ -986,14 +987,47 @@ impl DaemonSessionRetrievalService {
             return LcmDescribeServiceOutcome::Denied;
         };
         let outcome = self.execute_temporal_query(query).await;
-        let result = match outcome {
-            SessionRetrievalOutcome::Complete { mut items, .. }
-            | SessionRetrievalOutcome::Partial { mut items, .. } => items.pop(),
-            SessionRetrievalOutcome::CompleteZero { .. } if direct.is_none() => None,
+        let (result, retrieval) = match outcome {
+            SessionRetrievalOutcome::Complete {
+                mut items,
+                freshness,
+            } => (
+                items.pop(),
+                LcmRetrievalOutcome::complete(lcm_data_freshness(freshness)),
+            ),
+            SessionRetrievalOutcome::Partial {
+                mut items,
+                freshness,
+                omitted,
+            } => {
+                let retrieval =
+                    LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted);
+                let Some(result) = items.pop() else {
+                    return LcmDescribeServiceOutcome::Partial {
+                        description: None,
+                        temporal: self.empty_temporal(),
+                        grain: command.grain(),
+                        state: None,
+                        lineage: Vec::new(),
+                        retrieval,
+                    };
+                };
+                (Some(result), retrieval)
+            }
+            SessionRetrievalOutcome::CompleteZero { freshness } if direct.is_none() => (
+                None,
+                LcmRetrievalOutcome::complete(lcm_data_freshness(freshness)),
+            ),
             SessionRetrievalOutcome::CompleteZero { .. } => {
                 return LcmDescribeServiceOutcome::Deleted;
             }
-            terminal => return describe_retrieval_outcome(terminal),
+            terminal => {
+                return describe_retrieval_outcome(
+                    terminal,
+                    command.grain(),
+                    self.empty_temporal(),
+                );
+            }
         };
         let state = match (direct.as_ref(), result.as_ref()) {
             (Some(direct), Some(result)) => match hydration_state(result, &direct.anchor_id) {
@@ -1018,18 +1052,34 @@ impl DaemonSessionRetrievalService {
         let rendered = executor.render_lcm_describe(request).await;
         let description = match rendered {
             Ok(description) => description,
-            Err(error) => return describe_execution_error(error),
+            Err(error) => return describe_execution_error(error, self.empty_temporal()),
         };
         let temporal = result.as_ref().map_or_else(
             || self.empty_temporal(),
             |result| self.lcm_temporal_view(result),
         );
-        LcmDescribeServiceOutcome::Complete {
-            description,
-            temporal,
-            grain: command.grain(),
-            state,
-            lineage: result.map_or_else(Vec::new, |result| result.lineage),
+        let lineage = result.map_or_else(Vec::new, |result| result.lineage);
+        match retrieval {
+            LcmRetrievalOutcome::Complete { .. } => LcmDescribeServiceOutcome::Complete {
+                description,
+                temporal,
+                grain: command.grain(),
+                state,
+                lineage,
+                retrieval,
+            },
+            LcmRetrievalOutcome::Partial { .. } => LcmDescribeServiceOutcome::Partial {
+                description: Some(description),
+                temporal,
+                grain: command.grain(),
+                state: Some(state),
+                lineage,
+                retrieval,
+            },
+            LcmRetrievalOutcome::Stale { .. } => LcmDescribeServiceOutcome::Stale {
+                temporal,
+                retrieval,
+            },
         }
     }
 
@@ -1056,7 +1106,7 @@ impl DaemonSessionRetrievalService {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
-            Err(error) => return expand_execution_error(error),
+            Err(error) => return expand_execution_error(error, self.empty_temporal()),
         };
         let target = command.target().clone();
         let direct_result = executor
@@ -1067,7 +1117,7 @@ impl DaemonSessionRetrievalService {
             Err(SessionTemporalExecutionError::Deleted) if command.cursor().is_some() => {
                 return LcmExpandServiceOutcome::Denied;
             }
-            Err(error) => return expand_execution_error(error),
+            Err(error) => return expand_execution_error(error, self.empty_temporal()),
         };
         let binding = self.lcm_binding(
             "expand",
@@ -1097,16 +1147,45 @@ impl DaemonSessionRetrievalService {
             return LcmExpandServiceOutcome::Denied;
         };
         let outcome = self.execute_temporal_query(query).await;
-        let result = match outcome {
-            SessionRetrievalOutcome::Complete { mut items, .. }
-            | SessionRetrievalOutcome::Partial { mut items, .. } => match items.pop() {
-                Some(result) => result,
+        let (result, retrieval) = match outcome {
+            SessionRetrievalOutcome::Complete {
+                mut items,
+                freshness,
+            } => match items.pop() {
+                Some(result) => (
+                    result,
+                    LcmRetrievalOutcome::complete(lcm_data_freshness(freshness)),
+                ),
                 None => return LcmExpandServiceOutcome::Deleted,
             },
+            SessionRetrievalOutcome::Partial {
+                mut items,
+                freshness,
+                omitted,
+            } => {
+                let retrieval =
+                    LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted);
+                let Some(result) = items.pop() else {
+                    return LcmExpandServiceOutcome::Partial {
+                        expansion: None,
+                        temporal: self.empty_temporal(),
+                        grain: command.grain(),
+                        state: None,
+                        retrieval,
+                    };
+                };
+                (result, retrieval)
+            }
             SessionRetrievalOutcome::CompleteZero { .. } => {
                 return LcmExpandServiceOutcome::Deleted;
             }
-            terminal => return expand_retrieval_outcome(terminal),
+            terminal => {
+                return expand_retrieval_outcome(
+                    terminal,
+                    command.grain(),
+                    self.empty_temporal(),
+                );
+            }
         };
         let canonical_content = match hydration_state(&result, &direct.anchor_id) {
             Some(HydrationStateV1::Available) => result
@@ -1131,7 +1210,7 @@ impl DaemonSessionRetrievalService {
                 .await
             {
                 Ok(offset) => offset,
-                Err(error) => return expand_execution_error(error),
+                Err(error) => return expand_execution_error(error, self.empty_temporal()),
             },
             None => command.source_offset(),
         };
@@ -1146,7 +1225,7 @@ impl DaemonSessionRetrievalService {
         let rendered = executor.render_lcm_expand(request, canonical_content).await;
         let mut expansion = match rendered {
             Ok(expansion) => expansion,
-            Err(error) => return expand_execution_error(error),
+            Err(error) => return expand_execution_error(error, self.empty_temporal()),
         };
         if let Err(error) = executor
             .hydrate_lcm_summary_sources(
@@ -1158,7 +1237,7 @@ impl DaemonSessionRetrievalService {
             )
             .await
         {
-            return expand_execution_error(error);
+            return expand_execution_error(error, self.empty_temporal());
         }
         let mut temporal = self.lcm_temporal_view(&result);
         if let Some(offset) = expansion
@@ -1171,14 +1250,46 @@ impl DaemonSessionRetrievalService {
                 .await
             {
                 Ok(cursor) => temporal.cursor = Some(cursor),
-                Err(error) => return expand_execution_error(error),
+                Err(error) => return expand_execution_error(error, self.empty_temporal()),
             }
         }
-        LcmExpandServiceOutcome::Complete {
-            expansion,
-            temporal,
-            grain: command.grain(),
-            state: HydrationStateV1::Available,
+        let summary_source_omitted = u64::try_from(
+            expansion
+                .summary_sources
+                .iter()
+                .filter(|source| source.state != HydrationStateV1::Available)
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
+        let retrieval = match retrieval {
+            LcmRetrievalOutcome::Complete { freshness } if summary_source_omitted > 0 => {
+                LcmRetrievalOutcome::partial(freshness, summary_source_omitted)
+            }
+            LcmRetrievalOutcome::Partial { freshness, omitted } => LcmRetrievalOutcome::partial(
+                freshness,
+                omitted.saturating_add(summary_source_omitted),
+            ),
+            retrieval => retrieval,
+        };
+        match retrieval {
+            LcmRetrievalOutcome::Complete { .. } => LcmExpandServiceOutcome::Complete {
+                expansion,
+                temporal,
+                grain: command.grain(),
+                state: HydrationStateV1::Available,
+                retrieval,
+            },
+            LcmRetrievalOutcome::Partial { .. } => LcmExpandServiceOutcome::Partial {
+                expansion: Some(expansion),
+                temporal,
+                grain: command.grain(),
+                state: Some(HydrationStateV1::Available),
+                retrieval,
+            },
+            LcmRetrievalOutcome::Stale { .. } => LcmExpandServiceOutcome::Stale {
+                temporal,
+                retrieval,
+            },
         }
     }
 }
@@ -1202,6 +1313,18 @@ fn lcm_describe_target_key(target: &LcmDescribeTarget) -> String {
         LcmDescribeTarget::Session => "session".to_string(),
         LcmDescribeTarget::SummaryNode { node_id } => format!("summary:{node_id}"),
         LcmDescribeTarget::ExternalPayload { payload_ref } => format!("payload:{payload_ref}"),
+    }
+}
+
+const fn lcm_data_freshness(freshness: SessionDataFreshness) -> LcmDataFreshness {
+    match freshness {
+        SessionDataFreshness::Fresh => LcmDataFreshness::Fresh,
+        SessionDataFreshness::Stored { generation_lag } => {
+            LcmDataFreshness::Stored { generation_lag }
+        }
+        SessionDataFreshness::Partial { generation_lag } => {
+            LcmDataFreshness::Partial { generation_lag }
+        }
     }
 }
 
@@ -1252,7 +1375,10 @@ fn expand_hydration_state(state: HydrationStateV1) -> LcmExpandServiceOutcome {
     }
 }
 
-fn describe_execution_error(error: SessionTemporalExecutionError) -> LcmDescribeServiceOutcome {
+fn describe_execution_error(
+    error: SessionTemporalExecutionError,
+    temporal: SessionTemporalMetadataView,
+) -> LcmDescribeServiceOutcome {
     match error {
         SessionTemporalExecutionError::Locked => LcmDescribeServiceOutcome::Locked,
         SessionTemporalExecutionError::Redacted => LcmDescribeServiceOutcome::Redacted,
@@ -1263,8 +1389,15 @@ fn describe_execution_error(error: SessionTemporalExecutionError) -> LcmDescribe
             LcmDescribeServiceOutcome::BudgetExhausted
         }
         SessionTemporalExecutionError::Cancelled => LcmDescribeServiceOutcome::Cancelled,
-        SessionTemporalExecutionError::Stale { .. }
-        | SessionTemporalExecutionError::Unavailable
+        SessionTemporalExecutionError::Stale { generation_lag } => {
+            LcmDescribeServiceOutcome::Stale {
+                temporal,
+                retrieval: LcmRetrievalOutcome::stale(LcmDataFreshness::Stored {
+                    generation_lag,
+                }),
+            }
+        }
+        SessionTemporalExecutionError::Unavailable
         | SessionTemporalExecutionError::Empty { .. }
         | SessionTemporalExecutionError::Kernel(_) => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
@@ -1274,7 +1407,10 @@ fn describe_execution_error(error: SessionTemporalExecutionError) -> LcmDescribe
     }
 }
 
-fn expand_execution_error(error: SessionTemporalExecutionError) -> LcmExpandServiceOutcome {
+fn expand_execution_error(
+    error: SessionTemporalExecutionError,
+    temporal: SessionTemporalMetadataView,
+) -> LcmExpandServiceOutcome {
     match error {
         SessionTemporalExecutionError::Locked => LcmExpandServiceOutcome::Locked,
         SessionTemporalExecutionError::Redacted => LcmExpandServiceOutcome::Redacted,
@@ -1283,8 +1419,15 @@ fn expand_execution_error(error: SessionTemporalExecutionError) -> LcmExpandServ
         SessionTemporalExecutionError::Denied => LcmExpandServiceOutcome::Denied,
         SessionTemporalExecutionError::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => LcmExpandServiceOutcome::Cancelled,
-        SessionTemporalExecutionError::Stale { .. }
-        | SessionTemporalExecutionError::Unavailable
+        SessionTemporalExecutionError::Stale { generation_lag } => {
+            LcmExpandServiceOutcome::Stale {
+                temporal,
+                retrieval: LcmRetrievalOutcome::stale(LcmDataFreshness::Stored {
+                    generation_lag,
+                }),
+            }
+        }
+        SessionTemporalExecutionError::Unavailable
         | SessionTemporalExecutionError::Empty { .. }
         | SessionTemporalExecutionError::Kernel(_) => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
@@ -1296,6 +1439,8 @@ fn expand_execution_error(error: SessionTemporalExecutionError) -> LcmExpandServ
 
 fn describe_retrieval_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
+    grain: RetrievalGrainV1,
+    temporal: SessionTemporalMetadataView,
 ) -> LcmDescribeServiceOutcome {
     match outcome {
         SessionRetrievalOutcome::WrongScope => LcmDescribeServiceOutcome::WrongScope,
@@ -1308,11 +1453,25 @@ fn describe_retrieval_outcome(
             LcmDescribeServiceOutcome::BudgetExhausted
         }
         SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
-        SessionRetrievalOutcome::Stale { .. }
-        | SessionRetrievalOutcome::Unavailable
+        SessionRetrievalOutcome::Stale { freshness } => LcmDescribeServiceOutcome::Stale {
+            temporal,
+            retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),
+        },
+        SessionRetrievalOutcome::Partial {
+            freshness,
+            omitted,
+            ..
+        } => LcmDescribeServiceOutcome::Partial {
+            description: None,
+            temporal,
+            grain,
+            state: None,
+            lineage: Vec::new(),
+            retrieval: LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted),
+        },
+        SessionRetrievalOutcome::Unavailable
         | SessionRetrievalOutcome::Complete { .. }
-        | SessionRetrievalOutcome::CompleteZero { .. }
-        | SessionRetrievalOutcome::Partial { .. } => {
+        | SessionRetrievalOutcome::CompleteZero { .. } => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
             ))
@@ -1322,6 +1481,8 @@ fn describe_retrieval_outcome(
 
 fn expand_retrieval_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
+    grain: RetrievalGrainV1,
+    temporal: SessionTemporalMetadataView,
 ) -> LcmExpandServiceOutcome {
     match outcome {
         SessionRetrievalOutcome::WrongScope => LcmExpandServiceOutcome::WrongScope,
@@ -1334,11 +1495,24 @@ fn expand_retrieval_outcome(
             LcmExpandServiceOutcome::BudgetExhausted
         }
         SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
-        SessionRetrievalOutcome::Stale { .. }
-        | SessionRetrievalOutcome::Unavailable
+        SessionRetrievalOutcome::Stale { freshness } => LcmExpandServiceOutcome::Stale {
+            temporal,
+            retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),
+        },
+        SessionRetrievalOutcome::Partial {
+            freshness,
+            omitted,
+            ..
+        } => LcmExpandServiceOutcome::Partial {
+            expansion: None,
+            temporal,
+            grain,
+            state: None,
+            retrieval: LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted),
+        },
+        SessionRetrievalOutcome::Unavailable
         | SessionRetrievalOutcome::Complete { .. }
-        | SessionRetrievalOutcome::CompleteZero { .. }
-        | SessionRetrievalOutcome::Partial { .. } => {
+        | SessionRetrievalOutcome::CompleteZero { .. } => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
             ))
@@ -1684,5 +1858,87 @@ mod tests {
             page.temporal.omissions[0].reason,
             HydrationStateV1::Unauthorized
         );
+    }
+
+    #[test]
+    fn stale_lcm_retrieval_remains_typed_instead_of_generic_unavailable() {
+        let freshness = SessionDataFreshness::Stored { generation_lag: 7 };
+
+        let describe = describe_retrieval_outcome(
+            SessionRetrievalOutcome::Stale { freshness },
+            RetrievalGrainV1::Summary,
+            SessionTemporalMetadataView::default(),
+        );
+        let expand = expand_retrieval_outcome(
+            SessionRetrievalOutcome::Stale { freshness },
+            RetrievalGrainV1::Summary,
+            SessionTemporalMetadataView::default(),
+        );
+
+        assert!(matches!(
+            describe,
+            LcmDescribeServiceOutcome::Stale {
+                retrieval: LcmRetrievalOutcome::Stale {
+                    freshness: LcmDataFreshness::Stored { generation_lag: 7 }
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            expand,
+            LcmExpandServiceOutcome::Stale {
+                retrieval: LcmRetrievalOutcome::Stale {
+                    freshness: LcmDataFreshness::Stored { generation_lag: 7 }
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
+        let freshness = SessionDataFreshness::Partial { generation_lag: 3 };
+
+        let describe = describe_retrieval_outcome(
+            SessionRetrievalOutcome::Partial {
+                items: Vec::new(),
+                freshness,
+                omitted: 5,
+            },
+            RetrievalGrainV1::Summary,
+            SessionTemporalMetadataView::default(),
+        );
+        let expand = expand_retrieval_outcome(
+            SessionRetrievalOutcome::Partial {
+                items: Vec::new(),
+                freshness,
+                omitted: 5,
+            },
+            RetrievalGrainV1::Summary,
+            SessionTemporalMetadataView::default(),
+        );
+
+        assert!(matches!(
+            describe,
+            LcmDescribeServiceOutcome::Partial {
+                description: None,
+                retrieval: LcmRetrievalOutcome::Partial {
+                    freshness: LcmDataFreshness::Partial { generation_lag: 3 },
+                    omitted: 5,
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            expand,
+            LcmExpandServiceOutcome::Partial {
+                expansion: None,
+                retrieval: LcmRetrievalOutcome::Partial {
+                    freshness: LcmDataFreshness::Partial { generation_lag: 3 },
+                    omitted: 5,
+                },
+                ..
+            }
+        ));
     }
 }
