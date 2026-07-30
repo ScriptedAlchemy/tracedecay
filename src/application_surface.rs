@@ -23,7 +23,8 @@ use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
-    HttpApplicationRequest, WorkOperation, application_problem_response, sse_response,
+    HttpApplicationRequest, MultiRootHttpOperation, MultiRootHttpRequest, WorkOperation,
+    application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -38,16 +39,17 @@ use tracedecay_application::{
     AdmitExecutionCommand, ApplicationContractError, ApplicationEnvelope, ApplicationOperation,
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
     AttachRuntimeEvidenceCommand, CancellationContext, CancellationSignal, CreateWorkCommand,
-    Deadline, HealthReadRequest, IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination,
-    PageRequest, ProblemOwningLayer, ReplanDependenciesCommand, RequestContext, RequestId,
-    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
-    RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
-    SourceLinesRequest, StreamEvent, StreamEventKind, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
+    Deadline, HealthReadRequest, IdempotencyKey, LegalAction, MultiRootExecuteRequestV1,
+    MultiRootScopeSetCasRequestV1, MultiRootScopeSetReadRequestV1, OpaqueCursor,
+    OperationTermination, PageRequest, ProblemOwningLayer, ReplanDependenciesCommand,
+    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder,
+    RetrievalRequestMeta, RetryDirective, ReviewProposalRequestV1, SafeDiagnostic,
+    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
+    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
     WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
-    WorkAttemptRecoverRequestV1,
-    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
+    WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
@@ -1124,6 +1126,42 @@ pub fn http_application_invoker(
     )
 }
 
+pub(crate) async fn invoke_multi_root_surface_request(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    page: PageRequest,
+    deadline: Deadline,
+    cancellation: tracedecay_application::CancellationSignal,
+    body: Value,
+) -> Result<Value, ApplicationSurfaceAdapterError> {
+    let http_operation = HttpApplicationOperation::ALL
+        .into_iter()
+        .find(|candidate| application_operation_for_http(*candidate) == operation)
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    let invoke = application_invoker_for_surface(
+        executor,
+        BindingSurface::Http,
+        std::slice::from_ref(&operation),
+    )?;
+    let response = invoke(HttpApplicationRequest {
+        operation: http_operation,
+        request_id,
+        page,
+        deadline: Some(deadline),
+        cancellation,
+        body,
+    })
+    .await;
+    let envelope = response
+        .result
+        .map_err(|_| ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    serde_json::to_value(envelope.outcome)
+        .ok()
+        .and_then(|value| value.get("value")?.get("payload").cloned())
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
+}
+
 fn work_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -1131,6 +1169,239 @@ fn work_application_router_with_executor(
     Ok(tracedecay_api::work_application_router(WorkExecutorOwner {
         executor,
     }))
+}
+
+fn multi_root_application_router_with_executor(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+) -> axum::Router {
+    tracedecay_api::multi_root_application_router(MultiRootExecutorOwner { executor })
+}
+
+#[derive(Clone)]
+struct MultiRootExecutorOwner {
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+}
+
+impl tracedecay_api::MultiRootApplicationOwner for MultiRootExecutorOwner {
+    fn invoke_multi_root(
+        &self,
+        request: MultiRootHttpRequest,
+    ) -> tracedecay_api::MultiRootInvocationFuture {
+        let executor = Arc::clone(&self.executor);
+        Box::pin(async move { invoke_multi_root_operation(executor, request).await })
+    }
+}
+
+async fn invoke_multi_root_operation(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    request: MultiRootHttpRequest,
+) -> Response {
+    let MultiRootHttpRequest {
+        operation,
+        request_id,
+        controls,
+        body,
+    } = request;
+    let observed_at = crate::daemon_client::invocation_now_micros();
+    match operation {
+        MultiRootHttpOperation::ScopeSetRead => {
+            let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body) else {
+                return work_adapter_unavailable(
+                    request_id,
+                    "multi_root.invalid_request",
+                    "The multi-root application request is invalid",
+                );
+            };
+            let invocation = crate::daemon::DaemonInvocationRequest::multi_root_scope_set_read(
+                request_id.as_str(),
+                request,
+                observed_at,
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            invoke_multi_root_http::<Option<tracedecay_application::AuthorizedScopeSet>>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                invocation,
+                |outcome| match outcome {
+                    crate::daemon::DaemonInvocationOutcome::MultiRootScopeSetRead {
+                        scope,
+                        outcome,
+                    } => Some((scope, outcome)),
+                    _ => None,
+                },
+            )
+            .await
+        }
+        MultiRootHttpOperation::ScopeSetCompareAndSwap => {
+            let Ok(request) = serde_json::from_value::<MultiRootScopeSetCasRequestV1>(body) else {
+                return work_adapter_unavailable(
+                    request_id,
+                    "multi_root.invalid_request",
+                    "The multi-root application request is invalid",
+                );
+            };
+            let invocation =
+                crate::daemon::DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
+            invoke_multi_root_http::<tracedecay_application::MultiRootScopeSetCasResultV1>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                invocation,
+                |outcome| match outcome {
+                    crate::daemon::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
+                        scope,
+                        outcome,
+                    } => Some((scope, outcome)),
+                    _ => None,
+                },
+            )
+            .await
+        }
+        MultiRootHttpOperation::Execute => {
+            let Ok(request) = serde_json::from_value::<MultiRootExecuteRequestV1>(body) else {
+                return work_adapter_unavailable(
+                    request_id,
+                    "multi_root.invalid_request",
+                    "The multi-root application request is invalid",
+                );
+            };
+            let invocation = crate::daemon::DaemonInvocationRequest::multi_root_execute(
+                request_id.as_str(),
+                request,
+                observed_at,
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            invoke_multi_root_http::<
+                tracedecay_application::MultiRootQueryPageV1<serde_json::Value>,
+            >(
+                executor,
+                operation,
+                request_id,
+                controls,
+                invocation,
+                |outcome| match outcome {
+                    crate::daemon::DaemonInvocationOutcome::MultiRootQueryPage {
+                        scope,
+                        outcome,
+                    } => Some((scope, outcome)),
+                    _ => None,
+                },
+            )
+            .await
+        }
+    }
+}
+
+async fn invoke_multi_root_http<T>(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    operation: MultiRootHttpOperation,
+    request_id: RequestId,
+    controls: HttpApplicationControls,
+    invocation: crate::daemon::DaemonInvocationRequest,
+    select_outcome: fn(
+        crate::daemon::DaemonInvocationOutcome,
+    ) -> Option<(
+        tracedecay_application::ResolvedScope,
+        tracedecay_application::ApplicationOutcome<T>,
+    )>,
+) -> Response
+where
+    T: Serialize,
+{
+    let registry = match tracedecay_application::application_executable_binding_registry() {
+        Ok(registry) => registry,
+        Err(_) => {
+            return work_adapter_unavailable(
+                request_id,
+                "multi_root.catalog_unavailable",
+                "The multi-root capability catalog is unavailable",
+            );
+        }
+    };
+    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
+        Ok(operation_id) => operation_id,
+        Err(_) => {
+            return work_adapter_unavailable(
+                request_id,
+                "multi_root.operation_identity_unavailable",
+                "The multi-root operation identity is unavailable",
+            );
+        }
+    };
+    let Some(binding) = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+    else {
+        return work_adapter_unavailable(
+            request_id,
+            "multi_root.binding_unavailable",
+            "The multi-root operation is not advertised by this build",
+        );
+    };
+    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+        return work_adapter_unavailable(
+            request_id,
+            "multi_root.route_unavailable",
+            "The multi-root operation binding carries no public route",
+        );
+    };
+    let Ok(result_contract) = ResultContractRef::new(
+        binding.result_schema().schema_ref().schema_id().clone(),
+        binding.result_schema().schema_ref().revision(),
+    ) else {
+        return work_adapter_unavailable(
+            request_id,
+            "multi_root.result_contract_unavailable",
+            "The multi-root operation result contract is unavailable",
+        );
+    };
+    let response = executor
+        .invoke_controlled(
+            invocation,
+            controls.deadline,
+            controls.cancellation,
+            if operation == MultiRootHttpOperation::ScopeSetCompareAndSwap {
+                InvocationCancellationPolicy::AuthoritativeEffect
+            } else {
+                InvocationCancellationPolicy::ReadOnly
+            },
+        )
+        .await;
+    let Ok(crate::daemon::DaemonInvocationResponse { outcome, .. }) = response else {
+        return work_adapter_unavailable(
+            request_id,
+            "multi_root.transport_unavailable",
+            "The multi-root application transport is unavailable",
+        );
+    };
+    let Some((scope, outcome)) = select_outcome(outcome) else {
+        return work_adapter_unavailable(
+            request_id,
+            "multi_root.runtime_unavailable",
+            "The multi-root runtime authority rejected the request",
+        );
+    };
+    CanonicalInvocationResult::new(
+        binding_id.clone(),
+        Ok(ApplicationEnvelope {
+            contract: result_contract,
+            request_id,
+            scope,
+            outcome,
+        }),
+    )
+    .into_http_response()
 }
 
 /// Refuse to mount Work unless the catalog advertises every descriptor
@@ -1524,6 +1795,7 @@ pub fn http_application_router_with_executor(
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     let event_executor = Arc::clone(&executor);
     let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
+    let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor));
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1531,6 +1803,7 @@ pub fn http_application_router_with_executor(
             &APPLICATION_SURFACE_OPERATIONS,
         )?)
         .merge(work_router)
+        .merge(multi_root_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,

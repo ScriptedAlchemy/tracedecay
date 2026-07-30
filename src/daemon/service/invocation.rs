@@ -35,8 +35,10 @@ use tracedecay_application::{
     GitIndexEffectProofV1, GitIndexOperationBindingV1, GitIndexPreviewPortResultV1,
     GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError,
     GitIndexTransactionPort, GitIndexTransactionPortError, GitIndexTransactionService,
-    IdempotencyKey, Omission, OmissionReason, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PageRequest, PageState, PolicyDecisionRef, PolicyEvaluationContextV1,
+    IdempotencyKey, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    Omission, OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination,
+    PageRequest, PageState, PolicyDecisionRef, PolicyEvaluationContextV1,
     PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
     ReconciliationState, ReplanDependenciesCommand, RequestAdmission, RequestContext, RequestId,
     ResolvedScope, RetrieverContribution, RetryDirective, ReviewProposalRequestV1, SafeDiagnostic,
@@ -210,6 +212,9 @@ pub(crate) enum DaemonInvocationOperation {
     CodeReferences,
     Configuration,
     ContextScout,
+    MultiRootScopeSetRead,
+    MultiRootScopeSetCompareAndSwap,
+    MultiRootExecute,
     WorkApplication,
     WorkAttempt,
     SemanticEvaluateAndPublish,
@@ -254,6 +259,9 @@ impl DaemonInvocationOperation {
             Self::CodeReferences => "code_references",
             Self::Configuration => "configuration",
             Self::ContextScout => "context_scout",
+            Self::MultiRootScopeSetRead => "multi_root_scope_set_read",
+            Self::MultiRootScopeSetCompareAndSwap => "multi_root_scope_set_compare_and_swap",
+            Self::MultiRootExecute => "multi_root_execute",
             Self::WorkApplication => "work_application",
             Self::WorkAttempt => "work_attempt",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
@@ -471,6 +479,24 @@ pub(crate) enum DaemonInvocationPayload {
     ContextScout {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: ContextScoutSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    MultiRootScopeSetRead {
+        request: MultiRootScopeSetReadRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    MultiRootScopeSetCompareAndSwap {
+        request: MultiRootScopeSetCasRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    MultiRootExecute {
+        request: MultiRootExecuteRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -932,6 +958,69 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn multi_root_scope_set_read(
+        request_id: impl Into<String>,
+        request: MultiRootScopeSetReadRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::MultiRootScopeSetRead {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub(crate) fn multi_root_scope_set_compare_and_swap(
+        request_id: impl Into<String>,
+        request: MultiRootScopeSetCasRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub(crate) fn multi_root_execute(
+        request_id: impl Into<String>,
+        request: MultiRootExecuteRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::MultiRootExecute {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn work_application(
         request_id: impl Into<String>,
         request: WorkApplicationInvocationV1,
@@ -1247,6 +1336,15 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::Configuration
             }
             DaemonInvocationPayload::ContextScout { .. } => DaemonInvocationOperation::ContextScout,
+            DaemonInvocationPayload::MultiRootScopeSetRead { .. } => {
+                DaemonInvocationOperation::MultiRootScopeSetRead
+            }
+            DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. } => {
+                DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
+            }
+            DaemonInvocationPayload::MultiRootExecute { .. } => {
+                DaemonInvocationOperation::MultiRootExecute
+            }
             DaemonInvocationPayload::WorkApplication { .. } => {
                 DaemonInvocationOperation::WorkApplication
             }
@@ -1292,6 +1390,9 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::CodeCallees
                 | DaemonInvocationOperation::Configuration
                 | DaemonInvocationOperation::ContextScout
+                | DaemonInvocationOperation::MultiRootScopeSetRead
+                | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
+                | DaemonInvocationOperation::MultiRootExecute
                 | DaemonInvocationOperation::WorkApplication
                 | DaemonInvocationOperation::WorkAttempt
                 | DaemonInvocationOperation::SemanticEvaluateAndPublish
@@ -1310,6 +1411,48 @@ impl DaemonInvocationRequest {
             return Err(DaemonInvocationProblem::InvalidRequest);
         }
         match &self.payload {
+            DaemonInvocationPayload::MultiRootScopeSetRead {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || MultiRootScopeSetReadRequestV1::new(request.scope_set_id.clone()).is_err()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || request.validate().is_err()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::MultiRootExecute {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || request.validate().is_err()
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
             DaemonInvocationPayload::GitRead {
                 observed_at,
                 deadline,
@@ -3985,6 +4128,19 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
     },
+    MultiRootScopeSetRead {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<Option<AuthorizedScopeSet>>,
+    },
+    MultiRootScopeSetCompareAndSwap {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<MultiRootScopeSetCasResultV1>,
+    },
+    MultiRootQueryPage {
+        scope: ResolvedScope,
+        outcome:
+            ApplicationOutcome<tracedecay_application::MultiRootQueryPageV1<serde_json::Value>>,
+    },
     WorkApplication {
         scope: ResolvedScope,
         outcome: WorkApplicationOutcomeV1,
@@ -4077,7 +4233,7 @@ impl DaemonInvocationResponse {
         }
     }
 
-    fn with_outcome(request_id: String, outcome: DaemonInvocationOutcome) -> Self {
+    pub(crate) fn with_outcome(request_id: String, outcome: DaemonInvocationOutcome) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
@@ -7294,6 +7450,336 @@ impl DaemonInvocationService {
         self.project_runtimes.get(&canonical_root).await
     }
 
+    pub(crate) async fn lsp_owner_matches_scope(
+        &self,
+        project_root: &Path,
+        scope: &ResolvedScope,
+    ) -> bool {
+        self.lsp_owner(Some(project_root))
+            .await
+            .and_then(|owner| owner.scope_grant)
+            .is_some_and(|grant| grant.scope == *scope)
+    }
+
+    pub(crate) async fn multi_root_query_context(
+        &self,
+        project_root: &Path,
+        scope: &ResolvedScope,
+        ordinal: usize,
+        observed_at: UtcMicros,
+    ) -> Option<(RequestContext, ManifestDigest)> {
+        let owner = self.lsp_owner(Some(project_root)).await?;
+        let grant = owner.scope_grant?;
+        if grant.scope != *scope {
+            return None;
+        }
+        let digest = grant.digest.clone();
+        let context = RequestContext::new(
+            grant.issuer.clone(),
+            scope.clone(),
+            grant,
+            RequestId::new(format!("request.multi-root.query.{ordinal}")).ok()?,
+            Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?,
+            CancellationContext::active(format!("cancel.multi-root.query.{ordinal}")).ok()?,
+        )
+        .ok()?;
+        Some((context, digest))
+    }
+
+    pub(crate) async fn persisted_scope_set(
+        &self,
+        project_root: &Path,
+        scope_set_id: &ScopeSetId,
+    ) -> Option<AuthorizedScopeSet> {
+        self.lsp_owner(Some(project_root))
+            .await?
+            .scope_set_storage?
+            .read(scope_set_id)
+            .ok()?
+    }
+
+    pub(crate) async fn authorize_lsp_workspace(
+        &self,
+        mut roots: Vec<(PathBuf, String, ResolvedScope)>,
+        observed_at: UtcMicros,
+    ) -> Option<AuthorizedLspWorkspace> {
+        if roots.is_empty() {
+            return None;
+        }
+        if !canonicalize_lsp_roots(&mut roots) {
+            return None;
+        }
+        let mut contexts = Vec::with_capacity(roots.len());
+        let mut owners = Vec::with_capacity(roots.len());
+        let mut scope_set_storages = Vec::with_capacity(roots.len());
+        for (ordinal, (project_root, _, scope)) in roots.iter().enumerate() {
+            let owner = self.lsp_owner(Some(project_root)).await?;
+            let owner_storage = owner.scope_set_storage.clone()?;
+            let grant = owner.scope_grant.clone()?;
+            if grant.scope != *scope {
+                return None;
+            }
+            owners.push(owner);
+            scope_set_storages.push(owner_storage);
+            let request_id = RequestId::new(format!("request.lsp.workspace.{ordinal}")).ok()?;
+            let deadline =
+                Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?;
+            let cancellation =
+                CancellationContext::active(format!("cancel.lsp.workspace.{ordinal}")).ok()?;
+            contexts.push(
+                RequestContext::new(
+                    grant.issuer.clone(),
+                    scope.clone(),
+                    grant,
+                    request_id,
+                    deadline,
+                    cancellation,
+                )
+                .ok()?,
+            );
+        }
+        let selector_digest = canonical_sha256(&(
+            "tracedecay.daemon.lsp-workspace-selector.v1",
+            roots
+                .iter()
+                .map(|(_, _, scope)| &scope.scope_digest)
+                .collect::<Vec<_>>(),
+        ))
+        .ok()?;
+        let scope_set_id = ScopeSetId::new(format!(
+            "scope-set.lsp.{}",
+            selector_digest.as_str().trim_start_matches("sha256:")
+        ))
+        .ok()?;
+        let capability =
+            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
+                .ok()?;
+        let use_case =
+            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
+                .ok()?;
+        let scope_set = AuthorizedScopeSetAuthority::authorize(
+            scope_set_id,
+            ScopeSetRevision::new(1).ok()?,
+            contexts,
+            &capability,
+            &use_case,
+            observed_at,
+        )
+        .ok()?;
+        for storage in &scope_set_storages {
+            self.persist_exact_scope_set(storage, &scope_set).ok()??;
+        }
+        let admitted_roots = roots
+            .iter()
+            .map(|(_, uri, scope)| {
+                AdmittedRoot::authorized(uri.clone(), scope.scope_digest.clone())
+            })
+            .collect::<Vec<_>>();
+        let workspace =
+            AuthorizedLspWorkspace::new(Some(scope_set.digest().clone()), admitted_roots.clone())
+                .ok()?;
+        let factories = admitted_roots
+            .into_iter()
+            .zip(owners.into_iter().map(|owner| owner.factory))
+            .collect();
+        let authorized = AuthorizedDaemonLspWorkspace {
+            workspace: workspace.clone(),
+            scope_set,
+            factories,
+        };
+        let mut workspaces = self.authorized_lsp_workspaces.lock().await;
+        if workspaces.len() >= MAX_LSP_SESSIONS
+            && !workspaces.contains_key(authorized.scope_set.digest())
+        {
+            return None;
+        }
+        workspaces.insert(authorized.scope_set.digest().clone(), authorized);
+        Some(workspace)
+    }
+
+    pub(crate) async fn compare_and_swap_scope_set(
+        &self,
+        active_project_root: &Path,
+        request: MultiRootScopeSetCasRequestV1,
+        mut roots: Vec<(PathBuf, ResolvedScope)>,
+        observed_at: UtcMicros,
+    ) -> Option<(ResolvedScope, MultiRootScopeSetCasResultV1)> {
+        request.validate().ok()?;
+        roots.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
+        if roots.is_empty()
+            || roots
+                .windows(2)
+                .any(|pair| pair[0].1.scope_digest == pair[1].1.scope_digest)
+        {
+            return None;
+        }
+        let active_owner = self.lsp_owner(Some(active_project_root)).await?;
+        let active_scope = active_owner.scope_grant.as_ref()?.scope.clone();
+        let active_storage = active_owner.scope_set_storage?;
+        let current = active_storage.read(&request.scope_set_id).ok()?;
+        let next_revision = match (request.expected_revision, current.as_ref()) {
+            (None, None) => ScopeSetRevision::new(1).ok()?,
+            (Some(expected), Some(current)) if current.revision() == expected => {
+                ScopeSetRevision::new(expected.get().checked_add(1)?).ok()?
+            }
+            _ => {
+                return Some((
+                    active_scope,
+                    MultiRootScopeSetCasResultV1 {
+                        status: MultiRootScopeSetCasStatusV1::Conflict,
+                        scope_set: current,
+                    },
+                ));
+            }
+        };
+        let capability =
+            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
+                .ok()?;
+        let use_case =
+            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
+                .ok()?;
+        let mut contexts = Vec::with_capacity(roots.len());
+        let mut storages = vec![active_storage.clone()];
+        for (ordinal, (project_root, scope)) in roots.iter().enumerate() {
+            let owner = self.lsp_owner(Some(project_root)).await?;
+            let grant = owner.scope_grant?;
+            if grant.scope != *scope {
+                return None;
+            }
+            if let Some(storage) = owner.scope_set_storage {
+                storages.push(storage);
+            }
+            contexts.push(
+                RequestContext::new(
+                    grant.issuer.clone(),
+                    scope.clone(),
+                    grant,
+                    RequestId::new(format!("request.multi-root.cas.{ordinal}")).ok()?,
+                    Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000)))
+                        .ok()?,
+                    CancellationContext::active(format!("cancel.multi-root.cas.{ordinal}")).ok()?,
+                )
+                .ok()?,
+            );
+        }
+        let next = AuthorizedScopeSetAuthority::authorize(
+            request.scope_set_id,
+            next_revision,
+            contexts,
+            &capability,
+            &use_case,
+            observed_at,
+        )
+        .ok()?;
+        for storage in storages {
+            match storage
+                .compare_and_swap(request.expected_revision, &next)
+                .ok()?
+            {
+                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
+                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
+                    let stored = storage.read(next.scope_set_id()).ok()?;
+                    if stored.as_ref() != Some(&next) {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some((
+            active_scope,
+            MultiRootScopeSetCasResultV1 {
+                status: MultiRootScopeSetCasStatusV1::Applied,
+                scope_set: Some(next),
+            },
+        ))
+    }
+
+    pub(crate) async fn multi_root_evidence<T>(
+        &self,
+        project_root: &Path,
+        request_id: RequestId,
+        operation_key: &str,
+        payload: T,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Option<(ResolvedScope, ApplicationOutcome<T>)>
+    where
+        T: Serialize,
+    {
+        let owner = self.lsp_owner(Some(project_root)).await?;
+        let grant = owner.scope_grant?;
+        let scope = grant.scope.clone();
+        let context = RequestContext::new(
+            grant.issuer.clone(),
+            scope.clone(),
+            grant.clone(),
+            request_id,
+            deadline.clone(),
+            cancellation,
+        )
+        .ok()?;
+        let policy_digest = canonical_sha256(&(
+            "tracedecay.daemon.multi-root-policy.v1",
+            &grant.digest,
+            operation_key,
+        ))
+        .ok()?;
+        let policy = PolicyDecisionRef::new(
+            format!("policy.daemon.multi-root.{operation_key}.v1"),
+            1,
+            policy_digest,
+            ComponentVersion::new("tracedecay.daemon.multi-root-policy.v1").ok()?,
+        )
+        .ok()?;
+        let authority = AuthorityReceipt::from_context(&context, policy, observed_at).ok()?;
+        let execution = OperationReceipt::completed(
+            observed_at,
+            current_micros(),
+            deadline,
+            OperationBudgetUsage::default(),
+        )
+        .ok()?;
+        let evidence_digest = canonical_sha256(&(
+            "tracedecay.daemon.multi-root-evidence.v1",
+            operation_key,
+            &scope,
+            &payload,
+        ))
+        .ok()?;
+        let packet = EvidencePacket {
+            temporal: TemporalState::current(execution.ended_at),
+            authority,
+            evidence_authorities: vec![EvidenceAuthority {
+                evidence_id: EvidenceIdentity::new(format!(
+                    "evidence.multi-root.{}",
+                    evidence_digest.as_str().trim_start_matches("sha256:")
+                ))
+                .ok()?,
+                source_kind: "registered_multi_root".to_owned(),
+                producer: operation_key.to_owned(),
+                scope: scope.clone(),
+                revision: ComponentVersion::new("tracedecay.multi-root.v1").ok()?,
+                horizon: Some(execution.ended_at),
+            }],
+            coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Operational], 1, 1, 1)
+                .ok()?,
+            omissions: Vec::new(),
+            scores: Vec::new(),
+            contributions: Vec::new(),
+            page: PageState::first_page(
+                SortContractId::new("sort.multi-root.scope-order.v1").ok()?,
+                1,
+                Some(1),
+                1,
+            )
+            .ok()?,
+            execution,
+            payload: Some(payload),
+        };
+        Some((scope, ApplicationOutcome::Evidence(packet)))
+    }
+
     async fn execute_semantic_evaluation(
         &self,
         project_root: Option<&Path>,
@@ -7826,6 +8312,65 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::MultiRootScopeSetRead {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let Some(owner) = self.lsp_owner(project_root).await else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                let Some(storage) = owner.scope_set_storage else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                match storage.read(&request.scope_set_id) {
+                    Ok(scope_set) => {
+                        let Some(project_root) = project_root else {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::Unavailable,
+                            );
+                        };
+                        let Some((scope, outcome)) = self
+                            .multi_root_evidence(
+                                project_root,
+                                RequestId::new(request_id.clone())
+                                    .expect("validated daemon request id"),
+                                "scope_set_read",
+                                scope_set,
+                                observed_at,
+                                deadline,
+                                cancellation,
+                            )
+                            .await
+                        else {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                DaemonInvocationProblem::Unavailable,
+                            );
+                        };
+                        DaemonInvocationResponse::with_outcome(
+                            request_id,
+                            DaemonInvocationOutcome::MultiRootScopeSetRead { scope, outcome },
+                        )
+                    }
+                    Err(_) => DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    ),
+                }
+            }
+            DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
+            | DaemonInvocationPayload::MultiRootExecute { .. } => {
+                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+            }
             DaemonInvocationPayload::WorkApplication {
                 request,
                 observed_at,
@@ -8330,6 +8875,9 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::CodeReferences
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
+        | DaemonInvocationOperation::MultiRootScopeSetRead
+        | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
+        | DaemonInvocationOperation::MultiRootExecute
         | DaemonInvocationOperation::WorkApplication
         | DaemonInvocationOperation::WorkAttempt
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
@@ -8361,6 +8909,9 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
         | DaemonInvocationOutcome::GitApply { .. }
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
+        | DaemonInvocationOutcome::MultiRootScopeSetRead { .. }
+        | DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { .. }
+        | DaemonInvocationOutcome::MultiRootQueryPage { .. }
         | DaemonInvocationOutcome::WorkApplication { .. }
         | DaemonInvocationOutcome::WorkAttempt { .. }
         | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }

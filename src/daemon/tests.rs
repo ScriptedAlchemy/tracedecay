@@ -21,7 +21,8 @@ use super::{
 };
 use super::{
     DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
-    ProjectServerKey, StoreAdministration, StoreOwnerKey,
+    ProjectServerKey, StoreAdministration, StoreOwnerKey, explicit_git_state,
+    multi_root_family_allows,
 };
 
 mod bootstrap;
@@ -39,6 +40,70 @@ mod socket;
 
 fn test_client_identity() -> DaemonClientIdentity {
     test_client_identity_for(PathBuf::from("/profiles/client"))
+}
+
+#[cfg(unix)]
+#[test]
+fn multi_root_git_generation_reads_each_explicit_root() {
+    fn init(root: &std::path::Path) {
+        let status = Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+    }
+
+    let first = TempDir::new().expect("first root");
+    let second = TempDir::new().expect("second root");
+    init(first.path());
+    init(second.path());
+    std::fs::write(first.path().join("first.txt"), "first").expect("first source");
+    std::fs::write(second.path().join("second.txt"), "second").expect("second source");
+
+    let first_generation = explicit_git_state(first.path()).expect("first generation");
+    let second_generation = explicit_git_state(second.path()).expect("second generation");
+    assert_ne!(first_generation, second_generation);
+
+    std::fs::write(first.path().join("third.txt"), "third").expect("changed first source");
+    assert_ne!(
+        explicit_git_state(first.path()).expect("updated first generation"),
+        first_generation
+    );
+    assert_eq!(
+        explicit_git_state(second.path()).expect("stable second generation"),
+        second_generation
+    );
+}
+
+#[test]
+fn multi_root_families_refuse_cross_family_fallback() {
+    use crate::application_surface::ApplicationSurfaceOperation;
+    use tracedecay_application::MultiRootOperationV1;
+
+    let git = MultiRootOperationV1::Git {
+        request: json!({}),
+    };
+    assert!(multi_root_family_allows(
+        &git,
+        ApplicationSurfaceOperation::GitStatus
+    ));
+    assert!(!multi_root_family_allows(
+        &git,
+        ApplicationSurfaceOperation::CodePhraseSearch
+    ));
+    let query = MultiRootOperationV1::Query {
+        request: json!({}),
+    };
+    assert!(multi_root_family_allows(
+        &query,
+        ApplicationSurfaceOperation::CodePhraseSearch
+    ));
+    assert!(!multi_root_family_allows(
+        &query,
+        ApplicationSurfaceOperation::GitStatus
+    ));
 }
 
 fn test_client_identity_for(profile_root: PathBuf) -> DaemonClientIdentity {
