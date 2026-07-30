@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -6,6 +7,51 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RehearsalPublicationFault {
+    None,
+    BeforeRename,
+    AfterRenameBeforeParentSync,
+    AfterParentSyncBeforeMarkerRemoval,
+}
+
+thread_local! {
+    static REHEARSAL_PUBLICATION_FAULT: Cell<RehearsalPublicationFault> =
+        const { Cell::new(RehearsalPublicationFault::None) };
+}
+
+/// Test-only fault injection for rehearsal publication boundaries.
+#[doc(hidden)]
+pub fn set_rehearsal_publication_fault_for_test(fault: &str) {
+    let fault = match fault {
+        "before_rename" => RehearsalPublicationFault::BeforeRename,
+        "after_rename_before_parent_sync" => RehearsalPublicationFault::AfterRenameBeforeParentSync,
+        "after_parent_sync_before_marker_removal" => {
+            RehearsalPublicationFault::AfterParentSyncBeforeMarkerRemoval
+        }
+        _ => RehearsalPublicationFault::None,
+    };
+    REHEARSAL_PUBLICATION_FAULT.with(|cell| cell.set(fault));
+}
+
+fn inject_rehearsal_publication_fault(
+    phase: RehearsalPublicationFault,
+) -> Result<(), String> {
+    let injected = REHEARSAL_PUBLICATION_FAULT.with(|cell| {
+        if cell.get() == phase {
+            cell.set(RehearsalPublicationFault::None);
+            true
+        } else {
+            false
+        }
+    });
+    if injected {
+        Err(format!("injected rehearsal publication fault at {phase:?}"))
+    } else {
+        Ok(())
+    }
+}
 
 const BACKUP_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const REHEARSAL_MARKER_SCHEMA_VERSION: u32 = 1;
@@ -117,11 +163,14 @@ pub fn rehearse_complete_profile_backup(
 ) -> Result<CompleteProfileBackupManifest, String> {
     let manifest = load_and_verify_backup(backup_root)?;
     let restore_root = absolute_destination(restore_root)?;
+    if recover_interrupted_publication(&restore_root, &manifest.backup_id)? {
+        return Ok(manifest);
+    }
+    let staging = rehearsal_staging_path(&restore_root)?;
+    recover_interrupted_staging(&staging, &manifest.backup_id, &restore_root)?;
     if restore_root.exists() {
         return Err("restore destination must not already exist".to_owned());
     }
-    let staging = rehearsal_staging_path(&restore_root)?;
-    recover_interrupted_rehearsal(&staging, &manifest.backup_id, &restore_root)?;
     fs::create_dir(&staging).map_err(|error| {
         format!(
             "create restore staging directory '{}': {error}",
@@ -151,13 +200,11 @@ pub fn rehearse_complete_profile_backup(
             return Err("restored profile inventory differs from backup manifest".to_owned());
         }
         rebind_restored_store_manifests(&staging, &restore_root)?;
-        fs::remove_file(&marker_path).map_err(|error| {
-            format!(
-                "remove settled profile rehearsal marker '{}': {error}",
-                marker_path.display()
-            )
-        })?;
+        // Keep the ownership marker through rename and parent sync so a crash
+        // never leaves an unowned staging directory or an unmarked published
+        // root that recovery cannot finish.
         sync_directory(&staging)?;
+        inject_rehearsal_publication_fault(RehearsalPublicationFault::BeforeRename)?;
         fs::rename(&staging, &restore_root).map_err(|error| {
             format!(
                 "publish rehearsed profile '{}' to '{}': {error}",
@@ -165,15 +212,19 @@ pub fn rehearse_complete_profile_backup(
                 restore_root.display()
             )
         })?;
-        sync_directory(
-            restore_root
-                .parent()
-                .ok_or_else(|| "restore destination has no parent".to_owned())?,
+        inject_rehearsal_publication_fault(
+            RehearsalPublicationFault::AfterRenameBeforeParentSync,
         )?;
-        Ok(())
+        finish_published_rehearsal(&restore_root, &manifest.backup_id)
     })();
     if let Err(error) = result {
-        let _ = fs::remove_dir_all(&staging);
+        // Leave marker-owned staging or published roots for crash recovery.
+        // Only scrub unmarked partial staging created before ownership settled.
+        let staging_marked = staging.join(REHEARSAL_MARKER_FILENAME).is_file();
+        let published_marked = restore_root.join(REHEARSAL_MARKER_FILENAME).is_file();
+        if !staging_marked && !published_marked {
+            let _ = fs::remove_dir_all(&staging);
+        }
         return Err(error);
     }
     Ok(manifest)
@@ -204,7 +255,56 @@ fn rehearsal_staging_path(restore_root: &Path) -> Result<PathBuf, String> {
     Ok(parent.join(format!(".{name}.tracedecay-rehearsal")))
 }
 
-fn recover_interrupted_rehearsal(
+fn recover_interrupted_publication(
+    restore_root: &Path,
+    backup_id: &str,
+) -> Result<bool, String> {
+    let metadata = match fs::symlink_metadata(restore_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "inspect restore destination '{}': {error}",
+                restore_root.display()
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(false);
+    }
+    let marker_path = restore_root.join(REHEARSAL_MARKER_FILENAME);
+    match fs::symlink_metadata(&marker_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "inspect published rehearsal marker '{}': {error}",
+                marker_path.display()
+            ));
+        }
+        Ok(marker_metadata) => {
+            if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+                return Err(format!(
+                    "published rehearsal marker '{}' is not a regular file",
+                    marker_path.display()
+                ));
+            }
+        }
+    }
+    let marker = read_rehearsal_marker(&marker_path)?;
+    if marker.schema_version != REHEARSAL_MARKER_SCHEMA_VERSION
+        || marker.backup_id != backup_id
+        || marker.restore_root != restore_root
+    {
+        return Err(format!(
+            "published rehearsal root '{}' belongs to another restore attempt",
+            restore_root.display()
+        ));
+    }
+    finish_published_rehearsal(restore_root, backup_id)?;
+    Ok(true)
+}
+
+fn recover_interrupted_staging(
     staging: &Path,
     backup_id: &str,
     restore_root: &Path,
@@ -238,19 +338,7 @@ fn recover_interrupted_rehearsal(
             marker_path.display()
         ));
     }
-    let marker: ProfileBackupRehearsalMarker =
-        serde_json::from_slice(&fs::read(&marker_path).map_err(|error| {
-            format!(
-                "read profile rehearsal marker '{}': {error}",
-                marker_path.display()
-            )
-        })?)
-        .map_err(|error| {
-            format!(
-                "decode profile rehearsal marker '{}': {error}",
-                marker_path.display()
-            )
-        })?;
+    let marker = read_rehearsal_marker(&marker_path)?;
     if marker.schema_version != REHEARSAL_MARKER_SCHEMA_VERSION
         || marker.backup_id != backup_id
         || marker.restore_root != restore_root
@@ -271,6 +359,50 @@ fn recover_interrupted_rehearsal(
             .parent()
             .ok_or_else(|| "profile rehearsal staging has no parent".to_owned())?,
     )
+}
+
+fn finish_published_rehearsal(restore_root: &Path, backup_id: &str) -> Result<(), String> {
+    let marker_path = restore_root.join(REHEARSAL_MARKER_FILENAME);
+    let marker = read_rehearsal_marker(&marker_path)?;
+    if marker.schema_version != REHEARSAL_MARKER_SCHEMA_VERSION
+        || marker.backup_id != backup_id
+        || marker.restore_root != restore_root
+    {
+        return Err(format!(
+            "published rehearsal root '{}' belongs to another restore attempt",
+            restore_root.display()
+        ));
+    }
+    let parent = restore_root
+        .parent()
+        .ok_or_else(|| "restore destination has no parent".to_owned())?;
+    sync_directory(parent)?;
+    inject_rehearsal_publication_fault(
+        RehearsalPublicationFault::AfterParentSyncBeforeMarkerRemoval,
+    )?;
+    fs::remove_file(&marker_path).map_err(|error| {
+        format!(
+            "remove settled profile rehearsal marker '{}': {error}",
+            marker_path.display()
+        )
+    })?;
+    sync_directory(restore_root)?;
+    sync_directory(parent)
+}
+
+fn read_rehearsal_marker(marker_path: &Path) -> Result<ProfileBackupRehearsalMarker, String> {
+    serde_json::from_slice(&fs::read(marker_path).map_err(|error| {
+        format!(
+            "read profile rehearsal marker '{}': {error}",
+            marker_path.display()
+        )
+    })?)
+    .map_err(|error| {
+        format!(
+            "decode profile rehearsal marker '{}': {error}",
+            marker_path.display()
+        )
+    })
 }
 
 fn rebind_restored_store_manifests(
@@ -316,7 +448,13 @@ fn rebind_restored_store_manifests(
         let manifest_path = store_root.join(crate::storage::STORE_MANIFEST_FILENAME);
         let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "restored store '{}' is missing required {}",
+                    store_root.display(),
+                    crate::storage::STORE_MANIFEST_FILENAME
+                ));
+            }
             Err(error) => {
                 return Err(format!(
                     "inspect restored store manifest '{}': {error}",
@@ -867,5 +1005,110 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("outside the source profile"));
+    }
+
+    fn sharded_released_backup(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        let profile = temp.path().join("released-profile");
+        let backups = temp.path().join("backups");
+        let project = temp.path().join("released-project");
+        let project_id = "project.release";
+        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&project).unwrap();
+        released_profile(&profile);
+        fs::remove_file(profile.join("projects/project.release.db")).unwrap();
+        let source_store = profile.join("projects").join(project_id);
+        fs::create_dir(&source_store).unwrap();
+        for (name, contents) in [
+            ("tracedecay.db", b"released memory identity".as_slice()),
+            ("sessions.db", b"released LCM identity".as_slice()),
+            (
+                "branch-meta.json",
+                br#"{"default_branch":"main","branches":{}}"#,
+            ),
+        ] {
+            fs::write(source_store.join(name), contents).unwrap();
+        }
+        crate::storage::write_store_manifest_to_path(
+            &source_store.join(crate::storage::STORE_MANIFEST_FILENAME),
+            &crate::storage::StoreManifest {
+                schema_version: crate::storage::STORE_MANIFEST_SCHEMA_VERSION,
+                project_id: Some(project_id.to_owned()),
+                store_kind: crate::storage::StoreKind::CodeProject,
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+                project_root: project,
+                data_root: source_store.clone(),
+                graph_db_relpath: "tracedecay.db".into(),
+                sessions_db_relpath: "sessions.db".into(),
+                branch_meta_relpath: "branch-meta.json".into(),
+            },
+        )
+        .unwrap();
+        let lease =
+            crate::lifecycle_lease::acquire_exclusive_for_profile(&profile, "backup test").unwrap();
+        let backup =
+            create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
+                .unwrap();
+        (backup, temp.path().join("rehearsed-profile"))
+    }
+
+    #[test]
+    fn rehearsal_publication_faults_resume_or_rollback_at_each_boundary() {
+        for (fault, expect_staging, expect_published_marker) in [
+            ("before_rename", true, false),
+            ("after_rename_before_parent_sync", false, true),
+            ("after_parent_sync_before_marker_removal", false, true),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (backup, restore) = sharded_released_backup(&temp);
+            let staging = temp.path().join(".rehearsed-profile.tracedecay-rehearsal");
+            set_rehearsal_publication_fault_for_test(fault);
+
+            let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+            assert!(
+                error.contains("injected rehearsal publication fault"),
+                "{fault}: unexpected error {error}"
+            );
+            assert_eq!(
+                staging.is_dir(),
+                expect_staging,
+                "{fault}: staging presence"
+            );
+            assert_eq!(
+                restore.join(REHEARSAL_MARKER_FILENAME).is_file(),
+                expect_published_marker,
+                "{fault}: published marker presence"
+            );
+
+            set_rehearsal_publication_fault_for_test("");
+            rehearse_complete_profile_backup(&backup, &restore).unwrap();
+            assert!(restore.join("profile-identity.json").is_file());
+            assert!(!staging.exists());
+            assert!(!restore.join(REHEARSAL_MARKER_FILENAME).exists());
+        }
+    }
+
+    #[test]
+    fn rehearsal_rejects_project_store_missing_store_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let (backup, restore) = sharded_released_backup(&temp);
+        let manifest_entry = format!(
+            "projects/project.release/{}",
+            crate::storage::STORE_MANIFEST_FILENAME
+        );
+        fs::remove_file(backup.join(&manifest_entry)).unwrap();
+        let manifest_path = backup.join("backup-manifest.json");
+        let mut manifest: CompleteProfileBackupManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest
+            .entries
+            .retain(|entry| entry.logical_path != manifest_entry);
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+        let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+        assert!(
+            error.contains("missing required store_manifest.json"),
+            "unexpected error: {error}"
+        );
+        assert!(!restore.exists());
     }
 }
