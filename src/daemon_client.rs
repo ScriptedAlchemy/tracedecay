@@ -926,6 +926,8 @@ pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
 pub struct DaemonLspSessionClient {
     invocation: DaemonInvocationClient,
     session: crate::daemon::DaemonLspSessionAccess,
+    scope_set_id: Option<tracedecay_domain::ScopeSetId>,
+    scope_set_digest: Option<tracedecay_domain::ManifestDigest>,
     next_request: ConnectionLocalRequestSequence,
     detached: bool,
 }
@@ -945,16 +947,31 @@ impl DaemonLspSessionClient {
                 workspace_folders,
             ))
             .await?;
-        let crate::daemon::DaemonInvocationOutcome::LspOpened { session, .. } = response.outcome
+        let crate::daemon::DaemonInvocationOutcome::LspOpened {
+            session,
+            scope_set_id,
+            scope_set_digest,
+            ..
+        } = response.outcome
         else {
             return Err(invocation_outcome_error(response.outcome));
         };
         Ok(Self {
             invocation,
             session,
+            scope_set_id,
+            scope_set_digest,
             next_request: ConnectionLocalRequestSequence::starting_at(2),
             detached: false,
         })
+    }
+
+    pub fn scope_set_id(&self) -> Option<&tracedecay_domain::ScopeSetId> {
+        self.scope_set_id.as_ref()
+    }
+
+    pub fn scope_set_digest(&self) -> Option<&tracedecay_domain::ManifestDigest> {
+        self.scope_set_digest.as_ref()
     }
 
     pub async fn try_send_client_frame(&mut self, frame: &str) -> crate::errors::Result<FrameSend> {
