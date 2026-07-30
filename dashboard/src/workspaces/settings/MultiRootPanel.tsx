@@ -103,10 +103,11 @@ function Field({ term, detail }: { term: string; detail: string }) {
 
 function PanelFrame({ children }: { children: React.ReactNode }) {
   return (
+    // No `data-section`: that attribute is how `findConfigSection` locates a
+    // configuration section for the jump index, and this is not one.
     <section
       aria-label="Multi-root scope set"
-      data-section="multi-root"
-      className="flex flex-col gap-2 border-b border-edge-subtle p-3"
+      className="flex shrink-0 flex-col gap-2 border-b border-edge-subtle p-3"
     >
       <Legend>Multi-root scope set</Legend>
       {children}

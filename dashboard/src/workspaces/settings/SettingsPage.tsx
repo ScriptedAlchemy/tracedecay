@@ -262,6 +262,15 @@ function SettingsSurface({
         </p>
       </div>
 
+      {/* Outside the "Effective configuration" region, deliberately. This is a
+       * capability from `/api/capabilities`, not a configuration value from the
+       * settings payload: it is not in the key search, it has no scope or
+       * revision to patch, and the region's contract is that its count
+       * describes its rows. Mounting it inside broke that count by two — which
+       * the audit caught — and would have put a non-setting under a label
+       * promising effective configuration. */}
+      <MultiRootPanel />
+
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <SectionIndex entries={filtered} total={model.sections.length} onJump={jumpTo} />
         <div
@@ -295,12 +304,6 @@ function SettingsSurface({
                 />
               ) : null}
               {query === '' ? <OriginBand model={model} onJump={jumpTo} /> : null}
-              {/* Not a configuration section: it comes from `/api/capabilities`
-               * rather than the settings payload, so it is outside the
-               * key-search this page runs over `model.sections`. Shown only in
-               * the unfiltered view for that reason — a search that skipped it
-               * silently would be the same lie as not reading it at all. */}
-              {query === '' ? <MultiRootPanel /> : null}
               {filtered.map(({ section, rows }) => (
                 <ConfigSectionBlock
                   key={section.id}
