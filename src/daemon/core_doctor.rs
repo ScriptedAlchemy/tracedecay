@@ -23,6 +23,16 @@ pub(crate) struct DoctorRuntimeRequest {
     doctor_report_requested: bool,
 }
 
+impl DoctorRuntimeRequest {
+    pub(crate) fn doctor_report_requested(&self) -> bool {
+        self.doctor_report_requested
+    }
+
+    pub(crate) fn should_serve_from_core(&self, doctor_report_ready: bool) -> bool {
+        !self.doctor_report_requested || !doctor_report_ready
+    }
+}
+
 pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntimeRequest> {
     let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
     if request.method != "tools/call" {
@@ -241,22 +251,14 @@ async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
     startup_health_only: bool,
-    project_runtime_ready: bool,
 ) -> serde_json::Value {
-    doctor_runtime_value_inner(
-        handshake,
-        Some(store_administration),
-        startup_health_only,
-        project_runtime_ready,
-    )
-    .await
+    doctor_runtime_value_inner(handshake, Some(store_administration), startup_health_only).await
 }
 
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
     store_administration: Option<&super::StoreAdministration>,
     startup_health_only: bool,
-    project_runtime_ready: bool,
 ) -> serde_json::Value {
     let Some(project_path) = handshake.project_path.as_deref() else {
         return doctor_runtime_unavailable(None, "project_path_missing");
@@ -304,14 +306,13 @@ async fn doctor_runtime_value_inner(
         };
         return doctor_runtime_unavailable(Some(project_path), reason);
     };
-    if !project_runtime_ready {
-        return doctor_runtime_unavailable(Some(project_path), "project_runtime_warming");
-    }
-    // Full publication follows the daemon-owned post-open integrity gate.
-    // Re-running PRAGMA quick_check here serializes reserved health probes
-    // behind a multi-second database-health scan on large WALs.
-    let quick_check_ok = true;
-    let quick_check_error: Option<String> = None;
+    let (quick_check_ok, quick_check_error) = match graph.quick_check_report().await {
+        Ok(None) => (true, None),
+        Ok(Some(problem)) => (false, Some(problem)),
+        Err(_) => {
+            return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
+        }
+    };
     let page_counts = graph.storage_page_counts().await.ok();
     let db_size_bytes = page_counts
         .map(|(page_size, page_count, _)| page_size.saturating_mul(page_count))
@@ -493,31 +494,18 @@ fn doctor_semantic_runtime_status(
 pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> serde_json::Value {
     // Owned stores are never path-opened as a fallback. Without the daemon's
     // retained runtime authority Doctor reports explicit unavailability.
-    doctor_runtime_value_inner(handshake, None, false, false).await
+    doctor_runtime_value_inner(handshake, None, false).await
 }
 
 pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
-    project_runtime_ready: bool,
     request: DoctorRuntimeRequest,
 ) -> Result<()> {
-    let mut value = doctor_runtime_value(
-        handshake,
-        store_administration,
-        request.startup_health_only,
-        project_runtime_ready,
-    )
-    .await;
-    if request.doctor_report_requested {
-        value["doctor_report"] = json!({
-            "kind": "unknown",
-            "reason": "background_snapshot_pending",
-            "table_growth_evidence": [],
-        });
-    }
-    let result = doctor_runtime_tool_result(value);
+    let result = doctor_runtime_tool_result(
+        doctor_runtime_value(handshake, store_administration, request.startup_health_only).await,
+    );
     write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
 }
 
@@ -619,6 +607,7 @@ mod doctor_runtime_route_tests {
         DaemonHandshake {
             project_path: Some(project_path),
             scope_prefix: None,
+            attested_scope: None,
             timings: false,
             allow_init: false,
             allow_initialize_root_routing: false,
@@ -719,7 +708,8 @@ mod doctor_runtime_route_tests {
         let parsed = doctor_runtime_request(&request).expect("doctor runtime request");
         assert_eq!(parsed.id, serde_json::json!(7));
         assert!(!parsed.startup_health_only);
-        assert!(!parsed.doctor_report_requested);
+        assert!(!parsed.doctor_report_requested());
+        assert!(parsed.should_serve_from_core(true));
 
         let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
         assert!(doctor_runtime_request(&ordinary).is_none());
@@ -740,11 +730,11 @@ mod doctor_runtime_route_tests {
         let parsed = doctor_runtime_request(&startup).expect("startup health runtime request");
         assert_eq!(parsed.id, serde_json::json!(8));
         assert!(parsed.startup_health_only);
-        assert!(!parsed.doctor_report_requested);
+        assert!(!parsed.doctor_report_requested());
     }
 
     #[test]
-    fn requested_doctor_report_stays_on_the_reserved_core_route() {
+    fn requested_doctor_report_uses_core_only_until_the_ready_owner_is_published() {
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 9,
@@ -762,7 +752,9 @@ mod doctor_runtime_route_tests {
         .to_string();
         let parsed = doctor_runtime_request(&request).expect("Doctor report request");
 
-        assert!(parsed.doctor_report_requested);
+        assert!(parsed.doctor_report_requested());
+        assert!(parsed.should_serve_from_core(false));
+        assert!(!parsed.should_serve_from_core(true));
     }
 
     #[test]
