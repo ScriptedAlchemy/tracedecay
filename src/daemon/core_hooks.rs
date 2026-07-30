@@ -18,6 +18,14 @@ pub use tracedecay_domain::HostIntegrationIdV1 as HookAgent;
 pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
 pub(crate) const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEventNotifyOutcomeV1 {
+    Delivered,
+    Unavailable,
+    TimedOut,
+    Malformed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookRouteMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,32 +158,49 @@ impl DaemonHookEvent {
     }
 }
 
-pub async fn notify_hook_event(project_path: &Path, event: DaemonHookEvent) {
-    let _ = timeout(
+pub async fn notify_hook_event(
+    project_path: &Path,
+    event: DaemonHookEvent,
+) -> HookEventNotifyOutcomeV1 {
+    let connection = {
+        #[cfg(unix)]
+        {
+            std::env::var_os(SOCKET_ENV)
+                .filter(|path| !path.is_empty())
+                .map(|path| connection_for_socket_path(Path::new(&path)))
+                .map_or_else(current_daemon_connection, Ok)
+        }
+        #[cfg(not(unix))]
+        {
+            current_daemon_connection()
+        }
+    };
+    let Ok(connection) = connection else {
+        return HookEventNotifyOutcomeV1::Unavailable;
+    };
+    match timeout(
         HOOK_EVENT_NOTIFY_TIMEOUT,
-        notify_hook_event_inner(project_path, event),
+        notify_hook_event_to_connection(project_path, event, connection),
     )
-    .await;
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => HookEventNotifyOutcomeV1::TimedOut,
+    }
 }
 
-async fn notify_hook_event_inner(project_path: &Path, event: DaemonHookEvent) {
-    #[cfg(unix)]
-    let connection = std::env::var_os(SOCKET_ENV)
-        .filter(|path| !path.is_empty())
-        .map(|path| connection_for_socket_path(Path::new(&path)))
-        .map_or_else(current_daemon_connection, Ok);
-    #[cfg(not(unix))]
-    let connection = current_daemon_connection();
-    let Ok(connection) = connection else {
-        return;
-    };
+async fn notify_hook_event_to_connection(
+    project_path: &Path,
+    event: DaemonHookEvent,
+    connection: super::DaemonConnection,
+) -> HookEventNotifyOutcomeV1 {
     let Ok(handshake) =
         DaemonHandshake::for_current_client(Some(project_path.to_path_buf()), None, false, false)
     else {
-        return;
+        return HookEventNotifyOutcomeV1::Malformed;
     };
     let Ok(params) = serde_json::to_value(event) else {
-        return;
+        return HookEventNotifyOutcomeV1::Malformed;
     };
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -184,24 +209,55 @@ async fn notify_hook_event_inner(project_path: &Path, event: DaemonHookEvent) {
         params: Some(params),
     };
     let Ok(line) = serde_json::to_string(&request) else {
-        return;
+        return HookEventNotifyOutcomeV1::Malformed;
     };
     let Ok(stream) = BrokerStream::connect(&connection.endpoint).await else {
-        return;
+        return HookEventNotifyOutcomeV1::Unavailable;
     };
     let (_reader, mut writer) = stream.into_split();
     if write_daemon_preamble(&mut writer, &connection, &handshake)
         .await
         .is_err()
     {
-        return;
+        return HookEventNotifyOutcomeV1::Unavailable;
     }
     if writer.write_all(line.as_bytes()).await.is_err() {
-        return;
+        return HookEventNotifyOutcomeV1::Unavailable;
     }
     if writer.write_all(b"\n").await.is_err() {
-        return;
+        return HookEventNotifyOutcomeV1::Unavailable;
     }
-    let _ = writer.flush().await;
-    let _ = writer.shutdown().await;
+    if writer.flush().await.is_err() || writer.shutdown().await.is_err() {
+        return HookEventNotifyOutcomeV1::Unavailable;
+    }
+    HookEventNotifyOutcomeV1::Delivered
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_hook_socket_returns_typed_unavailable_without_retry_delay() {
+        let socket_dir = tempfile::tempdir().unwrap();
+        let missing_socket = socket_dir.path().join("missing.sock");
+        let connection = connection_for_socket_path(&missing_socket);
+        let started = Instant::now();
+
+        let outcome = notify_hook_event_to_connection(
+            socket_dir.path(),
+            DaemonHookEvent::cursor_after_shell_execution(socket_dir.path().to_path_buf()),
+            connection,
+        )
+        .await;
+
+        assert_eq!(outcome, HookEventNotifyOutcomeV1::Unavailable);
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "a missing socket must not consume the outer hook timeout"
+        );
+    }
 }

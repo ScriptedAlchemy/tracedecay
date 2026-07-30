@@ -332,7 +332,9 @@ pub(crate) async fn notify_hook_event_with_optional_telemetry(
         Some(telemetry) => {
             notify_hook_event_with_telemetry(project_root, event, telemetry).await;
         }
-        None => crate::daemon::notify_hook_event(project_root, event).await,
+        None => {
+            let _ = crate::daemon::notify_hook_event(project_root, event).await;
+        }
     }
 }
 
@@ -398,18 +400,30 @@ pub(crate) fn schedule_user_session_review(provider: &str, session_id: Option<&s
         return;
     };
     let payload = serde_json::json!({ "provider": provider, "session_id": session_id }).to_string();
-    let Ok(mut child) = std::process::Command::new(exe)
-        .arg("hook-user-session-review")
+    let mut command = std::process::Command::new(exe);
+    command.arg("hook-user-session-review");
+    let _ = spawn_reaped_hook_child(command, payload.as_bytes());
+}
+
+fn spawn_reaped_hook_child(
+    mut command: std::process::Command,
+    payload: &[u8],
+) -> std::io::Result<u32> {
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.as_bytes());
-    }
+        .spawn()?;
+    let pid = child.id();
+    let write_result = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(payload));
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    write_result?;
+    Ok(pid)
 }
 
 pub async fn hook_user_session_review() -> i32 {
@@ -1347,7 +1361,9 @@ mod hint_analytics_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{hook_route_metadata_from_event, parse_daemon_tool_json_content};
+    use super::{
+        hook_route_metadata_from_event, parse_daemon_tool_json_content, spawn_reaped_hook_child,
+    };
 
     #[test]
     fn daemon_tool_json_ignores_notices_and_returns_one_payload() {
@@ -1417,5 +1433,22 @@ mod tests {
         };
 
         assert_eq!(route.session_id.as_deref(), Some("conversation-camel"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detached_hook_child_is_reaped_after_exit() {
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg("exit 0");
+        let pid = spawn_reaped_hook_child(command, b"").expect("spawn disposable hook child");
+        let process_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while process_path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            !process_path.exists(),
+            "the exited hook child remained as an unreaped process"
+        );
     }
 }
