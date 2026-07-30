@@ -29,11 +29,6 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   `cargo nextest run --workspace --all-features --no-fail-fast`.
 - Dashboard: `npm run build` (rsbuild), `npm run typecheck` (`tsc --noEmit`),
   `npm test` (vitest) from `dashboard/`.
-- libtest `--exact` requires the full module path and exits 0 when a filter
-  matches nothing — a vacuous "0 passed" green. For name-filtered runs prefer
-  `scripts/require-exact-test.sh`, which fails when nothing matched; otherwise
-  pass the full path (`module::path::test_name`) and confirm the reported
-  count is non-zero before treating a run as evidence.
 - `dashboard/app-dist/` is gitignored build output but required by `build.rs`;
   a fresh checkout/worktree must build the dashboard (or seed the directory)
   before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a

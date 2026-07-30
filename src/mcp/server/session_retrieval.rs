@@ -52,16 +52,16 @@ use crate::mcp::tools::{
     SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
     SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
-use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use crate::query::temporal::ports::TemporalExecutionSnapshot;
-use crate::query::temporal::ranking::{DiversityLimits, RankedCandidate};
-use crate::query::temporal::{TemporalHydratedResult, TemporalKernelResult};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
 use crate::sessions::{SessionMessageSearchResult, SessionRecord};
 use crate::tracedecay::TraceDecay;
+use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::ports::TemporalExecutionSnapshot;
+use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate};
+use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
 
 const MESSAGE_SEARCH_ACTOR_ID: &str = "mcp.message-search";
 #[cfg(test)]
@@ -732,7 +732,7 @@ impl DaemonSessionRetrievalService {
     async fn hydrate_result(
         &self,
         snapshot: &TemporalExecutionSnapshot,
-        ranked: &crate::query::temporal::ranking::RankedCandidate,
+        ranked: &tracedecay_temporal_query::ranking::RankedCandidate,
         hydrated: &TemporalHydratedResult,
         sessions: &mut PageSessionCache,
     ) -> Option<SessionMessageSearchResult> {
@@ -746,7 +746,7 @@ impl DaemonSessionRetrievalService {
                 .iter()
                 .find(|contribution| {
                     contribution.channel
-                        == crate::query::temporal::candidates::CandidateChannel::Summary
+                        == tracedecay_temporal_query::candidates::CandidateChannel::Summary
                 })?
                 .retriever_record_id
                 .clone();
@@ -1336,7 +1336,7 @@ fn hydration_state(
         .hydrated
         .iter()
         .find(|hydrated| hydrated.anchor_id() == anchor_id)
-        .map(crate::query::temporal::TemporalHydratedResult::state)
+        .map(tracedecay_temporal_query::TemporalHydratedResult::state)
 }
 
 fn describe_hydration_state(state: HydrationStateV1) -> LcmDescribeServiceOutcome {

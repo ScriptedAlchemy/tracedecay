@@ -23,7 +23,6 @@ use tracedecay_code_index::projection::{
 };
 
 const VECTOR_OUTPUT_DIGEST_DOMAIN: &str = "tracedecay.semantic-vector-output.v1";
-const VECTOR_ENCODING_BATCH_SIZE: usize = 8;
 
 /// The only projector dependency that may produce vector values.
 pub trait CanonicalChunkVectorEncoderV1 {
@@ -32,14 +31,6 @@ pub trait CanonicalChunkVectorEncoderV1 {
         key: &EmbeddingProjectionKeyV1,
         chunk: &CodeSearchChunkV1,
     ) -> Result<Vec<f32>, String>;
-
-    fn encode_batch(
-        &mut self,
-        key: &EmbeddingProjectionKeyV1,
-        chunks: &[&CodeSearchChunkV1],
-    ) -> Result<Vec<Vec<f32>>, String> {
-        chunks.iter().map(|chunk| self.encode(key, chunk)).collect()
-    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -239,56 +230,37 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
             + request.changes.deleted.len()
             + request.changes.reused.len(),
     );
-    for changes in request
-        .changes
-        .added_or_changed
-        .chunks(VECTOR_ENCODING_BATCH_SIZE)
-    {
-        let batch = changes
-            .iter()
-            .map(|change| {
-                chunks.get(&change.chunk_id).copied().ok_or_else(|| {
-                    SemanticProjectionErrorV1::CanonicalChunkSetMismatch(change.chunk_id.clone())
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded = encoder
-            .encode_batch(embedding_key, &batch)
-            .map_err(|reason| SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch
-                    .first()
-                    .map_or_else(|| changes[0].chunk_id.clone(), |chunk| chunk.id.clone()),
+    for change in &request.changes.added_or_changed {
+        let chunk = chunks.get(&change.chunk_id).ok_or_else(|| {
+            SemanticProjectionErrorV1::CanonicalChunkSetMismatch(change.chunk_id.clone())
+        })?;
+        let values = encoder.encode(embedding_key, chunk).map_err(|reason| {
+            SemanticProjectionErrorV1::Encoder {
+                chunk_id: chunk.id.clone(),
                 reason,
-            })?;
-        if encoded.len() != batch.len() {
-            return Err(SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch[0].id.clone(),
-                reason: "semantic projector returned an unexpected vector batch size".to_owned(),
-            });
-        }
-        for ((change, chunk), values) in changes.iter().zip(batch).zip(encoded) {
-            let vector = ProjectedChunkVectorV1::new(
-                target_key.clone(),
-                request.changes.to_generation.clone(),
-                request.changes.manifest_digest.clone(),
-                chunk,
-                values,
-                embedding_key.dimensions,
-            )?;
-            decisions.push(ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: Some(vector.output_digest.clone()),
-            });
-            vectors.push(vector);
-        }
+            }
+        })?;
+        let vector = ProjectedChunkVectorV1::new(
+            target_key.clone(),
+            request.changes.to_generation.clone(),
+            request.changes.manifest_digest.clone(),
+            chunk,
+            values,
+            embedding_key.dimensions,
+        )?;
+        decisions.push(ChunkProjectionDecisionV1 {
+            chunk_id: change.chunk_id.clone(),
+            prior_chunk_digest: change.prior_digest.clone(),
+            current_chunk_digest: change.current_digest.clone(),
+            operation: if change.prior_digest.is_some() {
+                ProjectionOperationV1::Updated
+            } else {
+                ProjectionOperationV1::Added
+            },
+            outcome: ProjectionOutcomeV1::Applied,
+            output_digest: Some(vector.output_digest.clone()),
+        });
+        vectors.push(vector);
     }
 
     let mut tombstones = Vec::with_capacity(request.changes.deleted.len());
@@ -313,42 +285,15 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
     }
     for change in &request.changes.reused {
         if reembed_reused {
-            continue;
-        }
-        decisions.push(ChunkProjectionDecisionV1 {
-            chunk_id: change.chunk_id.clone(),
-            prior_chunk_digest: change.prior_digest.clone(),
-            current_chunk_digest: change.current_digest.clone(),
-            operation: ProjectionOperationV1::Reused,
-            outcome: ProjectionOutcomeV1::Reused,
-            output_digest: None,
-        });
-    }
-    for changes in reembedded_changes.chunks(VECTOR_ENCODING_BATCH_SIZE) {
-        let batch = changes
-            .iter()
-            .map(|change| {
-                chunks
-                    .get(&change.chunk_id)
-                    .copied()
-                    .ok_or(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded = encoder
-            .encode_batch(embedding_key, &batch)
-            .map_err(|reason| SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch
-                    .first()
-                    .map_or_else(|| changes[0].chunk_id.clone(), |chunk| chunk.id.clone()),
-                reason,
+            let chunk = chunks
+                .get(&change.chunk_id)
+                .ok_or(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)?;
+            let values = encoder.encode(embedding_key, chunk).map_err(|reason| {
+                SemanticProjectionErrorV1::Encoder {
+                    chunk_id: chunk.id.clone(),
+                    reason,
+                }
             })?;
-        if encoded.len() != batch.len() {
-            return Err(SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch[0].id.clone(),
-                reason: "semantic projector returned an unexpected vector batch size".to_owned(),
-            });
-        }
-        for ((change, chunk), values) in changes.iter().zip(batch).zip(encoded) {
             let vector = ProjectedChunkVectorV1::new(
                 target_key.clone(),
                 request.changes.to_generation.clone(),
@@ -366,6 +311,15 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
                 output_digest: Some(vector.output_digest.clone()),
             });
             vectors.push(vector);
+        } else {
+            decisions.push(ChunkProjectionDecisionV1 {
+                chunk_id: change.chunk_id.clone(),
+                prior_chunk_digest: change.prior_digest.clone(),
+                current_chunk_digest: change.current_digest.clone(),
+                operation: ProjectionOperationV1::Reused,
+                outcome: ProjectionOutcomeV1::Reused,
+                output_digest: None,
+            });
         }
     }
 
