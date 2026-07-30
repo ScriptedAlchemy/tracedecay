@@ -1878,6 +1878,13 @@ mod compatibility_tests {
         .expect("valid JSON tool result")
     }
 
+    fn response_text(result: ToolResult) -> String {
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("tool result text")
+            .to_string()
+    }
+
     #[tokio::test]
     async fn load_maps_exact_forensic_occurrence_and_preserves_legacy_keys() {
         let service = RecordingService::new(complete("a😀界bc", "assistant", Some("opaque-next")));
@@ -2416,6 +2423,139 @@ mod compatibility_tests {
         assert_eq!(response["state"], "available");
         assert_eq!(response["next_cursor"], "opaque-next");
         assert_eq!(response["source_coverage"][0]["source_id"], "claude");
+    }
+
+    #[tokio::test]
+    async fn stale_describe_and_expand_render_typed_freshness_in_json_and_markdown() {
+        let service = RecordingService::new(complete("unused", "assistant", None));
+        let retrieval = LcmRetrievalOutcome::stale(LcmDataFreshness::Stored { generation_lag: 7 });
+        service.set_describe_outcome(LcmDescribeServiceOutcome::Stale {
+            temporal: temporal(None),
+            retrieval,
+        });
+        service.set_expand_outcome(LcmExpandServiceOutcome::Stale {
+            temporal: temporal(None),
+            retrieval,
+        });
+
+        let describe = payload(
+            handle_lcm_describe(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({"provider": "claude", "session_id": "session-exact", "format": "json"}),
+            )
+            .await
+            .unwrap(),
+        );
+        let expand = payload(
+            handle_lcm_expand(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "provider": "claude",
+                    "session_id": "session-exact",
+                    "target": {"kind": "raw_message", "store_id": 41},
+                    "format": "json"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        for response in [&describe, &expand] {
+            assert_eq!(response["status"], "stale");
+            assert_eq!(response["retrieval"]["outcome"], "stale");
+            assert_eq!(response["retrieval"]["freshness"]["state"], "stored");
+            assert_eq!(response["retrieval"]["freshness"]["generation_lag"], 7);
+            assert!(response.get("error").is_none(), "{response}");
+        }
+
+        let markdown = response_text(
+            handle_lcm_describe(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({"provider": "claude", "session_id": "session-exact", "format": "markdown"}),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(markdown.contains("**status:** stale"), "{markdown}");
+        assert!(markdown.contains("**generation lag:** 7"), "{markdown}");
+        assert!(
+            !markdown.contains("temporal_store_unavailable"),
+            "{markdown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_item_partial_describe_and_expand_render_omissions_without_deletion() {
+        let service = RecordingService::new(complete("unused", "assistant", None));
+        let retrieval =
+            LcmRetrievalOutcome::partial(LcmDataFreshness::Partial { generation_lag: 3 }, 5);
+        service.set_describe_outcome(LcmDescribeServiceOutcome::Partial {
+            description: None,
+            temporal: temporal(None),
+            grain: RetrievalGrainV1::Summary,
+            state: None,
+            lineage: Vec::new(),
+            retrieval,
+        });
+        service.set_expand_outcome(LcmExpandServiceOutcome::Partial {
+            expansion: None,
+            temporal: temporal(None),
+            grain: RetrievalGrainV1::Summary,
+            state: None,
+            retrieval,
+        });
+
+        let describe = payload(
+            handle_lcm_describe(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({"provider": "claude", "session_id": "session-exact", "format": "json"}),
+            )
+            .await
+            .unwrap(),
+        );
+        let expand = payload(
+            handle_lcm_expand(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "provider": "claude",
+                    "session_id": "session-exact",
+                    "target": {"kind": "raw_message", "store_id": 41},
+                    "format": "json"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        for response in [&describe, &expand] {
+            assert_eq!(response["status"], "partial");
+            assert_eq!(response["omitted"], 5);
+            assert_eq!(response["retrieval"]["outcome"], "partial");
+            assert_eq!(response["retrieval"]["freshness"]["state"], "partial");
+            assert_eq!(response["retrieval"]["freshness"]["generation_lag"], 3);
+            assert!(response.get("error").is_none(), "{response}");
+        }
+        assert!(describe["description"].is_null());
+        assert!(expand["expansion"].is_null());
+
+        let markdown = response_text(
+            handle_lcm_expand(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "provider": "claude",
+                    "session_id": "session-exact",
+                    "target": {"kind": "raw_message", "store_id": 41},
+                    "format": "markdown"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(markdown.contains("**status:** partial"), "{markdown}");
+        assert!(markdown.contains("**omitted:** 5"), "{markdown}");
+        assert!(
+            !markdown.contains("temporal_store_unavailable"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("**status:** deleted"), "{markdown}");
     }
 
     #[tokio::test]
