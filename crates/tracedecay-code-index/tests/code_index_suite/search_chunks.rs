@@ -31,7 +31,7 @@ fn extraction_to_chunks_is_deterministic_and_covers_all_grains() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_index::extraction::LanguageRegistry::new(),
+        tracedecay_code_extraction::LanguageRegistry::new(),
     );
 
     let first = chunker
@@ -81,7 +81,7 @@ fn partial_extraction_never_chunks_unsupported_tail_bytes() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_index::extraction::LanguageRegistry::new(),
+        tracedecay_code_extraction::LanguageRegistry::new(),
     )
     .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
     .expect("chunk bounded evidence");
@@ -121,7 +121,7 @@ fn exact_term_kinds_cover_the_frozen_plan25_contract() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_index::extraction::LanguageRegistry::new(),
+        tracedecay_code_extraction::LanguageRegistry::new(),
     )
     .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
     .expect("chunk exact-term fixture");
@@ -183,7 +183,7 @@ fn oversized_symbol_bodies_use_bounded_deterministic_fallback_windows() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_index::extraction::LanguageRegistry::new(),
+        tracedecay_code_extraction::LanguageRegistry::new(),
     );
 
     let first = chunker
@@ -226,7 +226,7 @@ fn multiple_file_windows_have_unique_stable_ids_and_ordinals() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_index::extraction::LanguageRegistry::new(),
+        tracedecay_code_extraction::LanguageRegistry::new(),
     );
 
     let first = chunker

@@ -26,23 +26,19 @@ pub mod capabilities;
 pub mod chunks;
 pub mod diagnostics;
 pub mod extract;
-pub mod extraction;
 pub mod generations;
 pub mod git_join;
-pub mod historical_query;
 pub mod impact_join;
 pub mod incremental;
 pub mod intake;
 pub mod languages;
 pub mod lineage;
-mod path_scope;
 pub mod production;
 pub mod production_joins;
 pub mod projection;
 pub mod provider;
 pub mod receipts;
 pub mod test_attribution;
-pub mod types;
 
 pub use self::intake::CodeIndexIntake;
 

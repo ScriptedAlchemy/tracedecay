@@ -19,10 +19,11 @@ use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CodeSearchChunkV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, EdgeAuthorityV1,
-    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionBatchV1, FileIdentityDigest,
-    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, ParseOutcomeV1, PolicyRevisionId,
-    RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, ValidatedCodeFileV1, canonical_sha256,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, ExtractionBatchV1,
+    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES,
+    ParseOutcomeV1, PolicyRevisionId, RelationEdgeKindV1, RepositoryId, SanitizerRevision,
+    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
+    ValidatedCodeFileV1, canonical_sha256,
 };
 
 use super::{
@@ -30,7 +31,7 @@ use super::{
     intake::ReceiptBoundCodeFileV1,
     lineage::LineageSymbolRecordV1,
 };
-use crate::types::{Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef};
+use tracedecay_domain::{Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef};
 
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
@@ -135,6 +136,14 @@ impl ExtractionAdmittedCodeSearchChunkV1 {
 
     /// Consume the authority-bearing wrapper and return its admitted chunk.
     pub fn into_chunk(self) -> CodeSearchChunkV1 {
+        self.chunk
+    }
+}
+
+// SAFETY: values are only created by `ExactExtractionAuthorityV1::admit`,
+// after the parser-backed chunk digest has been validated.
+unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
+    fn into_admitted_chunk(self) -> CodeSearchChunkV1 {
         self.chunk
     }
 }
@@ -526,7 +535,7 @@ pub struct DeterministicCodeChunker {
     policy_revision: PolicyRevisionId,
     sensitivity_level: SensitivityLevelV1,
     chunker_revision: ChunkerRevision,
-    extractors: Arc<crate::extraction::LanguageRegistry>,
+    extractors: Arc<tracedecay_code_extraction::LanguageRegistry>,
 }
 
 impl DeterministicCodeChunker {
@@ -539,7 +548,7 @@ impl DeterministicCodeChunker {
         sanitizer_revision: SanitizerRevision,
         policy_revision: PolicyRevisionId,
         chunker_revision: ChunkerRevision,
-        extractors: crate::extraction::LanguageRegistry,
+        extractors: tracedecay_code_extraction::LanguageRegistry,
     ) -> Self {
         Self::from_shared_registry(
             generation_id,
@@ -558,7 +567,7 @@ impl DeterministicCodeChunker {
         sanitizer_revision: SanitizerRevision,
         policy_revision: PolicyRevisionId,
         chunker_revision: ChunkerRevision,
-        extractors: Arc<crate::extraction::LanguageRegistry>,
+        extractors: Arc<tracedecay_code_extraction::LanguageRegistry>,
     ) -> Self {
         Self {
             generation_id,
@@ -2096,7 +2105,7 @@ mod tests {
             id("sanitizer.v1"),
             id("policy.v1"),
             id("chunker.v1"),
-            crate::extraction::LanguageRegistry::new(),
+            tracedecay_code_extraction::LanguageRegistry::new(),
         )
     }
 
@@ -2299,18 +2308,18 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    impl crate::extraction::LanguageExtractor for CountingRustExtractor {
+    impl tracedecay_code_extraction::LanguageExtractor for CountingRustExtractor {
         fn extensions(&self) -> &[&str] {
-            crate::extraction::RustExtractor.extensions()
+            tracedecay_code_extraction::RustExtractor.extensions()
         }
 
         fn language_name(&self) -> &str {
-            crate::extraction::RustExtractor.language_name()
+            tracedecay_code_extraction::RustExtractor.language_name()
         }
 
-        fn extract(&self, file_path: &str, source: &str) -> crate::types::ExtractionResult {
+        fn extract(&self, file_path: &str, source: &str) -> tracedecay_domain::ExtractionResult {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            crate::extraction::RustExtractor.extract(file_path, source)
+            tracedecay_code_extraction::RustExtractor.extract(file_path, source)
         }
     }
 
@@ -2318,7 +2327,7 @@ mod tests {
     fn extraction_artifacts_feed_chunking_without_a_second_parse() {
         let calls = Arc::new(AtomicUsize::new(0));
         let registry = Arc::new(
-            crate::extraction::LanguageRegistry::from_extractors_for_test(vec![Box::new(
+            tracedecay_code_extraction::LanguageRegistry::from_extractors_for_test(vec![Box::new(
                 CountingRustExtractor {
                     calls: Arc::clone(&calls),
                 },

@@ -18,7 +18,7 @@ use tracedecay_domain::{
 };
 
 use super::{intake::ReceiptBoundCodeFileV1, languages::canonical_language_id};
-use crate::types::{Edge, ExtractionResult, Node, UnresolvedRef, Visibility};
+use tracedecay_domain::{Edge, ExtractionResult, Node, UnresolvedRef, Visibility};
 
 /// Cancellation checkpoint for extraction (the code-index-local spelling of
 /// the Plan 25 `CancellationToken`). Application adapts its cancellation
@@ -86,7 +86,7 @@ pub const EXTRACTION_ROWS_SEPARATOR: &str = "tracedecay.extraction-rows.v1";
 pub const MAX_EXTRACTION_SOURCE_BYTES: usize = 1024 * 1024;
 
 /// The tree-sitter-backed extractor adapter. It reuses the established
-/// `crate::extraction` parser registry as the sole parser acquisition path
+/// `tracedecay_code_extraction` parser registry as the sole parser acquisition path
 /// (Plan 25: duplicate parser acquisition paths are forbidden) and adapts its
 /// rows into the canonical `ExtractionBatchV1` evidence contract.
 ///
@@ -95,26 +95,28 @@ pub const MAX_EXTRACTION_SOURCE_BYTES: usize = 1024 * 1024;
 /// canonically ordered before hashing, so identical sanitized input under
 /// identical descriptor revisions produces identical digests.
 pub struct TreeSitterExtractor {
-    parsers: Arc<crate::extraction::LanguageRegistry>,
+    parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
 }
 
 impl TreeSitterExtractor {
     /// Create the adapter over a freshly built extraction registry.
     pub fn new() -> Self {
         Self {
-            parsers: Arc::new(crate::extraction::LanguageRegistry::new()),
+            parsers: Arc::new(tracedecay_code_extraction::LanguageRegistry::new()),
         }
     }
 
     /// Create the adapter over an existing extraction registry.
-    pub fn from_registry(parsers: crate::extraction::LanguageRegistry) -> Self {
+    pub fn from_registry(parsers: tracedecay_code_extraction::LanguageRegistry) -> Self {
         Self {
             parsers: Arc::new(parsers),
         }
     }
 
     /// Share one generation-scoped registry with downstream chunking.
-    pub fn from_shared_registry(parsers: Arc<crate::extraction::LanguageRegistry>) -> Self {
+    pub fn from_shared_registry(
+        parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,
+    ) -> Self {
         Self { parsers }
     }
 
@@ -125,7 +127,7 @@ impl TreeSitterExtractor {
         &'a self,
         file: &ValidatedCodeFileV1,
         descriptor: &LanguageDescriptorV1,
-    ) -> Option<&'a dyn crate::extraction::LanguageExtractor> {
+    ) -> Option<&'a dyn tracedecay_code_extraction::LanguageExtractor> {
         if let Some(extractor) = self.parsers.extractor_for_file(&file.file.logical_path) {
             return Some(extractor);
         }
@@ -156,7 +158,7 @@ struct CanonicalNodeRow<'a> {
     file_path: &'a str,
     id: &'a str,
     is_async: bool,
-    kind: &'a crate::types::NodeKind,
+    kind: &'a tracedecay_domain::NodeKind,
     loops: u32,
     max_nesting: u32,
     name: &'a str,
@@ -208,7 +210,7 @@ fn sort_canonical_rows<T: Serialize>(rows: &mut [T]) {
 
 #[derive(Serialize)]
 struct CanonicalEdgeRow<'a> {
-    kind: crate::types::EdgeKind,
+    kind: tracedecay_domain::EdgeKind,
     line: Option<u32>,
     source: &'a str,
     target: &'a str,
@@ -231,7 +233,7 @@ struct CanonicalUnresolvedRefRow<'a> {
     file_path: &'a str,
     from_node_id: &'a str,
     line: u32,
-    reference_kind: crate::types::EdgeKind,
+    reference_kind: tracedecay_domain::EdgeKind,
     reference_name: &'a str,
 }
 

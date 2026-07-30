@@ -4,7 +4,7 @@
 //! rewrite path shells out to the host `ast-grep` binary, structural *search*
 //! runs entirely in-process: the [`ast_grep_core`] pattern engine is generic
 //! over a tree-sitter [`Language`], so we wire the repo's own bundled grammars
-//! (served by [`crate::extraction::ts_provider`]) into its `Language` trait.
+//! (served by [`tracedecay_code_extraction::ts_provider`]) into its `Language` trait.
 //!
 //! That means:
 //!   * no external `ast-grep` CLI requirement (the tool registers
@@ -28,7 +28,8 @@ use ast_grep_core::{AstGrep, Language, Pattern, PatternError};
 use ignore::WalkBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
 
-use crate::extraction::ts_provider;
+use tracedecay_code_extraction::ts_provider;
+use tracedecay_domain::repository_path_matches_scope;
 
 /// Bytes sniffed from the head of each file to classify it as binary.
 const BINARY_SNIFF_BYTES: usize = 8_192;
@@ -354,7 +355,7 @@ where
             continue;
         };
         let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if !crate::path_scope::path_matches_scope(&rel_str, scope_prefix) {
+        if !repository_path_matches_scope(&rel_str, scope_prefix) {
             continue;
         }
 

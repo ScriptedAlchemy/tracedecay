@@ -144,7 +144,7 @@ fn extra_aliases(language: &str) -> Vec<&'static str> {
 /// The static language registry: one versioned `LanguageDescriptorV1` per
 /// language whose extractor is compiled into this build. Descriptor language
 /// facts are owned here; parser acquisition stays in
-/// `crate::extraction::LanguageRegistry`, which this registry enumerates so
+/// `tracedecay_code_extraction::LanguageRegistry`, which this registry enumerates so
 /// the descriptor set always covers exactly the compiled extractor set.
 pub struct StaticLanguageRegistry {
     revision: LanguageRegistryRevision,
@@ -161,11 +161,13 @@ impl StaticLanguageRegistry {
     /// extractor that would actually parse it, so descriptor extension
     /// admission and parser selection share one dispatch order.
     pub fn new() -> Self {
-        Self::from_extraction_registry(&crate::extraction::LanguageRegistry::new())
+        Self::from_extraction_registry(&tracedecay_code_extraction::LanguageRegistry::new())
     }
 
     /// Build the registry from an existing extraction registry.
-    pub fn from_extraction_registry(extractors: &crate::extraction::LanguageRegistry) -> Self {
+    pub fn from_extraction_registry(
+        extractors: &tracedecay_code_extraction::LanguageRegistry,
+    ) -> Self {
         // Group each dispatched extension by the extractor that claims it,
         // keyed by canonical language identity for deterministic ordering.
         let mut by_language: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
@@ -375,7 +377,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_compiled_extractor_extension() {
-        let extractors = crate::extraction::LanguageRegistry::new();
+        let extractors = tracedecay_code_extraction::LanguageRegistry::new();
         let registry = StaticLanguageRegistry::from_extraction_registry(&extractors);
         assert!(!registry.descriptors().is_empty());
         for extension in extractors.supported_extensions() {

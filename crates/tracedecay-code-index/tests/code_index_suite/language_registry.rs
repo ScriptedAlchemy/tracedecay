@@ -5,7 +5,7 @@ use crate::support::id;
 
 #[test]
 fn registry_is_total_canonical_and_alias_backed() {
-    let extraction = tracedecay_code_index::extraction::LanguageRegistry::new();
+    let extraction = tracedecay_code_extraction::LanguageRegistry::new();
     let registry = StaticLanguageRegistry::from_extraction_registry(&extraction);
 
     for extension in extraction.supported_extensions() {
