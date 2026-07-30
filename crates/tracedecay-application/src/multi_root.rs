@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ActorId, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome,
+    ActorId, ManifestDigest, ProjectId, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome,
     ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
     canonical_sha256,
 };
@@ -18,6 +18,159 @@ const AUTHORIZED_SCOPE_SET_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.authorized-scope-set.v1";
 const MULTI_ROOT_CONTINUATION_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.multi-root-continuation.v1";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiRootScopeSetReadRequestV1 {
+    pub scope_set_id: ScopeSetId,
+}
+
+impl MultiRootScopeSetReadRequestV1 {
+    pub fn new(scope_set_id: ScopeSetId) -> Result<Self, MultiRootQueryError> {
+        scope_set_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        Ok(Self { scope_set_id })
+    }
+}
+
+/// Canonical external selector for creating or updating an authorized scope
+/// set. Callers select registered projects only; filesystem roots, CWD hints,
+/// actor ids, and grants are resolved and minted by the daemon.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiRootScopeSetCasRequestV1 {
+    pub scope_set_id: ScopeSetId,
+    pub expected_revision: Option<ScopeSetRevision>,
+    pub project_ids: Vec<ProjectId>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiRootScopeSetCasStatusV1 {
+    Applied,
+    Conflict,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiRootScopeSetCasResultV1 {
+    pub status: MultiRootScopeSetCasStatusV1,
+    pub scope_set: Option<AuthorizedScopeSet>,
+}
+
+impl MultiRootScopeSetCasRequestV1 {
+    pub fn new(
+        scope_set_id: ScopeSetId,
+        expected_revision: Option<ScopeSetRevision>,
+        mut project_ids: Vec<ProjectId>,
+    ) -> Result<Self, MultiRootQueryError> {
+        scope_set_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        if let Some(revision) = expected_revision {
+            revision
+                .validate()
+                .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        }
+        project_ids.sort();
+        if project_ids.is_empty() || project_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(MultiRootQueryError::RootSetMismatch);
+        }
+        Ok(Self {
+            scope_set_id,
+            expected_revision,
+            project_ids,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), MultiRootQueryError> {
+        if Self::new(
+            self.scope_set_id.clone(),
+            self.expected_revision,
+            self.project_ids.clone(),
+        )? != *self
+        {
+            return Err(MultiRootQueryError::RootSetMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Closed federated read families. The family is typed while its existing
+/// operation-specific request remains the canonical JSON payload owned by that
+/// application surface.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MultiRootOperationV1 {
+    Work { request: serde_json::Value },
+    Git { request: serde_json::Value },
+    Feedback { request: serde_json::Value },
+    Impact { request: serde_json::Value },
+    Query { request: serde_json::Value },
+}
+
+/// External federated request bound to one persisted scope-set revision and
+/// digest. Query/order digests and root generations are server-derived.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MultiRootExecuteRequestV1 {
+    pub scope_set_id: ScopeSetId,
+    pub scope_set_revision: ScopeSetRevision,
+    pub scope_set_digest: ManifestDigest,
+    pub operation: MultiRootOperationV1,
+    pub page: u64,
+    pub continuation: Option<MultiRootContinuationV1>,
+}
+
+impl MultiRootExecuteRequestV1 {
+    pub fn new(
+        scope_set_id: ScopeSetId,
+        scope_set_revision: ScopeSetRevision,
+        scope_set_digest: ManifestDigest,
+        operation: MultiRootOperationV1,
+        page: u64,
+        continuation: Option<MultiRootContinuationV1>,
+    ) -> Result<Self, MultiRootQueryError> {
+        scope_set_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        scope_set_revision
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        scope_set_digest
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        if let Some(cursor) = &continuation {
+            cursor.validate()?;
+            if page != cursor.next_page() {
+                return Err(MultiRootQueryError::CursorMismatch { field: "page" });
+            }
+        } else if page != 0 {
+            return Err(MultiRootQueryError::CursorMismatch { field: "page" });
+        }
+        Ok(Self {
+            scope_set_id,
+            scope_set_revision,
+            scope_set_digest,
+            operation,
+            page,
+            continuation,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), MultiRootQueryError> {
+        Self::new(
+            self.scope_set_id.clone(),
+            self.scope_set_revision,
+            self.scope_set_digest.clone(),
+            self.operation.clone(),
+            self.page,
+            self.continuation.clone(),
+        )
+        .map(|_| ())
+    }
+}
 
 /// Failures from centralized multi-root authorization and validation.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -410,7 +563,7 @@ pub trait MultiRootQueryPort<Q, T> {
 }
 
 /// Federated page preserving each root outcome and aggregate partial truth.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[schemars(rename = "MultiRootQueryPageV1_for_{T}")]
 pub struct MultiRootQueryPageV1<T> {
@@ -449,32 +602,38 @@ impl<P> AuthorizedMultiRootQueryService<P> {
 
         let mut roots = Vec::with_capacity(request.scope_set.roots().len());
         for scope in request.scope_set.roots() {
-            let context = contexts
-                .get(&scope.scope_digest)
-                .copied()
-                .ok_or(MultiRootQueryError::RootSetMismatch)?;
             let snapshot = generations
                 .get(&scope.scope_digest)
                 .copied()
                 .ok_or(MultiRootQueryError::RootSetMismatch)?;
             let outcome = match &snapshot.outcome {
                 ScopeOutcome::Exact(generation) => {
+                    let context = contexts
+                        .get(&scope.scope_digest)
+                        .copied()
+                        .ok_or(MultiRootQueryError::RootSetMismatch)?;
                     self.port
                         .query_root(context, generation, &request.query, request.page)
                 }
                 ScopeOutcome::Partial {
                     value: generation,
                     reason,
-                } => match self
-                    .port
-                    .query_root(context, generation, &request.query, request.page)
-                {
-                    ScopeOutcome::Exact(value) => ScopeOutcome::Partial {
-                        value,
-                        reason: *reason,
-                    },
-                    outcome => outcome,
-                },
+                } => {
+                    let context = contexts
+                        .get(&scope.scope_digest)
+                        .copied()
+                        .ok_or(MultiRootQueryError::RootSetMismatch)?;
+                    match self
+                        .port
+                        .query_root(context, generation, &request.query, request.page)
+                    {
+                        ScopeOutcome::Exact(value) => ScopeOutcome::Partial {
+                            value,
+                            reason: *reason,
+                        },
+                        outcome => outcome,
+                    }
+                }
                 ScopeOutcome::Denied => ScopeOutcome::Denied,
                 ScopeOutcome::Unavailable { reason } => {
                     ScopeOutcome::Unavailable { reason: *reason }
@@ -512,7 +671,17 @@ impl<P> AuthorizedMultiRootQueryService<P> {
 fn validate_contexts<Q>(
     request: &MultiRootQueryRequestV1<Q>,
 ) -> Result<BTreeMap<ManifestDigest, &RequestContext>, MultiRootQueryError> {
-    if request.contexts.len() != request.scope_set.roots().len() {
+    let admitted_count = request
+        .root_generations
+        .iter()
+        .filter(|generation| {
+            matches!(
+                generation.outcome,
+                ScopeOutcome::Exact(_) | ScopeOutcome::Partial { .. }
+            )
+        })
+        .count();
+    if request.contexts.len() != admitted_count {
         return Err(MultiRootQueryError::RootSetMismatch);
     }
     let mut contexts = BTreeMap::new();
@@ -531,9 +700,18 @@ fn validate_contexts<Q>(
         }
     }
     if request.scope_set.roots().iter().any(|scope| {
-        contexts
-            .get(&scope.scope_digest)
-            .is_none_or(|context| context.scope() != scope)
+        request
+            .root_generations
+            .iter()
+            .find(|generation| generation.scope_digest == scope.scope_digest)
+            .is_some_and(|generation| {
+                matches!(
+                    generation.outcome,
+                    ScopeOutcome::Exact(_) | ScopeOutcome::Partial { .. }
+                ) && contexts
+                    .get(&scope.scope_digest)
+                    .is_none_or(|context| context.scope() != scope)
+            })
     }) {
         return Err(MultiRootQueryError::RootSetMismatch);
     }

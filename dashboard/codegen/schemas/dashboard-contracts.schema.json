@@ -237,6 +237,38 @@
         }
       ]
     },
+    "AuthorizedScopeSet": {
+      "additionalProperties": false,
+      "description": "Immutable canonical set of exact roots admitted by their existing request\ncontexts. Paths and mutable aliases never participate in this authority.",
+      "properties": {
+        "actor_id": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "revision": {
+          "$ref": "#/$defs/ScopeSetRevision"
+        },
+        "roots": {
+          "items": {
+            "$ref": "#/$defs/ResolvedScope"
+          },
+          "type": "array"
+        },
+        "scope_set_id": {
+          "$ref": "#/$defs/ScopeSetId"
+        }
+      },
+      "required": [
+        "scope_set_id",
+        "revision",
+        "actor_id",
+        "roots",
+        "digest"
+      ],
+      "type": "object"
+    },
     "AutomaticWorktreeGcV1": {
       "oneOf": [
         {
@@ -6980,6 +7012,123 @@
       ],
       "type": "object"
     },
+    "MultiRootExecuteRequestV1": {
+      "additionalProperties": false,
+      "description": "External federated request bound to one persisted scope-set revision and\ndigest. Query/order digests and root generations are server-derived.",
+      "properties": {
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MultiRootContinuationV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation": {
+          "$ref": "#/$defs/MultiRootOperationV1"
+        },
+        "page": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope_set_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "scope_set_id": {
+          "$ref": "#/$defs/ScopeSetId"
+        },
+        "scope_set_revision": {
+          "$ref": "#/$defs/ScopeSetRevision"
+        }
+      },
+      "required": [
+        "scope_set_id",
+        "scope_set_revision",
+        "scope_set_digest",
+        "operation",
+        "page",
+        "continuation"
+      ],
+      "type": "object"
+    },
+    "MultiRootOperationV1": {
+      "description": "Closed federated read families. The family is typed while its existing\noperation-specific request remains the canonical JSON payload owned by that\napplication surface.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "work",
+              "type": "string"
+            },
+            "request": true
+          },
+          "required": [
+            "kind",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "git",
+              "type": "string"
+            },
+            "request": true
+          },
+          "required": [
+            "kind",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "feedback",
+              "type": "string"
+            },
+            "request": true
+          },
+          "required": [
+            "kind",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "impact",
+              "type": "string"
+            },
+            "request": true
+          },
+          "required": [
+            "kind",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "query",
+              "type": "string"
+            },
+            "request": true
+          },
+          "required": [
+            "kind",
+            "request"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "MultiRootQueryPageV1_for_AnyValue": {
       "additionalProperties": false,
       "description": "Federated page preserving each root outcome and aggregate partial truth.",
@@ -7019,6 +7168,79 @@
     "MultiRootQueryReadModelV1": {
       "$ref": "#/$defs/MultiRootQueryPageV1_for_AnyValue",
       "description": "Wire-stable projection. The application page already owns every\ncontinuation and per-root truthfulness invariant, so the API does not\nreconstruct or flatten it."
+    },
+    "MultiRootScopeSetCasRequestV1": {
+      "additionalProperties": false,
+      "description": "Canonical external selector for creating or updating an authorized scope\nset. Callers select registered projects only; filesystem roots, CWD hints,\nactor ids, and grants are resolved and minted by the daemon.",
+      "properties": {
+        "expected_revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeSetRevision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project_ids": {
+          "items": {
+            "$ref": "#/$defs/ProjectId"
+          },
+          "type": "array"
+        },
+        "scope_set_id": {
+          "$ref": "#/$defs/ScopeSetId"
+        }
+      },
+      "required": [
+        "scope_set_id",
+        "expected_revision",
+        "project_ids"
+      ],
+      "type": "object"
+    },
+    "MultiRootScopeSetCasResultV1": {
+      "additionalProperties": false,
+      "properties": {
+        "scope_set": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorizedScopeSet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/MultiRootScopeSetCasStatusV1"
+        }
+      },
+      "required": [
+        "status",
+        "scope_set"
+      ],
+      "type": "object"
+    },
+    "MultiRootScopeSetCasStatusV1": {
+      "enum": [
+        "applied",
+        "conflict"
+      ],
+      "type": "string"
+    },
+    "MultiRootScopeSetReadRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "scope_set_id": {
+          "$ref": "#/$defs/ScopeSetId"
+        }
+      },
+      "required": [
+        "scope_set_id"
+      ],
+      "type": "object"
     },
     "NodeRefV1": {
       "properties": {
@@ -11889,8 +12111,30 @@
     "multi_root_capability": {
       "$ref": "#/$defs/MultiRootCapabilityV1"
     },
+    "multi_root_execute_request": {
+      "$ref": "#/$defs/MultiRootExecuteRequestV1"
+    },
     "multi_root_query": {
       "$ref": "#/$defs/MultiRootQueryReadModelV1"
+    },
+    "multi_root_scope_set": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthorizedScopeSet"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "multi_root_scope_set_cas_request": {
+      "$ref": "#/$defs/MultiRootScopeSetCasRequestV1"
+    },
+    "multi_root_scope_set_cas_result": {
+      "$ref": "#/$defs/MultiRootScopeSetCasResultV1"
+    },
+    "multi_root_scope_set_read_request": {
+      "$ref": "#/$defs/MultiRootScopeSetReadRequestV1"
     },
     "observatory": {
       "$ref": "#/$defs/ObservatoryReadModelV1"
@@ -12017,6 +12261,11 @@
     "work_accept_task_command",
     "work_projection",
     "multi_root_capability",
+    "multi_root_scope_set_read_request",
+    "multi_root_scope_set",
+    "multi_root_scope_set_cas_request",
+    "multi_root_scope_set_cas_result",
+    "multi_root_execute_request",
     "multi_root_query",
     "automation_scheduler_status"
   ],

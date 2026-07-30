@@ -1,8 +1,9 @@
 use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish};
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
-    application, domain, operation, remote, work,
+    application, domain, operation, operations, remote, work,
 };
+use tracedecay_sdk::operations::TypedOperation;
 
 #[test]
 fn canonical_contracts_are_available_without_sdk_copies() {
@@ -123,6 +124,22 @@ fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
     assert_eq!(
         binding.result_schema().schema_ref().revision(),
         WorkAttemptFinish::RESULT_SCHEMA_REVISION
+    );
+}
+
+#[test]
+fn generated_multi_root_clients_use_canonical_routes() {
+    assert_eq!(
+        operations::MultiRootScopeSetRead::ROUTE,
+        "/application/multi-root/scope-set/read"
+    );
+    assert_eq!(
+        operations::MultiRootScopeSetCompareAndSwap::ROUTE,
+        "/application/multi-root/scope-set/compare-and-swap"
+    );
+    assert_eq!(
+        operations::MultiRootExecute::ROUTE,
+        "/application/multi-root/execute"
     );
 }
 

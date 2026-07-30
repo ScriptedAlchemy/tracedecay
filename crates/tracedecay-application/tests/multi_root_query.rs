@@ -213,6 +213,40 @@ fn cursor_mismatch_and_denied_root_never_become_empty_success() {
 }
 
 #[test]
+fn denied_generation_does_not_require_a_current_root_context() {
+    let (set, mut contexts) = setup();
+    let denied_index = set
+        .roots()
+        .iter()
+        .position(|scope| scope.worktree_id.as_str() == "worktree.linked")
+        .unwrap();
+    let denied_scope = set.roots()[denied_index].scope_digest.clone();
+    contexts.retain(|context| context.scope().scope_digest != denied_scope);
+    let mut request = request(set, contexts, digest('d'), 0, None);
+    request.root_generations[denied_index] = RootScopeOutcomeV1::new(
+        denied_scope,
+        ScopeOutcome::Denied,
+    )
+    .unwrap();
+
+    let page = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Unavailable))
+        .execute(request)
+        .unwrap();
+
+    assert!(matches!(
+        page.roots[denied_index].outcome,
+        ScopeOutcome::Denied
+    ));
+    assert!(page
+        .roots
+        .iter()
+        .enumerate()
+        .any(|(index, root)| index != denied_index
+            && matches!(root.outcome, ScopeOutcome::Exact(_))));
+    assert!(matches!(page.aggregate, ScopeOutcome::Partial { .. }));
+}
+
+#[test]
 fn continuation_schema_and_runtime_reject_page_zero() {
     let schema =
         serde_json::to_value(schema_for!(tracedecay_application::MultiRootContinuationV1)).unwrap();

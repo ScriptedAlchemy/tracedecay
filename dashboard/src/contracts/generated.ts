@@ -90,6 +90,17 @@ export const AuthorityRefSchema = z.discriminatedUnion("kind", [z.object({
 })]);
 export type AuthorityRef = z.infer<typeof AuthorityRefSchema>;
 
+/** Immutable canonical set of exact roots admitted by their existing request
+contexts. Paths and mutable aliases never participate in this authority. */
+export const AuthorizedScopeSetSchema = z.object({
+  actor_id: z.lazy(() => ActorIdSchema),
+  digest: z.lazy(() => ManifestDigestSchema),
+  revision: z.lazy(() => ScopeSetRevisionSchema),
+  roots: z.array(z.lazy(() => ResolvedScopeSchema)),
+  scope_set_id: z.lazy(() => ScopeSetIdSchema),
+});
+export type AuthorizedScopeSet = z.infer<typeof AuthorizedScopeSetSchema>;
+
 export const AutomaticWorktreeGcV1Schema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("disabled"),
 }), z.object({
@@ -1912,6 +1923,39 @@ export const MultiRootContinuationV1Schema = z.object({
 });
 export type MultiRootContinuationV1 = z.infer<typeof MultiRootContinuationV1Schema>;
 
+/** External federated request bound to one persisted scope-set revision and
+digest. Query/order digests and root generations are server-derived. */
+export const MultiRootExecuteRequestV1Schema = z.object({
+  continuation: z.union([z.lazy(() => MultiRootContinuationV1Schema), z.null()]),
+  operation: z.lazy(() => MultiRootOperationV1Schema),
+  page: z.number().int(),
+  scope_set_digest: z.lazy(() => ManifestDigestSchema),
+  scope_set_id: z.lazy(() => ScopeSetIdSchema),
+  scope_set_revision: z.lazy(() => ScopeSetRevisionSchema),
+});
+export type MultiRootExecuteRequestV1 = z.infer<typeof MultiRootExecuteRequestV1Schema>;
+
+/** Closed federated read families. The family is typed while its existing
+operation-specific request remains the canonical JSON payload owned by that
+application surface. */
+export const MultiRootOperationV1Schema = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("feedback"),
+  request: z.unknown(),
+}), z.object({
+  kind: z.literal("git"),
+  request: z.unknown(),
+}), z.object({
+  kind: z.literal("impact"),
+  request: z.unknown(),
+}), z.object({
+  kind: z.literal("query"),
+  request: z.unknown(),
+}), z.object({
+  kind: z.literal("work"),
+  request: z.unknown(),
+})]);
+export type MultiRootOperationV1 = z.infer<typeof MultiRootOperationV1Schema>;
+
 /** Federated page preserving each root outcome and aggregate partial truth. */
 export const MultiRootQueryPageV1_for_AnyValueSchema = z.object({
   aggregate: z.lazy(() => ScopeOutcome_for_Array_of_AnyValueSchema),
@@ -1928,6 +1972,30 @@ continuation and per-root truthfulness invariant, so the API does not
 reconstruct or flatten it. */
 export const MultiRootQueryReadModelV1Schema = z.lazy(() => MultiRootQueryPageV1_for_AnyValueSchema);
 export type MultiRootQueryReadModelV1 = z.infer<typeof MultiRootQueryReadModelV1Schema>;
+
+/** Canonical external selector for creating or updating an authorized scope
+set. Callers select registered projects only; filesystem roots, CWD hints,
+actor ids, and grants are resolved and minted by the daemon. */
+export const MultiRootScopeSetCasRequestV1Schema = z.object({
+  expected_revision: z.union([z.lazy(() => ScopeSetRevisionSchema), z.null()]),
+  project_ids: z.array(z.lazy(() => ProjectIdSchema)),
+  scope_set_id: z.lazy(() => ScopeSetIdSchema),
+});
+export type MultiRootScopeSetCasRequestV1 = z.infer<typeof MultiRootScopeSetCasRequestV1Schema>;
+
+export const MultiRootScopeSetCasResultV1Schema = z.object({
+  scope_set: z.union([z.lazy(() => AuthorizedScopeSetSchema), z.null()]),
+  status: z.lazy(() => MultiRootScopeSetCasStatusV1Schema),
+});
+export type MultiRootScopeSetCasResultV1 = z.infer<typeof MultiRootScopeSetCasResultV1Schema>;
+
+export const MultiRootScopeSetCasStatusV1Schema = z.enum(["applied", "conflict"]);
+export type MultiRootScopeSetCasStatusV1 = z.infer<typeof MultiRootScopeSetCasStatusV1Schema>;
+
+export const MultiRootScopeSetReadRequestV1Schema = z.object({
+  scope_set_id: z.lazy(() => ScopeSetIdSchema),
+});
+export type MultiRootScopeSetReadRequestV1 = z.infer<typeof MultiRootScopeSetReadRequestV1Schema>;
 
 export const NodeRefV1Schema = z.object({
   file_path: z.string(),
@@ -3561,8 +3629,20 @@ export const MultiRootCapabilitySchema = MultiRootCapabilityV1Schema;
 export type MultiRootCapability = MultiRootCapabilityV1;
 export const MultiRootContinuationSchema = MultiRootContinuationV1Schema;
 export type MultiRootContinuation = MultiRootContinuationV1;
+export const MultiRootExecuteRequestSchema = MultiRootExecuteRequestV1Schema;
+export type MultiRootExecuteRequest = MultiRootExecuteRequestV1;
+export const MultiRootOperationSchema = MultiRootOperationV1Schema;
+export type MultiRootOperation = MultiRootOperationV1;
 export const MultiRootQueryReadModelSchema = MultiRootQueryReadModelV1Schema;
 export type MultiRootQueryReadModel = MultiRootQueryReadModelV1;
+export const MultiRootScopeSetCasRequestSchema = MultiRootScopeSetCasRequestV1Schema;
+export type MultiRootScopeSetCasRequest = MultiRootScopeSetCasRequestV1;
+export const MultiRootScopeSetCasResultSchema = MultiRootScopeSetCasResultV1Schema;
+export type MultiRootScopeSetCasResult = MultiRootScopeSetCasResultV1;
+export const MultiRootScopeSetCasStatusSchema = MultiRootScopeSetCasStatusV1Schema;
+export type MultiRootScopeSetCasStatus = MultiRootScopeSetCasStatusV1;
+export const MultiRootScopeSetReadRequestSchema = MultiRootScopeSetReadRequestV1Schema;
+export type MultiRootScopeSetReadRequest = MultiRootScopeSetReadRequestV1;
 export const NodeRefSchema = NodeRefV1Schema;
 export type NodeRef = NodeRefV1;
 export const NodeSessionsMeasurementSchema = NodeSessionsMeasurementV1Schema;
