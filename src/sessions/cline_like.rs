@@ -50,7 +50,8 @@ use crate::sessions::source::{
 use serde_json::{Map, Value};
 #[cfg(test)]
 use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
+    CanonicalObservationEnvelopeV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
+    ObservationSourceRangeV1,
 };
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
@@ -988,10 +989,10 @@ mod observation_tests {
             let receipts = observations
                 .iter()
                 .map(|item| {
-                    let envelope =
-                        parse_normalized_observation_record_v1(item.observation().payload())
+                    let envelope: CanonicalObservationEnvelopeV1 =
+                        serde_json::from_value(item.observation().payload().clone())
                             .unwrap_or_else(|error| {
-                                panic!("{provider}: sanitized envelope: {error}")
+                                panic!("{provider}: canonical envelope: {error}")
                             });
                     assert_eq!(envelope.provider().as_str(), provider);
                     item.commit_receipt().clone()
@@ -1032,7 +1033,7 @@ mod observation_tests {
             );
 
             let original = std::fs::read(&api).unwrap();
-            std::fs::write(&api, b"[{\"role\":\"assistant\"").unwrap();
+            std::fs::write(&api, b"[{\"role\":}]").unwrap();
             let poison = capture_cline_like_snapshot_observations(
                 &facade,
                 &source,
