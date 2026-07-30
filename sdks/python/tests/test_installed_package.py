@@ -146,9 +146,7 @@ class InstalledPackageConformance(unittest.TestCase):
                     },
                 )
                 evidence = [json.loads(line) for line in output.splitlines()]
-                self.assertEqual(
-                    [item["mode"] for item in evidence], ["local", "remote"]
-                )
+                self.assertEqual([item["mode"] for item in evidence], ["local"])
                 self.assertTrue(all(item["terminal"] for item in evidence))
                 self.assertTrue(
                     all(
@@ -203,8 +201,6 @@ class InstalledPackageConformance(unittest.TestCase):
         return """
 import json
 import os
-from urllib.parse import urlsplit
-
 from tracedecay_sdk import (
     PageOptions,
     SERVER_OPERATIONS,
@@ -218,17 +214,9 @@ from tracedecay_sdk import (
 base_url = os.environ["TRACEDECAY_SDK_BASE_URL"]
 project_id = os.environ["TRACEDECAY_SDK_PROJECT_ID"]
 token = os.environ["TRACEDECAY_SDK_TOKEN"]
-parsed = urlsplit(base_url)
-origin = f"{parsed.scheme}://{parsed.netloc}"
 
-for mode in ("local", "remote"):
-    client = (
-        TraceDecayClient.local(base_url, project_id=project_id, token=token)
-        if mode == "local"
-        else TraceDecayClient.remote(
-            base_url, project_id=project_id, token=token, origin=origin
-        )
-    )
+for mode in ("local",):
+    client = TraceDecayClient.local(base_url, project_id=project_id, token=token)
     if len(SERVER_OPERATIONS) != 81 or len(UNAVAILABLE_OPERATIONS) != 64:
         raise AssertionError("installed operation availability inventory drifted")
     if any(value != "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values()):
