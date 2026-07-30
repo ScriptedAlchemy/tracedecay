@@ -5,6 +5,10 @@ import {
   type RequestFor,
   type ResultFor,
 } from "./operations";
+import {
+  SERVER_OPERATIONS,
+  type ServerOperationName,
+} from "./server-operations";
 import type {
   ApplicationProblemRecord,
   HttpProblemEnvelope,
@@ -40,6 +44,11 @@ export type OperationMethod<Name extends OperationName> = (
 
 export type OperationMethods = {
   readonly [Name in OperationName]: OperationMethod<Name>;
+} & {
+  readonly [Name in ServerOperationName]: (
+    request: Readonly<Record<string, unknown>>,
+    options?: OperationRequestOptions,
+  ) => Promise<HttpSuccessEnvelope<unknown>>;
 };
 
 export interface OperationStreamResume {
@@ -674,7 +683,19 @@ export class TraceDecayClient {
 
   constructor(options: ClientOptions) {
     const baseUrl = new URL(options.baseUrl);
-    this.projectRoot = `${baseUrl.origin}/projects/${encodeURIComponent(options.projectId)}`;
+    if (
+      (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") ||
+      baseUrl.username !== "" ||
+      baseUrl.password !== "" ||
+      baseUrl.search !== "" ||
+      baseUrl.hash !== ""
+    ) {
+      throw new TraceDecayProtocolError(
+        "baseUrl must be an absolute HTTP URL without credentials, query, or fragment",
+      );
+    }
+    const baseRoot = baseUrl.toString().replace(/\/+$/u, "");
+    this.projectRoot = `${baseRoot}/projects/${encodeURIComponent(options.projectId)}`;
     this.applicationRoot = `${this.projectRoot}/application`;
     this.token = options.token;
     this.origin = options.origin ?? baseUrl.origin;
@@ -687,7 +708,17 @@ export class TraceDecayClient {
         requestOptions?: OperationRequestOptions,
       ) => Promise<HttpSuccessEnvelope<unknown>>
     > = {};
-    for (const descriptor of OPERATIONS) {
+    for (const descriptor of SERVER_OPERATIONS) {
+      methods[descriptor.operation] = (request, requestOptions) =>
+        this.requestServerOperation(descriptor, request, requestOptions);
+    }
+    for (
+      const descriptor of OPERATIONS as readonly OperationDescriptor<
+        string,
+        unknown,
+        unknown
+      >[]
+    ) {
       methods[descriptor.operation] = (request, requestOptions) =>
         this.requestOperation<unknown, unknown>(
           descriptor,
@@ -757,9 +788,10 @@ export class TraceDecayClient {
       throw new TraceDecayAuthenticationError(response.status);
     }
     if (!hasMediaType(response, "application/json")) {
+      const payload = await response.text();
       throw new TraceDecayMalformedResponseError(
         "the daemon returned JSON with an invalid media type",
-        { status: response.status },
+        { status: response.status, payload },
       );
     }
     const envelope = parseJson(await response.text(), response.status);
@@ -837,6 +869,44 @@ export class TraceDecayClient {
         { status: response.status, payload: { envelope: envelope.value, cause } },
       );
     }
+  }
+
+  private async requestServerOperation(
+    descriptor: (typeof SERVER_OPERATIONS)[number],
+    request: unknown,
+    options: OperationRequestOptions = {},
+  ): Promise<HttpSuccessEnvelope<unknown>> {
+    if (!isRecord(request)) {
+      throw new TraceDecayProtocolError(
+        `${descriptor.operation} request must be a JSON object`,
+      );
+    }
+    const url = this.operationUrl(descriptor.route, options.page);
+    const headers = this.headers("application/json");
+    headers.set("content-type", "application/json");
+    const response = await this.fetchResponse(
+      url,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(request),
+        signal: options.signal,
+      },
+      options.signal,
+    );
+    const envelope = await this.readJson(response);
+    if (
+      !response.ok ||
+      !isRecord(envelope) ||
+      envelope.kind !== "success" ||
+      !isDecodedSuccessEnvelope(envelope.value)
+    ) {
+      throw new TraceDecayMalformedResponseError(
+        `the daemon returned an invalid ${descriptor.operation} success envelope`,
+        { status: response.status, payload: envelope },
+      );
+    }
+    return envelope.value as unknown as HttpSuccessEnvelope<unknown>;
   }
 
   async *streamOperation(

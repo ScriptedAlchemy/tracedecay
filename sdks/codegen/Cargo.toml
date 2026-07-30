@@ -12,5 +12,6 @@ path = "../../crates/tracedecay-sdk/src/bin/generate.rs"
 
 [dependencies]
 serde_json = "1"
+tracedecay-api = { path = "../../crates/tracedecay-api" }
 tracedecay-application = { path = "../../crates/tracedecay-application" }
 tracedecay-tool-catalog = { path = "../../crates/tracedecay-tool-catalog" }

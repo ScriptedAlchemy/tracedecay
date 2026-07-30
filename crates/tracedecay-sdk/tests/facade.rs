@@ -49,27 +49,19 @@ fn remote_outcomes_are_the_canonical_application_types() {
 }
 
 #[test]
-fn work_inventory_preserves_executable_and_unavailable_authority() {
-    let registry = work::executable_binding_registry().expect("canonical Work registry");
-    let available = registry
-        .iter()
-        .filter(|availability| availability.binding().is_some())
-        .count();
-    let unavailable = registry
-        .iter()
-        .filter(|availability| availability.binding().is_none())
-        .count();
+fn work_inventory_does_not_claim_unmounted_attempt_routes() {
+    let registry =
+        work::executable_binding_registry(false, false).expect("canonical Work registry");
+    let attempt = registry
+        .get(&operation::OperationId::new("operation.work.attempt_start").unwrap())
+        .expect("attempt availability");
 
-    assert_eq!(available, 9);
-    assert_eq!(unavailable, 8);
-    let snapshot = registry
-        .get(&operation::OperationId::new("operation.work.snapshot").unwrap())
-        .and_then(operation::ExecutableBindingAvailabilityV1::binding)
-        .expect("snapshot executable binding");
     assert!(matches!(
-        snapshot.exposure(),
-        operation::RouteExposureV1::Public { route_path, .. }
-            if route_path == "/application/work/snapshot"
+        attempt,
+        operation::ExecutableBindingAvailabilityV1::Unavailable {
+            disposition: operation::ExecutableUnavailableDispositionV1::RouteUnavailable,
+            ..
+        }
     ));
 }
 

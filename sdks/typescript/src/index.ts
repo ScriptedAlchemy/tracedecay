@@ -4,4 +4,5 @@
 export { TraceDecayAbortError, TraceDecayAuthenticationError, TraceDecayCancelledError, TraceDecayClient, TraceDecayConflictError, TraceDecayDeniedError, TraceDecayDisconnectedError, TraceDecayInvalidRequestError, TraceDecayMalformedResponseError, TraceDecayProblemError, TraceDecayProtocolError, TraceDecaySaturatedError, TraceDecayStaleError, TraceDecayTimedOutError, TraceDecayTransportError, TraceDecayUnavailableError, TraceDecayUnsupportedError, createClient } from "./client";
 export type { ClientOptions, OperationCancellation, OperationRequestOptions, OperationStreamEvent, OperationStreamOptions, OperationStreamResume, PageOptions } from "./client";
 export * from "./operations";
+export * from "./server-operations";
 export * from "./types";

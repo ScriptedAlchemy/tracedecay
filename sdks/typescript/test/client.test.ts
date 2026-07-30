@@ -8,12 +8,8 @@ import {
 
 import { describe, expect, it } from "vitest";
 
-import type {
-  OperationDescriptor,
-  RequestFor,
-  ResultFor,
-} from "../src/operations";
-import { UNAVAILABLE_OPERATIONS } from "../src/operations";
+import type { OperationDescriptor } from "../src/operations";
+import { OPERATIONS, UNAVAILABLE_OPERATIONS } from "../src/operations";
 import {
   decodeHttpSuccessEnvelope,
   type HttpSuccessEnvelope,
@@ -25,7 +21,9 @@ import {
   TraceDecayMalformedResponseError,
   TraceDecayProtocolError,
   createClient,
+  type OperationRequestOptions,
 } from "../src/client";
+import { SERVER_OPERATIONS } from "../src/server-operations";
 
 type RequestHandler = (
   request: IncomingMessage,
@@ -177,17 +175,13 @@ const TEST_OPERATION: OperationDescriptor<
 
 function requestThroughTransport(
   client: ReturnType<typeof createClient>,
-  options: Parameters<
-    ReturnType<typeof createClient>["operations"]["work_snapshot"]
-  >[1] = {},
+  options: OperationRequestOptions = {},
 ): Promise<HttpSuccessEnvelope<unknown>> {
   const transport = client as unknown as {
     requestOperation<Request, Result>(
       descriptor: OperationDescriptor<string, Request, Result>,
       request: unknown,
-      requestOptions?: Parameters<
-        ReturnType<typeof createClient>["operations"]["work_snapshot"]
-      >[1],
+      requestOptions?: OperationRequestOptions,
     ): Promise<HttpSuccessEnvelope<Result>>;
   };
   return transport.requestOperation(TEST_OPERATION, {}, options);
@@ -260,24 +254,49 @@ function json(
 }
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("uses operation-specific generated signatures", () => {
+  it("publishes the complete canonical server inventory", () => {
     type Equal<Left, Right> =
       (<Value>() => Value extends Left ? 1 : 2) extends
       (<Value>() => Value extends Right ? 1 : 2) ? true : false;
     const requestMatches: Equal<
-      Parameters<ReturnType<typeof createClient>["operations"]["work_snapshot"]>[0],
-      RequestFor<"work_snapshot">
-    > = true;
-    const resultMatches: Equal<
-      Awaited<ReturnType<ReturnType<typeof createClient>["operations"]["work_snapshot"]>>,
-      HttpSuccessEnvelope<ResultFor<"work_snapshot">>
+      Parameters<ReturnType<typeof createClient>["operations"]["health_read"]>[0],
+      Readonly<Record<string, unknown>>
     > = true;
 
     expect(requestMatches).toBe(true);
-    expect(resultMatches).toBe(true);
+    expect(SERVER_OPERATIONS).toHaveLength(64);
+    expect(SERVER_OPERATIONS.map((operation) => operation.operation)).toContain(
+      "health_read",
+    );
   });
 
-  it("fails closed on malformed generated requests before transport", async () => {
+  it("preserves remote base paths and origin policy", async () => {
+    let requestedUrl = "";
+    let requestedOrigin = "";
+    const client = createClient({
+      baseUrl: "https://remote.example/api/v1/",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      origin: "https://consumer.example",
+      fetch: async (input, init) => {
+        requestedUrl = String(input);
+        requestedOrigin = new Headers(init?.headers).get("origin") ?? "";
+        return new Response(JSON.stringify(successEnvelope({ status: "ok" })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await client.operations.health_read({});
+
+    expect(requestedUrl).toBe(
+      "https://remote.example/api/v1/projects/project.sdk/application/primitives/health_read",
+    );
+    expect(requestedOrigin).toBe("https://consumer.example");
+  });
+
+  it("fails closed on malformed server requests before transport", async () => {
     let fetchCalls = 0;
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
@@ -290,28 +309,36 @@ describe("TraceDecayClient generated operation bindings", () => {
     });
 
     await expect(
-      client.operations.work_snapshot({ page_size: -1 }),
-    ).rejects.toBeInstanceOf(TypeError);
-    await expect(
-      client.operations.work_create({
-        task_id: "task.sdk",
-        title: "SDK task",
-        command_id: "command.sdk",
-        occurred_at: 1,
-        dependencies: ["task.dependency", "task.dependency"],
-      }),
-    ).rejects.toBeInstanceOf(TypeError);
+      // @ts-expect-error Deliberately malformed at the package boundary.
+      client.operations.health_read(null),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
     expect(fetchCalls).toBe(0);
     expect("invoke" in client).toBe(false);
   });
 
-  it("publishes runtime attempts only as typed unavailable capabilities", () => {
-    expect(UNAVAILABLE_OPERATIONS).toHaveLength(8);
+  it("publishes unmounted core Work routes as typed unavailable", () => {
+    const available = OPERATIONS as readonly {
+      readonly operation: string;
+    }[];
+    expect(OPERATIONS.length + UNAVAILABLE_OPERATIONS.length).toBe(17);
+    expect(
+      available.some((availableOperation) =>
+        UNAVAILABLE_OPERATIONS.some(
+          (unavailable) =>
+            unavailable.operation === availableOperation.operation,
+        ),
+      ),
+    ).toBe(false);
     expect(
       UNAVAILABLE_OPERATIONS.map((operation) => operation.operation),
-    ).toContain("work_attempt_acquire_lease");
+    ).toContain("work_snapshot");
     expect(
-      "work_attempt_acquire_lease" in createClient({
+      UNAVAILABLE_OPERATIONS.find(
+        (operation) => operation.operation === "work_snapshot",
+      )?.disposition,
+    ).toBe("route_unavailable");
+    expect(
+      "work_snapshot" in createClient({
         baseUrl: "http://127.0.0.1:43123",
         projectId: "project.sdk",
         token: "sdk-secret",
