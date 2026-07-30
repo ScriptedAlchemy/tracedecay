@@ -456,7 +456,7 @@ pub(crate) fn hook_v2_admission_ledger_root(
     data_root: &Path,
     host: tracedecay_hooks::HookHostV1,
 ) -> std::path::PathBuf {
-    data_root.join("hook-v2-admissions").join(host.as_key())
+    data_root.join("hook-v2-admissions").join(host.hook_key())
 }
 
 /// Bound on distinct ledgers held open at once. A daemon serves one profile, so
@@ -477,7 +477,7 @@ fn hook_v2_pending_work_root(
     data_root: &Path,
     host: tracedecay_hooks::HookHostV1,
 ) -> std::path::PathBuf {
-    data_root.join("hook-v2-pending-work").join(host.as_key())
+    data_root.join("hook-v2-pending-work").join(host.hook_key())
 }
 
 fn hook_v2_pending_work_gate() -> &'static StdMutex<()> {
@@ -491,7 +491,7 @@ fn complete_hook_v2_pending_work(
     sequence: u64,
     now: UtcMicros,
 ) -> bool {
-    let key = (data_root.to_path_buf(), envelope.producer.as_key());
+    let key = (data_root.to_path_buf(), envelope.producer.hook_key());
     let Some(mut ledgers) = hook_v2_admission_ledgers().lock().ok() else {
         return false;
     };
@@ -590,7 +590,7 @@ pub(crate) fn record_hook_v2_admission(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     now: UtcMicros,
 ) -> Option<tracedecay_hooks::HookAdmissionLedgerReceiptV1> {
-    let key = (data_root.to_path_buf(), envelope.producer.as_key());
+    let key = (data_root.to_path_buf(), envelope.producer.hook_key());
     let mut ledgers = hook_v2_admission_ledgers().lock().ok()?;
     if !ledgers.contains_key(&key) {
         if ledgers.len() >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
@@ -616,7 +616,7 @@ fn forget_hook_v2_admission_ledger_for_test(data_root: &Path, host: tracedecay_h
     hook_v2_admission_ledgers()
         .lock()
         .unwrap()
-        .remove(&(data_root.to_path_buf(), host.as_key()));
+        .remove(&(data_root.to_path_buf(), host.hook_key()));
 }
 
 fn hook_v2_requires_producer_work(envelope: &tracedecay_hooks::HookEventEnvelopeV2) -> bool {
@@ -647,7 +647,7 @@ fn daemon_mint_hook_v2_id(
     domain: &[u8],
     native_id: [u8; 16],
 ) -> [u8; 16] {
-    let producer = envelope.producer.as_key().as_bytes();
+    let producer = envelope.producer.hook_key().as_bytes();
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.hook-v2.daemon-id.v1");
     hasher.update(envelope.binding_token);
@@ -839,7 +839,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         };
         if !admit_native_context_scout_lifecycle(
             project_sessions,
-            ProviderId::new(envelope.producer.as_key()).expect("static Hook V2 provider id"),
+            ProviderId::new(envelope.producer.hook_key()).expect("static Hook V2 provider id"),
             native_lifecycle,
             range,
         )
@@ -2584,7 +2584,7 @@ mod tests {
         {
             let key = (
                 data_root.path().to_path_buf(),
-                tracedecay_hooks::HookHostV1::ClaudeCode.as_key(),
+                tracedecay_hooks::HookHostV1::ClaudeCode.hook_key(),
             );
             let mut ledgers = hook_v2_admission_ledgers().lock().unwrap();
             assert!(
