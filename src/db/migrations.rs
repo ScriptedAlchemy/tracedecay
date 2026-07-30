@@ -1425,90 +1425,39 @@ async fn migrate_v9(conn: &Transaction) -> Result<()> {
         operation: "migrate_v9".to_string(),
     })?;
 
-    // ALTER TABLE has no IF NOT EXISTS for columns in SQLite. Probe
-    // PRAGMA table_info first — fresh installs already include parent_id
-    // from create_schema, and the test harness exercises that path by
-    // resetting user_version to a pre-v9 value.
-    let has_parent_id = {
-        let mut rows = conn
-            .query("PRAGMA table_info(nodes)", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("v9: failed to probe nodes columns: {e}"),
-                operation: "migrate_v9".to_string(),
-            })?;
-        let mut found = false;
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("v9: failed to read table_info row: {e}"),
-            operation: "migrate_v9".to_string(),
-        })? {
-            if let Ok(name) = row.get::<String>(1)
-                && name == "parent_id"
-            {
-                found = true;
-                break;
-            }
-        }
-        found
-    };
-
-    if !has_parent_id {
-        conn.execute("ALTER TABLE nodes ADD COLUMN parent_id TEXT", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("v9: failed to add parent_id column: {e}"),
-                operation: "migrate_v9".to_string(),
-            })?;
-    }
-
-    // Backfill parent_id from existing Contains edges, then drop those
-    // rows. Gate on the edges table actually existing — tests seed
-    // partial schemas and a real install always has it (migrate_v1).
-    let has_edges_table = {
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='edges'",
-                (),
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("v9: failed to probe sqlite_master: {e}"),
-                operation: "migrate_v9".to_string(),
-            })?;
-        rows.next()
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("v9: failed to read sqlite_master row: {e}"),
-                operation: "migrate_v9".to_string(),
-            })?
-            .is_some()
-    };
-
-    if has_edges_table {
-        // When a node has multiple incoming Contains rows (legacy data
-        // anomaly), the first matching row wins — subsequent rows are
-        // noise the new schema does not preserve.
-        conn.execute(
-            "UPDATE nodes SET parent_id = (
-                SELECT source FROM edges
-                WHERE edges.target = nodes.id AND edges.kind = 'contains'
-                LIMIT 1
-            )",
-            (),
-        )
+    // V9 and its user_version publication execute in one immediate
+    // transaction. A valid V8 source therefore always lacks this column;
+    // accepting it would silently bless a malformed or partially edited V8.
+    conn.execute("ALTER TABLE nodes ADD COLUMN parent_id TEXT", ())
         .await
         .map_err(|e| TraceDecayError::Database {
-            message: format!("v9: failed to backfill parent_id from contains edges: {e}"),
+            message: format!("v9: failed to add parent_id column: {e}"),
             operation: "migrate_v9".to_string(),
         })?;
 
-        conn.execute("DELETE FROM edges WHERE kind = 'contains'", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("v9: failed to drop contains edges: {e}"),
-                operation: "migrate_v9".to_string(),
-            })?;
-    }
+    // V1 creates edges, so its absence at V8 is corruption and must fail
+    // closed. When a node has multiple incoming Contains rows (legacy data
+    // anomaly), the first matching row wins; later rows are not preserved.
+    conn.execute(
+        "UPDATE nodes SET parent_id = (
+            SELECT source FROM edges
+            WHERE edges.target = nodes.id AND edges.kind = 'contains'
+            LIMIT 1
+        )",
+        (),
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("v9: failed to backfill parent_id from contains edges: {e}"),
+        operation: "migrate_v9".to_string(),
+    })?;
+
+    conn.execute("DELETE FROM edges WHERE kind = 'contains'", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to drop contains edges: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id)",
