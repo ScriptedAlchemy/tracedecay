@@ -12,6 +12,10 @@ const DASHBOARD_EVENT_NAMES = [
   'session_ingest',
   'code_index_activity',
   'tool_call',
+  // Work task mutations. The daemon enumerates this family and emits it under
+  // this name; without it listed here the dashboard would drop every frame it
+  // sends, so subscribing is what makes the family reach a reader at all.
+  'task_activity',
 ] as const;
 
 export type SseConnectionState = 'connecting' | 'live' | 'offline';
