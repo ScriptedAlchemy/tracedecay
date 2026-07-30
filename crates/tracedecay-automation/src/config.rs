@@ -111,6 +111,9 @@ pub struct AutomationConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_scheduler_tick_secs")]
     pub scheduler_tick_secs: u64,
+    /// Applies validated accepted memory-curation operations when true.
+    /// Legacy configurations that set this false retain proposal-only
+    /// behavior; the default remains autonomous apply.
     #[serde(default = "default_true")]
     pub auto_apply_memory_ops: bool,
     #[serde(default)]
@@ -222,6 +225,8 @@ pub struct AutomationConfigPatch {
     pub temperature: Option<Option<f32>>,
     #[serde(default, skip_serializing)]
     pub require_dashboard_approval: Option<bool>,
+    /// Legacy-compatible memory apply gate. `true` applies validated accepted
+    /// operations autonomously; `false` retains them as proposals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_apply_memory_ops: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -581,6 +586,10 @@ pub fn parse_schedule(schedule: Option<&str>) -> Result<AutomationSchedule> {
     Ok(AutomationSchedule::Interval { every_secs })
 }
 
+pub fn validate_schedule(schedule: Option<&str>) -> Result<()> {
+    parse_schedule(schedule).map(|_| ())
+}
+
 fn parse_cron_expression(raw: &str) -> Result<AutomationSchedule> {
     let fields: Vec<&str> = raw.split_whitespace().collect();
     let [minute, hour, dom, month, dow] = fields.as_slice() else {
@@ -833,5 +842,7 @@ mod tests {
         };
         assert!(cron.matches(32_400));
         assert_eq!(cron.previous_occurrence(32_459), Some(32_400));
+        assert!(validate_schedule(Some("hourly")).is_ok());
+        assert!(validate_schedule(Some("after lunch")).is_err());
     }
 }

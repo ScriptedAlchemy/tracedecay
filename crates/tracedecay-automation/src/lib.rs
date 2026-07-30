@@ -9,7 +9,8 @@ pub mod artifact_policy;
 pub mod backend;
 pub mod config;
 mod error;
-mod managed_skill_format;
+#[doc(hidden)]
+pub mod managed_skill_format;
 mod managed_skill_model;
 mod managed_skill_validation;
 mod ports;
@@ -22,7 +23,8 @@ pub mod managed_skills {
         MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES, ManagedSkill, ManagedSkillDraft,
         ManagedSkillMaterializationScope, ManagedSkillMetadata, ManagedSkillPendingUpdate,
         ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-        ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
+        ManagedSupportFile, SkillInstallTarget, current_metadata_timestamp,
+        default_managed_skill_targets,
     };
     pub use crate::managed_skill_validation::{
         validate_managed_pending_update, validate_managed_skill, validate_managed_skill_update,

@@ -110,6 +110,17 @@ fn apply_policy_preserves_complete_and_partial_outcomes() {
 }
 
 #[test]
+fn apply_policy_preserves_the_legacy_proposal_only_escape_hatch() {
+    let mut config = AutomationConfig::default();
+    config.auto_apply_memory_ops = false;
+
+    let policy = MemoryApplyPolicy::curation_ops(&config, 1);
+
+    assert_eq!(policy.decision(), MemoryApplyDecision::ApplyIncomplete);
+    assert!(!policy.to_json()["mutates_store"].as_bool().unwrap());
+}
+
+#[test]
 fn artifact_policy_changes_handoff_by_acceptance() {
     let policy = artifact_policy(AgentTaskKind::SkillWriter);
     let accepted = TestRunRecord {

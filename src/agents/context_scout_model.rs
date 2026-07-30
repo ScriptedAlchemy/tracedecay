@@ -252,7 +252,7 @@ mod tests {
     use super::*;
     use crate::application::context::{CancellationToken, MonotonicDeadline};
     use crate::automation::backend::AgentTaskResponse;
-    use crate::errors::Result;
+    use tracedecay_automation::Result;
 
     #[derive(Clone)]
     struct RecordingBackend {

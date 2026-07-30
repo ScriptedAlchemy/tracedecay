@@ -287,10 +287,18 @@ fn print_automation_config(
         && effective.host_mode == tracedecay::automation::config::AutomationHostMode::Standalone;
     let delegated_host =
         effective.host_mode == tracedecay::automation::config::AutomationHostMode::DelegatedHost;
-    // Automation applies validated memory output autonomously;
-    // `require_dashboard_approval` and `auto_apply_memory_ops` are retained
-    // only for legacy config compatibility and do not gate curation runs.
-    let memory_ops_policy = "validate_then_apply";
+    // `require_dashboard_approval` is deprecated, but the legacy memory flag
+    // remains an explicit apply/proposal-only switch.
+    let memory_ops_policy = if effective.auto_apply_memory_ops {
+        "validate_then_apply"
+    } else {
+        "validate_then_propose"
+    };
+    let apply_mode = if effective.auto_apply_memory_ops {
+        "autonomous"
+    } else {
+        "proposal_only"
+    };
     let skills_policy = if effective.auto_enable_skills {
         "auto_enable"
     } else {
@@ -306,12 +314,12 @@ fn print_automation_config(
             "trace_decay_backend_calls": trace_decay_backend_calls,
             "delegated_host": delegated_host,
             "auto_apply_memory_ops": effective.auto_apply_memory_ops,
-            "auto_apply_memory_ops_legacy_config_only": true,
+            "auto_apply_memory_ops_legacy_config_only": false,
             "auto_enable_skills": effective.auto_enable_skills,
             "export_memory_digest": effective.export_memory_digest,
             "effective_apply_policy": {
-                "mode": "autonomous",
-                "human_approval_required": false,
+                "mode": apply_mode,
+                "human_approval_required": !effective.auto_apply_memory_ops,
                 "dashboard_approval": "deprecated",
                 "memory_ops": memory_ops_policy,
                 "skills": skills_policy,
@@ -340,7 +348,7 @@ fn print_automation_config(
         println!("timeout_secs: {}", effective.timeout_secs);
         println!("scheduler_tick_secs: {}", effective.scheduler_tick_secs);
         println!("memory_curator: {}", effective.tasks.memory_curator.enabled);
-        println!("effective_apply_policy: autonomous");
+        println!("effective_apply_policy: {apply_mode}");
         if explain {
             println!(
                 "session_reflector: {}",
@@ -348,12 +356,15 @@ fn print_automation_config(
             );
             println!("skill_writer: {}", effective.tasks.skill_writer.enabled);
             println!(
-                "auto_apply_memory_ops: {} (legacy; autonomous curation always applies)",
+                "auto_apply_memory_ops: {} (legacy-compatible apply gate)",
                 effective.auto_apply_memory_ops
             );
             println!("auto_enable_skills: {}", effective.auto_enable_skills);
             println!("export_memory_digest: {}", effective.export_memory_digest);
-            println!("apply_policy.human_approval_required: false");
+            println!(
+                "apply_policy.human_approval_required: {}",
+                !effective.auto_apply_memory_ops
+            );
             println!("apply_policy.dashboard_approval: deprecated");
             println!("apply_policy.memory_ops: {memory_ops_policy}");
             println!("apply_policy.skills: {skills_policy}");
