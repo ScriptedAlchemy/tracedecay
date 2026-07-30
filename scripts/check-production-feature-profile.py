@@ -3,16 +3,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import subprocess
 import tomllib
 
 
-REPO = Path(__file__).resolve().parent.parent
-
-
-def metadata(*arguments: str) -> dict[str, object]:
+def metadata(repo: Path, *arguments: str) -> dict[str, object]:
     completed = subprocess.run(
         [
             "cargo",
@@ -22,7 +20,7 @@ def metadata(*arguments: str) -> dict[str, object]:
             "--locked",
             *arguments,
         ],
-        cwd=REPO,
+        cwd=repo,
         check=True,
         capture_output=True,
         text=True,
@@ -49,7 +47,16 @@ def resolved_features(value: dict[str, object]) -> dict[str, set[str]]:
 
 
 def main() -> int:
-    with REPO.joinpath("Cargo.toml").open("rb") as handle:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent,
+    )
+    arguments = parser.parse_args()
+    repo = arguments.repo.resolve()
+
+    with repo.joinpath("Cargo.toml").open("rb") as handle:
         manifest = tomllib.load(handle)
     features = manifest.get("features", {})
     if features.get("default") != ["production"]:
@@ -64,8 +71,10 @@ def main() -> int:
     if "test-transport" in features["production"]:
         raise SystemExit("production feature directly enables test-transport")
 
-    default = metadata()
-    production = metadata("--no-default-features", "--features", "production")
+    default = metadata(repo)
+    production = metadata(
+        repo, "--no-default-features", "--features", "production"
+    )
     default_graph = resolved_features(default)
     production_graph = resolved_features(production)
     if default_graph.keys() != production_graph.keys():
