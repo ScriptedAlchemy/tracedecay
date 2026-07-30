@@ -10,8 +10,15 @@ use tracedecay_application::remote::{
         RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionPortV1,
     },
 };
+use tracedecay_domain::{ObservationSourceCursorV1, canonical_sha256};
 use tracedecay_store::{
-    RepositoryWritePayloadV1, RuntimeSubmitRequestV1, StoreCommitReceiptV1, StoreRuntimeBindingV1,
+    AnchoredObservationWrite, CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1,
+    ObservationWrite, OperationPriorityV1, RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1,
+    RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1, StoreCommitReceiptV1,
+    StoreIdempotencyKeyV1, StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 use crate::{
@@ -26,6 +33,131 @@ pub trait RemoteReplayRequestFactoryV1: Send {
         frame: &RemoteReplayFrameV1,
         binding: &StoreRuntimeBindingV1,
     ) -> Result<RuntimeSubmitRequestV1, RemoteReplayTransactionErrorV1>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CanonicalRemoteReplayRequestFactoryV1;
+
+impl RemoteReplayRequestFactoryV1 for CanonicalRemoteReplayRequestFactoryV1 {
+    fn build_request(
+        &mut self,
+        frame: &RemoteReplayFrameV1,
+        binding: &StoreRuntimeBindingV1,
+    ) -> Result<RuntimeSubmitRequestV1, RemoteReplayTransactionErrorV1> {
+        frame
+            .validate()
+            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        let observation = frame.capture.observation.clone();
+        let position = observation.identity().position();
+        let expected_cursor = (position.start() > 0)
+            .then(|| {
+                ObservationSourceCursorV1::for_ordering(
+                    observation.source().clone(),
+                    observation.scope().clone(),
+                    observation.identity().generation(),
+                    observation.identity().ordering_domain(),
+                    position.start(),
+                )
+            })
+            .transpose()
+            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            position.end(),
+        )
+        .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        let write = ObservationWrite::new(observation, expected_cursor, next_cursor)
+            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        let projection_generation = frame.capture.writer.authority.fence.generation_id.clone();
+        let authorization = build_observation_resolution_authorization_v1(
+            write.observation(),
+            "tracedecay.remote-replay.v1",
+        )
+        .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        let retrieval_anchor = build_observation_retrieval_anchor_v2(
+            write.observation(),
+            projection_generation.clone(),
+            frame.capture.captured_at,
+            authorization,
+        )
+        .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        let payload = RepositoryWritePayloadV1::Observation(Box::new(
+            AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation)
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+        ));
+        let capture_identity = (
+            "tracedecay.remote-capture.v2",
+            &frame.capture.enrollment_id,
+            frame.capture.enrollment_revision,
+            &frame.capture.node_id,
+            &frame.capture.writer,
+            frame.capture.policy_revision,
+            &frame.capture.sequence,
+            &frame.capture.observation,
+            frame.capture.captured_at,
+        );
+        let capture_digest = canonical_sha256(&capture_identity)
+            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        if frame.event_id != format!("remote.event.{}", capture_digest.as_str()) {
+            return Err(RemoteReplayTransactionErrorV1::IdempotencyConflict);
+        }
+        let capture_bytes = serde_json::to_vec(&capture_identity)
+            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+        let metadata = StoreOperationMetadataV1 {
+            operation_id: StoreOperationIdV1::new(format!("remote.replay.{}", frame.event_id))
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            client_id: StoreClientIdV1::new(format!("remote.{}", frame.capture.node_id.as_str()))
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            shard_id: binding.shard_id.clone(),
+            incarnation: binding.incarnation,
+            authority_epoch: binding.authority_epoch,
+            idempotency: IdempotencyIdentityV1 {
+                key: StoreIdempotencyKeyV1::new(frame.event_id.clone())
+                    .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+                command_digest: CommandDigestV1::new(capture_digest.as_str())
+                    .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            },
+            durability: DurabilityClassV1::Full,
+            priority: OperationPriorityV1::Foreground,
+            admission_bytes: u64::try_from(capture_bytes.len())
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            admitted_at: frame.capture.captured_at,
+        };
+        let transaction_scope = RuntimeTransactionScopeV1 {
+            transaction_id: RuntimeTransactionIdV1::new(format!(
+                "remote.replay.{}",
+                frame.event_id
+            ))
+            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            compatibility: RuntimeBatchCompatibilityV1::from_operation(&metadata)
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            opened_at: frame.capture.captured_at,
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: frame.capture.captured_at,
+            deadline: RuntimeDeadlineV1 {
+                deadline_id: RuntimeDeadlineIdV1::new(format!("remote.replay.{}", frame.event_id))
+                    .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+            },
+            cancellation: RuntimeCancellationIdentityV1 {
+                cancellation_id: RuntimeCancellationIdV1::new(format!(
+                    "remote.replay.{}",
+                    frame.event_id
+                ))
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+                generation: frame.capture.sequence.sequence,
+            },
+        };
+        RuntimeSubmitRequestV1::new(
+            RepositoryOperationEnvelopeV1 { metadata, payload },
+            transaction_scope,
+            control,
+        )
+        .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)
+    }
 }
 
 pub struct RusqliteRemoteReplayPort<E, F> {

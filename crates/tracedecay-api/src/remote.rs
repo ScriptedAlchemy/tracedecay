@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::remote::auth::OpaqueRemoteCredential;
 use tracedecay_application::remote::protocol::{
-    REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1, RemoteProtocolServiceV1,
 };
 
 const BEARER_PREFIX: &[u8] = b"Bearer ";
@@ -167,9 +168,77 @@ impl<T> From<RemoteProtocolResponseV1<T>> for RemoteHttpResponseV1<T> {
     }
 }
 
+pub struct RemoteHttpProtocolTransportV1<Port> {
+    service: RemoteProtocolServiceV1<Port>,
+}
+
+impl<Port> RemoteHttpProtocolTransportV1<Port> {
+    pub const fn new(port: Port) -> Self {
+        Self {
+            service: RemoteProtocolServiceV1::new(port),
+        }
+    }
+
+    pub fn execute<Request>(
+        &self,
+        request: RemoteHttpRequestV1<Request>,
+        authorization: RemoteAuthorizationHeader,
+    ) -> Result<RemoteHttpResponseV1<Port::Output>, RemoteHttpBoundaryError>
+    where
+        Port: RemoteProtocolPortV1<Request>,
+    {
+        let admission = request.admit(authorization)?;
+        let response = self
+            .service
+            .execute(admission.request, admission.credential)
+            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
+        Ok(response.into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use tracedecay_application::remote::protocol::{
+        RemoteProtocolFailureV1, RemoteProtocolPortV1, remote_protocol_problem,
+    };
+    use tracedecay_application::{RequestId, ResultContractRef};
+    use tracedecay_domain::{
+        BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1,
+        UtcMicros,
+    };
+    use tracedecay_tool_catalog::SchemaId;
+
+    struct CountingProtocolPort(Arc<AtomicUsize>);
+
+    impl RemoteProtocolPortV1<()> for CountingProtocolPort {
+        type Output = ();
+
+        fn execute(
+            &self,
+            request: RemoteProtocolRequestV1<()>,
+            _credential: OpaqueRemoteCredential,
+        ) -> RemoteProtocolResponseV1<Self::Output> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let request_id = request.request_id;
+            RemoteProtocolResponseV1::new(
+                request_id.clone(),
+                CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                    observed_at: UtcMicros(20),
+                },
+                Err(remote_protocol_problem(
+                    ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1).unwrap(),
+                    request_id,
+                    RemoteProtocolFailureV1::AuthorityUnavailable,
+                )),
+            )
+            .unwrap()
+        }
+    }
 
     #[test]
     fn authorization_header_is_always_redacted() {
@@ -229,5 +298,35 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("credential"));
         assert!(!json.contains("authorization"));
+    }
+
+    #[test]
+    fn concrete_http_transport_admits_and_delegates_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transport =
+            RemoteHttpProtocolTransportV1::new(CountingProtocolPort(Arc::clone(&calls)));
+        let request = RemoteHttpRequestV1 {
+            request: RemoteProtocolRequestV1::new(
+                RequestId::new("request.remote.transport").unwrap(),
+                BrainId::new("brain.remote").unwrap(),
+                BrainNodeId::new("node.remote").unwrap(),
+                1,
+                None,
+                UtcMicros(10),
+                (),
+            )
+            .unwrap(),
+        };
+        let authorization = RemoteAuthorizationHeader::from_owned_bytes(
+            b"Bearer 0123456789abcdef0123456789abcdef".to_vec(),
+        )
+        .unwrap();
+
+        let response = transport.execute(request, authorization).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            response.response.request_id.as_str(),
+            "request.remote.transport"
+        );
     }
 }
