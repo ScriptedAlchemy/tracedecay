@@ -189,12 +189,30 @@ impl Client {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ClientError::Authentication(status.as_u16()));
         }
-        let value: OperationCancellation = response.json().map_err(ClientError::transport)?;
+        let body: Value = response.json().map_err(ClientError::transport)?;
+        if body.get("kind").and_then(Value::as_str) == Some("problem") {
+            let envelope = body
+                .get("value")
+                .cloned()
+                .ok_or_else(|| ClientError::Protocol {
+                    status: Some(status.as_u16()),
+                    message: "cancellation problem envelope has no value".into(),
+                })?;
+            return Err(ClientError::Problem(ProblemError::new(
+                status.as_u16(),
+                envelope,
+            )?));
+        }
+        let value: OperationCancellation =
+            serde_json::from_value(body).map_err(|error| ClientError::Protocol {
+                status: Some(status.as_u16()),
+                message: format!("daemon returned malformed cancellation JSON: {error}"),
+            })?;
         let valid_status = matches!(
-            (status, value.status.as_str()),
-            (StatusCode::ACCEPTED, "requested")
-                | (StatusCode::OK, "already_requested")
-                | (StatusCode::OK, "already_terminal")
+            (status, value.status),
+            (StatusCode::ACCEPTED, CancellationStatus::Requested)
+                | (StatusCode::OK, CancellationStatus::AlreadyRequested)
+                | (StatusCode::OK, CancellationStatus::AlreadyTerminal)
         );
         if !valid_status {
             return Err(ClientError::Protocol {
@@ -354,9 +372,18 @@ impl ApplicationResponse {
 /// Canonical cancellation acknowledgement.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct OperationCancellation {
-    pub status: String,
+    pub status: CancellationStatus,
     #[serde(flatten)]
     pub details: serde_json::Map<String, Value>,
+}
+
+/// Canonical cancellation acknowledgement state.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationStatus {
+    Requested,
+    AlreadyRequested,
+    AlreadyTerminal,
 }
 
 /// Resume frontier supplied by an earlier stream.
@@ -443,6 +470,26 @@ impl OperationStream {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
             .map(str::trim);
+        if !status.is_success() && media_type == Some("application/json") {
+            let body: Value = response.json().map_err(ClientError::transport)?;
+            if body.get("kind").and_then(Value::as_str) == Some("problem") {
+                let envelope = body
+                    .get("value")
+                    .cloned()
+                    .ok_or_else(|| ClientError::Protocol {
+                        status: Some(status.as_u16()),
+                        message: "stream problem envelope has no value".into(),
+                    })?;
+                return Err(ClientError::Problem(ProblemError::new(
+                    status.as_u16(),
+                    envelope,
+                )?));
+            }
+            return Err(ClientError::Protocol {
+                status: Some(status.as_u16()),
+                message: "daemon returned an unknown stream problem envelope".into(),
+            });
+        }
         if !status.is_success() || media_type != Some("text/event-stream") {
             return Err(ClientError::Protocol {
                 status: Some(status.as_u16()),
