@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use tracedecay_domain::ContentDigest;
+
 use crate::gateway::AdmittedRoot;
 
 pub const MAX_PENDING_REQUESTS: usize = 64;
@@ -259,6 +261,7 @@ pub struct LspSessionControl {
     detached_from: Option<SessionLifecycle>,
     pending: BTreeMap<LspRequestId, PendingRequest>,
     publications: BTreeMap<String, PublicationState>,
+    publication_payload_digests: BTreeMap<String, ContentDigest>,
     max_pending_requests: usize,
 }
 
@@ -275,6 +278,7 @@ impl LspSessionControl {
             detached_from: None,
             pending: BTreeMap::new(),
             publications: BTreeMap::new(),
+            publication_payload_digests: BTreeMap::new(),
             max_pending_requests,
         }
     }
@@ -311,6 +315,7 @@ impl LspSessionControl {
         self.transition(SessionLifecycle::Shutdown, SessionLifecycle::Exited, "exit")?;
         self.pending.clear();
         self.publications.clear();
+        self.publication_payload_digests.clear();
         Ok(())
     }
 
@@ -356,6 +361,7 @@ impl LspSessionControl {
         self.detached_from = None;
         self.pending.clear();
         self.publications.clear();
+        self.publication_payload_digests.clear();
     }
 
     pub fn admit_request(
@@ -469,6 +475,39 @@ impl LspSessionControl {
         generation: u64,
         payload_bytes: usize,
     ) -> PublicationAdmission {
+        self.admit_publication_identity(
+            document_uri.into(),
+            document_version,
+            generation,
+            payload_bytes,
+            None,
+        )
+    }
+
+    pub(crate) fn admit_payload_publication(
+        &mut self,
+        document_uri: impl Into<String>,
+        document_version: i64,
+        generation: u64,
+        payload: &[u8],
+    ) -> PublicationAdmission {
+        self.admit_publication_identity(
+            document_uri.into(),
+            document_version,
+            generation,
+            payload.len(),
+            Some(ContentDigest::of_bytes(payload)),
+        )
+    }
+
+    fn admit_publication_identity(
+        &mut self,
+        document_uri: String,
+        document_version: i64,
+        generation: u64,
+        payload_bytes: usize,
+        payload_digest: Option<ContentDigest>,
+    ) -> PublicationAdmission {
         if self.lifecycle != SessionLifecycle::Ready {
             return PublicationAdmission::SessionUnavailable;
         }
@@ -478,7 +517,6 @@ impl LspSessionControl {
                 limit: MAX_PUBLICATION_BYTES,
             };
         }
-        let document_uri = document_uri.into();
         if let Some(current) = self.publications.get(&document_uri) {
             let key = (document_version, generation);
             let current_key = (current.document_version, current.generation);
@@ -486,8 +524,19 @@ impl LspSessionControl {
                 return PublicationAdmission::Stale;
             }
             if key == current_key {
-                return PublicationAdmission::Duplicate;
+                let duplicate = payload_digest.as_ref().is_none_or(|digest| {
+                    self.publication_payload_digests.get(&document_uri) == Some(digest)
+                });
+                if duplicate {
+                    return PublicationAdmission::Duplicate;
+                }
             }
+        }
+        if let Some(payload_digest) = payload_digest {
+            self.publication_payload_digests
+                .insert(document_uri.clone(), payload_digest);
+        } else {
+            self.publication_payload_digests.remove(&document_uri);
         }
         self.publications.insert(
             document_uri,
@@ -531,6 +580,7 @@ impl LspSessionControl {
     }
 
     pub fn remove_publication(&mut self, document_uri: &str) -> Option<PublicationState> {
+        self.publication_payload_digests.remove(document_uri);
         self.publications.remove(document_uri)
     }
 
@@ -901,6 +951,28 @@ mod tests {
         session.exit().unwrap();
         assert_eq!(session.lifecycle(), SessionLifecycle::Exited);
         assert!(session.publication(uri).is_none());
+    }
+
+    #[test]
+    fn publication_identity_includes_bounded_payload_digest() {
+        let mut session = ready(1);
+        let uri = "file:///root/a.rs";
+        assert_eq!(
+            session.admit_payload_publication(uri, 2, 7, b"first"),
+            PublicationAdmission::Accepted
+        );
+        assert_eq!(
+            session.admit_payload_publication(uri, 2, 7, b"first"),
+            PublicationAdmission::Duplicate
+        );
+        assert_eq!(
+            session.admit_payload_publication(uri, 2, 7, b"changed"),
+            PublicationAdmission::Accepted
+        );
+        assert_eq!(
+            session.admit_payload_publication(uri, 1, 99, b"stale"),
+            PublicationAdmission::Stale
+        );
     }
 
     #[test]
