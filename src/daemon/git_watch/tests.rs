@@ -40,6 +40,24 @@ fn retention_window_conversion_never_wraps_negative() {
 }
 
 #[test]
+fn failed_branch_compaction_keeps_maintenance_retry_eligible() {
+    let report = crate::retention::branch_compaction::BranchCompactionReport {
+        compacted: Vec::new(),
+        skipped: vec![crate::retention::branch_compaction::BranchCompactionSkip {
+            branch: "busy".to_string(),
+            db_path: PathBuf::from("/tmp/busy.db"),
+            reason: crate::retention::branch_compaction::BranchCompactionSkipReason::Busy,
+        }],
+        policy_invalid: false,
+    };
+
+    assert!(
+        !store_maintenance::branch_compaction_succeeded(&report),
+        "a skipped branch store must keep the maintenance cadence eligible for retry"
+    );
+}
+
+#[test]
 fn dirty_set_coalesces_and_takes_once() {
     let mut set = DirtySet::default();
     assert!(set.is_clean());
