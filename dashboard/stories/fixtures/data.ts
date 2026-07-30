@@ -1594,31 +1594,199 @@ const DOCTOR_FAMILIES = [
   'observability',
 ] as const;
 
+/** Owner operation references, verbatim from
+ * `tracedecay_application::doctor::operations` (remediation.rs:30-53). The
+ * dashboard route resolves a finding's reference through the kernel registry,
+ * so a fixture naming an operation the registry does not seed would produce a
+ * descriptor the real route can never emit. */
+const DOCTOR_OPERATIONS = {
+  retentionCollect: 'use-case.application.storage.retention-collect',
+  branchGc: 'use-case.application.storage.branch-gc',
+  protectedApply: 'use-case.application.configuration.protected-apply',
+  codeIndexRemount: 'use-case.application.code-index.remount',
+} as const;
+
 /**
- * Wire-true default for `GET /api/doctor/findings`: a dashboard without an
- * admitted Doctor report reader returns a typed **unsupported** envelope with
- * no entries (doctor_findings_api.rs `findings` → `DashboardEnvelopeV1::unsupported`).
- * The DoctorInspector renders this as a single StateChip.
+ * `GET /api/doctor/findings` with an admitted report reader — the populated
+ * report, not the empty one.
  *
- * A *populated* findings fixture is intentionally NOT used: the DoctorInspector
- * renders each finding's evidence badge with `doctorModel.ts` `tokenClass` as a
- * text color (`text-state-partial`/`stale`/`ready`/`error`), and every one of
- * those tokens fails WCAG contrast on `bg-surface-2` in the light theme. That is
- * a theme/component bug outside fixture scope, so the fixture stays on the
- * wire-true unsupported state to keep the audited surface at zero axe
- * violations (divergence flagged in the report).
+ * This fixture used to be deliberately empty, and said so: the inspector
+ * painted each evidence badge's label in `doctorModel.ts` `tokenClass`, those
+ * indicator hues miss WCAG AA as 11px text on `--surface-2`, and an empty
+ * envelope was the only way to keep the audited surface at zero axe violations.
+ * It kept the gate green by keeping the defective markup off the page. The
+ * badge now follows the `StateChip` idiom — hue on the lamp and glyph, label on
+ * an AA token — so the findings can be served and actually scanned.
+ *
+ * All eight `DoctorEvidenceStateV1` values appear exactly once, so every badge
+ * variant is on screen for the axe scan rather than a representative few. Only
+ * `healthy_complete_coverage` carries complete coverage, which is the invariant
+ * `DoctorFindingV1::new` enforces: missing or partial truth never presents as
+ * healthy.
+ *
+ * The descriptors mirror the kernel's seeded registry verbatim (summary,
+ * surface, preview_available, action_confirmation), and `target` follows
+ * `DoctorRemediationTargetV1::for_operation` — null for the protected
+ * configuration apply, which needs a concrete key, value and base revision the
+ * route cannot build from a finding alone.
  */
 function doctorFindingsEnvelope(): Record<string, unknown> {
+  const entry = (
+    family: (typeof DOCTOR_FAMILIES)[number],
+    state: string,
+    completeness: 'complete' | 'partial' | 'unknown',
+    statement: string,
+    evidence: ReadonlyArray<string>,
+    options: { storageKind?: string; operation?: string } = {},
+  ): Record<string, unknown> => ({
+    finding: {
+      family,
+      state,
+      coverage: { completeness, statement },
+      evidence: evidence.map((reference) => ({ family, reference })),
+      remediation: options.operation
+        ? { kind: 'action', owning_operation: options.operation }
+        : null,
+    },
+    storage_kind: options.storageKind ?? null,
+  });
+
+  const entries = [
+    entry(
+      'storage',
+      'partial',
+      'partial',
+      'two of three stores reported a size; the third could not be opened for measurement',
+      ['store:lcm:size-observation:wm-41', 'store:memory:size-observation:wm-41'],
+      { storageKind: 'over_budget_store', operation: DOCTOR_OPERATIONS.retentionCollect },
+    ),
+    entry(
+      'storage',
+      'stale',
+      'complete',
+      'branch databases were last reconciled against git refs 19 days ago',
+      ['store:branch-db:reconcile-watermark:wm-22'],
+      { storageKind: 'stale_branch_dbs', operation: DOCTOR_OPERATIONS.branchGc },
+    ),
+    entry(
+      'configuration',
+      'degraded',
+      'complete',
+      'effective configuration diverges from the desired revision on two protected keys',
+      ['configuration:revision:r-317', 'configuration:revision:r-318'],
+      { operation: DOCTOR_OPERATIONS.protectedApply },
+    ),
+    entry(
+      'semantic_index',
+      'unknown',
+      'unknown',
+      'the semantic index did not report a mount state, so its freshness is unknown',
+      ['semantic-index:mount-probe:absent'],
+      { operation: DOCTOR_OPERATIONS.codeIndexRemount },
+    ),
+    entry(
+      'storage_runtime',
+      'denied',
+      'unknown',
+      'this identity is not permitted to read the storage runtime health surface',
+      ['storage-runtime:authority:denied'],
+    ),
+    entry(
+      'language_server',
+      'absent',
+      'unknown',
+      'no language server evidence source is present in this scope',
+      ['language-server:probe:absent'],
+    ),
+    entry(
+      'observability',
+      'unsupported',
+      'unknown',
+      'the observability envelope source is not wired for this dashboard scope',
+      ['observability:envelope:unwired'],
+    ),
+    entry(
+      'advisory',
+      'healthy_complete_coverage',
+      'complete',
+      'every advisory source was consulted and none reported a finding',
+      ['advisory:feedback-finding:none', 'advisory:policy:none'],
+    ),
+  ];
+
+  // Two families answered nothing. These render as coverage-gap chips above the
+  // cards, which is the report saying which sources it never reached — a report
+  // that dropped them would read as a clean bill of health for all seven.
+  const consulted = ['advisory', 'configuration', 'storage_runtime', 'storage', 'semantic_index'];
   const payload = {
     family_filter: null,
-    entries: [],
-    report_coverage: null,
-    remediations: [],
+    entries,
+    report_coverage: {
+      completeness: 'partial',
+      statement: {
+        completeness: 'partial',
+        statement: 'five of seven finding families were consulted for this report',
+      },
+      families: DOCTOR_FAMILIES.map((family) => ({
+        family,
+        consultation: consulted.includes(family)
+          ? { status: 'consulted' }
+          : {
+              status: 'unavailable',
+              reason: family === 'language_server' ? 'absent' : 'unwired',
+            },
+      })),
+    },
+    remediations: [
+      {
+        operation: DOCTOR_OPERATIONS.retentionCollect,
+        surface: 'storage_runtime',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'collect retention-eligible rows or reclaim an over-budget store',
+        target: { owner_operation: 'storage_retention_collect' },
+      },
+      {
+        operation: DOCTOR_OPERATIONS.branchGc,
+        surface: 'storage_runtime',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'remove branch-scoped databases whose git refs are gone',
+        target: { owner_operation: 'storage_branch_gc' },
+      },
+      {
+        operation: DOCTOR_OPERATIONS.protectedApply,
+        surface: 'configuration_control_plane',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'apply desired configuration to reconcile effective drift',
+        // `for_operation` returns None here: the owning surface supplies the
+        // key, value and base revision. The card says so instead of offering a
+        // button that could not be dispatched.
+        target: null,
+      },
+      {
+        operation: DOCTOR_OPERATIONS.codeIndexRemount,
+        surface: 'semantic_index_runtime',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'remount or rebuild a code/semantic index that is unmounted or stale',
+        target: { owner_operation: 'code_index_remount' },
+      },
+    ],
     known_families: [...DOCTOR_FAMILIES],
-    note: 'no admitted Doctor report source is available for this dashboard scope',
+    note: 'five of seven finding families were consulted; two reported no evidence source',
   };
-  return envelope(payload, 'unsupported', [
+  // `partial`, because two families were never reached. The owner authorizes a
+  // dry run and an apply on the three dispatchable operations; the protected
+  // configuration apply is authorized too, and is simply not dispatchable from
+  // here.
+  return envelope(payload, 'partial', [
     { kind: 'refresh', operation: 'use-case.dashboard.doctor.findings.refresh' },
+    ...Object.values(DOCTOR_OPERATIONS).flatMap((operation) => [
+      { kind: 'request_dry_run', operation },
+      { kind: 'request_apply', operation },
+    ]),
   ]);
 }
 

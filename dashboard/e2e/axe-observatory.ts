@@ -14,6 +14,7 @@
  * complete read that is separately redacted, and a read model carrying no
  * measurements at all.
  */
+import { DoctorEvidenceStateSchema } from '../src/contracts/wire.ts';
 import {
   expectAbsent,
   expectContains,
@@ -58,7 +59,145 @@ function withoutValue(metric: Record<string, unknown>, reason: string): Record<s
   };
 }
 
+/** Every `DoctorEvidenceStateV1`, from the contract rather than a copy of it —
+ * the fixture carries one finding per state, so this is also the count of
+ * evidence badges the scan must find, and a ninth state added in Rust has to
+ * make that requirement fail rather than go unscanned. */
+const DOCTOR_EVIDENCE_STATES = DoctorEvidenceStateSchema.options.map((option) => option.value);
+
+/**
+ * The WCAG contrast of each evidence badge's label against the background it
+ * actually renders on, measured in the browser.
+ *
+ * Walks up for the first non-transparent background rather than assuming the
+ * badge paints its own, and composites any alpha over it — a label on a
+ * translucent chip is read against what shows through, not against the chip's
+ * declared colour.
+ */
+const BADGE_CONTRAST_PROBE = `(() => {
+  // Resolve through a canvas rather than by parsing the string. The theme is
+  // authored in \`oklch()\` and Chromium serializes those computed values in
+  // their own colour space, so a naive "grab the first three numbers" parse
+  // reads L, C and H as if they were 8-bit RGB — which scored every badge at
+  // 1.39:1 regardless of state while axe's own rule reported no violation.
+  // The 2d context converts any CSS colour to sRGB bytes for us.
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const parse = (value) => {
+    if (value === '' || value === 'none') return null;
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.fillStyle = '#000000';
+    ctx.fillStyle = value;
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.fillRect(0, 0, 1, 1);
+    const d = ctx.getImageData(0, 0, 1, 1).data;
+    return [d[0], d[1], d[2], d[3] / 255];
+  };
+  const channel = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
+  const lum = ([r, g, b]) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+  const over = (fg, bg) => fg.slice(0, 3).map((c, i) => c * fg[3] + bg[i] * (1 - fg[3]));
+  const backdrop = (el) => {
+    for (let node = el; node; node = node.parentElement) {
+      const c = parse(getComputedStyle(node).backgroundColor);
+      if (c && c[3] > 0) return c[3] === 1 ? c.slice(0, 3) : over(c, backdrop(node.parentElement));
+    }
+    return [255, 255, 255];
+  };
+  return Array.from(document.querySelectorAll('[data-evidence-state]')).map((badge) => {
+    const label = Array.from(badge.querySelectorAll('span')).find(
+      (s) => s.querySelector('span') === null && (s.textContent ?? '').trim() !== '',
+    ) ?? badge;
+    const style = getComputedStyle(label);
+    const bg = backdrop(label);
+    const fgRaw = parse(style.color) ?? [0, 0, 0, 1];
+    const fg = fgRaw[3] === 1 ? fgRaw.slice(0, 3) : over(fgRaw, bg);
+    const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a);
+    return {
+      state: badge.getAttribute('data-evidence-state') ?? '',
+      text: (label.textContent ?? '').trim(),
+      fontPx: Number.parseFloat(style.fontSize),
+      ratio: Number((((hi + 0.05) / (lo + 0.05))).toFixed(2)),
+    };
+  });
+})()`;
+
+interface BadgeContrast {
+  state: string;
+  text: string;
+  fontPx: number;
+  ratio: number;
+}
+
 export const OBSERVATORY_SCENARIOS: readonly Scenario[] = [
+  {
+    id: 'observatory-doctor-findings',
+    route: '/observatory',
+    proves:
+      'a populated Doctor report is actually scanned, and every evidence badge label clears WCAG AA against the surface it renders on',
+    // No override: this is the shipped fixture. That is the point of the
+    // scenario. `/api/doctor/findings` used to serve an empty envelope with a
+    // comment saying a populated one could not pass the gate, because the badge
+    // painted its label in an indicator hue that misses AA. The gate stayed
+    // green by never rendering the defect. Serving the real report here means a
+    // regression to that state fails on the assertion below rather than
+    // quietly shrinking what the scan covers.
+    overrides: {},
+    // Light and dark at every matrix viewport, plus contrast-more and
+    // forced-colors in both themes. `color-contrast` runs in all of them except
+    // forced colors, where the OS palette replaces every declared colour and
+    // `FORCED_COLORS_PROBE` measures instead.
+    matrix: true,
+    assert: async (page) => {
+      const badges = (await page.evaluate(BADGE_CONTRAST_PROBE)) as BadgeContrast[];
+      const found = badges.map((badge) => badge.state).sort();
+      const expected = [...DOCTOR_EVIDENCE_STATES].sort();
+      if (JSON.stringify(found) !== JSON.stringify(expected)) {
+        throw new Error(
+          `FALSIFIED: the Doctor report must put one badge on screen per evidence state, or the scan is measuring an emptier page than it appears to. expected ${JSON.stringify(expected)}, found ${JSON.stringify(found)}`,
+        );
+      }
+      // Recorded before it is judged, so a failing run reports the whole set of
+      // measurements rather than only the ones that tripped the threshold.
+      console.log(
+        `[axe] doctor evidence badge contrast @ light/1440x900: ${badges
+          .map((badge) => `${badge.state} ${badge.ratio}:1 at ${badge.fontPx}px`)
+          .join(', ')}`,
+      );
+      // 4.5:1 is the threshold that applies: the label renders at 11px, well
+      // under the 18.66px-bold / 24px that would qualify it as large text. The
+      // check reads the font size back rather than trusting that.
+      const failures = badges.filter((badge) => {
+        const large = badge.fontPx >= 24;
+        return badge.ratio < (large ? 3 : 4.5);
+      });
+      if (failures.length > 0) {
+        throw new Error(
+          `FALSIFIED: evidence badge labels below WCAG AA: ${failures
+            .map((f) => `${f.state} "${f.text}" ${f.ratio}:1 at ${f.fontPx}px`)
+            .join(', ')}`,
+        );
+      }
+      // A ratio is only meaningful if there is text to read. A badge that lost
+      // its label would carry its state in colour alone and still score well.
+      const wordless = badges.filter((badge) => badge.text === '');
+      if (wordless.length > 0) {
+        throw new Error(
+          `FALSIFIED: these badges carry no text, so their state is colour-only: ${wordless
+            .map((badge) => badge.state)
+            .join(', ')}`,
+        );
+      }
+      // The report says which families it never reached. A populated report
+      // that dropped them would read as a clean bill of health for all seven.
+      await expectVisibleText(
+        page,
+        'five of seven finding families were consulted',
+        "the report's own coverage statement",
+      );
+    },
+  },
   {
     id: 'observatory-canonical',
     route: '/observatory',

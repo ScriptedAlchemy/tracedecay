@@ -2,10 +2,15 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { DoctorEvidenceStateSchema } from '../../contracts/generated.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
 import { saveActiveDoctorOperation } from './doctorModel.ts';
 
 const operation = 'use-case.application.configuration.pin-authority';
+
+/** Every `DoctorEvidenceStateV1`, so the badge check covers the whole taxonomy
+ * rather than the states one fixture happens to carry. */
+const EVIDENCE_STATES = DoctorEvidenceStateSchema.options.map((option) => option.value);
 
 describe('DoctorInspector', () => {
   beforeEach(() => {
@@ -50,6 +55,77 @@ describe('DoctorInspector', () => {
     ).toBeTruthy();
     expect(screen.getAllByText('Unsupported').length).toBeGreaterThan(0);
     expect(screen.queryByText(/zero findings/i)).toBeNull();
+  });
+
+  /**
+   * The evidence badge follows the `StateChip` rule: the state hue rides the
+   * lamp and the glyph, and the label text stays on an AA-contrast token.
+   *
+   * This is structural rather than a numeric contrast check because jsdom
+   * computes no colours — but it fails on exactly the markup that produced the
+   * violation. The badge used to put `evidence.tokenClass` on the span carrying
+   * its own label, and colour inherits, so a hue anywhere from the label up to
+   * the badge root is the defect. Measured on `--surface-2` at the 11px the
+   * label renders at, five of these tokens miss WCAG AA 4.5:1 — light:
+   * partial 3.88, stale 4.06, ready 4.21; dark: error 4.41, unknown 4.44 — so
+   * every state is checked rather than a sample.
+   */
+  it('keeps every evidence badge label off the state hue, and puts the hue on the lamp and icon', async () => {
+    const response = findingsEnvelope();
+    const template = response.payload.entries[0]!;
+    response.payload.entries = EVIDENCE_STATES.map((state) => ({
+      ...template,
+      finding: {
+        ...template.finding,
+        state,
+        // Only a healthy finding may claim complete coverage of a healthy
+        // result, so the rest are downgraded to keep the entry wire-legal.
+        coverage: {
+          completeness: state === 'healthy_complete_coverage' ? 'complete' : 'partial',
+          statement: `${state} evidence statement`,
+        },
+      },
+    }));
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(response)));
+
+    renderDoctor();
+    await screen.findByLabelText('Doctor diagnosis');
+    const badges = await waitFor(() => {
+      const found = document.querySelectorAll('[data-evidence-state]');
+      expect(found).toHaveLength(EVIDENCE_STATES.length);
+      return [...found];
+    });
+
+    for (const badge of badges) {
+      const state = badge.getAttribute('data-evidence-state');
+      // The innermost element carrying the label text — or the badge itself
+      // when the label is a bare child of it, which is how the defective
+      // version rendered and is exactly the case that must reach the
+      // inherited-hue assertion below rather than stopping short of it.
+      const label =
+        [...badge.querySelectorAll('span')].find(
+          (span) => span.querySelector('span') === null && (span.textContent ?? '').trim() !== '',
+        ) ?? badge;
+
+      // Colour inherits, so the hue must be absent from the label and from
+      // every element between it and the badge root.
+      for (let node: Element | null = label; node !== null; node = node.parentElement) {
+        expect(
+          [...node.classList].filter((name) => name.startsWith('text-state-')),
+          `the ${state} badge label inherits a state hue from ${node.className}`,
+        ).toEqual([]);
+        if (node === badge) break;
+      }
+      expect([...label.classList]).toContain('text-text-secondary');
+
+      // The hue is not lost: it is on the decorative lamp and glyph, both of
+      // which are hidden from assistive technology because the label carries
+      // the meaning.
+      const lamp = badge.querySelector('[aria-hidden][class*="bg-state-"]');
+      expect(lamp, `the ${state} badge lost its lamp`).toBeTruthy();
+      const icon = badge.querySelector('svg[aria-hidden][class*="text-state-"]');
+      expect(icon, `the ${state} badge lost its state glyph`).toBeTruthy();
+    }
   });
 
   it('renders per-family denied and unknown coverage instead of hiding it in aggregate state', async () => {
