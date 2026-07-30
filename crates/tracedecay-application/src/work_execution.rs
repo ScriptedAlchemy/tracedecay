@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAttemptProgressV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
@@ -7,6 +9,84 @@ use tracedecay_domain::{
     WorkCancellationStateV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1, WorkProviderRouteV1,
     WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1,
 };
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptAcquireLeaseRequestV1 {
+    pub snapshot: WorkProjectionSnapshotV1,
+    pub identity: WorkAttemptIdentityV1,
+    pub projection_binding: WorkAttemptProjectionBindingV1,
+    pub lease: WorkLeaseFenceV1,
+    pub requested_route: WorkProviderRouteV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptRenewLeaseRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub expected: WorkLeaseFenceV1,
+    pub replacement: WorkLeaseFenceV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptStartRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub recovery: WorkRecoveryStateV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptPublishProgressRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub progress: WorkAttemptProgressV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptPublishArtifactRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub artifact: WorkArtifactRefV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptCancelRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub request: WorkCancellationRequestV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptRecoverRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub reason: WorkRestartReasonV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptTerminalizeRequestV1 {
+    pub identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub terminal: WorkTerminalEvidenceV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptResponseV1 {
+    pub attempt: WorkAttemptV1,
+}
+
+impl From<WorkAttemptV1> for WorkAttemptResponseV1 {
+    fn from(attempt: WorkAttemptV1) -> Self {
+        Self { attempt }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkExecutionPersistenceError {
