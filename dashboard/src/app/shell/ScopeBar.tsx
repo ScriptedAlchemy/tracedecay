@@ -1,26 +1,45 @@
+import { useEffect } from 'react';
 import { Command, Moon, Sun, X } from 'lucide-react';
-import { z } from 'zod';
+import { ProjectsPayloadSchema, type ProjectsPayload } from '../../contracts/wire.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import type { LegacyResult } from '../../data/query/legacy.ts';
 import { cn } from '../../ui/cn';
-import { useScope } from '../../data/scope/store.ts';
+import { useScope, type ActiveProjectReading } from '../../data/scope/store.ts';
 
-const ScopeProjectsSchema = z
-  .object({
-    status: z.string(),
-    projects: z
-      .array(
-        z
-          .object({
-            project_id: z.string(),
-            label: z.string(),
-          })
-          .passthrough(),
-      )
-      .optional(),
-  })
-  .passthrough();
-type ScopeProjects = z.infer<typeof ScopeProjectsSchema>;
+/**
+ * What the registry establishes about which project is active.
+ *
+ * `/api/projects` is the only authority for this, and `active_project_id` is
+ * the field that carries it — which is why the hand-written schema this file
+ * used to hold had to go: it modelled `projects` and nothing else, so the one
+ * fact the scope needs was not even in the parse.
+ *
+ * Only a `status: "ok"` body is a measurement. A registry that answered with
+ * any other status, or did not answer, establishes nothing — and returning
+ * `measured` for it would resolve every selected project to "not active",
+ * disabling writes that would in fact have been accepted.
+ */
+function activeProjectReading(
+  result: LegacyResult<ProjectsPayload> | undefined,
+): ActiveProjectReading {
+  if (!result) return { state: 'unknown' };
+  switch (result.outcome) {
+    case 'ok':
+      return result.data.status === 'ok'
+        ? { state: 'measured', activeProjectId: result.data.active_project_id }
+        : { state: 'unknown' };
+    case 'offline':
+    case 'unauthorized':
+    case 'denied':
+    case 'error':
+    case 'unsupported_schema':
+      return { state: 'unknown' };
+    default: {
+      const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
+}
 
 function toggleTheme() {
   const root = document.documentElement;
@@ -36,9 +55,20 @@ function toggleTheme() {
 export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
   const scope = useScope((s) => s.scope);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
-  const registry = useLegacy(['shell', 'project-registry'], '/api/projects', ScopeProjectsSchema, {
+  const resolveActivation = useScope((s) => s.resolveActivation);
+  const registry = useLegacy(['shell', 'project-registry'], '/api/projects', ProjectsPayloadSchema, {
     enabled: scope.kind === 'project',
   });
+
+  // The one place a selected project's activation is reconciled. Every entry
+  // into a project scope — deep link, command palette, this bar — arrives
+  // `unresolved`, and this read is what moves it off that. Controls consult
+  // `scopeWritable`, so until this lands they report writability as unknown
+  // rather than offering a write the gateway would refuse.
+  useEffect(() => {
+    resolveActivation(activeProjectReading(registry.data));
+  }, [registry.data, resolveActivation]);
+
   const projectLabel =
     scope.kind === 'project' ? resolvedProjectLabel(scope.projectId, registry.data) : undefined;
   return (
@@ -105,14 +135,14 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
 
 function resolvedProjectLabel(
   projectId: string,
-  result: LegacyResult<ScopeProjects> | undefined,
+  result: LegacyResult<ProjectsPayload> | undefined,
 ): string {
   if (!result) return 'resolving';
   switch (result.outcome) {
     case 'ok': {
       if (result.data.status !== 'ok') return `registry unavailable · ${projectId}`;
       return (
-        result.data.projects?.find((project) => project.project_id === projectId)?.label ??
+        (result.data.projects ?? []).find((project) => project.project_id === projectId)?.label ??
         `unknown project · ${projectId}`
       );
     }

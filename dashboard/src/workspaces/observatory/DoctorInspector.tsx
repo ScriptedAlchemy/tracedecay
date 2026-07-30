@@ -22,8 +22,10 @@ import {
   type DoctorEvidenceState,
   type DoctorFindingsPayload,
   type DoctorOwningSurface,
+  type DoctorRemediationApplyRequest,
   type DoctorRemediationOperation,
   type DoctorRemediationPayload,
+  type DoctorRemediationPreviewRequest,
   type DoctorRemediationTarget,
   type DoctorReportEntry,
   type DoctorReportCoverage,
@@ -39,9 +41,11 @@ import {
   fetchDoctorFindings,
   fetchDoctorRemediationStatus,
   previewDoctorRemediation,
+  type DoctorWriteResult,
 } from '../../data/query/doctor.ts';
 import { mintBrowserIdempotencyKey } from '../../data/identity.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { scopeWritable, useScope, type ScopeWritability } from '../../data/scope/store.ts';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn.ts';
@@ -78,9 +82,17 @@ const NO_REMEDIATION_ACTIONS: RemediationActionAvailability = {
  * renders server-supplied findings/actions only; it owns no diagnosis or repair. */
 export function DoctorInspector() {
   const queryClient = useQueryClient();
+  // The panel reads the scope the rest of the workspace reads, and the rail's
+  // health dot reads the same one — so the diagnosis on screen belongs to the
+  // project named in the scope bar rather than to whichever project the daemon
+  // happens to have active.
+  const scope = useScope((s) => s.scope);
+  const writability = scopeWritable(scope);
+  // Stable per scope: it is an effect dependency and the invalidation target.
+  const findingsKey = useMemo(() => doctorFindingsQueryKey(scope), [scope]);
   const findings = useQuery({
-    queryKey: doctorFindingsQueryKey,
-    queryFn: () => fetchDoctorFindings(),
+    queryKey: findingsKey,
+    queryFn: () => fetchDoctorFindings(scope),
     refetchInterval: 30_000,
   });
   const [selected, setSelected] = useState<SelectedRemediation | null>(null);
@@ -94,7 +106,7 @@ export function DoctorInspector() {
       ? sameDoctorScope(activeOperation.transport_scope, currentScope)
       : false;
 
-  const rememberOperation = (result: EnvelopeResult<DoctorRemediationPayload>) => {
+  const rememberOperation = (result: DoctorWriteResult) => {
     const operation = operationFromResult(result);
     if (!operation || result.outcome !== 'envelope') return;
     const active = {
@@ -107,19 +119,20 @@ export function DoctorInspector() {
   };
 
   const preview = useMutation({
-    mutationFn: previewDoctorRemediation,
+    mutationFn: (request: DoctorRemediationPreviewRequest) =>
+      previewDoctorRemediation(scope, request),
     onSuccess: rememberOperation,
   });
   const apply = useMutation({
-    mutationFn: applyDoctorRemediation,
+    mutationFn: (request: DoctorRemediationApplyRequest) => applyDoctorRemediation(scope, request),
     onSuccess: (result) => {
       rememberOperation(result);
       setConfirmed(false);
     },
   });
   const status = useQuery({
-    queryKey: doctorOperationQueryKey(activeOperation?.operation_id ?? 'inactive'),
-    queryFn: () => fetchDoctorRemediationStatus(activeOperation!.operation_id),
+    queryKey: doctorOperationQueryKey(scope, activeOperation?.operation_id ?? 'inactive'),
+    queryFn: () => fetchDoctorRemediationStatus(scope, activeOperation!.operation_id),
     enabled: activeOperation != null && activeTransportScopeMatches,
     refetchInterval: (query) => {
       const operation = operationFromResult(query.state.data);
@@ -139,9 +152,9 @@ export function DoctorInspector() {
       reobservedOperation.current !== observedOperation.operation_id
     ) {
       reobservedOperation.current = observedOperation.operation_id;
-      void queryClient.invalidateQueries({ queryKey: doctorFindingsQueryKey });
+      void queryClient.invalidateQueries({ queryKey: findingsKey });
     }
-  }, [observedOperation, queryClient]);
+  }, [observedOperation, queryClient, findingsKey]);
 
   const selectedPreviewId = useMemo(() => {
     if (!selected) return null;
@@ -209,6 +222,7 @@ export function DoctorInspector() {
         }}
         onPreview={(operation) => preview.mutate(operation)}
         previewing={preview.isPending}
+        writability={writability}
       />
 
       <OperationStatus
@@ -227,6 +241,7 @@ export function DoctorInspector() {
         authorityScope={selectedAuthorityScope}
         applying={apply.isPending}
         result={apply.data}
+        writability={writability}
         onConfirmedChange={setConfirmed}
         onOpenChange={(open) => {
           if (!open) {
@@ -246,6 +261,7 @@ function DoctorFindings({
   pending,
   refreshing,
   previewing,
+  writability,
   onRefresh,
   onInspect,
   onPreview,
@@ -254,6 +270,7 @@ function DoctorFindings({
   pending: boolean;
   refreshing: boolean;
   previewing: boolean;
+  writability: ScopeWritability;
   onRefresh: () => void;
   onInspect: (
     entry: DoctorReportEntry,
@@ -315,6 +332,7 @@ function DoctorFindings({
               target={target}
               actions={actions}
               previewing={previewing}
+              writability={writability}
               onPreview={onPreview}
               onInspect={() => {
                 if (descriptor) onInspect(entry, descriptor, envelope.legal_actions);
@@ -376,12 +394,44 @@ function consultationState(
   }
 }
 
+/**
+ * What the current scope means for the controls beside it.
+ *
+ * Rendered in every state including `writable`, because the aggregate scope is
+ * writable and a remediation issued under it lands on one project — the reader
+ * is told which rather than being left to assume it applies across the
+ * registry. Exhaustive, so a new writability state has to choose its wording
+ * here instead of silently rendering an unexplained disabled control.
+ */
+function ScopeWriteNote({ writability }: { writability: ScopeWritability }) {
+  const sentence = ((): string => {
+    switch (writability.state) {
+      case 'writable':
+        return `Remediations apply to ${writability.target}.`;
+      case 'read_only':
+      case 'unknown':
+        return writability.reason;
+      default:
+        return assertNever(writability);
+    }
+  })();
+  return (
+    <p
+      data-scope-writability={writability.state}
+      className="mt-2 text-2xs text-text-secondary"
+    >
+      {sentence}
+    </p>
+  );
+}
+
 function FindingCard({
   entry,
   descriptor,
   target,
   actions,
   previewing,
+  writability,
   onPreview,
   onInspect,
 }: {
@@ -390,11 +440,13 @@ function FindingCard({
   target: DoctorRemediationTarget | null;
   actions: RemediationActionAvailability;
   previewing: boolean;
+  writability: ScopeWritability;
   onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
   onInspect: () => void;
 }) {
   const { finding } = entry;
   const authorized = actions.canPreview || actions.canApply;
+  const scopeBlocked = writability.state !== 'writable';
   return (
     <OverviewCard title={doctorFamilyLabel(finding.family)}>
       <div className="flex flex-col gap-2">
@@ -411,25 +463,37 @@ function FindingCard({
               {descriptor.operation}
             </p>
             {actions.dispatchable && target ? (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {actions.canPreview ? (
-                  <button
-                    type="button"
-                    className={secondaryButtonClass}
-                    onClick={() => onPreview({ operation: descriptor.operation, target })}
-                    disabled={previewing}
-                  >
-                    <span className={secondaryBezelClass}>
-                      {previewing ? 'Previewing' : 'Preview'}
-                    </span>
-                  </button>
-                ) : null}
-                {actions.canApply ? (
-                  <button type="button" className={primaryButtonClass} onClick={onInspect}>
-                    <span className={primaryBezelClass}>Review remediation</span>
-                  </button>
-                ) : null}
-              </div>
+              <>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {actions.canPreview ? (
+                    <button
+                      type="button"
+                      className={secondaryButtonClass}
+                      onClick={() => onPreview({ operation: descriptor.operation, target })}
+                      disabled={previewing || scopeBlocked}
+                    >
+                      <span className={secondaryBezelClass}>
+                        {previewing ? 'Previewing' : 'Preview'}
+                      </span>
+                    </button>
+                  ) : null}
+                  {actions.canApply ? (
+                    <button
+                      type="button"
+                      className={primaryButtonClass}
+                      onClick={onInspect}
+                      disabled={scopeBlocked}
+                    >
+                      <span className={primaryBezelClass}>Review remediation</span>
+                    </button>
+                  ) : null}
+                </div>
+                {/* A preview is a POST, so the gateway treats it as a write and
+                  * so does this card: both controls are gated on one reading,
+                  * and the reading is stated rather than left to a greyed-out
+                  * button to imply. */}
+                <ScopeWriteNote writability={writability} />
+              </>
             ) : null}
             <RemediationAvailabilityNote
               authorized={authorized}
@@ -586,12 +650,18 @@ function OperationStatus({
   operationId,
   transportScopeMismatch,
 }: {
-  result: EnvelopeResult<DoctorRemediationPayload> | undefined;
+  result: DoctorWriteResult | undefined;
   pending: boolean;
   operationId: string | null;
   transportScopeMismatch: boolean;
 }) {
   if (!operationId && !result) return null;
+  // A control that declined to dispatch produced no operation, so this reports
+  // the absence of one rather than a phase. `locked` is the state for a surface
+  // that will not accept a change, and the reason is the scope authority's own.
+  if (result?.outcome === 'not_dispatched') {
+    return <DoctorState kind="locked" detail={result.writability.reason} />;
+  }
   if (transportScopeMismatch) {
     return (
       <DoctorState
@@ -644,6 +714,7 @@ function RemediationDialog({
   authorityScope,
   applying,
   result,
+  writability,
   onConfirmedChange,
   onOpenChange,
   onApply,
@@ -653,7 +724,8 @@ function RemediationDialog({
   previewId: string | null;
   authorityScope: ResolvedScope | null;
   applying: boolean;
-  result: EnvelopeResult<DoctorRemediationPayload> | undefined;
+  result: DoctorWriteResult | undefined;
+  writability: ScopeWritability;
   onConfirmedChange: (confirmed: boolean) => void;
   onOpenChange: (open: boolean) => void;
   onApply: () => void;
@@ -731,6 +803,9 @@ function RemediationDialog({
               ) : null}
 
               <RemediationResult result={result} />
+              {/* The scope reads the same here as on the card this dialog was
+                * opened from, and it gates the apply for the same reason. */}
+              <ScopeWriteNote writability={writability} />
 
               <div className="flex justify-end gap-2">
                 <Dialog.Close className={secondaryButtonClass}>
@@ -743,6 +818,7 @@ function RemediationDialog({
                   disabled={
                     applying ||
                     !selection.actions.canApply ||
+                    writability.state !== 'writable' ||
                     (confirmationRequired && !confirmed)
                   }
                 >
@@ -826,12 +902,12 @@ function FindingEvidence({ entry }: { entry: DoctorReportEntry }) {
   );
 }
 
-function RemediationResult({
-  result,
-}: {
-  result: EnvelopeResult<DoctorRemediationPayload> | undefined;
-}) {
+function RemediationResult({ result }: { result: DoctorWriteResult | undefined }) {
   if (!result) return null;
+  // Nothing was sent, so there is no owner result to report. The adjacent
+  // `ScopeWriteNote` already carries the reason, so this stays silent rather
+  // than printing it twice.
+  if (result.outcome === 'not_dispatched') return null;
   if (result.outcome === 'transport') {
     return <StateChip kind={result.state} detail={result.detail ?? 'owner unreachable'} />;
   }
@@ -857,8 +933,10 @@ function DoctorState({ kind, detail }: { kind: DomainStateKind; detail: string }
   );
 }
 
+/** Accepts a write result too, so a control that declined to dispatch reports
+ * no operation rather than needing a separate path to say the same thing. */
 function operationFromResult(
-  result: EnvelopeResult<DoctorRemediationPayload> | undefined,
+  result: DoctorWriteResult | undefined,
 ): DoctorRemediationOperation | null {
   if (result?.outcome !== 'envelope') return null;
   const { payload } = result.envelope;
