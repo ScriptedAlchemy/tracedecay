@@ -1,19 +1,21 @@
 //! Conformance contract for every `RouteExposureV1::Public` executable binding.
 //!
 //! Each available executable binding advertises a public route path to clients.
-//! This suite proves those paths are actually served by the merged production
-//! HTTP application router — the router returned by
-//! [`tracedecay::application_surface::http_application_router`], which is the
-//! same constructor the daemon's `build_http_application_router` calls to mount
-//! a project, and which the daemon serves without a path prefix. Nothing here
-//! builds a substitute router, reads Rust source text, or accepts a descriptor,
-//! a mount flag, or a caller boolean as evidence.
+//! Reachability is graded at the surface a client actually calls: the live
+//! daemon's published HTTP application endpoint, authenticated with the token
+//! and origin from its own authority record. The daemon exposes one outer route,
+//! `/projects/{project_id}/application/{*tail}`, and
+//! `dispatch_project_application` rewrites the inner router URI to `/{tail}`
+//! (`src/daemon/http_application.rs`). A canonical `route_path` already starts
+//! with `/application`, so the external URL is `/projects/{project_id}` followed
+//! by the canonical path, and the inner router must therefore register that path
+//! *relative* to the stripped prefix.
 //!
-//! The registry is composed with every route family declared. Production passes
-//! `false` for the application-route family today, which turns those bindings
-//! into `Unavailable` records — a truthful catalog, but a caller boolean cannot
-//! settle whether a handler exists. Enumerating the fully declared set is what
-//! makes the missing handlers visible instead of merely undeclared.
+//! Probing the inner router directly would bypass that rewrite and score a
+//! double-prefixed route as mounted, so the in-process router is kept only as
+//! secondary diagnostics, and any disagreement between inner and outer
+//! reachability fails this gate. That is what stops a prefix regression from
+//! hiding behind inner-router evidence.
 //!
 //! Mounting is decided at axum's routing table, not by handler behavior. A
 //! canonical binding is served as `POST`, so a `GET` to the same path can only
@@ -23,12 +25,16 @@
 //! itself answer `404` for `NotFoundOrNotAuthorized` concealment. Every route is
 //! probed both ways and the two signals must agree.
 //!
+//! The registry has no caller-supplied mount flags. Every public binding must be
+//! reachable on the production endpoint or this test fails.
+//!
 //! Request bodies are derived from the request schema each binding publishes
 //! (`ExecutableBindingV1::request_schema`), so no handwritten payload mirror can
 //! drift from the wire contract.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -53,16 +59,20 @@ use tracedecay_tool_catalog::RouteExposureV1;
 /// the shared test harness repeats it.
 const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
-/// A path that no canonical binding declares, used to prove the router really
-/// answers `404` for unmounted paths instead of swallowing everything.
-const ABSENT_PROBE_PATH: &str = "/application/work/route-exposure-conformance-absent";
+/// Tail that no canonical binding declares, used to prove the routers really
+/// answer `404` for an unmounted path instead of swallowing everything.
+const ABSENT_TAIL: &str = "/application/route-exposure-conformance-absent";
 
-/// Route owned by `tracedecay_api::application_router`, the first of the three
-/// routers merged into the production HTTP application router.
-const API_ROUTER_WITNESS_PATH: &str = "/primitives/storage_status";
+/// Canonical path owned by `tracedecay_api::application_router`, which registers
+/// its routes relative to the outer prefix. Reaching it proves the outer
+/// dispatch resolved the project, applied the URI rewrite, and handed off to the
+/// inner routing table.
+const RELATIVE_WITNESS_TAIL: &str = "/application/primitives/storage_status";
 
-/// Route owned by the operation-event router, the third merged router.
-const OPERATION_EVENT_WITNESS_PATH: &str = "/operations/operation.conformance/cancel";
+/// A project id the registry cannot resolve, used to show that an unresolved
+/// project also answers `404` — which is why the witness probe above has to pass
+/// before any per-route verdict is trusted.
+const UNKNOWN_PROJECT_ID: &str = "project.route-exposure-conformance-unknown";
 
 /// Guards against a malformed schema cycle producing an unbounded instance.
 const MAX_SCHEMA_DEPTH: usize = 32;
@@ -94,24 +104,37 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// A live daemon under a throwaway profile, so the production invocation client
-/// this router requires can be constructed without touching the operator's
-/// TraceDecay data.
-struct IsolatedDaemon {
+/// A live daemon over a registered project under a throwaway profile, plus the
+/// credentials it published for its own HTTP application endpoint.
+struct ProductionDaemon {
     daemon: Child,
     project: PathBuf,
+    project_id: String,
+    base_url: String,
+    origin: String,
+    authorization: String,
     _home: TempDir,
     _guards: Vec<EnvVarGuard>,
 }
 
-impl IsolatedDaemon {
+impl ProductionDaemon {
     fn start() -> Self {
         let home = tempfile::tempdir().expect("isolated home");
         let root = home.path().to_path_buf();
         let profile = root.join(".tracedecay");
         let project = root.join("project");
-        std::fs::create_dir_all(&profile).expect("isolated profile root");
-        std::fs::create_dir_all(&project).expect("isolated project root");
+        fs::create_dir_all(&profile).expect("isolated profile root");
+        fs::create_dir_all(project.join("src")).expect("isolated project root");
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname=\"route-exposure-fixture\"\nversion=\"0.0.0\"\nedition=\"2024\"\n",
+        )
+        .expect("fixture manifest");
+        fs::write(
+            project.join("src/lib.rs"),
+            "pub const ROUTE_EXPOSURE_FIXTURE: bool = true;\n",
+        )
+        .expect("fixture source");
 
         let guards = vec![
             EnvVarGuard::set("HOME", &root),
@@ -122,126 +145,198 @@ impl IsolatedDaemon {
             EnvVarGuard::set("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1"),
         ];
 
-        let mut daemon = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        run_ok(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&project),
+            "git init",
+        );
+        run_ok(
+            isolated(&root, &profile).arg("init").current_dir(&project),
+            "tracedecay init",
+        );
+
+        let mut daemon = isolated(&root, &profile)
             .args(["daemon", "run"])
-            .env("HOME", &root)
-            .env("USERPROFILE", &root)
-            .env("XDG_CONFIG_HOME", root.join(".config"))
-            .env(USER_DATA_DIR_ENV, &profile)
-            .env(GLOBAL_DB_ENV, profile.join("global.db"))
-            .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
-            .current_dir(&root)
+            .current_dir(&project)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .expect("daemon should start");
+        let authority = wait_for_authority(&mut daemon, &profile.join("daemon-authority.json"));
+
+        let context = run_ok(
+            isolated(&root, &profile)
+                .args(["projects", "context"])
+                .arg(&project)
+                .arg("--json")
+                .current_dir(&project),
+            "tracedecay projects context",
+        );
+        let context: Value = serde_json::from_slice(&context).expect("project context JSON");
+        let project_id = context["project"]["project_id"]
+            .as_str()
+            .expect("registered project id")
+            .to_owned();
+
+        let endpoint = authority["http_application_endpoint"]
+            .as_str()
+            .expect("published HTTP application endpoint")
+            .to_owned();
+        let token = authority["auth_token"]
+            .as_str()
+            .expect("published auth token")
+            .to_owned();
 
         Self {
             daemon,
             project,
+            project_id,
+            base_url: format!("http://{endpoint}"),
+            origin: format!("http://{endpoint}"),
+            authorization: format!("Bearer {token}"),
             _home: home,
             _guards: guards,
         }
     }
 
-    /// Waits until the daemon has published an authority record the production
-    /// client can resolve, then returns that client.
-    fn await_client(&mut self, project: &Path) -> DaemonInvocationClient {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut last = String::new();
-        while Instant::now() < deadline {
-            if let Some(status) = self.daemon.try_wait().expect("daemon status") {
-                let mut stderr = String::new();
-                if let Some(mut piped) = self.daemon.stderr.take() {
-                    let _ = piped.read_to_string(&mut stderr);
-                }
-                panic!("daemon exited before publishing authority: {status}; stderr: {stderr}");
-            }
-            let handshake = DaemonHandshake::for_current_client(
-                Some(project.to_path_buf()),
-                None,
-                false,
-                false,
-            )
-            .expect("production daemon handshake");
-            match DaemonInvocationClient::for_current(handshake) {
-                Ok(client) => return client,
-                Err(error) => last = error.to_string(),
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        panic!("daemon never published a resolvable authority record: {last}");
+    /// External URL for a canonical route path, which already starts with
+    /// `/application` and therefore composes directly onto the project prefix.
+    fn external_url(&self, route_path: &str) -> String {
+        format!(
+            "{}/projects/{}{}",
+            self.base_url, self.project_id, route_path
+        )
     }
 }
 
-impl Drop for IsolatedDaemon {
+impl Drop for ProductionDaemon {
     fn drop(&mut self) {
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
 }
 
-/// One canonical public binding and the two independent routing observations
-/// taken against the production router.
+fn isolated(home: &Path, profile: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    command
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env(USER_DATA_DIR_ENV, profile)
+        .env(GLOBAL_DB_ENV, profile.join("global.db"))
+        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
+    command
+}
+
+fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
+    assert!(
+        output.status.success(),
+        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn wait_for_authority(daemon: &mut Child, path: &Path) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        if let Some(status) = daemon.try_wait().expect("daemon status") {
+            let mut stderr = String::new();
+            if let Some(mut piped) = daemon.stderr.take() {
+                let _ = piped.read_to_string(&mut stderr);
+            }
+            panic!("daemon exited before publishing authority: {status}; stderr: {stderr}");
+        }
+        if let Ok(bytes) = fs::read(path)
+            && let Ok(record) = serde_json::from_slice::<Value>(&bytes)
+            && record["auth_token"]
+                .as_str()
+                .is_some_and(|token| token.len() == 64)
+            && record["http_application_endpoint"].as_str().is_some()
+        {
+            return record;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "timed out waiting for a published HTTP application endpoint at {}",
+        path.display()
+    );
+}
+
+/// Status and body length of one probe, the two facts every verdict rests on.
+#[derive(Clone, Copy, Debug)]
+struct ProbeResult {
+    status: u16,
+    body_len: usize,
+}
+
+impl ProbeResult {
+    /// Whether the routing table holds the path. Only a method-mismatch probe
+    /// may be judged this way.
+    fn path_is_registered(self) -> bool {
+        self.status == StatusCode::METHOD_NOT_ALLOWED.as_u16()
+    }
+
+    /// Whether a request reached a handler rather than a router fallback, which
+    /// always answers `404` with an empty body.
+    fn reached_a_handler(self) -> bool {
+        self.status != StatusCode::NOT_FOUND.as_u16() || self.body_len > 0
+    }
+}
+
+/// One canonical public binding graded at the external surface, with the
+/// in-process router recorded alongside as secondary evidence.
 #[derive(Debug)]
 struct RouteObservation {
     operation_id: String,
     route_path: String,
-    /// Status for a method the route does not serve. `405` proves the path is
-    /// in the routing table; `404` proves it is absent.
-    method_mismatch_status: StatusCode,
-    /// Status for the representative schema-derived `POST`.
-    request_status: StatusCode,
-    /// Body length of the representative `POST` response. The router's fallback
-    /// `404` is empty; a handler's `404` carries a problem envelope.
-    request_body_len: usize,
+    external_url: String,
+    outer_method_mismatch: ProbeResult,
+    outer_request: ProbeResult,
+    inner_method_mismatch: ProbeResult,
+    inner_request: ProbeResult,
 }
 
 impl RouteObservation {
-    /// Whether axum's routing table holds this path, judged only by the
-    /// method-mismatch probe.
-    fn path_is_registered(&self) -> bool {
-        self.method_mismatch_status == StatusCode::METHOD_NOT_ALLOWED
-    }
-
-    /// Whether the representative request reached a handler rather than the
-    /// router's empty fallback.
-    fn request_reached_a_handler(&self) -> bool {
-        self.request_status != StatusCode::NOT_FOUND || self.request_body_len > 0
-    }
-
     fn describe(&self) -> String {
         format!(
-            "{} -> {} (method-mismatch {}, representative POST {} with {} body bytes)",
+            "{} -> {}\n      external {}: GET {} / POST {} ({} body bytes)\n      inner    {}: GET {} / POST {} ({} body bytes)",
             self.operation_id,
             self.route_path,
-            self.method_mismatch_status.as_u16(),
-            self.request_status.as_u16(),
-            self.request_body_len
+            self.external_url,
+            self.outer_method_mismatch.status,
+            self.outer_request.status,
+            self.outer_request.body_len,
+            self.route_path,
+            self.inner_method_mismatch.status,
+            self.inner_request.status,
+            self.inner_request.body_len,
         )
     }
 }
 
-/// Every public route path the canonical executable catalog can advertise must
-/// be served by the merged production HTTP application router.
-#[tokio::test(flavor = "multi_thread")]
-async fn public_executable_routes_are_served_by_the_production_http_router() {
-    let mut fixture = IsolatedDaemon::start();
-    let project = fixture.project.clone();
-    let client = fixture.await_client(&project);
+/// Every public route path the canonical executable catalog advertises must be
+/// reachable on the live daemon's published HTTP application endpoint.
+#[test]
+fn public_executable_routes_are_served_by_the_production_daemon() {
+    let fixture = ProductionDaemon::start();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into();
 
-    let router = http_application_router(
-        client,
-        OperationEventAuthority::default(),
-        ProjectId::new("project.route-exposure-conformance").expect("conformance project identity"),
-    )
-    .expect("production merged HTTP application router");
+    assert_external_surface_is_authenticated_and_resolving(&agent, &fixture);
 
-    assert_router_is_the_merged_production_router(&router).await;
-
-    let registry =
-        work_executable_binding_registry(true, true).expect("canonical Work binding registry");
+    let registry = work_executable_binding_registry().expect("canonical Work binding registry");
     let mut declared_routes = BTreeMap::new();
     let mut withheld = Vec::new();
     for availability in registry.iter() {
@@ -263,13 +358,12 @@ async fn public_executable_routes_are_served_by_the_production_http_router() {
             binding.operation_id().as_str()
         );
     }
-    // Composed with every route family declared, so a withheld entry would
-    // shrink the set under test instead of being reported.
+    // A withheld entry carries no route path, so it would silently shrink the
+    // set under test rather than be reported as unreachable.
     assert!(
         withheld.is_empty(),
-        "the canonical registry withheld {} executable binding(s) even with \
-         every route family declared, so the route probes below would grade a \
-         silently truncated set: {}",
+        "the canonical registry withheld {} executable binding(s), so the route \
+         probes below would grade a silently truncated set: {}",
         withheld.len(),
         withheld.join(", ")
     );
@@ -279,125 +373,248 @@ async fn public_executable_routes_are_served_by_the_production_http_router() {
          contract would pass vacuously"
     );
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("probe runtime");
+    let inner = runtime.block_on(inner_router(&fixture.project));
+
     let mut observations = Vec::with_capacity(declared_routes.len());
     for (operation_id, (route_path, body)) in declared_routes {
-        let (method_mismatch_status, _) = probe(&router, "GET", &route_path, None).await;
-        let (request_status, request_body_len) =
-            probe(&router, "POST", &route_path, Some(body)).await;
+        let external_url = fixture.external_url(&route_path);
         observations.push(RouteObservation {
+            outer_method_mismatch: get_probe(&agent, &external_url, &fixture),
+            outer_request: post_probe(&agent, &external_url, &fixture, &body),
+            inner_method_mismatch: runtime.block_on(inner_probe(&inner, "GET", &route_path, None)),
+            inner_request: runtime.block_on(inner_probe(&inner, "POST", &route_path, Some(body))),
             operation_id,
             route_path,
-            method_mismatch_status,
-            request_status,
-            request_body_len,
+            external_url,
         });
     }
 
     for observation in &observations {
-        assert!(
-            matches!(
-                observation.method_mismatch_status,
-                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
-            ),
-            "the method-mismatch probe answered neither 404 nor 405, so it no \
-             longer discriminates a mounted path. A binding served on GET as \
-             well as POST would do this; give such a binding a probe method it \
-             does not serve instead of relaxing this check: {}",
+        for (surface, probe) in [
+            ("external", observation.outer_method_mismatch),
+            ("inner", observation.inner_method_mismatch),
+        ] {
+            assert!(
+                probe.status == StatusCode::NOT_FOUND.as_u16()
+                    || probe.status == StatusCode::METHOD_NOT_ALLOWED.as_u16(),
+                "the {surface} method-mismatch probe answered {} — neither 404 \
+                 nor 405 — so it no longer discriminates a mounted path. A \
+                 binding served on GET as well as POST would do this; give such \
+                 a binding a probe method it does not serve instead of relaxing \
+                 this check.\n  {}",
+                probe.status,
+                observation.describe()
+            );
+        }
+        assert_eq!(
+            observation.outer_method_mismatch.path_is_registered(),
+            observation.outer_request.reached_a_handler(),
+            "the external routing-table and representative-request signals \
+             disagree, so neither can be trusted:\n  {}",
             observation.describe()
         );
         assert_eq!(
-            observation.path_is_registered(),
-            observation.request_reached_a_handler(),
-            "the routing-table and representative-request signals disagree, so \
-             neither can be trusted: {}",
+            observation.inner_method_mismatch.path_is_registered(),
+            observation.inner_request.reached_a_handler(),
+            "the inner routing-table and representative-request signals \
+             disagree, so neither can be trusted:\n  {}",
             observation.describe()
         );
     }
 
     let missing = observations
         .iter()
-        .filter(|observation| !observation.path_is_registered())
+        .filter(|observation| !observation.outer_method_mismatch.path_is_registered())
+        .collect::<Vec<_>>();
+    // A route the inner router serves but the external surface does not is a
+    // prefix defect: the inner router registered an absolute path that the
+    // outer `{*tail}` rewrite has already stripped. Failing on disagreement
+    // alone is what stops such a regression from hiding behind inner evidence.
+    let disagreements = observations
+        .iter()
+        .filter(|observation| {
+            observation.inner_method_mismatch.path_is_registered()
+                != observation.outer_method_mismatch.path_is_registered()
+        })
         .collect::<Vec<_>>();
     assert!(
-        missing.is_empty(),
+        missing.is_empty() && disagreements.is_empty(),
         "{} of {} canonical public executable routes are advertised by the \
-         catalog but have no handler mounted on the production HTTP \
-         application router.\n\nmissing routes:\n{}\n\nmounted routes:\n{}",
+         catalog but are not reachable on the live daemon's HTTP application \
+         endpoint, and {} disagree between the external surface and the \
+         in-process router.\n\nunreachable externally:\n{}\n\ninner/outer \
+         disagreement (the in-process router serves it but the daemon does not, \
+         so the inner router registered a path the outer \
+         /projects/{{id}}/application/{{*tail}} rewrite already \
+         strips):\n{}\n\nreachable externally:\n{}",
         missing.len(),
         observations.len(),
-        missing
-            .iter()
-            .map(|observation| format!("  {}", observation.describe()))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        observations
-            .iter()
-            .filter(|observation| observation.path_is_registered())
-            .map(|observation| format!("  {}", observation.describe()))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        disagreements.len(),
+        describe_all(&missing),
+        describe_all(&disagreements),
+        describe_all(
+            &observations
+                .iter()
+                .filter(|observation| observation.outer_method_mismatch.path_is_registered())
+                .collect::<Vec<_>>()
+        ),
     );
 }
 
-/// Establishes that the router under test is the merged production router and
-/// that `404` really distinguishes an unmounted path.
+fn describe_all(observations: &[&RouteObservation]) -> String {
+    if observations.is_empty() {
+        return "  (none)".to_owned();
+    }
+    observations
+        .iter()
+        .map(|observation| format!("  {}", observation.describe()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Establishes that the external surface enforces an authenticated local origin
+/// and that a `404` there really means the route is absent.
 ///
-/// Without these preconditions a `404`-based verdict is meaningless: a router
-/// with a catch-all would never answer `404`, and a router missing a merge arm
-/// would report absent routes that production actually serves. Each merged arm
-/// is witnessed by a route only that arm owns.
-async fn assert_router_is_the_merged_production_router(router: &axum::Router) {
-    let (absent_get, absent_get_len) = probe(router, "GET", ABSENT_PROBE_PATH, None).await;
+/// Without these preconditions an external verdict is meaningless: an
+/// unauthenticated endpoint would answer `401` everywhere, and an unresolved
+/// project makes `dispatch_project_application` answer `404` for every path, so
+/// every route would score as missing for the wrong reason.
+fn assert_external_surface_is_authenticated_and_resolving(
+    agent: &ureq::Agent,
+    fixture: &ProductionDaemon,
+) {
+    let witness = fixture.external_url(RELATIVE_WITNESS_TAIL);
+
+    let anonymous = agent
+        .get(witness.as_str())
+        .header("origin", &fixture.origin)
+        .call()
+        .expect("anonymous probe response");
     assert_eq!(
-        absent_get,
-        StatusCode::NOT_FOUND,
-        "an undeclared path must answer 404, otherwise no route probe can \
-         distinguish a mounted handler from a catch-all"
+        anonymous.status().as_u16(),
+        StatusCode::UNAUTHORIZED.as_u16(),
+        "the daemon HTTP application endpoint served a request with no bearer \
+         token, so these probes would not be proving an authenticated surface"
+    );
+
+    let foreign_origin = agent
+        .get(witness.as_str())
+        .header("authorization", &fixture.authorization)
+        .header("origin", "http://route-exposure-conformance.invalid")
+        .call()
+        .expect("foreign-origin probe response");
+    assert_eq!(
+        foreign_origin.status().as_u16(),
+        StatusCode::FORBIDDEN.as_u16(),
+        "the daemon HTTP application endpoint accepted a foreign origin, so \
+         these probes would not be proving a local-origin surface"
+    );
+
+    let resolved = get_probe(agent, &witness, fixture);
+    assert_eq!(
+        resolved.status,
+        StatusCode::METHOD_NOT_ALLOWED.as_u16(),
+        "{witness} is a POST route that tracedecay_api::application_router \
+         registers relative to the outer prefix, so an authenticated GET must \
+         answer 405. Got {} instead, which means the outer dispatch never \
+         resolved the project or never reached the inner routing table, and no \
+         per-route verdict below would be trustworthy.",
+        resolved.status
+    );
+
+    let absent = get_probe(agent, &fixture.external_url(ABSENT_TAIL), fixture);
+    assert_eq!(
+        absent.status,
+        StatusCode::NOT_FOUND.as_u16(),
+        "an undeclared tail must answer 404, otherwise no probe can distinguish \
+         a mounted handler from a catch-all"
     );
     assert_eq!(
-        absent_get_len, 0,
+        absent.body_len, 0,
         "the router fallback must answer 404 with an empty body for the \
          body-length signal to separate a fallback from a handler problem"
     );
-    let (absent_post, _) = probe(
-        router,
-        "POST",
-        ABSENT_PROBE_PATH,
-        Some(Value::Object(Map::new())),
-    )
-    .await;
-    assert_eq!(
-        absent_post,
-        StatusCode::NOT_FOUND,
-        "an undeclared path must answer 404 for the served method too"
-    );
 
-    for (witness, arm) in [
-        (
-            API_ROUTER_WITNESS_PATH,
-            "tracedecay_api::application_router",
-        ),
-        (OPERATION_EVENT_WITNESS_PATH, "the operation-event router"),
-    ] {
-        let (status, _) = probe(router, "GET", witness, None).await;
-        assert_eq!(
-            status,
-            StatusCode::METHOD_NOT_ALLOWED,
-            "{witness} is served only by {arm}; a 405 here proves that arm was \
-             merged into the router under test. Got {status} instead, so this \
-             is not the merged production router."
-        );
+    let unknown_project = format!(
+        "{}/projects/{UNKNOWN_PROJECT_ID}{RELATIVE_WITNESS_TAIL}",
+        fixture.base_url
+    );
+    let unresolved = get_probe(agent, &unknown_project, fixture);
+    assert_eq!(
+        unresolved.status,
+        StatusCode::NOT_FOUND.as_u16(),
+        "an unresolvable project must answer 404, which is exactly why the \
+         witness probe above has to pass before any route is called missing"
+    );
+}
+
+fn get_probe(agent: &ureq::Agent, url: &str, fixture: &ProductionDaemon) -> ProbeResult {
+    let mut response = agent
+        .get(url)
+        .header("authorization", &fixture.authorization)
+        .header("origin", &fixture.origin)
+        .call()
+        .unwrap_or_else(|error| panic!("GET {url} failed: {error}"));
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .unwrap_or_else(|error| panic!("GET {url} body failed: {error}"));
+    ProbeResult {
+        status,
+        body_len: body.len(),
     }
 }
 
-/// Issues one request against the production router and returns the status and
-/// response body length.
-async fn probe(
+fn post_probe(
+    agent: &ureq::Agent,
+    url: &str,
+    fixture: &ProductionDaemon,
+    body: &Value,
+) -> ProbeResult {
+    let mut response = agent
+        .post(url)
+        .header("authorization", &fixture.authorization)
+        .header("origin", &fixture.origin)
+        .content_type("application/json")
+        .send(body.to_string())
+        .unwrap_or_else(|error| panic!("POST {url} failed: {error}"));
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .unwrap_or_else(|error| panic!("POST {url} body failed: {error}"));
+    ProbeResult {
+        status,
+        body_len: body.len(),
+    }
+}
+
+/// Builds the same in-process router the daemon mounts, used only as secondary
+/// evidence so an inner/outer disagreement can be named precisely.
+async fn inner_router(project: &Path) -> axum::Router {
+    let handshake =
+        DaemonHandshake::for_current_client(Some(project.to_path_buf()), None, false, false)
+            .expect("production daemon handshake");
+    let client = DaemonInvocationClient::for_current(handshake).expect("production daemon client");
+    http_application_router(
+        client,
+        OperationEventAuthority::default(),
+        ProjectId::new("project.route-exposure-conformance").expect("conformance project identity"),
+    )
+    .expect("production merged HTTP application router")
+}
+
+async fn inner_probe(
     router: &axum::Router,
     method: &str,
     path: &str,
     body: Option<Value>,
-) -> (StatusCode, usize) {
+) -> ProbeResult {
     let mut request = Request::builder().method(method).uri(path);
     if body.is_some() {
         request = request.header("content-type", "application/json");
@@ -407,17 +624,20 @@ async fn probe(
             Some(value) => Body::from(value.to_string()),
             None => Body::empty(),
         })
-        .expect("route probe request");
+        .expect("inner probe request");
     let response = router
         .clone()
         .oneshot(request)
         .await
-        .expect("route probe response");
-    let status = response.status();
+        .expect("inner probe response");
+    let status = response.status().as_u16();
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
-        .expect("route probe body");
-    (status, bytes.len())
+        .expect("inner probe body");
+    ProbeResult {
+        status,
+        body_len: bytes.len(),
+    }
 }
 
 /// Builds a representative instance of the request schema the binding publishes.
