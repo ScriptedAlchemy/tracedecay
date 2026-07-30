@@ -88,6 +88,34 @@ const WITHHELD_ATTEMPT_OPERATIONS = WITHHELD_ATTEMPT_OPERATION_KEYS.map((key) =>
   key.slice('attempt_'.length).replace(/_/g, ' '),
 );
 
+export function workScopeProvenance(scope: DashboardScope): string {
+  switch (scope.kind) {
+    case 'all':
+      return 'canonical task graph · the active project · nine mounted routes';
+    case 'project': {
+      const identity = `${scope.label} (${scope.projectId})`;
+      switch (scope.activation) {
+        case 'active':
+          return `canonical task graph · ${identity} · selected active project · nine mounted routes`;
+        case 'selected':
+          return `canonical task graph · ${identity} · selected project · nine mounted routes`;
+        case 'unresolved':
+          return `canonical task graph · ${identity} · selected project, registry unresolved · nine mounted routes`;
+        case 'absent':
+          return `canonical task graph · ${identity} · selected project absent from registry · nine mounted routes`;
+        default: {
+          const exhaustive: never = scope.activation;
+          return exhaustive;
+        }
+      }
+    }
+    default: {
+      const exhaustive: never = scope;
+      return exhaustive;
+    }
+  }
+}
+
 export function WorkPage() {
   const scope = useScope((state) => state.scope);
   const [selected, setSelected] = useSelectedTask();
