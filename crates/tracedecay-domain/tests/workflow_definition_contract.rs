@@ -42,16 +42,16 @@ fn output(producer_step_id: &str, output_name: &str) -> WorkflowOutputReferenceV
     }
 }
 
-fn definition(steps: Vec<WorkflowStepV1>) -> WorkflowDefinitionV1 {
-    WorkflowDefinitionV1 {
-        definition_id: id("workflow.definition.fixture"),
-        definition_version: 1,
-        project_id: id::<ProjectId>("project.workflow.fixture"),
+fn definition(steps: Vec<WorkflowStepV1>) -> Result<WorkflowDefinitionV1, WorkflowDefinitionError> {
+    WorkflowDefinitionV1::new(
+        id("workflow.definition.fixture"),
+        1,
+        id::<ProjectId>("project.workflow.fixture"),
         steps,
-        pinned_policy_digest: digest('a'),
-        pinned_configuration_digest: digest('b'),
-        pinned_catalog_digest: digest('c'),
-    }
+        digest('a'),
+        digest('b'),
+        digest('c'),
+    )
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn valid_two_step_definition_accepts_declared_predecessor_output() {
         &["finding"],
     );
 
-    definition(vec![prepare, review]).validate().unwrap();
+    definition(vec![prepare, review]).unwrap();
 }
 
 #[test]
@@ -73,7 +73,6 @@ fn duplicate_step_ids_are_rejected() {
         step("prepare", &[], vec![], &["first"]),
         step("prepare", &[], vec![], &["second"]),
     ])
-    .validate()
     .unwrap_err();
 
     assert!(matches!(
@@ -85,7 +84,7 @@ fn duplicate_step_ids_are_rejected() {
 #[test]
 fn workflow_step_count_is_bounded() {
     assert!(matches!(
-        definition(Vec::new()).validate(),
+        definition(Vec::new()),
         Err(WorkflowDefinitionError::InvalidStepCount { .. })
     ));
 
@@ -93,16 +92,14 @@ fn workflow_step_count_is_bounded() {
         .map(|ordinal| step(&format!("step-{ordinal}"), &[], vec![], &[]))
         .collect();
     assert!(matches!(
-        definition(steps).validate(),
+        definition(steps),
         Err(WorkflowDefinitionError::InvalidStepCount { .. })
     ));
 }
 
 #[test]
 fn dangling_predecessor_is_rejected() {
-    let error = definition(vec![step("review", &["missing"], vec![], &["finding"])])
-        .validate()
-        .unwrap_err();
+    let error = definition(vec![step("review", &["missing"], vec![], &["finding"])]).unwrap_err();
 
     assert!(matches!(
         error,
@@ -116,7 +113,6 @@ fn predecessor_cycle_is_rejected() {
         step("first", &["second"], vec![], &["first_output"]),
         step("second", &["first"], vec![], &["second_output"]),
     ])
-    .validate()
     .unwrap_err();
 
     assert!(matches!(error, WorkflowDefinitionError::PredecessorCycle));
@@ -133,7 +129,6 @@ fn invalid_output_reference_is_rejected() {
             &["finding"],
         ),
     ])
-    .validate()
     .unwrap_err();
 
     assert!(matches!(
@@ -153,7 +148,6 @@ fn output_reference_from_non_predecessor_is_rejected() {
             &["finding"],
         ),
     ])
-    .validate()
     .unwrap_err();
 
     assert!(matches!(
@@ -167,7 +161,7 @@ fn zero_and_unbounded_fan_out_are_rejected() {
     for max_parallel in [0, MAX_WORKFLOW_FAN_OUT + 1] {
         let mut fan_out = step("review", &[], vec![], &["finding"]);
         fan_out.fan_out = Some(WorkflowFanOutV1 { max_parallel });
-        let error = definition(vec![fan_out]).validate().unwrap_err();
+        let error = definition(vec![fan_out]).unwrap_err();
         assert!(matches!(
             error,
             WorkflowDefinitionError::InvalidFanOut { .. }
@@ -177,9 +171,8 @@ fn zero_and_unbounded_fan_out_are_rejected() {
 
 #[test]
 fn duplicate_output_names_are_rejected() {
-    let error = definition(vec![step("prepare", &[], vec![], &["context", "context"])])
-        .validate()
-        .unwrap_err();
+    let error =
+        definition(vec![step("prepare", &[], vec![], &["context", "context"])]).unwrap_err();
 
     assert!(matches!(
         error,
@@ -190,11 +183,22 @@ fn duplicate_output_names_are_rejected() {
 #[test]
 fn unknown_json_fields_are_rejected() {
     let mut value =
-        serde_json::to_value(definition(vec![step("prepare", &[], vec![], &["context"])])).unwrap();
+        serde_json::to_value(definition(vec![step("prepare", &[], vec![], &["context"])]).unwrap())
+            .unwrap();
     value
         .as_object_mut()
         .unwrap()
         .insert("scheduler".to_owned(), json!("must not exist"));
+
+    assert!(serde_json::from_value::<WorkflowDefinitionV1>(value).is_err());
+}
+
+#[test]
+fn invalid_wire_definitions_are_rejected_during_deserialization() {
+    let mut value =
+        serde_json::to_value(definition(vec![step("prepare", &[], vec![], &["context"])]).unwrap())
+            .unwrap();
+    value["definition_version"] = json!(0);
 
     assert!(serde_json::from_value::<WorkflowDefinitionV1>(value).is_err());
 }
