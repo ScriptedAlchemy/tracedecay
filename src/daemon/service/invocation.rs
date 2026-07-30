@@ -69,7 +69,8 @@ use tracedecay_lsp::{
     LSP_SESSION_TTL_MS, LspAnalyzerCancellationAuthority, LspEndpointError, LspRequestId,
     LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
     LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
-    MAX_LSP_FRAME_BYTES, SessionLifecycle, UnavailableSemanticProvider, UpstreamCapabilities,
+    MAX_LSP_FRAME_BYTES, MAX_LSP_SESSIONS, MAX_LSP_WORKSPACE_ROOTS, SessionLifecycle,
+    UnavailableSemanticProvider, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -1237,6 +1238,15 @@ impl DaemonInvocationRequest {
         self
     }
 
+    pub(crate) fn lsp_workspace_folders(&self) -> Option<&[String]> {
+        match &self.payload {
+            DaemonInvocationPayload::LspOpen {
+                workspace_folders, ..
+            } => Some(workspace_folders),
+            _ => None,
+        }
+    }
+
     pub(crate) fn operation(&self) -> DaemonInvocationOperation {
         match self.payload {
             DaemonInvocationPayload::GitRead {
@@ -1717,7 +1727,7 @@ impl DaemonInvocationRequest {
                     || requested_root_uri
                         .as_deref()
                         .is_some_and(|uri| !valid_printable(uri, MAX_ROOT_HINT_BYTES))
-                    || workspace_folders.len() > 1
+                    || workspace_folders.len() > MAX_LSP_WORKSPACE_ROOTS
                     || workspace_folders
                         .iter()
                         .any(|folder| !valid_printable(folder, MAX_ROOT_HINT_BYTES))
@@ -4164,6 +4174,10 @@ pub(crate) enum DaemonInvocationOutcome {
     LspOpened {
         session: DaemonLspSessionAccess,
         expires_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_set_id: Option<ScopeSetId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_set_digest: Option<ManifestDigest>,
     },
     LspFrameAccepted {
         backpressured: bool,
@@ -4221,7 +4235,13 @@ impl DaemonInvocationResponse {
         }
     }
 
-    fn lsp_opened(request_id: String, session: DaemonLspSessionAccess, expires_at_ms: u64) -> Self {
+    fn lsp_opened(
+        request_id: String,
+        session: DaemonLspSessionAccess,
+        expires_at_ms: u64,
+        scope_set_id: Option<ScopeSetId>,
+        scope_set_digest: Option<ManifestDigest>,
+    ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
             revision: DAEMON_INVOCATION_REVISION,
@@ -4229,6 +4249,8 @@ impl DaemonInvocationResponse {
             outcome: DaemonInvocationOutcome::LspOpened {
                 session,
                 expires_at_ms,
+                scope_set_id,
+                scope_set_digest,
             },
         }
     }
@@ -4570,6 +4592,7 @@ impl RegisteredWorkRuntime {
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
+    authorized_lsp_workspaces: Arc<Mutex<BTreeMap<ManifestDigest, AuthorizedDaemonLspWorkspace>>>,
     context_scout_registries:
         Arc<Mutex<BTreeMap<ProjectId, Arc<ProjectContextScoutAddressRegistryV1>>>>,
     /// Every per-project component, published together under one lock. See
@@ -4593,6 +4616,7 @@ impl DaemonInvocationService {
         Self {
             code_index_schedulers,
             lsp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            authorized_lsp_workspaces: Arc::new(Mutex::new(BTreeMap::new())),
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             project_runtimes: ProjectRuntimeRegistryV1::default(),
             operation_events: daemon_operation_event_authority(),
@@ -5875,6 +5899,13 @@ type RuntimeLspActor = DaemonLspRuntimeSession;
 #[derive(Clone)]
 pub(crate) struct DaemonLspInvocationOwner {
     factory: Arc<DaemonLspSessionFactory>,
+}
+
+#[derive(Clone)]
+struct AuthorizedDaemonLspWorkspace {
+    workspace: AuthorizedLspWorkspace,
+    scope_set: AuthorizedScopeSet,
+    factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
 }
 
 impl DaemonLspInvocationOwner {
@@ -7857,14 +7888,14 @@ impl DaemonInvocationService {
         }
     }
 
-    /// Executes a closed request after daemon socket authentication. `root` is
-    /// supplied only after the daemon has opened and authorized the project;
-    /// existing LSP session operations do not re-resolve client paths.
+    /// Executes a closed request after daemon socket authentication.
+    /// `lsp_workspace` is supplied only after the daemon has resolved every
+    /// requested root through registered project ownership.
     pub(crate) async fn invoke(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
         project_root: Option<&Path>,
-        root: Option<AdmittedRoot>,
+        lsp_workspace: Option<AuthorizedLspWorkspace>,
         git_service: Option<DaemonGitInvocationOwner>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
@@ -8429,7 +8460,7 @@ impl DaemonInvocationService {
             } => {
                 self.open_lsp_session(
                     lsp_registry,
-                    root,
+                    lsp_workspace,
                     request_id,
                     client_revision,
                     requested_root_uri,
@@ -8475,6 +8506,7 @@ impl DaemonInvocationService {
 
     pub(crate) async fn expire_all(&self) {
         self.lsp_sessions.lock().await.clear();
+        self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         self.project_runtimes.shut_down_all().await;
         if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
@@ -8486,7 +8518,7 @@ impl DaemonInvocationService {
     async fn open_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
-        root: Option<AdmittedRoot>,
+        workspace: Option<AuthorizedLspWorkspace>,
         request_id: String,
         client_revision: String,
         requested_root_uri: Option<String>,
@@ -8494,7 +8526,7 @@ impl DaemonInvocationService {
         now_ms: u64,
         lsp_owner: Option<DaemonLspInvocationOwner>,
     ) -> DaemonInvocationResponse {
-        let Some(root) = root else {
+        let Some(workspace) = workspace else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
@@ -8506,6 +8538,26 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        let authorized = if let Some(digest) = workspace.scope_set_digest() {
+            self.authorized_lsp_workspaces
+                .lock()
+                .await
+                .get(digest)
+                .cloned()
+        } else {
+            None
+        };
+        if authorized.as_ref().is_some_and(|authorized| {
+            !authorized
+                .factories
+                .iter()
+                .any(|(_, factory)| Arc::ptr_eq(factory, &lsp_owner.factory))
+        }) {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        }
         let request = LspSessionOpenRequest {
             requested_root_uri,
             workspace_folders,
@@ -8515,7 +8567,9 @@ impl DaemonInvocationService {
             let mut registry = lsp_registry.lock().await;
             let existing = std::mem::take(&mut *registry);
             let mut endpoint = DaemonLspSessionEndpoint::with_registry(
-                AdmittedRootSessionAdmission { root: root.clone() },
+                AdmittedWorkspaceSessionAdmission {
+                    workspace: workspace.clone(),
+                },
                 existing,
             );
             let result = endpoint.open(request, now_ms);
@@ -8530,7 +8584,26 @@ impl DaemonInvocationService {
         };
         let expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
         let session_id = access.session_id().clone();
-        let actor = runtime_lsp_actor(root, lsp_owner);
+        let (actor, scope_set_id, scope_set_digest) = match authorized {
+            Some(authorized) => {
+                let Some(actor) = runtime_lsp_actor(workspace, authorized.factories) else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                (
+                    actor,
+                    Some(authorized.scope_set.scope_set_id().clone()),
+                    Some(authorized.scope_set.digest().clone()),
+                )
+            }
+            None => (
+                lsp_owner.factory.open_workspace_session(workspace),
+                None,
+                None,
+            ),
+        };
         self.lsp_sessions.lock().await.insert(
             session_id,
             RuntimeLspSession {
@@ -8542,6 +8615,8 @@ impl DaemonInvocationService {
             request_id,
             DaemonLspSessionAccess::from_access(&access),
             expires_at_ms,
+            scope_set_id,
+            scope_set_digest,
         )
     }
 
@@ -8803,8 +8878,18 @@ impl DaemonInvocationService {
     }
 }
 
-fn runtime_lsp_actor(root: AdmittedRoot, owner: DaemonLspInvocationOwner) -> RuntimeLspActor {
-    owner.factory.open_session(root)
+fn canonicalize_lsp_roots(roots: &mut [(PathBuf, String, ResolvedScope)]) -> bool {
+    roots.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
+    !roots
+        .windows(2)
+        .any(|pair| pair[0].2.scope_digest == pair[1].2.scope_digest)
+}
+
+fn runtime_lsp_actor(
+    workspace: AuthorizedLspWorkspace,
+    factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
+) -> Option<RuntimeLspActor> {
+    DaemonLspSessionFactory::open_federated_workspace_session(workspace, factories)
 }
 
 fn plan26_invocation_subject(
@@ -11532,5 +11617,87 @@ mod tests {
             "daemon expiry must stop and join every provider execution"
         );
         assert!(service.project_runtimes.is_empty().await);
+    }
+
+    #[test]
+    fn lsp_scope_roots_canonicalize_independent_of_folder_order() {
+        let scope_a = ResolvedScope::new(
+            ProjectId::new("project.a").unwrap(),
+            tracedecay_domain::RepositoryId::new("repository.a").unwrap(),
+            tracedecay_domain::WorktreeId::new("worktree.a").unwrap(),
+            None,
+        )
+        .unwrap();
+        let scope_b = ResolvedScope::new(
+            ProjectId::new("project.b").unwrap(),
+            tracedecay_domain::RepositoryId::new("repository.b").unwrap(),
+            tracedecay_domain::WorktreeId::new("worktree.b").unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut forward = vec![
+            (PathBuf::from("/a"), "file:///a".to_owned(), scope_a.clone()),
+            (PathBuf::from("/b"), "file:///b".to_owned(), scope_b.clone()),
+        ];
+        let mut reverse = vec![
+            (PathBuf::from("/b"), "file:///b".to_owned(), scope_b),
+            (PathBuf::from("/a"), "file:///a".to_owned(), scope_a),
+        ];
+
+        assert!(canonicalize_lsp_roots(&mut forward));
+        assert!(canonicalize_lsp_roots(&mut reverse));
+        assert_eq!(forward, reverse);
+    }
+
+    #[tokio::test]
+    async fn linked_workspace_owner_requires_its_exact_registered_scope() {
+        let root = PathBuf::from("/linked/worktree");
+        let expected = ResolvedScope::new(
+            ProjectId::new("project.linked").unwrap(),
+            tracedecay_domain::RepositoryId::new("repository.linked").unwrap(),
+            tracedecay_domain::WorktreeId::new("worktree.expected").unwrap(),
+            None,
+        )
+        .unwrap();
+        let sibling = ResolvedScope::new(
+            ProjectId::new("project.linked").unwrap(),
+            tracedecay_domain::RepositoryId::new("repository.linked").unwrap(),
+            tracedecay_domain::WorktreeId::new("worktree.sibling").unwrap(),
+            None,
+        )
+        .unwrap();
+        let capability =
+            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
+                .unwrap();
+        let use_case =
+            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
+                .unwrap();
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.lsp.linked").unwrap(),
+            1,
+            canonical_sha256(&"grant.lsp.linked").unwrap(),
+            ActorId::new("actor.lsp.linked").unwrap(),
+            UtcMicros(1),
+            UtcMicros(10_000),
+            expected.clone(),
+            std::collections::BTreeSet::from([capability]),
+            std::collections::BTreeSet::from([use_case]),
+            DisclosureClass::Sensitive,
+        )
+        .unwrap();
+        let service = DaemonInvocationService::default();
+        service
+            .install_lsp_owner(
+                root.clone(),
+                DaemonLspInvocationOwner {
+                    factory: unavailable_lsp_session_factory(),
+                    scope_grant: Some(grant),
+                    scope_set_storage: None,
+                },
+            )
+            .await;
+
+        assert!(service.lsp_owner_matches_scope(&root, &expected).await);
+        assert!(!service.lsp_owner_matches_scope(&root, &sibling).await);
     }
 }
