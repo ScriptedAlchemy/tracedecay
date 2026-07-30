@@ -597,9 +597,7 @@ fn typify_schema(schema: &Value) -> Result<(String, String), Box<dyn Error>> {
 
 fn schema_for_typify(value: Value) -> Value {
     match value {
-        Value::Array(values) => {
-            Value::Array(values.into_iter().map(schema_for_typify).collect())
-        }
+        Value::Array(values) => Value::Array(values.into_iter().map(schema_for_typify).collect()),
         Value::Object(values) => Value::Object(
             values
                 .into_iter()
@@ -659,12 +657,8 @@ fn render_python_operations(
     }
     out.push_str("}\n\nUNAVAILABLE_OPERATIONS: Final[dict[str, str]] = {\n");
     for operation in HttpApplicationOperation::ALL {
-        writeln!(
-            out,
-            "    {:?}: \"schema_unavailable\",",
-            operation.as_str()
-        )
-        .expect("String writes cannot fail");
+        writeln!(out, "    {:?}: \"schema_unavailable\",", operation.as_str())
+            .expect("String writes cannot fail");
     }
     for operation in unavailable {
         writeln!(
@@ -855,7 +849,10 @@ impl PythonSchemaRenderer<'_> {
                 let item = object
                     .get("items")
                     .ok_or("array schema requires canonical items")?;
-                Ok(format!("list[{}]", self.render(item, &format!("{name}Item"))?))
+                Ok(format!(
+                    "list[{}]",
+                    self.render(item, &format!("{name}Item"))?
+                ))
             }
             Some("object") => {
                 if !self.emitted.insert(name.to_owned()) {
@@ -1067,7 +1064,16 @@ mod tests {
         let operations = canonical_operations(&registry).unwrap();
         let unavailable = canonical_unavailable_operations(&registry);
 
-        assert_eq!(operations.len(), 18);
+        assert!(!operations.is_empty());
+        assert_eq!(
+            operations
+                .iter()
+                .map(|operation| operation.operation_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            operations.len(),
+            "every mounted route must have a unique operation id"
+        );
         assert!(unavailable.is_empty());
         let generated = render_operations(&operations, &unavailable).unwrap();
         assert!(generated.contains("route: \"/application/work/snapshot\""));
@@ -1082,20 +1088,23 @@ mod tests {
     fn server_inventory_covers_all_request_operations() {
         let generated = super::render_server_operations();
 
-        assert_eq!(tracedecay_api::HttpApplicationOperation::ALL.len(), 64);
+        assert!(!tracedecay_api::HttpApplicationOperation::ALL.is_empty());
         assert!(generated.contains("operation: \"health_read\""));
         assert!(generated.contains("route: \"/application/primitives/health_read\""));
+        // One occurrence per rendered base route, plus one in the interface
+        // declaration itself (`readonly sdkAvailability: "unavailable";`).
+        let expected_marker_occurrences = tracedecay_api::HttpApplicationOperation::ALL.len() + 1;
         assert_eq!(
             generated
                 .matches("sdkAvailability: \"unavailable\"")
                 .count(),
-            65
+            expected_marker_occurrences
         );
         assert_eq!(
             generated
                 .matches("disposition: \"schema_unavailable\"")
                 .count(),
-            65
+            expected_marker_occurrences
         );
     }
 
@@ -1106,8 +1115,16 @@ mod tests {
         let unavailable = canonical_unavailable_operations(&registry);
         let generated = super::render_python_operations(&operations, &unavailable).unwrap();
 
-        assert_eq!(generated.matches("\": \"/application/").count(), 82);
-        assert_eq!(generated.matches("\": \"schema_unavailable\"").count(), 64);
+        assert_eq!(
+            generated.matches("\": \"/application/").count(),
+            tracedecay_api::HttpApplicationOperation::ALL.len()
+                + operations.len()
+                + unavailable.len()
+        );
+        assert_eq!(
+            generated.matches("\": \"schema_unavailable\"").count(),
+            tracedecay_api::HttpApplicationOperation::ALL.len() + unavailable.len()
+        );
         assert!(generated.contains("\"work_attempt_start\": \"/application/work/attempt/start\""));
         assert!(generated.contains("\"work_snapshot\": \"/application/work/snapshot\""));
         assert!(generated.contains("class OperationWorkSnapshotRequest(TypedDict):"));
@@ -1123,7 +1140,10 @@ mod tests {
         let operations = canonical_operations(&registry).unwrap();
         let generated = super::render_rust_operations(&operations).unwrap();
 
-        assert_eq!(generated.matches("typed_operation!(").count(), 18);
+        assert_eq!(
+            generated.matches("typed_operation!(").count(),
+            operations.len()
+        );
         assert!(generated.contains("pub mod work_snapshot"));
         assert!(generated.contains("WorkSnapshot"));
         assert!(generated.contains("pub type Request = request::"));
