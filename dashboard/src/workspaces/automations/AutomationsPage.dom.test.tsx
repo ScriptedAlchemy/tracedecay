@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useScope } from '../../data/scope/store.ts';
@@ -379,6 +379,33 @@ describe('AutomationsPage scheduler control scope', () => {
     // The aggregate reads across projects, so a control under it could easily be
     // read as applying across them too.
     expect(scopeNote().textContent).toBe('Applies to the active project.');
+  });
+
+  /**
+   * The write-target sentence is the reason label provenance matters. A deep
+   * link supplies both the project id and a display label, and only the id is
+   * verifiable on arrival — so before reconciliation adopted the registry's
+   * label, this control could correctly enable itself for the active project
+   * and name it whatever the link said it was called.
+   */
+  it('names the registry label in the write target, not a spoofed deep-link label', async () => {
+    useScope.getState().selectProject('proj_other', 'Scratch sandbox', 'unresolved');
+    stubAutomation({ status: scheduler(measured(0), measured(0)) });
+    renderAutomations();
+    await screen.findByText('pending proposals');
+    expect(scopeNote().textContent).toContain('not known yet');
+
+    act(() =>
+      useScope.getState().reconcileScope({
+        state: 'measured',
+        activeProjectId: 'proj_other',
+        projects: [{ projectId: 'proj_other', label: 'Production' }],
+      }),
+    );
+
+    expect(control().disabled).toBe(false);
+    expect(scopeNote().textContent).toBe('Applies to Production.');
+    expect(document.body.textContent).not.toContain('Scratch sandbox');
   });
 
   it('disables the control in a selected non-active project and says how to enable it', async () => {

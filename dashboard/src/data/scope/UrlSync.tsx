@@ -23,13 +23,21 @@ export function ScopeUrlSync() {
     applyingFromUrl.current = true;
     if (id) {
       const label = searchParams.get('scopeLabel') ?? id;
-      // Only reselect when the link actually names a different scope. This
-      // effect runs on every search-param change, including params that belong
-      // to a workspace and have nothing to do with scope, and reselecting
-      // would reset a project whose activation the registry had already
-      // resolved back to `unresolved` — withdrawing a legitimately enabled
-      // write control on an unrelated filter change.
-      if (current.kind !== 'project' || current.projectId !== id || current.label !== label) {
+      // Only reselect when the link names a different *project*. This effect
+      // runs on every search-param change, including params that belong to a
+      // workspace and have nothing to do with scope, and reselecting would
+      // reset a project whose activation the registry had already resolved
+      // back to `unresolved` — withdrawing a legitimately enabled write
+      // control on an unrelated filter change.
+      //
+      // The id alone decides that, deliberately. Comparing the label too used
+      // to look like extra care and was in fact the undoing of reconciliation:
+      // once the registry replaced a stale `scopeLabel` with the canonical
+      // name, the store's label no longer matched the URL's, so the next
+      // unrelated param change re-applied the URL's claim and dropped the
+      // scope back to `unresolved`. A label is not identity — it is the thing
+      // being corrected — so it cannot be a reason to reselect.
+      if (current.kind !== 'project' || current.projectId !== id) {
         // A deep link carries an opaque id and a display label, and neither
         // says whether this is the active project. The scope therefore arrives
         // unresolved, and stays that way until something reads the registry —
@@ -53,7 +61,14 @@ export function ScopeUrlSync() {
     if (scope !== useScope.getState().scope) return;
     const current = searchParams.get('scope');
     const next = scope.kind === 'project' ? scope.projectId : null;
-    if (current === next) return;
+    // The label is compared as well as the id, so a label the registry
+    // corrected reaches the address bar. Without this the URL would keep
+    // asserting the stale name it was opened with, and a reload would put that
+    // name back on screen until the registry answered again. Reselection no
+    // longer keys on the label, so writing it here cannot loop.
+    const labelSettled =
+      scope.kind !== 'project' || searchParams.get('scopeLabel') === scope.label;
+    if (current === next && labelSettled) return;
     const params = new URLSearchParams(searchParams);
     if (scope.kind === 'project') {
       params.set('scope', scope.projectId);

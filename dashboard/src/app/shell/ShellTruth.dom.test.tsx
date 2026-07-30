@@ -70,14 +70,32 @@ describe('shared shell truthfulness', () => {
     await waitFor(() => expect(queryByText('Local daemon')).toBeNull());
   });
 
-  it('replaces an untrusted scope label with the registry-owned label', async () => {
+  /**
+   * The bar used to substitute the string `resolving` for the label until the
+   * registry answered, which kept an unverified name off screen but also hid a
+   * name the reader had just clicked in the palette — where the label came from
+   * the registry to begin with — and left the bar the only surface with a view
+   * on whether a name could be trusted, while the write-target prose used the
+   * claim unqualified.
+   *
+   * So the unverified name is shown and marked unverified, then replaced. What
+   * must not happen is the middle state presenting as settled.
+   */
+  it('marks an untrusted scope label unverified, then replaces it from the registry', async () => {
     useScope.getState().selectProject('proj-real', 'fabricated label');
     stubRegistry(registryPayload('proj-real'));
 
     const { queryByText, findByText } = render(queryWrapper(<ScopeBar />));
 
-    expect(queryByText('fabricated label')).toBeNull();
+    expect(queryByText('fabricated label')).not.toBeNull();
+    expect(document.querySelector('[data-scope-label-annotation]')?.textContent).toContain(
+      'resolving',
+    );
+
     expect(await findByText('Canonical project')).not.toBeNull();
+    expect(queryByText('fabricated label')).toBeNull();
+    // Settled: nothing qualifies a name the registry confirmed.
+    expect(document.querySelector('[data-scope-label-annotation]')).toBeNull();
   });
 
   /**
@@ -102,28 +120,79 @@ describe('shared shell truthfulness', () => {
   });
 
   /**
-   * Reconciliation settles activation and not the label. The bar itself renders
-   * the registry-owned label, so what is on screen is sourced — but the label
-   * held in the scope is still whatever put it there, and `scopeWritable` names
-   * its write target from that. So a deep link carrying a wrong label produces a
-   * correctly-enabled control that names the project wrongly.
-   *
-   * Recorded rather than fixed: adopting the registry label into the scope is
-   * label provenance, which is its own slice, and doing it here would mean this
-   * reconciliation quietly rewrote a second field.
+   * Reconciliation settles the label as well as the activation, so the write
+   * target is named by the registry rather than by whatever put the scope
+   * there. Before this, a deep link carrying a wrong label produced a
+   * correctly-enabled control that named the project wrongly — the bar showed
+   * the canonical name while "Applies to …" showed the link's claim, which is
+   * the same fact in two places disagreeing.
    */
-  it('names its write target from the scope label, which reconciliation does not source', async () => {
+  it('names its write target from the registry, not from the label it was selected with', async () => {
     useScope.getState().selectProject('proj-real', 'fabricated label', 'unresolved');
     stubRegistry(registryPayload('proj-real'));
 
-    const { findByText } = render(queryWrapper(<ScopeBar />));
+    const { findByText, queryByText } = render(queryWrapper(<ScopeBar />));
 
     expect(await findByText('Canonical project')).toBeTruthy();
     await waitFor(() => expect(useScope.getState().scope).toMatchObject({ activation: 'active' }));
     expect(scopeWritable(useScope.getState().scope)).toEqual({
       state: 'writable',
-      target: 'fabricated label',
+      target: 'Canonical project',
     });
+    // Not merely outvoted — gone. The claim is not left anywhere on the bar.
+    expect(queryByText('fabricated label')).toBeNull();
+  });
+
+  /**
+   * The one case where the URL's label is kept: the registry did not answer, so
+   * there is nothing to correct it with. Discarding it here would replace a
+   * name that may well be right with an opaque id, on no evidence — the same
+   * mistake as the correction, pointed the other way.
+   */
+  it('keeps the selected label, unconfirmed, when the registry cannot be read', async () => {
+    useScope.getState().selectProject('proj-real', 'name from the link', 'unresolved');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+
+    const { findByText } = render(queryWrapper(<ScopeBar />));
+
+    // Shown, and shown as unconfirmed: the annotation is what keeps this from
+    // reading as a registry-backed name.
+    expect(await findByText('name from the link')).toBeTruthy();
+    const annotated = await waitFor(() => {
+      const found = document.querySelector('[data-scope-label-annotation]');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(annotated.getAttribute('data-scope-label-annotation')).toBe('registry offline');
+    expect(useScope.getState().scope).toMatchObject({
+      label: 'name from the link',
+      activation: 'unresolved',
+    });
+    // And unknown authority did not become read-only.
+    expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
+  });
+
+  /**
+   * Answered, and this id is not in it. The label has been contradicted rather
+   * than left unconfirmed, so keeping it would state a name no authority backs
+   * — but the id is still what every read routes by, so it stands in.
+   */
+  it('drops a label the registry contradicts, and says the project is not listed', async () => {
+    useScope.getState().selectProject('proj-ghost', 'Looks Legitimate', 'unresolved');
+    stubRegistry(registryPayload('proj-real'));
+
+    const { findByText, queryByText } = render(queryWrapper(<ScopeBar />));
+
+    expect(await findByText('proj-ghost')).toBeTruthy();
+    expect(queryByText('Looks Legitimate')).toBeNull();
+    const annotated = document.querySelector('[data-scope-label-annotation]');
+    expect(annotated?.getAttribute('data-scope-label-annotation')).toBe('not in registry');
+    // A project the registry does not list is certainly not the active one, so
+    // this is a measured read-only rather than an unknown.
+    const writability = scopeWritable(useScope.getState().scope);
+    expect(writability.state).toBe('read_only');
+    if (writability.state !== 'read_only') throw new Error('unreachable');
+    expect(writability.reason).toContain('proj-ghost is not the active project');
   });
 
   it('resolves a deep-linked project to read-only when another project is active', async () => {

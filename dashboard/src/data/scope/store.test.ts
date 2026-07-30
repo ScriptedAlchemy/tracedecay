@@ -20,16 +20,33 @@ import {
   READ_ONLY_SCOPE_STATUS,
   activationFor,
   readOnlyScopeRefusal,
+  reconciledLabel,
   scopeKey,
   scopeWritable,
   scopedUrl,
   useScope,
   type DashboardScope,
   type ProjectActivation,
+  type RegistryReading,
 } from './store.ts';
 
 function project(projectId: string, activation: ProjectActivation): DashboardScope {
   return { kind: 'project', projectId, label: `label-${projectId}`, activation };
+}
+
+/** A measured registry answer. `projects` defaults to naming `activeProjectId`
+ * so cases about activation do not have to restate the listing. */
+function measured(
+  activeProjectId: string | null,
+  projects?: readonly { projectId: string; label: string }[],
+): RegistryReading {
+  return {
+    state: 'measured',
+    activeProjectId,
+    projects:
+      projects ??
+      (activeProjectId ? [{ projectId: activeProjectId, label: `label-${activeProjectId}` }] : []),
+  };
 }
 
 describe('scopeWritable', () => {
@@ -80,21 +97,17 @@ describe('scopeWritable', () => {
 
 describe('activationFor', () => {
   it('resolves the active project from a measured reading', () => {
-    expect(activationFor('proj_a', { state: 'measured', activeProjectId: 'proj_a' })).toBe(
-      'active',
-    );
+    expect(activationFor('proj_a', measured('proj_a'))).toBe('active');
   });
 
   it('resolves a different active project to selected', () => {
-    expect(activationFor('proj_a', { state: 'measured', activeProjectId: 'proj_b' })).toBe(
-      'selected',
-    );
+    expect(activationFor('proj_a', measured('proj_b'))).toBe('selected');
   });
 
   it('treats a measured absence of any active project as selected, not unknown', () => {
     // The registry answered: there is no active project. That is a real
     // reading and it does mean this project is not it.
-    expect(activationFor('proj_a', { state: 'measured', activeProjectId: null })).toBe('selected');
+    expect(activationFor('proj_a', measured(null))).toBe('selected');
   });
 
   it('keeps an unread registry unresolved rather than calling it not-active', () => {
@@ -102,7 +115,53 @@ describe('activationFor', () => {
   });
 });
 
-describe('useScope.resolveActivation', () => {
+/**
+ * The label is not decoration. It reaches the sentence that names what a write
+ * is about to affect, so a URL-supplied name that no authority backs is a
+ * claim the dashboard should stop repeating the moment it can check it.
+ */
+describe('reconciledLabel', () => {
+  it('replaces a stale deep-link label with the registry entry', () => {
+    expect(
+      reconciledLabel(
+        'proj_a',
+        'Old Name From A Bookmark',
+        measured('proj_a', [{ projectId: 'proj_a', label: 'Canonical Name' }]),
+      ),
+    ).toBe('Canonical Name');
+  });
+
+  it('replaces a spoofed label on a project that is merely selected', () => {
+    // Not the active project, so nothing here is writable — but the read-only
+    // sentence still names the project, and it must not name it whatever the
+    // link said.
+    expect(
+      reconciledLabel(
+        'proj_b',
+        'Production (definitely safe)',
+        measured('proj_a', [
+          { projectId: 'proj_a', label: 'Alpha' },
+          { projectId: 'proj_b', label: 'Beta' },
+        ]),
+      ),
+    ).toBe('Beta');
+  });
+
+  it('keeps the supplied label while the registry has not answered', () => {
+    // Unknown authority is not licence to discard the only name available.
+    expect(reconciledLabel('proj_a', 'From The Link', { state: 'unknown' })).toBe('From The Link');
+  });
+
+  it('falls back to the id when the registry answered and does not list it', () => {
+    // Contradicted, not unconfirmed: keeping the claim would state a name no
+    // authority backs.
+    expect(
+      reconciledLabel('proj_ghost', 'Looks Legitimate', measured('proj_a')),
+    ).toBe('proj_ghost');
+  });
+});
+
+describe('useScope.reconcileScope', () => {
   beforeEach(() => {
     useScope.setState({ scope: { kind: 'all' } });
   });
@@ -110,14 +169,45 @@ describe('useScope.resolveActivation', () => {
   it('promotes a deep-linked project once the registry names it active', () => {
     useScope.getState().selectProject('proj_a', 'alpha');
     expect(useScope.getState().scope).toMatchObject({ activation: 'unresolved' });
-    useScope.getState().resolveActivation({ state: 'measured', activeProjectId: 'proj_a' });
+    useScope.getState().reconcileScope(measured('proj_a'));
     expect(useScope.getState().scope).toMatchObject({ activation: 'active' });
     expect(scopeWritable(useScope.getState().scope).state).toBe('writable');
   });
 
+  it('names the write target from the registry, not from the link', () => {
+    // The defect this closes: a link could choose the name that appears in
+    // "Applies to …" for the project it is about to be written to.
+    useScope.getState().selectProject('proj_a', 'Staging');
+    useScope
+      .getState()
+      .reconcileScope(measured('proj_a', [{ projectId: 'proj_a', label: 'Production' }]));
+    expect(useScope.getState().scope).toMatchObject({ label: 'Production' });
+    expect(scopeWritable(useScope.getState().scope)).toEqual({
+      state: 'writable',
+      target: 'Production',
+    });
+  });
+
+  it('corrects the label of a read-only selected project too', () => {
+    useScope.getState().selectProject('proj_b', 'Spoofed');
+    useScope
+      .getState()
+      .reconcileScope(
+        measured('proj_a', [
+          { projectId: 'proj_a', label: 'Alpha' },
+          { projectId: 'proj_b', label: 'Beta' },
+        ]),
+      );
+    const writability = scopeWritable(useScope.getState().scope);
+    expect(writability.state).toBe('read_only');
+    if (writability.state !== 'read_only') throw new Error('unreachable');
+    expect(writability.reason).toContain('Beta is not the active project');
+    expect(writability.reason).not.toContain('Spoofed');
+  });
+
   it('returns a resolved scope to unresolved when the registry stops answering', () => {
     useScope.getState().selectProject('proj_a', 'alpha', 'active');
-    useScope.getState().resolveActivation({ state: 'unknown' });
+    useScope.getState().reconcileScope({ state: 'unknown' });
     // A registry that went unreadable does not leave the last good answer
     // standing: writability is no longer known, and a stale `active` here
     // would keep offering a write on the strength of a read that has since
@@ -125,8 +215,55 @@ describe('useScope.resolveActivation', () => {
     expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
   });
 
+  it('keeps the last known label when the registry stops answering', () => {
+    // Losing the authority is not grounds for a correction in either
+    // direction: the name stands, and it is writability that goes unknown.
+    useScope.getState().selectProject('proj_a', 'From The Link');
+    useScope
+      .getState()
+      .reconcileScope(measured('proj_a', [{ projectId: 'proj_a', label: 'Canonical' }]));
+    useScope.getState().reconcileScope({ state: 'unknown' });
+    expect(useScope.getState().scope).toMatchObject({
+      label: 'Canonical',
+      activation: 'unresolved',
+    });
+  });
+
+  it('does not invent a correction from an unavailable registry', () => {
+    useScope.getState().selectProject('proj_a', 'From The Link');
+    useScope.getState().reconcileScope({ state: 'unknown' });
+    expect(useScope.getState().scope).toMatchObject({
+      label: 'From The Link',
+      activation: 'unresolved',
+    });
+  });
+
+  it('keeps the cache token stable across a label correction', () => {
+    // The label is display text; the id is what selects rows. A correction
+    // that re-keyed the caches would discard every read on the poll that
+    // renamed the project.
+    useScope.getState().selectProject('proj_a', 'Stale');
+    const before = scopeKey(useScope.getState().scope);
+    useScope
+      .getState()
+      .reconcileScope(measured('proj_a', [{ projectId: 'proj_a', label: 'Canonical' }]));
+    expect(useScope.getState().scope).toMatchObject({ label: 'Canonical' });
+    expect(scopeKey(useScope.getState().scope)).toBe(before);
+  });
+
+  it('holds the scope object identity when the reading changes nothing', () => {
+    // This runs on a 30-second poll. A fresh object each time would re-render
+    // every scope consumer in the shell for a reading that moved no fact.
+    useScope.getState().selectProject('proj_a', 'Canonical');
+    const reading = measured('proj_a', [{ projectId: 'proj_a', label: 'Canonical' }]);
+    useScope.getState().reconcileScope(reading);
+    const settled = useScope.getState().scope;
+    useScope.getState().reconcileScope(reading);
+    expect(useScope.getState().scope).toBe(settled);
+  });
+
   it('leaves the all-projects scope alone', () => {
-    useScope.getState().resolveActivation({ state: 'measured', activeProjectId: 'proj_a' });
+    useScope.getState().reconcileScope(measured('proj_a'));
     expect(useScope.getState().scope).toEqual({ kind: 'all' });
   });
 
