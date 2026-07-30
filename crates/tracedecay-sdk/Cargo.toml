@@ -1,0 +1,22 @@
+[workspace]
+
+[package]
+name = "tracedecay-sdk"
+version = "0.1.0"
+edition = "2024"
+autobins = false
+license = "MIT"
+description = "Native Rust facade for canonical TraceDecay contracts"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[dependencies]
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[dev-dependencies]
+serde_json = "1"
