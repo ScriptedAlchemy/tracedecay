@@ -1,3 +1,5 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     WorkAuthority, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1, WorkProjectionSnapshotV1,
@@ -6,6 +8,19 @@ use tracedecay_domain::{
 use crate::{ApplicationProblem, RequestContext};
 
 pub const MAX_WORK_PROJECTION_PAGE_SIZE: u32 = 1_000;
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProjectionSnapshotRequestV1 {
+    pub page_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProjectionDeltaRequestV1 {
+    pub cursor: WorkProjectionResumeCursorV1,
+    pub page_size: u32,
+}
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkProjectionPortError {

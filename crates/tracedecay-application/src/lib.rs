@@ -31,6 +31,7 @@ pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
 pub mod work;
+pub mod work_catalog;
 pub mod work_execution;
 pub mod work_read;
 
@@ -206,5 +207,6 @@ pub use storage::{
     stale_branch_dbs_finding,
 };
 pub use work::*;
+pub use work_catalog::*;
 pub use work_execution::*;
 pub use work_read::*;
