@@ -204,6 +204,59 @@ impl CanonicalDaemonRemoteProtocolOwnersV1 {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_registered_enrollment_replay_and_query(
+        enrollment_store: MigrationSqlHandle,
+        enrollment_configuration_path: &Path,
+        replay_spool: Arc<RemoteCaptureSpool>,
+        remote_authority: Arc<RusqliteRemoteAuthorityStoreV1>,
+        replay_transaction: Arc<dyn RemoteReplayTransactionPortV1>,
+        repository: Arc<RepositoryRuntimePhysicalAttachment>,
+        backup: Arc<BackupOwnerV1>,
+        restore: Arc<RestoreOwnerV1>,
+        promotion: Arc<PromotionOwnerV1>,
+    ) -> Result<Self, DaemonRemoteRegisteredOwnerErrorV1> {
+        let enrollment = DaemonRemoteEnrollmentProvisionerV1::from_registered_configured(
+            enrollment_store.clone(),
+            enrollment_configuration_path,
+        )?;
+        let credentials = Arc::new(RegisteredRemoteEnrollmentAuthorityV1::from_registered(
+            enrollment_store.clone(),
+        )?);
+        let policy = Arc::new(RegisteredRemoteReplayPolicyAuthorityV1::from_registered(
+            enrollment_store,
+        )?);
+        let replay = Arc::new(RemoteReplayProtocolAdapterV1::new(
+            RemoteReplayServiceV1::new(
+                credentials.clone(),
+                credentials.clone(),
+                replay_spool.clone(),
+                remote_authority.clone(),
+                policy.clone(),
+                policy,
+                replay_transaction,
+                replay_spool,
+            ),
+        ));
+        let query = Arc::new(RemoteExactObservationQueryProtocolAdapterV1::new(
+            RemoteExactObservationQueryServiceV1::new(
+                credentials,
+                Arc::new(RusqliteRemoteExactObservationQueryPortV1::new(
+                    remote_authority,
+                    repository,
+                )),
+            ),
+        ));
+        Ok(Self::new(
+            enrollment.protocol_port(),
+            replay,
+            query,
+            backup,
+            restore,
+            promotion,
+        ))
+    }
+
     pub fn new(
         enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
         replay: Arc<ReplayOwnerV1>,
