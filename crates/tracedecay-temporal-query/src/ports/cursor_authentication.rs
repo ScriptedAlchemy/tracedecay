@@ -85,6 +85,15 @@ impl InMemoryCursorAuthenticator {
         }
         let mut mac = self.mac()?;
         mac.update(CURSOR_KEY_DERIVATION_DOMAIN_V1);
+        let key_id = key.key_id.as_str().as_bytes();
+        let key_id_len =
+            u64::try_from(key_id.len()).map_err(|_| CursorKeyError::InvalidMaterial)?;
+        let context_len =
+            u64::try_from(context.len()).map_err(|_| CursorKeyError::InvalidMaterial)?;
+        mac.update(&key_id_len.to_be_bytes());
+        mac.update(key_id);
+        mac.update(&key.version.value().to_be_bytes());
+        mac.update(&context_len.to_be_bytes());
         mac.update(context);
         Ok(Zeroizing::new(mac.finalize().into_bytes().to_vec()))
     }
@@ -127,5 +136,61 @@ impl SessionCursorAuthenticator for InMemoryCursorAuthenticator {
         mac.update(authenticated);
         mac.verify_slice(&signature.0)
             .map_err(|_| CursorKeyError::AuthenticationFailed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
+
+    use super::{CursorKeyError, InMemoryCursorAuthenticator};
+
+    fn key(id: &str, version: u16) -> SignedCursorKeyRefV1 {
+        SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new(id).expect("valid key id"),
+            version: SessionCursorVersionV1::new(version).expect("valid version"),
+        }
+    }
+
+    #[test]
+    fn derived_material_binds_the_exact_key_reference() {
+        let first_key = key("cursor-key-first", 1);
+        let second_key = key("cursor-key-second", 1);
+        let next_version_key = key("cursor-key-first", 2);
+        let first =
+            InMemoryCursorAuthenticator::new(first_key.clone(), vec![0x5a; 32]).expect("first");
+        let second =
+            InMemoryCursorAuthenticator::new(second_key.clone(), vec![0x5a; 32]).expect("second");
+        let next_version =
+            InMemoryCursorAuthenticator::new(next_version_key.clone(), vec![0x5a; 32])
+                .expect("next version");
+        let context = b"query-cursor-context";
+
+        let first_material = first
+            .derive_key_material(&first_key, context)
+            .expect("first derivation");
+        let second_material = second
+            .derive_key_material(&second_key, context)
+            .expect("second derivation");
+        let next_version_material = next_version
+            .derive_key_material(&next_version_key, context)
+            .expect("next-version derivation");
+        assert_ne!(first_material.as_slice(), second_material.as_slice());
+        assert_ne!(
+            first_material.as_slice(),
+            next_version_material.as_slice(),
+            "the key version must change derived material even when key ID and secret are equal"
+        );
+        assert_eq!(
+            first
+                .derive_key_material(&first_key, context)
+                .expect("stable derivation")
+                .as_slice(),
+            first_material.as_slice()
+        );
+        assert_eq!(
+            first.derive_key_material(&second_key, context),
+            Err(CursorKeyError::Unavailable)
+        );
     }
 }
