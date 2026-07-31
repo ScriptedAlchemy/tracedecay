@@ -111,11 +111,12 @@ duplicating business logic.
   compatibility test alone is not release evidence. Pure source-only names are
   replaced in place. A branch-era callable name that may have reached dogfood
   clients or installed host files remains a binding until a separately
-  authorized installed-host/profile census proves absence. Once an
-  evidence-backed name is removed under policy, it returns the same
-  unknown-operation problem as any unknown name; authorized callers may
-  separately use ordinary discovery guidance. No retired-name tombstone
-  registry or compatibility ledger exists.
+  authorized installed-host/profile census proves absence. Until then it
+  delegates to the canonical operation or returns an actionable negotiated
+  upgrade result, never a generic unknown-operation response. After
+  census-authorized retirement it behaves as an ordinary unknown name;
+  authorized callers may use ordinary discovery guidance. No retired-name
+  tombstone registry or compatibility ledger exists.
 - **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
   methods to the same CapabilityId and typed application handler where the
   protocol exposes a callable product operation. Dashboard binding, dashboard
