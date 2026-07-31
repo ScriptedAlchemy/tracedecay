@@ -1200,12 +1200,6 @@ pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod project_open_owners;
 pub(crate) mod query_authority_provider;
-pub(crate) mod remote_brain;
-pub(crate) mod remote_enrollment;
-mod remote_https;
-#[cfg(test)]
-mod remote_https_tests;
-pub(crate) mod remote_protocol;
 mod semantic_evaluation;
 pub(crate) use core_admission::*;
 pub use core_client::*;
@@ -1291,9 +1285,7 @@ pub(crate) use service::invocation::{
     DaemonLspOwnerRegistrar, DaemonLspSessionAccess, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
-    Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationOutcomeV1,
-    Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
-    Pr13AdvisoryCycleTerminalV1, Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
+    Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
     admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
     parse_daemon_invocation_request,
@@ -3632,10 +3624,12 @@ impl<Server> DatabaseOwnerRegistry<Server> {
             .map(|entry| &entry.server)
     }
 
+    #[cfg(test)]
     fn insert(&mut self, key: ProjectServerKey, server: Server) {
         self.insert_at(key, server, Instant::now());
     }
 
+    #[cfg(test)]
     fn insert_at(&mut self, key: ProjectServerKey, server: Server, last_used: Instant) {
         self.servers.insert(
             key,
@@ -3763,17 +3757,6 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.synchronous_health.remove(owner);
     }
 
-    fn servers_for_owner(&self, owner: &StoreOwnerKey) -> Vec<Server>
-    where
-        Server: Clone,
-    {
-        self.servers
-            .iter()
-            .filter(|(key, _)| &key.owner == owner)
-            .map(|(_, entry)| entry.server.clone())
-            .collect()
-    }
-
     fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
         debug_assert!(self.servers.contains_key(&key));
         if let Some(entry) = self.servers.get_mut(&key) {
@@ -3782,6 +3765,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.aliases.insert(route, key);
     }
 
+    #[cfg(test)]
     fn insert_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey, server: Server) {
         self.insert(key.clone(), server);
         self.bind_route(route, key);
@@ -3804,7 +3788,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.aliases.insert(route, key);
     }
 
-    #[allow(dead_code)] // in-flight daemon route binding — staged
+    #[cfg(test)]
     fn bind_or_insert_route(
         &mut self,
         route: ProjectRouteKey,
@@ -3889,93 +3873,6 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     fn keys(&self) -> impl Iterator<Item = &ProjectServerKey> {
         self.servers.keys()
     }
-}
-
-/// The retirement steps a published project server has to support.
-///
-/// Once core publication exposes a route, any later failure must stop that
-/// server from answering before its registry entry disappears. Keeping the
-/// steps behind a trait lets the funnel below run against a recording double
-/// instead of a whole daemon composition.
-trait RetirableProjectServer: Send + Sync + 'static {
-    /// Stops the server from writing further responses and cancels its startup
-    /// transcript ingest.
-    fn revoke_and_cancel_ingest(&self);
-
-    /// Waits for responses already in flight when revocation landed.
-    fn wait_for_response_drain(&self) -> impl std::future::Future<Output = ()> + Send;
-}
-
-impl RetirableProjectServer for crate::mcp::McpServer {
-    fn revoke_and_cancel_ingest(&self) {
-        self.revoke_project_server_responses();
-        self.cancel_startup_transcript_ingest();
-    }
-
-    fn wait_for_response_drain(&self) -> impl std::future::Future<Output = ()> + Send {
-        self.wait_for_project_server_request_drain()
-    }
-}
-
-/// What a retirement leaves behind for the owner's next open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PublishedOwnerRetirement {
-    /// The failure proved store damage, so the owner is quarantined as well as
-    /// removed and its next open re-validates health synchronously.
-    QuarantineForHealth,
-    /// The failure says nothing about store health — a cancelled open, a branch
-    /// change, a capability that never finished mounting. The owner is removed
-    /// without making its next open pay for a full revalidation.
-    Remove,
-}
-
-/// Retires every server published under one store owner after a failure that
-/// landed once the core was already routable.
-///
-/// Revocation runs first so no further response can be written, then in-flight
-/// responses drain, and only then is the owner removed. The drain and removal
-/// run on a detached task: a project-open future dropped mid-retirement must
-/// not leave a half-mounted owner bound to its route.
-async fn retire_published_project_owner<S>(
-    project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry<Arc<S>>>>,
-    owner: StoreOwnerKey,
-    published: Vec<Arc<S>>,
-    retirement: PublishedOwnerRetirement,
-) -> Result<usize>
-where
-    S: RetirableProjectServer,
-{
-    for server in &published {
-        server.revoke_and_cancel_ingest();
-    }
-    let retiring = tokio::spawn(async move {
-        for server in &published {
-            server.wait_for_response_drain().await;
-        }
-        let removed = {
-            let mut servers = project_servers.lock().await;
-            match retirement {
-                PublishedOwnerRetirement::QuarantineForHealth => {
-                    servers.quarantine_and_remove_owner(&owner)
-                }
-                PublishedOwnerRetirement::Remove => servers.remove_owner(&owner),
-            }
-        };
-        for server in &removed {
-            server.revoke_and_cancel_ingest();
-        }
-        for server in &removed {
-            server.wait_for_response_drain().await;
-        }
-        removed.len()
-    });
-    retiring
-        .await
-        .map_err(|join_error| TraceDecayError::Config {
-            message: format!(
-                "failed to retire the published project server owner after project open failed: {join_error}"
-            ),
-        })
 }
 
 /// Post-open FTS health for one project publication.

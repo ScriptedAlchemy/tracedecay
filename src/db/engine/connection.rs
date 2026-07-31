@@ -6,9 +6,9 @@ use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlTransaction as RuntimeTransaction,
 };
 
-use super::{
-    IntoParams, ReadSnapshot, Result, Rows, Statement, Transaction, TransactionBehavior, Value,
-};
+#[cfg(test)]
+use super::Statement;
+use super::{IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, Value};
 
 const READER_WAIT: Duration = Duration::from_secs(5);
 
@@ -18,10 +18,13 @@ pub(super) trait Runtime: Send + Sync {
     fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows>;
     fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult>;
     fn repair_incremental_auto_vacuum(&self) -> Result<()>;
+    #[cfg(test)]
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()>;
+    #[cfg(test)]
     fn last_insert_rowid(&self) -> i64;
     fn begin_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
     fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
+    #[cfg(test)]
     fn begin_deferred(&self) -> Result<RuntimeTransaction>;
     fn begin_immediate(&self) -> Result<RuntimeTransaction>;
     fn begin_schema_migration_immediate(&self) -> Result<RuntimeTransaction>;
@@ -48,10 +51,12 @@ impl Runtime for MigrationSqlHandle {
         self.repair_incremental_auto_vacuum().map_err(Into::into)
     }
 
+    #[cfg(test)]
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()> {
         self.validate(statement).map_err(Into::into)
     }
 
+    #[cfg(test)]
     fn last_insert_rowid(&self) -> i64 {
         self.last_insert_rowid()
     }
@@ -65,6 +70,7 @@ impl Runtime for MigrationSqlHandle {
             .map_err(Into::into)
     }
 
+    #[cfg(test)]
     fn begin_deferred(&self) -> Result<RuntimeTransaction> {
         self.begin_deferred().map_err(Into::into)
     }
@@ -178,6 +184,7 @@ impl Connection {
             .map_err(join_error)?
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
         let statement = statement(sql, ())?;
         let runtime = Arc::clone(&self.runtime);
@@ -187,6 +194,7 @@ impl Connection {
         Statement::for_connection(self, sql)
     }
 
+    #[cfg(test)]
     pub(crate) fn last_insert_rowid(&self) -> i64 {
         self.runtime.last_insert_rowid()
     }
@@ -207,6 +215,7 @@ impl Connection {
             .map(ReadSnapshot::from_runtime)
     }
 
+    #[cfg(test)]
     pub(crate) async fn transaction(&self) -> Result<Transaction> {
         self.transaction_with_behavior(TransactionBehavior::Deferred)
             .await
@@ -217,6 +226,7 @@ impl Connection {
         behavior: TransactionBehavior,
     ) -> Result<Transaction> {
         match behavior {
+            #[cfg(test)]
             TransactionBehavior::Deferred => {
                 let runtime = Arc::clone(&self.runtime);
                 tokio::task::spawn_blocking(move || runtime.begin_deferred())

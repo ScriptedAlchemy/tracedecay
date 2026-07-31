@@ -9,7 +9,7 @@ use crate::db::engine::Value;
 
 use super::{
     RegisteredGlobalDb, SESSION_MESSAGE_SEARCH_MAX_FETCH, SessionActivityRow, SessionIngestHealth,
-    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionToolUsageRow,
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord,
     UNIX_TIMESTAMP_MILLIS_THRESHOLD, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
 };
@@ -233,50 +233,6 @@ impl RegisteredGlobalDb {
                 kind: row.get::<Option<String>>(2).ok().flatten(),
                 tool_names: row.get::<Option<String>>(3).ok().flatten(),
                 metadata_json: row.get::<Option<String>>(4).ok().flatten(),
-            });
-        }
-        Ok(out)
-    }
-
-    pub(crate) async fn session_tool_usage_rows(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<SessionToolUsageRow>, String> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to begin session tool usage snapshot: {error}"))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT COALESCE(tool_names, '') AS tool_names,
-                        COALESCE(text, '') AS text,
-                        COALESCE(metadata_json, '') AS metadata_json
-                 FROM session_messages
-                 ORDER BY timestamp, ordinal
-                 LIMIT ?1",
-                [i64::try_from(limit).unwrap_or(i64::MAX)],
-            )
-            .await
-            .map_err(|error| format!("failed to query session tool usage rows: {error}"))?;
-        let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read session tool usage rows: {error}"))?
-        {
-            out.push(SessionToolUsageRow {
-                tool_names: row
-                    .get::<String>(0)
-                    .map_err(|error| format!("failed to decode session tool_names: {error}"))?,
-                text: row
-                    .get::<String>(1)
-                    .map_err(|error| format!("failed to decode session text: {error}"))?,
-                metadata_json: row
-                    .get::<String>(2)
-                    .map_err(|error| format!("failed to decode session metadata: {error}"))?,
             });
         }
         Ok(out)

@@ -1,6 +1,5 @@
 //! Aggregation and summary queries for token accounting.
 
-use crate::display::CostRow;
 use crate::global_db::RegisteredGlobalDb;
 
 /// Full cost summary with breakdowns.
@@ -13,40 +12,6 @@ pub struct CostSummary {
     pub by_category: Vec<(String, f64, u64)>, // (category, cost, turn_count)
     pub tokens_saved: u64,
     pub efficiency_ratio: f64,
-}
-
-/// Quick cost summary for the `tracedecay status` header row.
-/// Returns `None` if no accounting data exists.
-pub(crate) async fn quick_cost_summary(
-    gdb: &RegisteredGlobalDb,
-    tokens_saved: u64,
-    global_tokens_saved: u64,
-) -> Result<Option<CostRow>, String> {
-    let now = now_epoch();
-    let today_start = today_start_epoch(now);
-    let week_start = now.saturating_sub(7 * 86400);
-
-    let today_cost = gdb.try_total_cost_since(today_start).await?;
-    let week_cost = gdb.try_total_cost_since(week_start).await?;
-    let week_consumed = gdb.try_total_tokens_since(week_start).await?;
-
-    // Don't show the row if there's no meaningful data
-    if today_cost < 0.001 && week_cost < 0.001 {
-        return Ok(None);
-    }
-
-    let total_saved = tokens_saved + global_tokens_saved;
-    let efficiency_pct = if total_saved + week_consumed > 0 {
-        (total_saved as f64 / (total_saved + week_consumed) as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    Ok(Some(CostRow {
-        today_cost,
-        week_cost,
-        efficiency_pct,
-    }))
 }
 
 /// Build a full cost summary for a given time range.

@@ -8,18 +8,20 @@ use tracedecay_rusqlite_runtime::migration_sql::{
 };
 
 use super::{
-    IntoParams, Result, Rows, Statement, Value,
+    IntoParams, Result, Rows, Value,
     connection::{Runtime, statement},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TransactionBehavior {
+    #[cfg(test)]
     Deferred,
     Immediate,
 }
 
 pub(crate) struct Transaction {
     runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
+    #[cfg(test)]
     connection_runtime: Arc<dyn Runtime>,
 }
 
@@ -28,8 +30,11 @@ impl Transaction {
         runtime: RuntimeTransaction,
         connection_runtime: Arc<dyn Runtime>,
     ) -> Self {
+        #[cfg(not(test))]
+        let _ = connection_runtime;
         Self {
             runtime: Arc::new(Mutex::new(Some(runtime))),
+            #[cfg(test)]
             connection_runtime,
         }
     }
@@ -128,7 +133,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
-    pub(crate) async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
+    pub(crate) async fn validate(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
         tokio::task::spawn_blocking(move || {
@@ -139,10 +144,10 @@ impl Transaction {
                 .map_err(super::Error::from)
         })
         .await
-        .map_err(join_error)??;
-        Statement::for_transaction(self, sql)
+        .map_err(join_error)?
     }
 
+    #[cfg(test)]
     pub(crate) fn last_insert_rowid(&self) -> i64 {
         self.connection_runtime.last_insert_rowid()
     }

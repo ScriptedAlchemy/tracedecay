@@ -16,10 +16,9 @@ use crate::application::feedback::concrete::Pr12FeedbackRuntime;
 use crate::application::primitives::Pr12PrimitiveProjectRuntime;
 
 use super::invocation::{
-    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, Pr13AdvisoryCycleInvocationPortV1,
-    Pr13HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
-    UnavailableFeedbackCycleRuntimeV1,
+    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, Pr13HookOrchestrationPortV1,
+    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
+    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
 mod reaper;
@@ -115,7 +114,6 @@ pub(crate) struct ProjectRuntime {
     work: Option<RegisteredWorkRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     advisory: Option<Arc<dyn Any + Send + Sync>>,
-    advisory_cycle_invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
     advisory_hook_orchestrator: Option<Arc<dyn Pr13HookOrchestrationPortV1>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
     reservations: Vec<TypeId>,
@@ -142,7 +140,6 @@ impl ProjectRuntime {
             || self.work.is_some()
             || self.lsp_owner.is_some()
             || self.advisory.is_some()
-            || self.advisory_cycle_invoker.is_some()
             || self.advisory_hook_orchestrator.is_some()
             || self.semantic.is_some()
             || {
@@ -198,7 +195,6 @@ project_runtime_components!(
     RegisteredWorkRuntime => work,
     DaemonLspInvocationOwner => lsp_owner,
     Arc<dyn Any + Send + Sync> => advisory,
-    Arc<dyn Pr13AdvisoryCycleInvocationPortV1> => advisory_cycle_invoker,
     Arc<dyn Pr13HookOrchestrationPortV1> => advisory_hook_orchestrator,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
@@ -352,7 +348,6 @@ impl ProjectRuntimePublication {
                 move_component!(work);
                 move_component!(lsp_owner);
                 move_component!(advisory);
-                move_component!(advisory_cycle_invoker);
                 move_component!(advisory_hook_orchestrator);
                 move_component!(semantic);
                 #[cfg(test)]
@@ -387,7 +382,6 @@ impl ProjectRuntimePublication {
 pub(super) struct ProjectRequestRuntimesV1 {
     pub(super) feedback: Option<Arc<Pr12FeedbackRuntime>>,
     pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
-    pub(super) advisory_cycle_invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
     pub(super) configuration: Option<RegisteredConfigurationRuntime>,
     pub(super) work: Option<RegisteredWorkRuntime>,
     pub(super) lsp_owner: Option<DaemonLspInvocationOwner>,
@@ -884,8 +878,6 @@ impl ProjectRuntimeRegistryV1 {
         ProjectRequestRuntimesV1 {
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
-            advisory_cycle_invoker: runtime
-                .and_then(|runtime| runtime.advisory_cycle_invoker.clone()),
             configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
             work: runtime.and_then(|runtime| runtime.work.clone()),
             lsp_owner: Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(

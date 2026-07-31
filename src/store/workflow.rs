@@ -1,4 +1,4 @@
-//! Root adapter for workflow-index storage and [`WorkflowIngestSink`].
+//! Root adapter for workflow-index storage.
 
 use std::future::Future;
 use std::path::Path;
@@ -10,8 +10,7 @@ use crate::db::engine::params;
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use crate::sessions::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowAgent, WorkflowIndexError,
-    WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
-    upsert_run,
+    WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent, upsert_run,
 };
 use crate::sessions::workflow_ingest::{WorkflowIngestStats, ingest_workflow_runs_with_sink};
 use crate::sessions::workflow_state::{WorkflowStateItem, list_unfinished};
@@ -149,27 +148,5 @@ impl WorkflowIngestWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
                 .await
                 .map_err(|error| WorkflowIndexError::Db(error.to_string()))
         }
-    }
-}
-
-impl WorkflowIngestSink for GlobalDbWorkflowStore<'_> {
-    fn matches_project_sessions_authority(&self, project_id: &ProjectId) -> bool {
-        GlobalDbWorkflowStore::matches_project_sessions_authority(self, project_id)
-    }
-
-    fn read_ingest_watermark(&self) -> impl Future<Output = Option<i64>> + Send {
-        async move { GlobalDbWorkflowStore::read_ingest_watermark(self).await }
-    }
-
-    fn upsert_workflow_run(
-        &self,
-        run: &WorkflowRun,
-        agents: &[WorkflowAgent],
-    ) -> impl Future<Output = Result<(), WorkflowIndexError>> + Send {
-        async move { GlobalDbWorkflowStore::upsert_workflow_run(self, run, agents).await }
-    }
-
-    fn bump_ingest_watermark(&self, value: i64) -> impl Future<Output = ()> + Send {
-        async move { GlobalDbWorkflowStore::bump_ingest_watermark(self, value).await }
     }
 }

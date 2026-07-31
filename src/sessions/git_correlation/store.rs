@@ -6,7 +6,7 @@
 
 use std::future::Future;
 
-use crate::db::engine::{Executor, QueryExecutor, ReadSnapshot};
+use crate::db::engine::{Executor, QueryExecutor};
 
 use super::GitCorrelationError;
 
@@ -37,29 +37,4 @@ impl AnalyticsSessionTimestampSource for AnalyticsSessionTimestamp {
 /// Write transaction surface required by span/commit backfill.
 pub(crate) trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send {
     fn commit(self) -> impl Future<Output = Result<(), GitCorrelationError>> + Send;
-}
-
-/// Project-session store authority used by git-correlation backfill and reads.
-///
-/// Implementations must preserve `ProjectSessions` authority checks, watermark
-/// ordering, idempotent span/commit writes, and fail-open-per-session skip
-/// semantics owned by the backfill loop.
-///
-/// Snapshot/write associated types stay concrete (not `impl Trait`) so
-/// monomorphized callers keep the same `Send` futures as direct
-/// `RegisteredGlobalDb` usage.
-pub(crate) trait GitCorrelationStore: Send + Sync {
-    type WriteTxn<'a>: GitCorrelationWriteTxn
-    where
-        Self: 'a;
-
-    fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError>;
-
-    fn read_snapshot(
-        &self,
-    ) -> impl Future<Output = Result<ReadSnapshot, GitCorrelationError>> + Send;
-
-    fn open_write_transaction(
-        &self,
-    ) -> impl Future<Output = Result<Self::WriteTxn<'_>, GitCorrelationError>> + Send;
 }

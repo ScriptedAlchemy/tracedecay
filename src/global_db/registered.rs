@@ -238,18 +238,6 @@ impl RegisteredGlobalDb {
         self.runtime.binding()
     }
 
-    pub(crate) fn retrieval_anchor_store(
-        &self,
-    ) -> tracedecay_store::RetrievalAnchorStoreResult<
-        crate::application::retrieval_anchor_store::RuntimeRetrievalAnchorStore,
-    > {
-        crate::application::retrieval_anchor_store::RuntimeRetrievalAnchorStore::new(
-            self.binding().shard_id.profile_id.clone(),
-            self.runtime.clone(),
-            self.authority.clone(),
-        )
-    }
-
     pub(crate) fn evidence_assembly_store(
         &self,
     ) -> tracedecay_store::EvidenceAssemblyStoreResult<

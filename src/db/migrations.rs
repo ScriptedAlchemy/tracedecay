@@ -356,6 +356,7 @@ pub async fn migrate(database: &crate::db::Database) -> Result<Option<u32>> {
 /// Internal registered-runtime entry point. Public callers migrate the
 /// authority-bound [`crate::db::Database`] facade instead of naming the
 /// private engine connection.
+#[cfg(test)]
 pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
     Ok(migrate_inner(conn, false).await?.is_some())
 }
@@ -366,6 +367,7 @@ pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
 /// [`migrate`] so startup latency never grows with the database file size. The
 /// maintenance runtime is consumed because a whole-file rebuild invalidates
 /// reader connections opened against the previous file image.
+#[cfg(test)]
 pub(crate) async fn migrate_with_exclusive_maintenance(
     database: crate::db::Database,
 ) -> Result<bool> {

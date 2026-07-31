@@ -1622,7 +1622,7 @@ async fn recover_source_edit_transaction(
     };
     let mut durable_outcome =
         SourceEditDurableOutcomeV1::from_live(&journal.request.operation, &outcome);
-    durable_outcome.files = journal.candidate_files.clone();
+    durable_outcome.files.clone_from(&journal.candidate_files);
     let record = durable_record(
         &journal,
         durable_outcome,
