@@ -4,7 +4,10 @@
 //! All operations are best-effort with timeouts. Failures are silently
 //! ignored and never block the CLI.
 
+use std::cmp::Ordering;
 use std::time::Duration;
+
+use semver::Version;
 
 /// The Cloudflare Worker endpoint URL.
 const WORKER_URL: &str = "https://tracedecay-counter.enzinol.workers.dev";
@@ -238,42 +241,23 @@ pub fn is_beta() -> bool {
     env!("CARGO_PKG_VERSION").contains('-')
 }
 
-/// Returns true if `latest` is strictly newer than `current` using semver comparison.
-/// Handles pre-release suffixes (e.g. "2.5.0-beta.1") by stripping them for the
-/// base version comparison, then comparing pre-release tags lexicographically.
+/// Returns true if `latest` is strictly newer than `current` using SemVer
+/// precedence (`Version::cmp_precedence`), so build metadata does not affect
+/// ordering. Stable and beta remain separate channels: a prerelease never
+/// dominates a stable release (or the reverse), even when the numeric core is
+/// higher.
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
-    /// Parses a version string into (major, minor, patch, pre-release).
-    fn parse(v: &str) -> Option<(u64, u64, u64, Option<&str>)> {
-        let (base, pre) = match v.split_once('-') {
-            Some((b, p)) => (b, Some(p)),
-            None => (v, None),
-        };
-        let mut parts = base.split('.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        let patch = parts.next()?.parse().ok()?;
-        Some((major, minor, patch, pre))
+    let Ok(current) = Version::parse(current) else {
+        return false;
+    };
+    let Ok(latest) = Version::parse(latest) else {
+        return false;
+    };
+    // Beta and stable are separate channels — never suggest cross-channel updates.
+    if current.pre.is_empty() != latest.pre.is_empty() {
+        return false;
     }
-
-    match (parse(current), parse(latest)) {
-        (Some((cm, cn, cp, cpre)), Some((lm, ln, lp, lpre))) => {
-            // Beta and stable are separate channels — never suggest cross-channel updates.
-            if cpre.is_some() != lpre.is_some() {
-                return false;
-            }
-            let c_base = (cm, cn, cp);
-            let l_base = (lm, ln, lp);
-            if l_base != c_base {
-                return l_base > c_base;
-            }
-            // Same base version, same channel
-            match (cpre, lpre) {
-                (Some(a), Some(b)) => b > a,
-                _ => false,
-            }
-        }
-        _ => false,
-    }
+    latest.cmp_precedence(&current) == Ordering::Greater
 }
 
 /// Returns true if `latest` is a newer version than `current` AND the
@@ -281,19 +265,17 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
 ///
 /// Used by the CLI version warning to avoid nagging on patch releases.
 pub fn is_newer_minor_version(current: &str, latest: &str) -> bool {
-    fn parse(v: &str) -> Option<(u64, u64)> {
-        let base = v.split_once('-').map_or(v, |(b, _)| b);
-        let mut parts = base.split('.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        Some((major, minor))
+    let Ok(current) = Version::parse(current) else {
+        return false;
+    };
+    let Ok(latest) = Version::parse(latest) else {
+        return false;
+    };
+    if current.pre.is_empty() != latest.pre.is_empty() {
+        return false;
     }
-
-    is_newer_version(current, latest)
-        && match (parse(current), parse(latest)) {
-            (Some(c), Some(l)) => l > c,
-            _ => true,
-        }
+    latest.cmp_precedence(&current) == Ordering::Greater
+        && (latest.major, latest.minor) > (current.major, current.minor)
 }
 
 /// How tracedecay was installed, detected from the binary path.

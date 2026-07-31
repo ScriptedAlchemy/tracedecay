@@ -341,6 +341,49 @@ fn patch_bump_only_advances_the_marker() {
 }
 
 #[test]
+fn numeric_beta_prerelease_bump_only_advances_the_marker() {
+    // beta.2 → beta.10 is newer, but same minor — no agent reinstall.
+    let config = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "0.0.18-beta.2".to_string(),
+        last_installed_version: "0.0.18-beta.2".to_string(),
+        ..UserConfig::default()
+    };
+
+    assert_eq!(
+        silent_reinstall_action(&config, "0.0.18-beta.10"),
+        SilentReinstallAction::AdvanceMarker
+    );
+}
+
+#[test]
+fn beta_minor_bump_triggers_reinstall_and_cross_channel_stays_quiet() {
+    // 1.2.x → 1.3.x is a SemVer minor bump on the same beta channel.
+    let beta_minor = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "1.2.3-beta.2".to_string(),
+        last_installed_version: "1.2.3-beta.2".to_string(),
+        ..UserConfig::default()
+    };
+    assert_eq!(
+        silent_reinstall_action(&beta_minor, "1.3.0-beta.1"),
+        SilentReinstallAction::Reinstall
+    );
+
+    // Stable ↔ beta never counts as a minor transition for silent reinstall.
+    let cross_channel = UserConfig {
+        installed_agents: vec!["cursor".to_string()],
+        previous_version: "1.2.3".to_string(),
+        last_installed_version: "1.2.3".to_string(),
+        ..UserConfig::default()
+    };
+    assert_eq!(
+        silent_reinstall_action(&cross_channel, "1.3.0-beta.1"),
+        SilentReinstallAction::AdvanceMarker
+    );
+}
+
+#[test]
 fn serve_skips_startup_maintenance() {
     // `tracedecay serve` is the MCP hot path with a 30 s client-side
     // `initialize` timeout (#84). Pre-serve maintenance work
