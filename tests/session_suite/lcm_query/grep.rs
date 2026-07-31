@@ -57,6 +57,11 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
     assert!(hits.iter().any(|hit| hit.kind == "summary_node"));
     assert!(
         hits.iter()
+            .all(|hit| matches!(hit.kind.as_str(), "raw_message" | "summary_node")),
+        "LCM query results must stay within the raw-message and summary stores"
+    );
+    assert!(
+        hits.iter()
             .all(|hit| hit.snippet.chars().count() <= MAX_DERIVED_SNIPPET_CHARS)
     );
     assert!(!hits.iter().any(|hit| hit.snippet.contains("secret body")));

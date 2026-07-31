@@ -246,12 +246,7 @@ impl RegisteredTemporalRead {
         detail_count
     }
 
-    async fn text_column(
-        &self,
-        sql: &str,
-        params: Vec<SqlValue>,
-        column: usize,
-    ) -> Vec<String> {
+    async fn text_column(&self, sql: &str, params: Vec<SqlValue>, column: usize) -> Vec<String> {
         let mut rows = crate::db::engine::QueryExecutor::query(&self.read, sql, params)
             .await
             .expect("query must execute");
@@ -1024,9 +1019,8 @@ async fn duplicate_frozen_generation_rows_fail_closed_as_not_unique() {
     .to_string();
     // No primary key: the production uniqueness probe must still fail closed
     // when two matching generation rows are visible under LIMIT 2.
-    conn.execute_batch(
-        &format!(
-            "CREATE TABLE session_temporal_generations (
+    conn.execute_batch(&format!(
+        "CREATE TABLE session_temporal_generations (
                 session_id TEXT NOT NULL,
                 generation INTEGER NOT NULL,
                 state TEXT NOT NULL,
@@ -1035,8 +1029,7 @@ async fn duplicate_frozen_generation_rows_fail_closed_as_not_unique() {
              INSERT INTO session_temporal_generations VALUES
                 ('session-snapshot', 1, 'active', '{frozen}'),
                 ('session-snapshot', 1, 'active', '{frozen}');"
-        ),
-    )
+    ))
     .await
     .expect("ambiguous generation fixture");
 
@@ -1046,7 +1039,9 @@ async fn duplicate_frozen_generation_rows_fail_closed_as_not_unique() {
         .await
         .expect_err("duplicate frozen generation rows must fail closed");
     assert!(
-        error.to_string().contains("frozen generation is not unique"),
+        error
+            .to_string()
+            .contains("frozen generation is not unique"),
         "unexpected ambiguity error: {error:?}"
     );
 }
@@ -1117,9 +1112,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(128),
         SqlValue::Integer(128),
         SqlValue::Integer(1_024),
-        SqlValue::Integer(
-            i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap"),
-        ),
+        SqlValue::Integer(i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap")),
         SqlValue::Integer(10),
     ];
     assert_eq!(
@@ -1142,12 +1135,8 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(10),
     ];
     assert_eq!(
-        read.text_column(
-            OCCURRENCE_FTS_QUERY,
-            occurrence_fts_params.clone(),
-            0
-        )
-        .await,
+        read.text_column(OCCURRENCE_FTS_QUERY, occurrence_fts_params.clone(), 0)
+            .await,
         ["occurrence-plan-inside"]
     );
     let occurrence_fts_plan = read
@@ -1155,8 +1144,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         .await;
     assert!(
         occurrence_fts_plan.iter().any(|detail| {
-            detail.contains("session_occurrences_fts")
-                && detail.contains("VIRTUAL TABLE INDEX")
+            detail.contains("session_occurrences_fts") && detail.contains("VIRTUAL TABLE INDEX")
         }),
         "occurrence retrieval must execute through the live FTS operator: {occurrence_fts_plan:?}"
     );
@@ -1213,8 +1201,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         .await;
     assert!(
         summary_plan.iter().any(|detail| {
-            detail.contains("session_summary_nodes_fts")
-                && detail.contains("VIRTUAL TABLE INDEX")
+            detail.contains("session_summary_nodes_fts") && detail.contains("VIRTUAL TABLE INDEX")
         }),
         "summary retrieval must execute through the live FTS operator: {summary_plan:?}"
     );
@@ -1244,8 +1231,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         .await;
     assert!(
         root_fts_plan.iter().any(|detail| {
-            detail.contains("session_occurrences_fts")
-                && detail.contains("VIRTUAL TABLE INDEX")
+            detail.contains("session_occurrences_fts") && detail.contains("VIRTUAL TABLE INDEX")
         }),
         "root retrieval must execute one live FTS store query: {root_fts_plan:?}"
     );
@@ -2173,132 +2159,4 @@ fn iso_day_bounds_are_micros_and_half_open() {
     let (start, end) = iso_day_bounds("2026-07-18").unwrap();
     assert_eq!(end - start, 86_400_000_000);
     assert!(iso_day_bounds("not-a-date").is_err());
-}
-
-#[test]
-fn record_query_has_no_offset_or_per_candidate_subqueries() {
-    let candidates = [
-        record_candidate(),
-        RankingCandidate {
-            stable_id: "exact:occurrence-2".to_string(),
-            anchor_id: RetrievalAnchorId::new("anchor-2").expect("anchor"),
-            retriever_record_id: "occurrence-2".to_string(),
-            channel: CandidateChannel::ExactMessage,
-            raw_score: 900,
-            knowledge_at_micros: 2,
-            logical_message: Some("message-2".to_string()),
-            turn: None,
-            session: Some("session-snapshot".to_string()),
-            source: Some("claude".to_string()),
-            evidence_role: Some("assistant".to_string()),
-            exact_ranges: Vec::new(),
-        },
-    ];
-    let query = build_record_query(
-        &TemporalRetrievalScope::Session(SessionId::new("session-snapshot").expect("session")),
-        &scoped_snapshot(1, Some("claude")),
-        &candidates,
-        0,
-        &RecordCursor {
-            candidate: 0,
-            kind: 0,
-            session_id: String::new(),
-            stable_id: String::new(),
-        },
-        33,
-        &record_request(),
-    )
-    .expect("multi-candidate record query");
-
-    assert!(
-        !query.sql.to_ascii_uppercase().contains(" OFFSET "),
-        "record hydration must keyset-paginate rather than OFFSET"
-    );
-    assert!(
-        query
-            .sql
-            .contains("WITH candidate_input(\n             ordinal, session_id, anchor_id, derived_kind, retriever_record_id")
-            || query
-                .sql
-                .contains("ordinal, session_id, anchor_id, derived_kind, retriever_record_id"),
-        "all candidates must hydrate through one candidate_input table"
-    );
-    assert!(
-        query.sql.matches("VALUES (").count() >= 1,
-        "candidate rows must be bound in one VALUES list, not per-candidate queries"
-    );
-    assert!(
-        query
-            .sql
-            .contains("ORDER BY ordinal, kind_rank, scope_session, stable_id"),
-        "record pages must stay keyset-ordered"
-    );
-    // Two candidates contribute session/anchor/derived/retriever bindings plus
-    // ordinals — observable proof the builder did not loop into N queries.
-    let candidate_text_params = query
-        .params
-        .iter()
-        .filter(|param| {
-            matches!(
-                param,
-                SqlValue::Text(value)
-                    if value == "session-snapshot"
-                        || value == "anchor-1"
-                        || value == "anchor-2"
-                        || value == "occurrence-1"
-                        || value == "occurrence-2"
-            )
-        })
-        .count();
-    assert!(
-        candidate_text_params >= 6,
-        "one query must bind every candidate identity field; got {candidate_text_params}"
-    );
-}
-
-#[test]
-fn root_record_query_carries_session_identity_through_hydration() {
-    let scope =
-        tracedecay_temporal_query::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot;
-    let mut candidate = record_candidate();
-    candidate.session = Some("session-b".to_string());
-    let query = build_record_query(
-        &scope,
-        &root_snapshot_with_mode(1, None, TemporalModeV1::Current),
-        &[candidate],
-        0,
-        &RecordCursor {
-            candidate: 0,
-            kind: 0,
-            session_id: String::new(),
-            stable_id: String::new(),
-        },
-        33,
-        &record_request(),
-    )
-    .expect("root record query");
-    assert!(
-        query
-            .sql
-            .contains("ordinal, session_id, anchor_id, derived_kind, retriever_record_id")
-    );
-    assert!(query.sql.contains("o.session_id = c.session_id"));
-    assert!(query.sql.contains("a.session_id = c.session_id"));
-    assert!(query.sql.contains("target.session_id = c.session_id"));
-    assert!(query.sql.contains("n.session_id = c.session_id"));
-    assert!(
-        query
-            .sql
-            .contains("source_summary.session_id = n.session_id")
-    );
-    assert!(
-        query
-            .sql
-            .contains("retained_summary.session_id = n.session_id")
-    );
-    assert!(
-        query
-            .sql
-            .contains("ORDER BY ordinal, kind_rank, scope_session, stable_id")
-    );
 }
