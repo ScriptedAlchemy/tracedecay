@@ -28,6 +28,13 @@ contract without establishing milestone status. Historical packet/type names,
 exact source layouts, schema registries, and fixture matrices are evidence only
 unless separately declared public or persisted API.
 
+The PR12 feedback-read and TraceDecay LSP extension shapes are branch-local and
+have no predecessor on `origin/master`, in a published package/release, or in
+live persisted data. They change to their final schemas in place. LSP revision
+negotiation remains required for independently deployed clients, but branch
+history, an experimental version tag, or a test fixture does not create a
+compatibility reader or migration obligation.
+
 ## PR12 baseline reader and LSP context contract
 
 PR12 must make canonical diagnostics, impact, affected-test, test-result,
@@ -273,7 +280,9 @@ feedback requires exact saved-content or clean-generation identity.
   and schema inventories, standalone milestone gates, giant lifecycle ×
   provider fixture matrices, and placeholder benchmark packets.
 - Remove reserved PR15/PR17 fields from PR13 schemas. Later callable
-  operations add their own versioned inputs when they ship.
+  operations add their inputs to the unreleased final shape in place; a new
+  contract version is introduced only after release or persistence evidence
+  establishes a predecessor.
 - Remove adapter-local findings, proximity fanout/dedupe, suggestion streams,
   task linking, and evidence stores. The canonical owners above remain.
 - Do not remove or reduce any pillar, surface, lifecycle/provider state,
