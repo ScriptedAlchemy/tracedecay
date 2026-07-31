@@ -52,16 +52,12 @@ directory; `npm publish <tarball>.tgz` (what the CI publish job does) skips
 package lifecycle scripts entirely, so CI's own build/conformance job is the
 authoritative gate, not this hook.
 
-Actual releases run through the `SDK publish` GitHub Actions workflow
-(`.github/workflows/sdk-publish.yml`, dispatched with `sdk: typescript`),
-split into two jobs so publish credentials are never exposed to build/test
-code: an unprivileged `build-typescript` job packs the tarball exactly once,
-runs typecheck/unit/conformance against that *same* tarball (not a fresh
-rebuild), records its sha256 digest, and uploads both; a separate
-environment-protected `publish-typescript` job (master-only, minimal OIDC)
-downloads the artifact, re-verifies the digest, and publishes those exact,
-unchanged bytes to npm via trusted publishing (no `NPM_TOKEN`). Setting
-`TRACEDECAY_SDK_TARBALL` to a prebuilt tarball path makes
-`test:installed` exercise that tarball instead of packing its own. See
-[`docs/RELEASE-AUTOMATION.md`](../../docs/RELEASE-AUTOMATION.md) for the
-trusted-publisher bootstrap.
+Actual releases run through `.github/workflows/sdk-publish.yml`, manually
+dispatched from `master` without a package selector. An unprivileged
+`build-typescript` job packs the tarball exactly once, runs
+typecheck/unit/conformance against that same tarball, and stages both the
+artifact and digest-pinned npm tooling. A separate protected
+`publish-typescript` job re-verifies those exact bytes and publishes through
+npm OIDC without installing code or receiving an `NPM_TOKEN`. Setting
+`TRACEDECAY_SDK_TARBALL` to a prebuilt tarball path makes `test:installed`
+exercise that tarball instead of packing its own.

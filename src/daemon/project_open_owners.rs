@@ -1200,6 +1200,11 @@ pub(super) async fn register_project_open_production_owners(
         .await
     {
         Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => {}
+        Err(DaemonPrimitiveRuntimeRegistrationError::RegistryClosed) => {
+            return Err(TraceDecayError::Config {
+                message: "project-open primitive runtime registration failed: the daemon project runtime registry is closed".to_owned(),
+            });
+        }
     }
     tracing::info!(
         event = "project_open_owner_phase",

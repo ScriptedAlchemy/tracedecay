@@ -5,7 +5,13 @@ release_plz=".github/workflows/release-plz.yml"
 release_workflow=".github/workflows/release.yml"
 release_beta=".github/workflows/release-beta.yml"
 release_pr_integrity=".github/workflows/release-pr-integrity.yml"
+sdk_conformance=".github/workflows/sdk-conformance.yml"
 ci_workflow=".github/workflows/ci.yml"
+cargo_manifest="Cargo.toml"
+root_cargo_lock="Cargo.lock"
+rust_sdk_manifest="crates/tracedecay-sdk/Cargo.toml"
+rust_sdk_lock="crates/tracedecay-sdk/Cargo.lock"
+release_plz_config="release-plz.toml"
 
 if grep -q 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$release_plz"; then
   echo "release-plz must not publish releases with GITHUB_TOKEN" >&2
@@ -13,11 +19,47 @@ if grep -q 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$release_plz"; then
   exit 1
 fi
 
-python3 - "$release_plz" <<'PY'
+python3 - "$release_plz" "$cargo_manifest" "$root_cargo_lock" "$rust_sdk_manifest" "$release_plz_config" <<'PY'
+import re
 import sys
+import tomllib
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
+if "  push:\n    branches: [master]\n  workflow_dispatch:" not in text:
+    raise SystemExit("release-plz triggers must be push-to-master plus manual dispatch")
+
+expected_guard = (
+    "github.repository == 'ScriptedAlchemy/tracedecay' "
+    "&& github.ref == 'refs/heads/master'"
+)
+job_boundaries = [
+    ("dashboard-assets", "release-plz-release"),
+    ("release-plz-release", "release-plz-pr"),
+]
+for job_name, next_job in job_boundaries:
+    job = text.split(f"  {job_name}:", 1)[1].split(f"\n  {next_job}:", 1)[0]
+    condition = re.search(r"^    if: (.+)$", job, re.MULTILINE)
+    if condition is None or condition.group(1) != expected_guard:
+        raise SystemExit(
+            f"{job_name} must have exact master/repository guard {expected_guard!r}"
+        )
+release_pr_job = text.split("  release-plz-pr:", 1)[1]
+condition = re.search(r"^    if: (.+)$", release_pr_job, re.MULTILINE)
+if condition is None or condition.group(1) != expected_guard:
+    raise SystemExit(
+        f"release-plz-pr must have exact master/repository guard {expected_guard!r}"
+    )
+if text.count("ref: ${{ github.sha }}") != 3:
+    raise SystemExit("every release-plz checkout must bind to the triggering master SHA")
+
+sha_ref = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+for uses in re.findall(r"^\s*-\s+uses:\s+([^#\s]+)", text, re.MULTILINE):
+    if uses.startswith("./"):
+        continue
+    if not sha_ref.fullmatch(uses):
+        raise SystemExit(f"release-plz external action must use an immutable SHA: {uses}")
+
 release_step = text.split("- name: Run release-plz release", 1)[1].split("- name:", 1)[0]
 retry_step = text.split("- name: Retry release-plz release after transient GitHub API failure", 1)[1].split("- name:", 1)[0]
 release_pr_step = text.split("- name: Run release-plz release-pr", 1)[1]
@@ -30,6 +72,80 @@ for name, step in [
     expected = "GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}"
     if expected not in step:
         raise SystemExit(f"{name} step must use RELEASE_PLZ_TOKEN")
+
+release_job = text.split("  release-plz-release:", 1)[1].split(
+    "\n  release-plz-pr:", 1
+)[0]
+for expected in [
+    "environment: crates-io",
+    "id-token: write",
+    "uses: release-plz/action@",
+]:
+    if expected not in release_job:
+        raise SystemExit(
+            f"workspace crates must publish through release-plz trusted authority: {expected}"
+        )
+
+with open(sys.argv[2], "rb") as manifest_file:
+    root_manifest = tomllib.load(manifest_file)
+if "crates/tracedecay-sdk" not in root_manifest["workspace"]["members"]:
+    raise SystemExit("Rust SDK must be a root workspace member")
+
+with open(sys.argv[3], "rb") as lock_file:
+    root_lock = tomllib.load(lock_file)
+sdk_lock_entries = [
+    package
+    for package in root_lock.get("package", [])
+    if package.get("name") == "tracedecay-sdk"
+]
+if len(sdk_lock_entries) != 1:
+    raise SystemExit("root Cargo.lock must contain exactly one tracedecay-sdk package")
+
+with open(sys.argv[4], "rb") as manifest_file:
+    sdk_manifest = tomllib.load(manifest_file)
+if "workspace" in sdk_manifest:
+    raise SystemExit("Rust SDK must not declare a nested standalone workspace")
+
+with open(sys.argv[5], "rb") as config_file:
+    release_config = tomllib.load(config_file)
+sdk_entries = [
+    package
+    for package in release_config.get("package", [])
+    if package.get("name") == "tracedecay-sdk"
+]
+if len(sdk_entries) != 1:
+    raise SystemExit("release-plz must contain exactly one tracedecay-sdk package entry")
+if sdk_entries[0].get("git_release_enable") is not False:
+    raise SystemExit("Rust SDK must not own a separate GitHub release")
+if sdk_entries[0].get("git_tag_enable") is not False:
+    raise SystemExit("Rust SDK must not own a separate git tag")
+PY
+
+if [[ -e "$rust_sdk_lock" ]]; then
+  echo "Rust SDK must use the root Cargo.lock" >&2
+  exit 1
+fi
+
+python3 - "$sdk_conformance" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+policy_job = text.split("  publish-workflow-policy:", 1)[1].split(
+    "\n  packages:", 1
+)[0]
+for expected in [
+    "python3 scripts/test-check-sdk-publish-workflow.py",
+    "python3 scripts/check-sdk-publish-workflow.py",
+    "python3 -m pip install pyyaml==6.0.2",
+    'python-version: "3.12.13"',
+]:
+    if expected not in policy_job:
+        raise SystemExit(f"SDK publication policy job missing pinned contract {expected!r}")
+sha_ref = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+for uses in re.findall(r"^\s*-\s+uses:\s+([^#\s]+)", policy_job, re.MULTILINE):
+    if not sha_ref.fullmatch(uses):
+        raise SystemExit(f"SDK publication policy action must use an immutable SHA: {uses}")
 PY
 
 grep -Fq "if: \${{ !cancelled() &&" "$ci_workflow"
