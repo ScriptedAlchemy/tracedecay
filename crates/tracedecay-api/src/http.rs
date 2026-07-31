@@ -30,20 +30,48 @@ const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
 /// so its handler is pure forwarding. Stating the extractor list once per
 /// router keeps that forwarding from being retyped for every operation.
 macro_rules! constant_operation_handlers {
+    // Peel one handler per step: the extractor list travels as one token tree
+    // because macro_rules cannot re-expand one repetition group inside a
+    // sibling group (`$handler` and `$extractor` repeat different counts).
     (
         owner: $generic:ident = $owner:path,
         dispatch = $dispatch:path,
-        extractors = { $($extractor:ident: $extractor_type:ty),+ $(,)? },
-        $($handler:ident => $operation:expr;)+
+        extractors = $extractors:tt,
+        $handler:ident => $operation:expr;
+        $($rest:tt)*
     ) => {
-        $(
-            async fn $handler<$generic>($($extractor: $extractor_type),+) -> Response
-            where
-                $generic: $owner,
-            {
-                $dispatch($operation, $($extractor),+).await
-            }
-        )+
+        constant_operation_handlers! {
+            @one
+            owner: $generic = $owner,
+            dispatch = $dispatch,
+            extractors = $extractors,
+            $handler => $operation;
+        }
+        constant_operation_handlers! {
+            owner: $generic = $owner,
+            dispatch = $dispatch,
+            extractors = $extractors,
+            $($rest)*
+        }
+    };
+    (
+        owner: $generic:ident = $owner:path,
+        dispatch = $dispatch:path,
+        extractors = $extractors:tt,
+    ) => {};
+    (
+        @one
+        owner: $generic:ident = $owner:path,
+        dispatch = $dispatch:path,
+        extractors = { $($extractor:ident: $extractor_type:ty),+ $(,)? },
+        $handler:ident => $operation:expr;
+    ) => {
+        async fn $handler<$generic>($($extractor: $extractor_type),+) -> Response
+        where
+            $generic: $owner,
+        {
+            $dispatch($operation, $($extractor),+).await
+        }
     };
 }
 
