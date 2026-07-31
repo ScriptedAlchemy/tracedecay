@@ -1152,6 +1152,192 @@ pub fn backup_and_write_json(path: &Path, value: &serde_json::Value) -> bool {
     safe_write_json_file(path, value, backup.as_deref()).is_ok()
 }
 
+// ---------------------------------------------------------------------------
+// Shared MCP server registration
+// ---------------------------------------------------------------------------
+//
+// Every JSON/JSONC-configured host registers tracedecay the same way: one
+// entry named `tracedecay` under a root key (`mcpServers` for the Cline
+// family and Gemini, `mcp` for Kilo). Only the config path, the root key, the
+// entry shape, and the config dialect differ, so install, uninstall, and the
+// doctor check all live here rather than once per host.
+
+/// Register the tracedecay MCP entry under `root_key` in a host config.
+///
+/// `load_for_edit` is the host's strict loader ([`load_json_file_strict`] or
+/// [`load_jsonc_file_strict`]): a config that exists but cannot be parsed is
+/// an error rather than a silent overwrite. `agent_label` names the host in
+/// the directory-creation error.
+pub fn install_mcp_server_entry(
+    config_path: &Path,
+    root_key: &str,
+    entry: serde_json::Value,
+    agent_label: &str,
+    load_for_edit: fn(&Path) -> Result<serde_json::Value>,
+) -> Result<()> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "cannot create {agent_label} config directory {}: {error}",
+                parent.display()
+            ),
+        })?;
+    }
+
+    let backup = backup_config_file(config_path)?;
+    let mut settings = match load_for_edit(config_path) {
+        Ok(settings) => settings,
+        Err(error) => {
+            if let Some(ref backup) = backup {
+                eprintln!("  Backup preserved at: {}", backup.display());
+            }
+            return Err(error);
+        }
+    };
+    settings[root_key]["tracedecay"] = entry;
+
+    safe_write_json_file(config_path, &settings, backup.as_deref())?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
+        config_path.display()
+    );
+    Ok(())
+}
+
+/// How far an uninstall prunes a config once the tracedecay entry is gone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct McpUninstallPolicy {
+    /// Drop the MCP root key itself once it holds no servers.
+    pub prune_empty_root: bool,
+    /// Delete the config file when an empty MCP root is all that is left.
+    pub remove_empty_file: bool,
+}
+
+/// Remove the tracedecay MCP entry under `root_key` from a host config.
+///
+/// Best effort by design: uninstall must keep going across the remaining
+/// hosts when one config is unreadable or unwritable, so `load` is the host's
+/// lenient loader ([`load_json_file`] or [`load_jsonc_file`]). Every rewrite
+/// goes through [`backup_and_write_json`], so a `.bak` is always left behind
+/// (issue #63).
+pub fn uninstall_mcp_server_entry(
+    config_path: &Path,
+    root_key: &str,
+    load: fn(&Path) -> serde_json::Value,
+    policy: McpUninstallPolicy,
+) {
+    if !config_path.exists() {
+        eprintln!("  {} not found, skipping", config_path.display());
+        return;
+    }
+
+    let mut settings = load(config_path);
+    let Some(servers) = settings.get_mut(root_key).and_then(|v| v.as_object_mut()) else {
+        eprintln!(
+            "  No tracedecay MCP server in {}, skipping",
+            config_path.display()
+        );
+        return;
+    };
+    if servers.remove("tracedecay").is_none() {
+        eprintln!(
+            "  No tracedecay MCP server in {}, skipping",
+            config_path.display()
+        );
+        return;
+    }
+    let root_is_empty = servers.is_empty();
+
+    if policy.prune_empty_root
+        && root_is_empty
+        && let Some(object) = settings.as_object_mut()
+    {
+        object.remove(root_key);
+    }
+
+    if policy.remove_empty_file && config_holds_only_empty_root(&settings, root_key) {
+        std::fs::remove_file(config_path).ok();
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
+            config_path.display()
+        );
+        return;
+    }
+
+    if backup_and_write_json(config_path, &settings) {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
+            config_path.display()
+        );
+    }
+}
+
+/// True when nothing survives in `settings` except an empty MCP root.
+fn config_holds_only_empty_root(settings: &serde_json::Value, root_key: &str) -> bool {
+    settings.as_object().is_some_and(|object| {
+        object.iter().all(|(key, value)| {
+            key == root_key && value.as_object().is_some_and(serde_json::Map::is_empty)
+        })
+    })
+}
+
+/// Host-specific wording for [`doctor_check_mcp_registration`].
+pub struct McpDoctorLabels<'a> {
+    /// Agent id used in the ``run `tracedecay install --agent <id>` `` hint.
+    pub agent_id: &'a str,
+    /// Product name used in the "if you use ..." warning for a missing file.
+    pub product: &'a str,
+    /// Subject of the pass line, rendered as "{registered} in {path}".
+    pub registered: &'a str,
+    /// Subject of the fail line, rendered as "{missing} in {path} — run ...".
+    pub missing: &'a str,
+}
+
+/// Report whether a host config registers tracedecay under `root_key`.
+///
+/// Returns the registered server object so callers can keep checking
+/// host-specific fields (Gemini's `args`/`trust`, for example).
+pub fn doctor_check_mcp_registration(
+    dc: &mut DoctorCounters,
+    config_path: &Path,
+    root_key: &str,
+    load: fn(&Path) -> serde_json::Value,
+    labels: &McpDoctorLabels<'_>,
+) -> Option<serde_json::Value> {
+    if !config_path.exists() {
+        dc.warn(&format!(
+            "{} not found — run `tracedecay install --agent {}` if you use {}",
+            config_path.display(),
+            labels.agent_id,
+            labels.product
+        ));
+        return None;
+    }
+
+    let settings = load(config_path);
+    let server = settings
+        .get(root_key)
+        .and_then(|servers| servers.get("tracedecay"))
+        .filter(|server| server.is_object());
+
+    if let Some(server) = server {
+        dc.pass(&format!(
+            "{} in {}",
+            labels.registered,
+            config_path.display()
+        ));
+        Some(server.clone())
+    } else {
+        dc.fail(&format!(
+            "{} in {} — run `tracedecay install --agent {}`",
+            labels.missing,
+            config_path.display(),
+            labels.agent_id
+        ));
+        None
+    }
+}
+
 /// Finds the tracedecay binary path.
 ///
 /// On Windows the returned path uses forward slashes so it can be safely

@@ -11,8 +11,8 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_config_file,
-    load_json_file, load_json_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
+    install_mcp_server_entry, load_json_file, load_json_file_strict, uninstall_mcp_server_entry,
 };
 
 /// Cline agent.
@@ -65,7 +65,7 @@ impl AgentIntegration for ClineIntegration {
         install_mcp_server(&settings_path, &ctx.tracedecay_bin)?;
         let legacy_path = legacy_cline_mcp_settings_path(&ctx.home);
         if legacy_path != settings_path && settings_have_tracedecay(&legacy_path) {
-            uninstall_mcp_server(&legacy_path)?;
+            uninstall_mcp_server(&legacy_path);
             eprintln!(
                 "\x1b[32m✔\x1b[0m Removed legacy duplicate registration from {}",
                 legacy_path.display()
@@ -94,7 +94,7 @@ impl AgentIntegration for ClineIntegration {
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         for settings_path in cline_settings_paths(&ctx.home) {
-            uninstall_mcp_server(&settings_path)?;
+            uninstall_mcp_server(&settings_path);
         }
 
         eprintln!();
@@ -160,74 +160,27 @@ impl AgentIntegration for ClineIntegration {
 // ---------------------------------------------------------------------------
 
 fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "cannot create Cline config directory {}: {error}",
-                parent.display()
-            ),
-        })?;
-    }
-
-    let backup = backup_config_file(settings_path)?;
-    let mut settings = match load_json_file_strict(settings_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-    settings["mcpServers"]["tracedecay"] = json!({
-        "command": tracedecay_bin,
-        "args": ["serve"],
-        "disabled": false
-    });
-
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        settings_path.display()
-    );
-    Ok(())
+    install_mcp_server_entry(
+        settings_path,
+        "mcpServers",
+        json!({
+            "command": tracedecay_bin,
+            "args": ["serve"],
+            "disabled": false
+        }),
+        "Cline",
+        load_json_file_strict,
+    )
 }
 
 /// Remove MCP server entry from Cline's `cline_mcp_settings.json`.
-fn uninstall_mcp_server(settings_path: &Path) -> Result<()> {
-    if !settings_path.exists() {
-        eprintln!("  {} not found, skipping", settings_path.display());
-        return Ok(());
-    }
-
-    let mut settings = load_json_file_strict(settings_path)?;
-
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return Ok(());
-    };
-
-    if servers.remove("tracedecay").is_none() {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return Ok(());
-    }
-
-    let backup = backup_config_file(settings_path)?;
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-        settings_path.display()
+fn uninstall_mcp_server(settings_path: &Path) {
+    uninstall_mcp_server_entry(
+        settings_path,
+        "mcpServers",
+        load_json_file,
+        McpUninstallPolicy::default(),
     );
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

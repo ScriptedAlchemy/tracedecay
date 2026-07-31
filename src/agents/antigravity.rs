@@ -18,8 +18,9 @@ use serde_json::json;
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_config_file,
-    load_json_file, load_json_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    McpUninstallPolicy, backup_config_file, doctor_check_mcp_registration, install_mcp_server_entry,
+    load_json_file, load_json_file_strict, safe_write_json_file, uninstall_mcp_server_entry,
 };
 
 /// Google Antigravity agent.
@@ -47,28 +48,16 @@ impl AgentIntegration for AntigravityIntegration {
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         // 1. Antigravity IDE config (~/.gemini/antigravity/mcp_config.json)
         let mcp_path = mcp_config_path(&ctx.home);
-        if let Some(parent) = mcp_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let backup = backup_config_file(&mcp_path)?;
-        let mut settings = match load_json_file_strict(&mcp_path) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(ref b) = backup {
-                    eprintln!("  Backup preserved at: {}", b.display());
-                }
-                return Err(e);
-            }
-        };
-        settings["mcpServers"]["tracedecay"] = json!({
-            "command": ctx.tracedecay_bin,
-            "args": ["serve"]
-        });
-        safe_write_json_file(&mcp_path, &settings, backup.as_deref())?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-            mcp_path.display()
-        );
+        install_mcp_server_entry(
+            &mcp_path,
+            "mcpServers",
+            json!({
+                "command": ctx.tracedecay_bin,
+                "args": ["serve"]
+            }),
+            "Antigravity",
+            load_json_file_strict,
+        )?;
 
         // 2. Antigravity CLI plugin (~/.gemini/antigravity-cli/plugins/tracedecay.json).
         //    Same shape as the IDE config; required because the IDE config is
@@ -156,57 +145,15 @@ impl AgentIntegration for AntigravityIntegration {
 // ---------------------------------------------------------------------------
 
 fn uninstall_mcp_server(mcp_path: &Path) {
-    if !mcp_path.exists() {
-        eprintln!("  {} not found, skipping", mcp_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(mcp_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    };
-
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            mcp_path.display()
-        );
-        return;
-    }
-
-    let is_empty = settings.as_object().is_some_and(|o| {
-        o.iter()
-            .all(|(k, v)| k == "mcpServers" && v.as_object().is_some_and(serde_json::Map::is_empty))
-    });
-
-    if is_empty {
-        std::fs::remove_file(mcp_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            mcp_path.display()
-        );
-    } else {
-        let pretty = serde_json::to_string_pretty(&settings).unwrap_or_default();
-        std::fs::write(mcp_path, format!("{pretty}\n")).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            mcp_path.display()
-        );
-    }
+    uninstall_mcp_server_entry(
+        mcp_path,
+        "mcpServers",
+        load_json_file,
+        McpUninstallPolicy {
+            prune_empty_root: false,
+            remove_empty_file: true,
+        },
+    );
 }
 
 /// Remove the per-plugin file the CLI loader picks up. Unlike the IDE config
@@ -227,55 +174,31 @@ fn uninstall_cli_plugin(plugin_path: &Path) {
 // ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
-    let mcp_path = mcp_config_path(home);
-
-    if !mcp_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent antigravity` if you use the Antigravity IDE",
-            mcp_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_json_file(&mcp_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!(
-            "IDE MCP server registered in {}",
-            mcp_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent antigravity`",
-            mcp_path.display()
-        ));
-    }
+    doctor_check_mcp_registration(
+        dc,
+        &mcp_config_path(home),
+        "mcpServers",
+        load_json_file,
+        &McpDoctorLabels {
+            agent_id: "antigravity",
+            product: "the Antigravity IDE",
+            registered: "IDE MCP server registered",
+            missing: "MCP server NOT registered",
+        },
+    );
 }
 
 fn doctor_check_cli_plugin(dc: &mut DoctorCounters, home: &Path) {
-    let plugin_path = cli_plugin_path(home);
-
-    if !plugin_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent antigravity` if you use the Antigravity CLI (#85)",
-            plugin_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_json_file(&plugin_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!(
-            "CLI plugin registered in {}",
-            plugin_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "CLI plugin file exists but lacks `mcpServers.tracedecay` in {} — run `tracedecay install --agent antigravity`",
-            plugin_path.display()
-        ));
-    }
+    doctor_check_mcp_registration(
+        dc,
+        &cli_plugin_path(home),
+        "mcpServers",
+        load_json_file,
+        &McpDoctorLabels {
+            agent_id: "antigravity",
+            product: "the Antigravity CLI (#85)",
+            registered: "CLI plugin registered",
+            missing: "CLI plugin file exists but lacks `mcpServers.tracedecay`",
+        },
+    );
 }

@@ -12,8 +12,9 @@ use serde_json::json;
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_and_write_json,
-    backup_config_file, load_json_file, load_json_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry, load_json_file,
+    load_json_file_strict, uninstall_mcp_server_entry,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -109,29 +110,17 @@ impl AgentIntegration for GeminiIntegration {
 
 /// Register MCP server in ~/.gemini/settings.json.
 fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    let backup = backup_config_file(settings_path)?;
-    let mut settings = match load_json_file_strict(settings_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    settings["mcpServers"]["tracedecay"] = json!({
-        "command": tracedecay_bin,
-        "args": ["serve"],
-        "trust": true
-    });
-
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        settings_path.display()
-    );
-    Ok(())
+    install_mcp_server_entry(
+        settings_path,
+        "mcpServers",
+        json!({
+            "command": tracedecay_bin,
+            "args": ["serve"],
+            "trust": true
+        }),
+        "Gemini CLI",
+        load_json_file_strict,
+    )
 }
 
 /// Install-or-refresh prompt rules in GEMINI.md.
@@ -151,45 +140,15 @@ fn install_prompt_rules(gemini_md: &Path) -> Result<()> {
 
 /// Remove MCP server from ~/.gemini/settings.json.
 fn uninstall_mcp_server(settings_path: &Path) {
-    if !settings_path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(settings_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        return;
-    };
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return;
-    }
-    if servers.is_empty() {
-        settings.as_object_mut().map(|o| o.remove("mcpServers"));
-    }
-    let is_empty = settings.as_object().is_some_and(serde_json::Map::is_empty);
-    if is_empty {
-        std::fs::remove_file(settings_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            settings_path.display()
-        );
-    } else if backup_and_write_json(settings_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            settings_path.display()
-        );
-    }
+    uninstall_mcp_server_entry(
+        settings_path,
+        "mcpServers",
+        load_json_file,
+        McpUninstallPolicy {
+            prune_empty_root: true,
+            remove_empty_file: true,
+        },
+    );
 }
 
 /// Remove tracedecay rules from GEMINI.md.
@@ -204,28 +163,20 @@ fn uninstall_prompt_rules(gemini_md: &Path) {
 /// Check settings.json has tracedecay registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = home.join(".gemini").join("settings.json");
-    if !settings_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent gemini` if you use Gemini CLI",
-            settings_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-
-    let Some(server) = server.and_then(|v| v.as_object()) else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent gemini`",
-            settings_path.display()
-        ));
+    let Some(server) = doctor_check_mcp_registration(
+        dc,
+        &settings_path,
+        "mcpServers",
+        load_json_file,
+        &McpDoctorLabels {
+            agent_id: "gemini",
+            product: "Gemini CLI",
+            registered: "MCP server registered",
+            missing: "MCP server NOT registered",
+        },
+    ) else {
         return;
     };
-    dc.pass(&format!(
-        "MCP server registered in {}",
-        settings_path.display()
-    ));
 
     // Check command includes "serve"
     let has_serve = server

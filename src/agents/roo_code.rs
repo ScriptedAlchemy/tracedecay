@@ -10,8 +10,9 @@ use serde_json::json;
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_and_write_json,
-    backup_config_file, load_json_file, load_json_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry, load_json_file,
+    load_json_file_strict, uninstall_mcp_server_entry,
 };
 
 /// Roo Code agent.
@@ -125,84 +126,30 @@ impl AgentIntegration for RooCodeIntegration {
 // ---------------------------------------------------------------------------
 
 fn install_mcp_server(settings_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let backup = backup_config_file(settings_path)?;
-    let mut settings = match load_json_file_strict(settings_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-    settings["mcpServers"]["tracedecay"] = json!({
-        "command": tracedecay_bin,
-        "args": ["serve"],
-        "disabled": false
-    });
-
-    safe_write_json_file(settings_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        settings_path.display()
-    );
-    Ok(())
+    install_mcp_server_entry(
+        settings_path,
+        "mcpServers",
+        json!({
+            "command": tracedecay_bin,
+            "args": ["serve"],
+            "disabled": false
+        }),
+        "Roo Code",
+        load_json_file_strict,
+    )
 }
 
 /// Remove MCP server entry from Roo Code's `cline_mcp_settings.json`.
 fn uninstall_mcp_server(settings_path: &Path) {
-    if !settings_path.exists() {
-        eprintln!("  {} not found, skipping", settings_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(settings_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-
-    let Some(servers) = settings
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-    else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return;
-    };
-
-    if servers.remove("tracedecay").is_none() {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            settings_path.display()
-        );
-        return;
-    }
-
-    let is_empty = settings.as_object().is_some_and(|o| {
-        o.iter()
-            .all(|(k, v)| k == "mcpServers" && v.as_object().is_some_and(serde_json::Map::is_empty))
-    });
-
-    if is_empty {
-        std::fs::remove_file(settings_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            settings_path.display()
-        );
-    } else if backup_and_write_json(settings_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            settings_path.display()
-        );
-    }
+    uninstall_mcp_server_entry(
+        settings_path,
+        "mcpServers",
+        load_json_file,
+        McpUninstallPolicy {
+            prune_empty_root: false,
+            remove_empty_file: true,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -212,27 +159,16 @@ fn uninstall_mcp_server(settings_path: &Path) {
 /// Check Roo Code's `cline_mcp_settings.json` has tracedecay MCP server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = roo_ext_dir(home).join("settings/cline_mcp_settings.json");
-
-    if !settings_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent roo-code` if you use Roo Code",
-            settings_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_json_file(&settings_path);
-    let server = settings.get("mcpServers").and_then(|v| v.get("tracedecay"));
-
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!(
-            "MCP server registered in {}",
-            settings_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent roo-code`",
-            settings_path.display()
-        ));
-    }
+    doctor_check_mcp_registration(
+        dc,
+        &settings_path,
+        "mcpServers",
+        load_json_file,
+        &McpDoctorLabels {
+            agent_id: "roo-code",
+            product: "Roo Code",
+            registered: "MCP server registered",
+            missing: "MCP server NOT registered",
+        },
+    );
 }
