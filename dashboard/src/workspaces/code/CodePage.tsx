@@ -13,8 +13,9 @@ import { SearchField } from '../../ui/search/SearchField.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { elideStart, splitCount } from '../../ui/format.ts';
-import { ambiguityNote, annotateHubs, describeSubgraph } from './hubs.ts';
+import { ambiguityNote, annotateHubs, describeSubgraph, displayName } from './hubs.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import type { LegacyResult } from '../../data/query/legacy.ts';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
@@ -469,14 +470,13 @@ function TopConnectedList({
   selected,
 }: {
   overviewPending: boolean;
-  overviewResult: Parameters<typeof LegacyBoundary>[0]['result'];
+  overviewResult: LegacyResult<GraphOverviewPayload> | undefined;
   onSelect: (node: GraphNode) => void;
   selected: TraceFocus | null;
 }) {
   return (
     <LegacyBoundary title="Code" pending={overviewPending} result={overviewResult}>
-      {(data) => {
-        const payload = data as GraphOverviewPayload;
+      {(payload) => {
         const hubs = payload.top_connected;
         if (hubs.length === 0)
           return (
@@ -699,7 +699,7 @@ function HubField({
       ) : null}
 
       <ol className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
-        {annotated.map(({ hub: node, module, file, ambiguous }, rank) => (
+        {annotated.map(({ hub: node, display, module, file, ambiguous }, rank) => (
           <li
             key={node.id ?? rank}
             className={cn(
@@ -714,6 +714,7 @@ function HubField({
           >
             <HubCard
               node={node}
+              display={display}
               rank={rank}
               module={module}
               file={file}
@@ -728,15 +729,9 @@ function HubField({
   );
 }
 
-/** The hub's own name is the headline. `qualified_name` is not served by this
- * endpoint at all, so the fallback chain is honest about what exists. */
-function displayName(node: TraceFocus | undefined): string {
-  if (!node) return '—';
-  return node.name ?? node.qualified_name ?? node.id;
-}
-
 function HubCard({
   node,
+  display,
   rank,
   module,
   file,
@@ -745,6 +740,8 @@ function HubCard({
   onSelect,
 }: {
   node: GraphNode;
+  /** The headline, already resolved by `annotateHubs`. */
+  display: string;
   rank: number;
   /** Directory the symbol lives in, trailing slash included. */
   module: string;
@@ -793,7 +790,7 @@ function HubCard({
           className={cn('min-w-0 flex-1 truncate text-text-primary', nameTier(rank))}
           title={node.qualified_name ?? undefined}
         >
-          {displayName(node)}
+          {display}
         </span>
         {/* The leader's own count steps up with its name: the one symbol the
          * eye lands on first should not have to report itself in the same
@@ -862,6 +859,9 @@ function SymbolRow({
        * four columns left the name -- the thing being listed -- with no width
        * at all. */}
       <span className="td-legend w-20 shrink-0 truncate max-md:hidden">{node.kind}</span>
+      {/* Qualified name first, deliberately the reverse of `displayName`: the
+       * search route does serve it, and in a list of matches the module path
+       * is what separates two hits that share a bare name. */}
       <span className="td-value min-w-0 flex-1 truncate text-text-primary">
         {node.qualified_name ?? node.name ?? node.id}
       </span>

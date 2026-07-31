@@ -36,8 +36,17 @@ export interface AnnotatedHub<T extends HubRow> {
   ambiguous: boolean;
 }
 
-function displayName(hub: HubRow): string {
-  return hub.name ?? hub.qualified_name ?? hub.id ?? '—';
+/** The headline a symbol is shown under, and the one place that decides it.
+ *
+ * `name` first: `qualified_name` is not served by the hub endpoint at all, so
+ * the chain is honest about what the payload actually carries. The em dash is
+ * the end of the chain rather than a separate absent case, so a row with no
+ * name and a row that is not there read the same way — which they should,
+ * because neither can be named. `AnnotatedHub.display` is this same string
+ * precomputed; call sites holding an annotated row should read it from there
+ * rather than recompute it. */
+export function displayName(hub: HubRow | null | undefined): string {
+  return hub?.name ?? hub?.qualified_name ?? hub?.id ?? '—';
 }
 
 /**
