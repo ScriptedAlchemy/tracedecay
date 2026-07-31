@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { StateChip } from '../../ui/StateChip';
-import { Legend, Meter, Panel } from '../../ui/instrument.tsx';
+import { Fact, Legend, Meter, Panel } from '../../ui/instrument.tsx';
 import { formatCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
@@ -381,31 +381,6 @@ function CausalGroup({
     <div className="flex flex-col gap-1">
       <span className="td-legend text-text-secondary">{label}</span>
       {children}
-    </div>
-  );
-}
-
-function Fact({
-  label,
-  value,
-  muted,
-}: {
-  label: string;
-  value: string;
-  muted?: boolean;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="td-legend">{label}</dt>
-      <dd
-        className={
-          muted
-            ? 'truncate text-3xs text-text-muted'
-            : 'truncate text-3xs text-text-secondary'
-        }
-      >
-        {value}
-      </dd>
     </div>
   );
 }

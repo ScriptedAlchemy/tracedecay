@@ -42,9 +42,6 @@ export const LANE_GAP = 3;
 export const TRACK_PAD = 7;
 /** Two-tier axis: a day-band row over a fine tick row. */
 export const AXIS_HEIGHT = 34;
-export const DAY_BAND_HEIGHT = 16;
-/** Overview strip: density profile + viewport brush. */
-export const MINIMAP_HEIGHT = 34;
 
 /** Minimum on-screen width of a mark, in CSS pixels. */
 export const MIN_MARK_PX = 3;
@@ -120,17 +117,6 @@ export function zoomWindow(
   );
 }
 
-export function panWindow(
-  view: LoomWindow,
-  extent: LoomWindow,
-  deltaSeconds: number,
-): LoomWindow {
-  return clampWindow(
-    { start: view.start + deltaSeconds, end: view.end + deltaSeconds },
-    extent,
-  );
-}
-
 /** True when the viewport is (near enough) the whole fitted extent. */
 export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
   const full = fittedWindow(extent);
@@ -143,10 +129,6 @@ export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
 
 export function xFor(time: number, window: LoomWindow, width: number): number {
   return ((time - window.start) / (window.end - window.start)) * width;
-}
-
-export function timeFor(x: number, window: LoomWindow, width: number): number {
-  return window.start + (x / width) * (window.end - window.start);
 }
 
 /* -------------------------------------------------------------------------
@@ -471,9 +453,4 @@ export function formatMoment(epochSeconds: number): string {
     hour: '2-digit',
     minute: '2-digit',
   });
-}
-
-/** Span of the viewport in words — the zoom readout. */
-export function formatWindowSpan(view: LoomWindow): string {
-  return formatDurationSeconds(view.end - view.start);
 }

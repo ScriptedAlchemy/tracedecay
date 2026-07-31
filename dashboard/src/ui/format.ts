@@ -91,6 +91,23 @@ export function splitBytes(bytes: number | null | undefined): {
   return { value: String(bytes), unit: 'B' };
 }
 
+/** A microsecond wire stamp as an absolute UTC instant.
+ *
+ * The sentinels are per-call and explicit because they are not interchangeable
+ * readings. A horizon `since_micros` of 0 means the projector was asked for an
+ * open-ended window, not for 1970 (`zeroAs: 'unbounded'`); a null stamp means
+ * the producer never recorded one (`nullAs: 'not reported'`). A site that
+ * declares neither has no sentinel case on the wire, and a 0 there is a real
+ * epoch instant. */
+export function formatMicrosUtc(
+  micros: number | null | undefined,
+  sentinels: { zeroAs?: string; nullAs?: string } = {},
+): string {
+  if (micros == null) return sentinels.nullAs ?? '—';
+  if (micros === 0 && sentinels.zeroAs != null) return sentinels.zeroAs;
+  return new Date(Math.floor(micros / 1000)).toISOString();
+}
+
 /** `splitBytes` for a figure whose direction is part of the reading: a store
  * that shrank has to read as a shrink, and the magnitude language must not fork
  * to say so. The sign rides on the value so the unit stays a bare unit. */
