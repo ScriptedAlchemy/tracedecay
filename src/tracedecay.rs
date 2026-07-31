@@ -302,18 +302,7 @@ pub fn current_timestamp() -> i64 {
 }
 
 /// Returns `true` if the file path looks like a test file.
-pub fn is_test_file(path: &str) -> bool {
-    let test_segments = [
-        "test/",
-        "tests/",
-        "__tests__/",
-        "spec/",
-        "e2e/",
-        ".test.",
-        ".spec.",
-        "_test.",
-        "_spec.",
-    ];
-    let lower = path.to_ascii_lowercase();
-    test_segments.iter().any(|s| lower.contains(s))
-}
+///
+/// Re-exported from the code-index crate so the segment list has one
+/// definition shared by extraction and the orchestrator's read paths.
+pub use tracedecay_code_index::is_test_file;
