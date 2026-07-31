@@ -1,4 +1,4 @@
-//! `rmcp` 3.x adapter for the authenticated TraceDecay MCP surface.
+//! `rmcp` 3.x adapter for the authenticated `TraceDecay` MCP surface.
 //!
 //! The daemon owns authentication, bounded framing, project selection, and
 //! replacement/retirement. Once that boundary selected a project server, this
@@ -54,7 +54,7 @@ where
     }
 }
 
-/// Per-connection `rmcp` server facade over the existing TraceDecay request
+/// Per-connection `rmcp` server facade over the existing `TraceDecay` request
 /// authority.
 pub(crate) struct RmcpConnectionAdapter {
     server: Arc<McpServer>,

@@ -225,7 +225,10 @@ mod tests {
             "the same exact root must resolve the same scope"
         );
         assert_eq!(
-            first.reference.as_ref().map(|reference| reference.as_str()),
+            first
+                .reference
+                .as_ref()
+                .map(tracedecay_domain::RefId::as_str),
             Some("refs/heads/main"),
         );
     }
@@ -332,7 +335,7 @@ mod tests {
             linked_scope
                 .reference
                 .as_ref()
-                .map(|reference| reference.as_str()),
+                .map(tracedecay_domain::RefId::as_str),
             Some("refs/heads/feature"),
         );
         linked_scope.validate().unwrap();

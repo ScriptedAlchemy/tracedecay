@@ -35,9 +35,7 @@ pub fn set_rehearsal_publication_fault_for_test(fault: &str) {
     REHEARSAL_PUBLICATION_FAULT.with(|cell| cell.set(fault));
 }
 
-fn inject_rehearsal_publication_fault(
-    phase: RehearsalPublicationFault,
-) -> Result<(), String> {
+fn inject_rehearsal_publication_fault(phase: RehearsalPublicationFault) -> Result<(), String> {
     let injected = REHEARSAL_PUBLICATION_FAULT.with(|cell| {
         if cell.get() == phase {
             cell.set(RehearsalPublicationFault::None);
@@ -715,7 +713,7 @@ fn collect_files(
             .map_err(|error| format!("read backup directory '{}': {error}", path.display()))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("read backup directory '{}': {error}", path.display()))?;
-        children.sort_by_key(|entry| entry.file_name());
+        children.sort_by_key(std::fs::DirEntry::file_name);
         for child in children {
             collect_files(root, &child.path(), entries)?;
         }
@@ -856,7 +854,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = File::open(path)
         .map_err(|error| format!("open '{}' for hashing: {error}", path.display()))?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -1207,7 +1205,11 @@ mod tests {
         manifest
             .entries
             .retain(|entry| entry.logical_path != manifest_entry);
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
 
         let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
         assert!(

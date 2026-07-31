@@ -5583,6 +5583,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tower",
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-tool-catalog",

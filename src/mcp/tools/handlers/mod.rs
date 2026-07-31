@@ -499,16 +499,16 @@ pub async fn handle_tool_call(
 
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
-    pub global_db: Option<&'a RegisteredGlobalDb>,
+    pub(crate) global_db: Option<&'a RegisteredGlobalDb>,
     /// Daemon-owned project-registry reads. `None` is the typed
     /// missing-registry state, not an empty registry.
-    pub project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
+    pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
     /// Daemon-owned workflow-index reads. `None` is an unavailable retained
     /// project-session authority, not a successful empty index.
     pub workflow_index_reads: Option<&'a dyn WorkflowIndexReadPort>,
-    pub accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
-    pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    pub registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub profile_root: Option<&'a Path>,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,

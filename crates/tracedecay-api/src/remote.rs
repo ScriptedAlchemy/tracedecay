@@ -146,11 +146,17 @@ impl<T> RemoteHttpRequestV1<T> {
         })
     }
 
+}
+
+impl RemoteHttpRequestV1<EnrollmentRequestV1> {
     pub fn admit_with_replacement(
         self,
         credentials: RemoteCredentialPairHeaders,
-    ) -> Result<RemoteHttpCredentialRotationAdmissionV1<T>, RemoteHttpBoundaryError> {
-        self.validate()?;
+    ) -> Result<RemoteHttpCredentialRotationAdmissionV1<EnrollmentRequestV1>, RemoteHttpBoundaryError>
+    {
+        self.request
+            .validate_initial_enrollment_metadata()
+            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
         let (current, replacement) = credentials.into_credentials();
         Ok(RemoteHttpCredentialRotationAdmissionV1 {
             request: self.request,
@@ -413,7 +419,7 @@ mod tests {
     use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     use super::*;
     use axum::body::Body;
@@ -433,7 +439,8 @@ mod tests {
         CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EntityId, ManifestDigest,
         ProjectId, ProjectionGenerationId, RefId, RemoteAuthorityUnavailableReasonV1,
         RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
-        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, UtcMicros, WorktreeId,
+        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, UtcMicros,
+        WorktreeId,
     };
     use tracedecay_tool_catalog::{SchemaId, SortContractId};
 
@@ -919,9 +926,8 @@ mod tests {
         } else {
             HeaderMap::new()
         };
-        let mut request =
-            protocol_request("request.remote.enrollment-validation", request);
-        request.enrollment_revision = 0;
+        let mut request = protocol_request("request.remote.enrollment-validation", request);
+        request.request.enrollment_revision = 0;
         block_on(enrollment_route::<ValidationPort>(
             State(state),
             headers,
@@ -1273,15 +1279,9 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 6);
     }
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
         let mut future = pin!(future);
         loop {
             match future.as_mut().poll(&mut context) {

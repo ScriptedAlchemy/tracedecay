@@ -144,7 +144,7 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
     .origin("https://client.example")
     .build()
     .unwrap();
-    let options = RequestOptions::default();
+    let options = RequestOptions;
 
     let request = serde_json::from_value(json!({
         "command_id": "command.sdk",
@@ -215,7 +215,6 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
                     next_sequence: 7,
                 }),
                 max_reconnects: 0,
-                ..StreamOptions::default()
             },
         )
         .unwrap()
@@ -260,7 +259,7 @@ fn typed_work_result_rejects_malformed_payloads() {
     )
     .unwrap();
     let error = client
-        .execute::<WorkSnapshot>(&request, RequestOptions::default())
+        .execute::<WorkSnapshot>(&request, RequestOptions)
         .unwrap_err();
 
     assert!(matches!(error, ClientError::Protocol { .. }));

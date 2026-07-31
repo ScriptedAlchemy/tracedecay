@@ -1,18 +1,18 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES, SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
-    RetrievalGrainV1, SessionContractError, SessionId, SessionSourceCoverageReasonV1,
-    SessionSourceCoverageReceiptV1, SessionSourceCoverageStateV1, SessionSourceCoverageV1,
-    SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
-    SignedCursorKeyRefV1, TemporalModeV1,
+    RetrievalGrainV1, SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES,
+    SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionContractError, SessionId,
+    SessionSourceCoverageReasonV1, SessionSourceCoverageReceiptV1, SessionSourceCoverageStateV1,
+    SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
+    SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1, TemporalModeV1,
 };
 
+use super::request::validate_label;
 use super::{
     BindingDigest, ExecutionLimitTighteningError, ExecutionLimits, TemporalPortError,
     TemporalRetrievalScope, TemporalSnapshotRequest,
 };
-use super::request::validate_label;
 use crate::resolution::types::ValidatedAuthorization;
 
 pub const MAX_TEMPORAL_PARTICIPANTS: usize = SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS;

@@ -602,7 +602,7 @@ impl McpServer {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     pub(crate) async fn new_with_global_db(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -611,7 +611,7 @@ impl McpServer {
         Self::new_with_dbs(cg, scope_prefix, global_db.clone(), global_db, true).await
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     pub(crate) async fn new_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -625,22 +625,6 @@ impl McpServer {
         let context =
             Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
                 .await;
-        Self::new_with_context(context).await
-    }
-
-    #[cfg(feature = "test-transport")]
-    #[doc(hidden)]
-    pub async fn new_with_project_session_db_for_test(
-        cg: TraceDecay,
-        scope_prefix: Option<String>,
-        session_db: Arc<RegisteredGlobalDb>,
-    ) -> Arc<Self> {
-        let context = McpServerConstructionContext::direct(cg, scope_prefix).with_direct_databases(
-            None,
-            None,
-            Some(session_db),
-            None,
-        );
         Self::new_with_context(context).await
     }
 
@@ -800,47 +784,7 @@ impl McpServer {
         Ok(server)
     }
 
-    /// Builds a direct test server with an isolated project admission spool.
-    #[cfg(feature = "test-transport")]
-    #[doc(hidden)]
-    pub async fn new_with_dbs_and_host_admission_for_test(
-        cg: TraceDecay,
-        scope_prefix: Option<String>,
-        global_db: Option<Arc<RegisteredGlobalDb>>,
-        registry_db: Option<Arc<RegisteredGlobalDb>>,
-        use_default_profile_root: bool,
-    ) -> Arc<Self> {
-        let profile_root = use_default_profile_root
-            .then(crate::storage::default_profile_root)
-            .and_then(std::result::Result::ok);
-        let session_db_path = cg.store_layout().sessions_db_path.clone();
-        let mut context =
-            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
-                .await;
-        let _ = session_db_path;
-        let Some(session_db) = context.session_db.as_ref() else {
-            panic!("test server project sessions database should open");
-        };
-        let database_path = session_db.db_path().to_path_buf();
-        let opened = tokio::task::spawn_blocking(move || {
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(
-                &database_path,
-            )
-        })
-        .await;
-        let Ok(opened) = opened else {
-            panic!("test server host-admission task should complete");
-        };
-        let Ok((runtime, _)) = opened else {
-            panic!("test server host-admission spool should open");
-        };
-        context.host_admission_broker = Some(Arc::new(
-            crate::application::host_admission::HostAdmissionBroker::new(runtime),
-        ));
-        Self::new_with_context(context).await
-    }
-
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     async fn direct_context_with_dbs(
         cg: TraceDecay,
         scope_prefix: Option<String>,

@@ -5,9 +5,9 @@ pub mod codex;
 pub mod cursor;
 pub mod cursor_composer;
 pub mod kiro;
-pub mod vibe;
 mod parse;
 mod timestamp;
+pub mod vibe;
 
 pub use parse::{
     ClaudeRecordParseErrorV1, MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,

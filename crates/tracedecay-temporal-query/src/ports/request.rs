@@ -107,10 +107,7 @@ impl TemporalAuthorizedRoot {
     }
 }
 
-pub(super) fn validate_label(
-    field: &'static str,
-    value: &str,
-) -> Result<(), TemporalPortError> {
+pub(super) fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortError> {
     if value.is_empty()
         || value.trim() != value
         || value.len() > 512

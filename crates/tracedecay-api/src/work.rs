@@ -27,11 +27,10 @@ use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationProblem,
     AttachRuntimeEvidenceCommand, CreateWorkCommand, ReplanDependenciesCommand, RequestId,
     RetryDirective, ReviewProposalRequestV1, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptPublishArtifactRequestV1,
+    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
     WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptFinishRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1,
+    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 
