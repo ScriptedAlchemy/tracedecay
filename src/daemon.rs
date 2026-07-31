@@ -2278,16 +2278,8 @@ impl DaemonInvocationState {
         project_path: Option<&Path>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
-        if matches!(
-            &request.payload,
-            service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead { .. }
-                | service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
-                | service::invocation::DaemonInvocationPayload::MultiRootExecute { .. }
-        ) {
-            return DaemonInvocationResponse::problem(
-                request.request_id,
-                service::invocation::DaemonInvocationProblem::Unavailable,
-            );
+        if let Some(response) = quarantined_multi_root_response(&request) {
+            return response;
         }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
@@ -7838,6 +7830,26 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     Ok(())
 }
 
+fn quarantined_multi_root_response(
+    request: &DaemonInvocationRequest,
+) -> Option<DaemonInvocationResponse> {
+    if !matches!(
+        &request.payload,
+        service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead { .. }
+            | service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
+            | service::invocation::DaemonInvocationPayload::MultiRootExecute { .. }
+    ) {
+        return None;
+    }
+    Some(match request.validate() {
+        Ok(()) => DaemonInvocationResponse::problem(
+            request.request_id.clone(),
+            service::invocation::DaemonInvocationProblem::Unavailable,
+        ),
+        Err(problem) => DaemonInvocationResponse::problem(request.request_id.clone(), problem),
+    })
+}
+
 #[cfg(any(not(unix), test))]
 async fn execute_portable_daemon_invocation(
     lifecycle: DaemonLifecycle,
@@ -7849,6 +7861,9 @@ async fn execute_portable_daemon_invocation(
     request: DaemonInvocationRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> DaemonInvocationResponse {
+    if let Some(response) = quarantined_multi_root_response(&request) {
+        return response;
+    }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let mut project_path = None;
@@ -8367,6 +8382,9 @@ async fn execute_daemon_invocation(
     handshake: &DaemonHandshake,
     request: DaemonInvocationRequest,
 ) -> DaemonInvocationResponse {
+    if let Some(response) = quarantined_multi_root_response(&request) {
+        return response;
+    }
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let mut project_path = None;

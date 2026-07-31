@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
@@ -90,6 +91,32 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
     };
     let engine = test_daemon_engine_for_profile(&profile_root);
     let _database_scope = enter_test_daemon_database_scope(&profile_root, "multi-root-journey");
+    let scope_set_id = ScopeSetId::new("scope-set.daemon-journey").expect("scope set id");
+    let observed_at = now();
+    let (deadline, cancellation) = controls("pre-admission-read", observed_at);
+    let pre_admission_read = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.multi-root.pre-admission-read",
+            MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        pre_admission_read.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
+    assert_eq!(
+        engine.project_open_attempts.load(Ordering::Relaxed),
+        0,
+        "quarantined read must refuse before project admission"
+    );
     let (first_key, _, _, _) = engine
         .open_project_server(&first_handshake)
         .await
@@ -140,7 +167,6 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
         }
     ));
 
-    let scope_set_id = ScopeSetId::new("scope-set.daemon-journey").expect("scope set id");
     let observed_at = now();
     let (deadline, cancellation) = controls("cas", observed_at);
     let cas = execute_daemon_invocation(
