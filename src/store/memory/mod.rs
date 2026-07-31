@@ -1000,6 +1000,10 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
 }
 
 #[cfg(test)]
+#[path = "fact_response_metadata_test.rs"]
+mod fact_response_metadata_test;
+
+#[cfg(test)]
 #[path = "memory_repair_test.rs"]
 mod memory_repair_test;
 
