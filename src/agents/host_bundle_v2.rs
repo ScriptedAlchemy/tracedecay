@@ -5,7 +5,7 @@
 //! contains no signing key, trust root, external bundle loader, credential,
 //! daemon lifecycle, product semantics, or host-specific business authority.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -691,12 +691,29 @@ pub trait HostBundleRegistrationInspectorV1 {
     ) -> HostBundleRegistrationStateV1;
 }
 
+/// Read-only classification of one installed component (or one of its
+/// artifacts). This type is `Serialize`-only and is never persisted into a
+/// receipt, journal, or any other durable control file — it exists solely for
+/// the transient [`HostBundleDoctorReportV1`]. Adding a variant therefore
+/// widens the doctor's reported vocabulary without making any previously
+/// written artifact unreadable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostBundleComponentDoctorStateV1 {
     Current,
     Repairable,
+    /// A receipt-owned artifact whose ownership marker is still this
+    /// component's own but whose bytes moved away from the recorded digest.
+    /// This is ordinary content drift, not a contested path: `Repair` plans it
+    /// as `BackupThenReplace` (see `plan_artifact_action`), so reinstall
+    /// converges without an operator first resolving a foreign claim.
+    Drifted,
     OwnershipConflict,
+    /// A `TraceDecay`-named host registration that no install receipt owns —
+    /// an uninstall that removed the receipt-owned artifacts but left the host
+    /// still advertising the extension. Reported so the leftover registration
+    /// is visible; repairing it is an explicit operator command.
+    OrphanedRegistration,
     Missing,
     Corrupt,
 }
@@ -1507,6 +1524,8 @@ pub fn inspect_installed_host_bundle_components_at(
         .collect::<Vec<_>>();
     receipt_paths.sort();
 
+    let ownership_claims = receipt_ownership_claims(&receipt_paths);
+
     let mut components = Vec::with_capacity(receipt_paths.len());
     for receipt_path in receipt_paths {
         let receipt_identity = receipt_path
@@ -1553,6 +1572,28 @@ pub fn inspect_installed_host_bundle_components_at(
             continue;
         }
         if receipt.operation == HostBundleLifecycleOpV1::Uninstall {
+            // An uninstall receipt owns nothing, so there are no artifacts to
+            // check. The host can still advertise the component (a leftover
+            // `extensions.json` entry, a stale plugin registration), and that
+            // orphan is invisible if discovery simply skips the receipt.
+            let registration = registrations.inspect_registration(receipt.host, receipt.component);
+            if registration != HostBundleRegistrationStateV1::Missing {
+                let state = HostBundleComponentDoctorStateV1::OrphanedRegistration;
+                components.push(HostBundleComponentDoctorResultV1 {
+                    repair_action: repair_action(
+                        receipt.host,
+                        receipt.component,
+                        state,
+                        registration,
+                    ),
+                    receipt_path,
+                    host: Some(receipt.host),
+                    component: Some(receipt.component),
+                    state,
+                    registration: Some(registration),
+                    artifacts: Vec::new(),
+                });
+            }
             continue;
         }
 
@@ -1576,29 +1617,30 @@ pub fn inspect_installed_host_bundle_components_at(
         let registration = registrations.inspect_registration(receipt.host, receipt.component);
         let mut artifacts = Vec::with_capacity(receipt.artifacts.len());
         for artifact in &receipt.artifacts {
+            // Ownership at a deploy path is proven by receipt evidence, exactly
+            // as `plan_artifact_action` proves it. A path claimed by more than
+            // one component (or claimed with an unexpected marker) has no
+            // single owner, so the marker is withheld and the planner's foreign
+            // branch is what discovery reports.
+            let sole_owner = ownership_claims
+                .get(&artifact.relative_path)
+                .is_some_and(|markers| {
+                    markers.len() == 1 && markers.contains(&artifact.ownership_marker)
+                });
             let observed = observe_artifact_at(
                 artifact_root,
                 &artifact.relative_path,
-                Some(artifact.ownership_marker.clone()),
+                sole_owner.then(|| artifact.ownership_marker.clone()),
                 Some(artifact.artifact_digest),
                 None,
             );
+            let expected = HostBundleArtifactV1 {
+                relative_path: artifact.relative_path.clone(),
+                artifact_digest: artifact.artifact_digest,
+                ownership_marker: artifact.ownership_marker.clone(),
+            };
             let (observed_digest, state) = match observed {
-                Ok(observed) if observed.kind == ObservedArtifactKindV1::Missing => {
-                    (None, HostBundleComponentDoctorStateV1::Missing)
-                }
-                Ok(observed) if observed.kind != ObservedArtifactKindV1::RegularFile => (
-                    observed.artifact_digest,
-                    HostBundleComponentDoctorStateV1::Corrupt,
-                ),
-                Ok(observed) if observed.artifact_digest == Some(artifact.artifact_digest) => (
-                    observed.artifact_digest,
-                    HostBundleComponentDoctorStateV1::Current,
-                ),
-                Ok(observed) => (
-                    observed.artifact_digest,
-                    HostBundleComponentDoctorStateV1::OwnershipConflict,
-                ),
+                Ok(observed) => (observed.artifact_digest, doctor_artifact_state(&observed, &expected)),
                 Err(_) => (None, HostBundleComponentDoctorStateV1::Corrupt),
             };
             artifacts.push(HostBundleArtifactDoctorResultV1 {
@@ -1625,6 +1667,14 @@ pub fn inspect_installed_host_bundle_components_at(
             .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Missing)
         {
             HostBundleComponentDoctorStateV1::Missing
+        } else if artifacts
+            .iter()
+            .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Drifted)
+        {
+            // Ranked below every contested or absent state: drift is repairable
+            // by the ordinary reinstall, so it must not mask a conflict, a
+            // missing artifact, or a corrupt receipt in the same component.
+            HostBundleComponentDoctorStateV1::Drifted
         } else if !catalog_current {
             HostBundleComponentDoctorStateV1::Repairable
         } else {
@@ -1858,12 +1908,86 @@ pub fn latest_host_component_set_receipt_at(
     Ok(latest.map(|(_, receipt)| receipt))
 }
 
+/// Where rollback backups are written, one subdirectory per applied operation
+/// id. Exposed so a dry run can tell the operator where the bytes it is about
+/// to replace will be preserved, without the CLI reconstructing a
+/// control-directory layout it does not own. The operation id is minted when
+/// the mutation actually runs, so only the root is knowable during a preview.
+#[must_use]
+pub fn host_bundle_backup_root(lifecycle_root: &Path) -> PathBuf {
+    lifecycle_root.join(HOST_BUNDLE_CONTROL_DIR).join("backups")
+}
+
 pub fn latest_host_component_receipt_at(
     lifecycle_root: &Path,
     host: HostKindV1,
     component: HostBundleComponentV1,
 ) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
     read_receipt_at(lifecycle_root, host, component)
+}
+
+/// Every ownership marker the valid, non-uninstall receipts under one control
+/// root claim for each deploy path. Discovery consults this instead of trusting
+/// whichever receipt it happens to be reading, so a path two components both
+/// claim is reported as a contested claim rather than silently attributed to
+/// the receipt that sorted first.
+fn receipt_ownership_claims(receipt_paths: &[PathBuf]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut claims: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for receipt_path in receipt_paths {
+        let Ok(bytes) = fs::read(receipt_path) else {
+            continue;
+        };
+        if bytes.is_empty() || bytes.len() > MAX_CONTROL_FILE_BYTES {
+            continue;
+        }
+        let Ok(receipt) = serde_json::from_slice::<HostBundleInstallReceiptV1>(&bytes) else {
+            continue;
+        };
+        if validate_receipt(&receipt).is_err()
+            || receipt.operation == HostBundleLifecycleOpV1::Uninstall
+            || receipt_path.file_name().and_then(|name| name.to_str())
+                != Some(receipt_file(receipt.host, receipt.component).as_str())
+        {
+            continue;
+        }
+        for artifact in &receipt.artifacts {
+            claims
+                .entry(artifact.relative_path.clone())
+                .or_default()
+                .insert(artifact.ownership_marker.clone());
+        }
+    }
+    claims
+}
+
+/// Doctor-side mirror of [`plan_artifact_action`]'s marker-vs-digest boundary
+/// under `Repair` — the operation every repair action recommends.
+///
+/// The ownership marker is the only conflict gate: a foreign or absent marker
+/// is a contested path that planning refuses outside the narrow pre-receipt
+/// adoption boundary, while a path whose marker is still this component's own
+/// is ordinary content drift that `Repair` plans as `BackupThenReplace`.
+/// Keeping the two in lockstep means discovery can never report a conflict the
+/// planner would have converged, or vice versa.
+fn doctor_artifact_state(
+    observed: &ObservedHostArtifactV1,
+    expected: &HostBundleArtifactV1,
+) -> HostBundleComponentDoctorStateV1 {
+    match observed.kind {
+        ObservedArtifactKindV1::Missing => return HostBundleComponentDoctorStateV1::Missing,
+        ObservedArtifactKindV1::Symlink | ObservedArtifactKindV1::Directory => {
+            return HostBundleComponentDoctorStateV1::Corrupt;
+        }
+        ObservedArtifactKindV1::RegularFile => {}
+    }
+    if observed.ownership_marker.as_deref() != Some(expected.ownership_marker.as_str()) {
+        return HostBundleComponentDoctorStateV1::OwnershipConflict;
+    }
+    if observed.artifact_digest == Some(expected.artifact_digest) {
+        HostBundleComponentDoctorStateV1::Current
+    } else {
+        HostBundleComponentDoctorStateV1::Drifted
+    }
 }
 
 fn corrupt_component_result(
@@ -1919,6 +2043,12 @@ fn repair_action(
         }
         HostBundleComponentDoctorStateV1::OwnershipConflict => format!(
             "resolve the foreign or modified files for {host}/{component}, then run `tracedecay reinstall --component {component} --yes`"
+        ),
+        HostBundleComponentDoctorStateV1::Drifted => format!(
+            "run `tracedecay reinstall --component {component} --yes` (backs up and re-owns)"
+        ),
+        HostBundleComponentDoctorStateV1::OrphanedRegistration => format!(
+            "{host} still registers {component} with no owning receipt; run `tracedecay uninstall --agent {host} --component {component} --yes` to finish removing it, or `tracedecay reinstall --component {component} --yes` to re-own it"
         ),
         HostBundleComponentDoctorStateV1::Repairable
         | HostBundleComponentDoctorStateV1::Missing
@@ -6101,6 +6231,61 @@ mod tests {
         );
     }
 
+    /// Discovery and planning must agree on the ownership boundary: whenever
+    /// `Repair` refuses a path as contested, the doctor reports an ownership
+    /// conflict, and whenever `Repair` would converge it, the doctor reports
+    /// drift or current. A disagreement means the doctor either fails on
+    /// something `reinstall` fixes, or hides something it cannot.
+    #[test]
+    fn doctor_discovery_mirrors_the_repair_ownership_boundary() {
+        let bundle = manifest(HostKindV1::OpenCode, b"current");
+        let artifact = &bundle.artifacts[0];
+        let owned = Some(artifact.ownership_marker.clone());
+        let foreign = Some(expected_ownership_marker(
+            HostKindV1::Hermes,
+            HostBundleComponentV1::Core,
+        ));
+
+        for (marker, bytes, expected) in [
+            (
+                owned.clone(),
+                b"current".as_slice(),
+                HostBundleComponentDoctorStateV1::Current,
+            ),
+            (
+                owned.clone(),
+                b"drifted".as_slice(),
+                HostBundleComponentDoctorStateV1::Drifted,
+            ),
+            (
+                foreign,
+                b"drifted".as_slice(),
+                HostBundleComponentDoctorStateV1::OwnershipConflict,
+            ),
+            (
+                None,
+                b"drifted".as_slice(),
+                HostBundleComponentDoctorStateV1::OwnershipConflict,
+            ),
+        ] {
+            let mut observed = pre_v2_artifact(artifact, bytes, None);
+            observed.ownership_marker = marker;
+            observed.owned_artifact_digest = observed
+                .ownership_marker
+                .as_ref()
+                .map(|_| Sha256::digest(b"current").into());
+
+            let state = doctor_artifact_state(&observed, artifact);
+            assert_eq!(state, expected, "observed {observed:?}");
+            assert_eq!(
+                plan_artifact_action(HostBundleLifecycleOpV1::Repair, artifact, Some(&observed))
+                    .is_err(),
+                state == HostBundleComponentDoctorStateV1::OwnershipConflict,
+                "planning and discovery must refuse the same observations"
+            );
+        }
+    }
+
     #[test]
     fn repair_takes_ownership_of_pre_v2_artifacts_that_no_receipt_records() {
         let root = tempfile::tempdir().unwrap();
@@ -6351,10 +6536,27 @@ mod tests {
         let uninstalled = inspect_installed_host_bundle_components_at(
             artifacts.path(),
             lifecycle.path(),
-            &CurrentRegistration,
+            &MissingRegistration,
         )
         .unwrap();
         assert!(uninstalled.components.is_empty());
+
+        // The same uninstall receipt with the host still advertising the
+        // component is a registered orphan: nothing owns the registration, so
+        // Doctor must surface it rather than skip past the receipt.
+        let orphaned = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert_eq!(orphaned.components.len(), 1);
+        assert_eq!(
+            orphaned.components[0].state,
+            HostBundleComponentDoctorStateV1::OrphanedRegistration
+        );
+        assert_eq!(orphaned.components[0].host, Some(HostKindV1::Hermes));
+        assert!(orphaned.components[0].artifacts.is_empty());
     }
 
     #[test]
@@ -6426,7 +6628,10 @@ mod tests {
             HostBundleComponentDoctorStateV1::Missing
         );
 
-        std::fs::write(&artifact, b"foreign").unwrap();
+        // Same ownership marker, different bytes: ordinary content drift. The
+        // planner would converge this with `BackupThenReplace` under `Repair`,
+        // so discovery must not report a contested path.
+        std::fs::write(&artifact, b"drifted").unwrap();
         let report = inspect_installed_host_bundle_components_at(
             artifacts.path(),
             lifecycle.path(),
@@ -6435,8 +6640,65 @@ mod tests {
         .unwrap();
         assert_eq!(
             report.components[0].state,
-            HostBundleComponentDoctorStateV1::OwnershipConflict
+            HostBundleComponentDoctorStateV1::Drifted
         );
+        assert_eq!(
+            report.components[0].artifacts[0].state,
+            HostBundleComponentDoctorStateV1::Drifted
+        );
+        assert_eq!(
+            report.components[0].repair_action,
+            "run `tracedecay reinstall --component core --yes` (backs up and re-owns)"
+        );
+
+        // A second receipt claiming the same deploy path with a different
+        // ownership marker is a foreign claim: no single component owns the
+        // bytes, so both components report the conflict rather than one of
+        // them silently adopting the other's path.
+        let foreign_receipt = HostBundleInstallReceiptV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id: [23; 16],
+            host: HostKindV1::Hermes,
+            component: HostBundleComponentV1::Core,
+            operation: HostBundleLifecycleOpV1::Install,
+            manifest_digest: manifest(HostKindV1::Hermes, b"foreign")
+                .canonical_digest()
+                .unwrap(),
+            artifacts: vec![HostBundleReceiptArtifactV1 {
+                relative_path: "plugins/tracedecay.json".to_string(),
+                artifact_digest: Sha256::digest(b"foreign").into(),
+                ownership_marker: expected_ownership_marker(
+                    HostKindV1::Hermes,
+                    HostBundleComponentV1::Core,
+                ),
+            }],
+            rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
+            rollback_history: Vec::new(),
+        };
+        let foreign_receipt_path = lifecycle
+            .path()
+            .join(HOST_BUNDLE_CONTROL_DIR)
+            .join(receipt_file(HostKindV1::Hermes, HostBundleComponentV1::Core));
+        std::fs::write(
+            &foreign_receipt_path,
+            serde_json::to_vec(&foreign_receipt).unwrap(),
+        )
+        .unwrap();
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert!(
+            report
+                .components
+                .iter()
+                .all(|component| component.state
+                    == HostBundleComponentDoctorStateV1::OwnershipConflict),
+            "a contested deploy path conflicts for every claimant"
+        );
+        std::fs::remove_file(&foreign_receipt_path).unwrap();
 
         let receipt_path = lifecycle
             .path()
