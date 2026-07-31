@@ -452,6 +452,9 @@ async fn physical_foreign_keys(
     database: MemoryV2ArchiveDatabase,
     spec: &TableSpec,
 ) -> Result<Vec<PhysicalForeignKey>> {
+    type ForeignKeyColumn = (i64, String, String);
+    type ForeignKeyGroup = (String, Vec<ForeignKeyColumn>);
+
     let sql = format!(
         "PRAGMA {}.foreign_key_list('{}')",
         database.schema_name(),
@@ -461,7 +464,7 @@ async fn physical_foreign_keys(
         .query(&sql, ())
         .await
         .map_err(|error| db_error(OPERATION, error))?;
-    let mut grouped: BTreeMap<i64, (String, Vec<(i64, String, String)>)> = BTreeMap::new();
+    let mut grouped: BTreeMap<i64, ForeignKeyGroup> = BTreeMap::new();
     while let Some(row) = rows
         .next()
         .await
