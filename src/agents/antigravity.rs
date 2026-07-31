@@ -19,8 +19,9 @@ use crate::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, backup_config_file, doctor_check_mcp_registration, install_mcp_server_entry,
-    load_json_file, load_json_file_strict, safe_write_json_file, uninstall_mcp_server_entry,
+    McpUninstallPolicy, backup_config_file, doctor_check_mcp_registration,
+    install_mcp_server_entry, load_json_file, load_json_file_strict, safe_write_json_file,
+    uninstall_mcp_server_entry,
 };
 
 /// Google Antigravity agent.

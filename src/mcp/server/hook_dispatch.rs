@@ -41,21 +41,18 @@ impl McpServer {
         agent: Option<HookAgent>,
         policy: BranchEffectPolicy,
     ) -> HostAdmissionOutcome {
-        let root = match hook_events::authorize_planned_branch_effect(
-            effect_root,
-            live_root,
-            &branch,
-        ) {
-            Ok(authorized) => authorized,
-            Err(error) => {
-                return match error {
-                    hook_events::AddBranchAtRootAuthError::Unresolvable => {
-                        HostAdmissionOutcome::retained_unavailable(error.reason_code())
-                    }
-                    _ => HostAdmissionOutcome::degraded(error.reason_code()),
-                };
-            }
-        };
+        let root =
+            match hook_events::authorize_planned_branch_effect(effect_root, live_root, &branch) {
+                Ok(authorized) => authorized,
+                Err(error) => {
+                    return match error {
+                        hook_events::AddBranchAtRootAuthError::Unresolvable => {
+                            HostAdmissionOutcome::retained_unavailable(error.reason_code())
+                        }
+                        _ => HostAdmissionOutcome::degraded(error.reason_code()),
+                    };
+                }
+            };
         let request = HookBranchWriteRequest {
             graph: Arc::clone(cg),
             root,
@@ -68,8 +65,10 @@ impl McpServer {
                 return HostAdmissionOutcome::retained_unavailable("canonical_admission_failed");
             }
         };
-        if matches!(policy.refresh, BranchTokenMapRefresh::AnyOutcomeWhenRequested)
-            && result.refresh_file_token_map
+        if matches!(
+            policy.refresh,
+            BranchTokenMapRefresh::AnyOutcomeWhenRequested
+        ) && result.refresh_file_token_map
         {
             self.refresh_file_token_map().await;
         }

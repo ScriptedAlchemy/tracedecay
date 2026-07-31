@@ -521,8 +521,7 @@ fn assertion_matches(
         .optional()?;
     let payload_matches = match stored_payload {
         Some((payload_json, content)) => {
-            payload_json == encode(assertion.payload())?
-                && content == assertion.payload().content()
+            payload_json == encode(assertion.payload())? && content == assertion.payload().content()
         }
         None => payload_is_purged_projection(connection, owner, assertion.fact_id())?,
     };
@@ -1081,7 +1080,10 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap();
-        assert_eq!(linked, 1, "identical evidence must still link the assertion");
+        assert_eq!(
+            linked, 1,
+            "identical evidence must still link the assertion"
+        );
     }
 
     fn profile_fact_id(operation: &str) -> FactId {

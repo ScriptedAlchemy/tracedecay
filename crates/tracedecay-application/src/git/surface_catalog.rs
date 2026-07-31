@@ -137,8 +137,11 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
 
     for spec in &SURFACE_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
-        let (spec_bindings, binding_ids) =
-            current_bindings(&capability_id, spec.operation, spec.surfaces.iter().copied())?;
+        let (spec_bindings, binding_ids) = current_bindings(
+            &capability_id,
+            spec.operation,
+            spec.surfaces.iter().copied(),
+        )?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }

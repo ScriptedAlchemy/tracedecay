@@ -167,11 +167,8 @@ fn require_adoption_confirmation(
         home,
         lifecycle_root,
     )?;
-    let adopted = adopted_relative_paths(
-        &preview,
-        lifecycle_root,
-        component_set.component_set.host,
-    );
+    let adopted =
+        adopted_relative_paths(&preview, lifecycle_root, component_set.component_set.host);
     if adopted.is_empty() {
         return Ok(());
     }
@@ -489,8 +486,7 @@ fn dry_run_canonical_component_set(
             hex::encode(claim.evidence_digest)
         );
     }
-    let backup_root =
-        tracedecay::agents::host_bundle_v2::host_bundle_backup_root(lifecycle_root);
+    let backup_root = tracedecay::agents::host_bundle_v2::host_bundle_backup_root(lifecycle_root);
     for plan in &preview.component_plans {
         eprintln!(
             "  {:?}: {} mutation(s), rollback={}",
@@ -498,7 +494,11 @@ fn dry_run_canonical_component_set(
             plan.mutations.len(),
             plan.rollback_required
         );
-        let owned = receipt_owned_paths(lifecycle_root, component_set.component_set.host, plan.component);
+        let owned = receipt_owned_paths(
+            lifecycle_root,
+            component_set.component_set.host,
+            plan.component,
+        );
         for mutation in &plan.mutations {
             eprintln!(
                 "  {:?} {} [{}]",
@@ -553,9 +553,7 @@ fn artifact_disposition(
         Action::Noop => "unchanged",
         Action::WriteNew => "write-new",
         Action::BackupThenRemove => "backup-then-remove",
-        Action::BackupThenReplace if receipt_owned.contains(relative_path) => {
-            "backup-then-replace"
-        }
+        Action::BackupThenReplace if receipt_owned.contains(relative_path) => "backup-then-replace",
         Action::BackupThenReplace => "adopt",
     }
 }
@@ -3567,7 +3565,11 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(
-            super::artifact_disposition(&Action::BackupThenReplace, &owned, "plugins/tracedecay.json"),
+            super::artifact_disposition(
+                &Action::BackupThenReplace,
+                &owned,
+                "plugins/tracedecay.json"
+            ),
             "backup-then-replace"
         );
         assert_eq!(
@@ -3579,7 +3581,11 @@ mod tests {
             "write-new"
         );
         assert_eq!(
-            super::artifact_disposition(&Action::BackupThenRemove, &owned, "plugins/tracedecay.json"),
+            super::artifact_disposition(
+                &Action::BackupThenRemove,
+                &owned,
+                "plugins/tracedecay.json"
+            ),
             "backup-then-remove"
         );
         assert_eq!(
@@ -3605,10 +3611,8 @@ mod tests {
         .unwrap();
         // A pre-receipt deployment: the cataloged path exists on disk with
         // foreign bytes and no receipt records it.
-        let adopted = &component_set.component_set.components[0]
-            .manifest
-            .artifacts[0]
-            .relative_path;
+        let adopted =
+            &component_set.component_set.components[0].manifest.artifacts[0].relative_path;
         let deployed = home.path().join(adopted);
         std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
         std::fs::write(&deployed, b"pre-receipt").unwrap();

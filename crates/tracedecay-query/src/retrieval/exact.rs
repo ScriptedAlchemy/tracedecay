@@ -41,16 +41,9 @@ pub struct ExactLaneRequest<'a> {
 
 impl ExactLaneRequest<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
-        self.base
-            .budget
-            .validate()
-            .map_err(contract_error)?;
-        self.budget
-            .validate()
-            .map_err(contract_error)?;
-        self.generation
-            .validate()
-            .map_err(contract_error)?;
+        self.base.budget.validate().map_err(contract_error)?;
+        self.budget.validate().map_err(contract_error)?;
+        self.generation.validate().map_err(contract_error)?;
         let mut seen = BTreeSet::new();
         for literal in &self.literals {
             literal.validate()?;
@@ -629,9 +622,7 @@ where
         request: &ExactLaneRequest<'_>,
         batch: &RetrieverBatch<ExactLaneEvidence>,
     ) -> Result<RetrieverBatch<ExactLaneEvidence>, RetrievalPortError> {
-        batch
-            .validate()
-            .map_err(contract_error)?;
+        batch.validate().map_err(contract_error)?;
         let mut admitted: Vec<(CompactCandidate, ExactLaneEvidence)> =
             Vec::with_capacity(batch.candidates.len());
         for candidate in &batch.candidates {
@@ -750,9 +741,7 @@ where
                 exhausted: truncated == 0,
             }),
         };
-        rebuilt
-            .validate()
-            .map_err(contract_error)?;
+        rebuilt.validate().map_err(contract_error)?;
         Ok(rebuilt)
     }
 }

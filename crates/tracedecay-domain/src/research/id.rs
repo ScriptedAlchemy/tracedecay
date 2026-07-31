@@ -132,8 +132,7 @@ macro_rules! digest_id_body {
             where
                 D: Deserializer<'de>,
             {
-                Self::new(String::deserialize(deserializer)?)
-                    .map_err(serde::de::Error::custom)
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
             }
         }
 

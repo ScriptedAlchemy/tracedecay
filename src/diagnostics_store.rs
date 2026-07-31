@@ -1080,9 +1080,9 @@ fn record_from_row(row: &Row, operation: &str) -> Result<GenerationDiagnosticV1>
         )?),
         None => None,
     };
-    let state = kind.into_state(state_generation).ok_or_else(|| {
-        db_message(operation, "current record carries a state_generation")
-    })?;
+    let state = kind
+        .into_state(state_generation)
+        .ok_or_else(|| db_message(operation, "current record carries a state_generation"))?;
 
     Ok(GenerationDiagnosticV1 {
         diagnostic_anchor: stored_id(text(0)?, operation, "diagnostic_anchor")?,

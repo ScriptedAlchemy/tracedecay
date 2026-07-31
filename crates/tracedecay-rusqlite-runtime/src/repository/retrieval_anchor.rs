@@ -347,7 +347,9 @@ mod tests {
         // The anchors table comes from the canonical production DDL so this
         // executor is exercised against the constraints the live table has,
         // rather than a relaxed local restatement of its columns.
-        connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .unwrap();
         connection
             .execute_batch(tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL)
             .unwrap();

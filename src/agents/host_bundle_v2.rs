@@ -1640,7 +1640,10 @@ pub fn inspect_installed_host_bundle_components_at(
                 ownership_marker: artifact.ownership_marker.clone(),
             };
             let (observed_digest, state) = match observed {
-                Ok(observed) => (observed.artifact_digest, doctor_artifact_state(&observed, &expected)),
+                Ok(observed) => (
+                    observed.artifact_digest,
+                    doctor_artifact_state(&observed, &expected),
+                ),
                 Err(_) => (None, HostBundleComponentDoctorStateV1::Corrupt),
             };
             artifacts.push(HostBundleArtifactDoctorResultV1 {
@@ -6675,10 +6678,14 @@ mod tests {
             rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
             rollback_history: Vec::new(),
         };
-        let foreign_receipt_path = lifecycle
-            .path()
-            .join(HOST_BUNDLE_CONTROL_DIR)
-            .join(receipt_file(HostKindV1::Hermes, HostBundleComponentV1::Core));
+        let foreign_receipt_path =
+            lifecycle
+                .path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(receipt_file(
+                    HostKindV1::Hermes,
+                    HostBundleComponentV1::Core,
+                ));
         std::fs::write(
             &foreign_receipt_path,
             serde_json::to_vec(&foreign_receipt).unwrap(),

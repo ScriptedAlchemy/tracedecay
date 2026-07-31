@@ -4,12 +4,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracedecay_domain::{ObservationScopeV1, UtcMicros};
 
 use crate::{
-    AnchoredObservationWrite, ConfigurationCommitV1, EvidenceAssemblyWriteV1, FactWriteBatch,
-    DiagnosticGenerationSupersessionV1, GitIndexTransactionRecordV1, ObservationCursorAdvance,
+    AnchoredObservationWrite, ConfigurationCommitV1, DiagnosticGenerationSupersessionV1,
+    EvidenceAssemblyWriteV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationCursorAdvance,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    SanitizedCleanDiagnosticSnapshotV1,
-    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1, SourceCommitV1,
-    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    SanitizedCleanDiagnosticSnapshotV1, SessionSummaryPublicationRequestV1,
+    SessionTemporalProjectionBatchV1, SourceCommitV1, TransactionalInboxReceiptV1,
+    TransactionalOutboxEntryV1,
 };
 
 use super::identity::validate_canonical_id;

@@ -3167,11 +3167,9 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         mutation: &DirectConfigurationMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        forward_to_registered!(
-            self,
-            [authority, mutation, expected_revision],
-            |store| store.commit_direct(&authority, &mutation, &expected_revision)
-        )
+        forward_to_registered!(self, [authority, mutation, expected_revision], |store| {
+            store.commit_direct(&authority, &mutation, &expected_revision)
+        })
     }
 
     fn commit_protected(
@@ -3181,11 +3179,8 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        forward_to_registered!(
-            self,
-            [authority, request, plan, evidence],
-            |store| store.commit_protected(&authority, &request, &plan, &evidence)
-        )
+        forward_to_registered!(self, [authority, request, plan, evidence], |store| store
+            .commit_protected(&authority, &request, &plan, &evidence))
     }
 
     fn dry_run_rollback(
@@ -3205,11 +3200,8 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        forward_to_registered!(
-            self,
-            [authority, request, plan, evidence],
-            |store| store.apply_rollback(&authority, &request, &plan, &evidence)
-        )
+        forward_to_registered!(self, [authority, request, plan, evidence], |store| store
+            .apply_rollback(&authority, &request, &plan, &evidence))
     }
 
     fn audit(
@@ -3218,9 +3210,9 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         query: &ConfigurationAuditQuery,
     ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
         // Disambiguated: the registered store also has an inherent `audit`.
-        forward_to_registered!(self, [actor, query], |store| ConfigurationControlStore::audit(
-            &store, &actor, &query
-        ))
+        forward_to_registered!(self, [actor, query], |store| {
+            ConfigurationControlStore::audit(&store, &actor, &query)
+        })
     }
 
     fn observed_state(
@@ -3238,11 +3230,8 @@ impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
         write: &WriteOnlyCredentialMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        forward_to_registered!(
-            self,
-            [authority, write, expected_revision],
-            |store| store.write_reference(&authority, &write, &expected_revision)
-        )
+        forward_to_registered!(self, [authority, write, expected_revision], |store| store
+            .write_reference(&authority, &write, &expected_revision))
     }
 }
 

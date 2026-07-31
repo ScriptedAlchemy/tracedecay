@@ -205,8 +205,14 @@ fn decode_uri_segment(segment: &str) -> Option<Vec<u8>> {
             index += 1;
             continue;
         }
-        let high = source.get(index + 1).copied().and_then(percent_hex_nibble)?;
-        let low = source.get(index + 2).copied().and_then(percent_hex_nibble)?;
+        let high = source
+            .get(index + 1)
+            .copied()
+            .and_then(percent_hex_nibble)?;
+        let low = source
+            .get(index + 2)
+            .copied()
+            .and_then(percent_hex_nibble)?;
         decoded.push((high << 4) | low);
         index += 3;
     }

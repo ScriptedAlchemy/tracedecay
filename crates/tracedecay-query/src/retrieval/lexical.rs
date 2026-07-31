@@ -192,22 +192,13 @@ pub trait LexicalLaneRetriever {
 
 impl LexicalLaneRequest<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
-        self.base
-            .budget
-            .validate()
-            .map_err(contract_error)?;
-        self.budget
-            .validate()
-            .map_err(contract_error)?;
-        self.generation
-            .validate()
-            .map_err(contract_error)?;
+        self.base.budget.validate().map_err(contract_error)?;
+        self.budget.validate().map_err(contract_error)?;
+        self.generation.validate().map_err(contract_error)?;
         self.lexical_profile_revision
             .validate()
             .map_err(contract_error)?;
-        self.score_domain
-            .validate()
-            .map_err(contract_error)?;
+        self.score_domain.validate().map_err(contract_error)?;
         if self.fuzzy_budget > MAX_FUZZY_TERM_EXPANSIONS_V1 {
             return Err(RetrievalPortError::Contract(format!(
                 "lexical fuzzy budget exceeds the v1 bound of {MAX_FUZZY_TERM_EXPANSIONS_V1}"
@@ -354,9 +345,7 @@ where
         request: &LexicalLaneRequest<'_>,
         batch: &RetrieverBatch<LexicalLaneEvidence>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
-        batch
-            .validate()
-            .map_err(contract_error)?;
+        batch.validate().map_err(contract_error)?;
         let mut admitted: Vec<(CompactCandidate, LexicalLaneEvidence, FixedPointScore)> =
             Vec::with_capacity(batch.candidates.len());
         let mut excluded = 0_u64;
@@ -451,9 +440,7 @@ where
                 exhausted: truncated == 0,
             }),
         };
-        rebuilt
-            .validate()
-            .map_err(contract_error)?;
+        rebuilt.validate().map_err(contract_error)?;
         Ok(rebuilt)
     }
 }

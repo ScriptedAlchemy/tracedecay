@@ -924,10 +924,7 @@ impl Database {
                      ORDER BY file_path, start_line
                      LIMIT ?2"
                 ),
-                vec![
-                    path_prefix_like_value(prefix),
-                    Value::Integer(limit as i64),
-                ],
+                vec![path_prefix_like_value(prefix), Value::Integer(limit as i64)],
             ),
             None => (
                 format!(

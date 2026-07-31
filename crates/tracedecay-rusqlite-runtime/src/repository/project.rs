@@ -1,9 +1,9 @@
 use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::{
     AnchoredObservationWrite, DiagnosticGenerationSupersessionV1, EvidenceAssemblyWriteV1,
-    FactWriteBatch, ObservationCursorAdvance,
-    ProjectReadOperationV1, ProjectReadResultV1, RetrievalAnchorDerivativeV1,
-    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1, SourceCommitV1,
+    FactWriteBatch, ObservationCursorAdvance, ProjectReadOperationV1, ProjectReadResultV1,
+    RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
+    SanitizedCleanDiagnosticSnapshotV1, SourceCommitV1,
 };
 
 use super::{

@@ -88,10 +88,7 @@ impl RawRetrievalRequestV1 {
             profile_id: self.profile_id,
             budget: self.budget,
         };
-        request
-            .budget
-            .validate()
-            .map_err(contract_error)?;
+        request.budget.validate().map_err(contract_error)?;
         Ok(SanitizedRetrievalRequestV1 {
             request,
             query_view,

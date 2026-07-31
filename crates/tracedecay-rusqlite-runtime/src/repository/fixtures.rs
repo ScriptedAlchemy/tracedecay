@@ -24,7 +24,12 @@ pub const PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1: &[AdapterParityFixtureV1] = &[
     },
     AdapterParityFixtureV1 {
         family: "project",
-        write_payloads: &["fact", "observation", "diagnostics", "diagnostic_supersession"],
+        write_payloads: &[
+            "fact",
+            "observation",
+            "diagnostics",
+            "diagnostic_supersession",
+        ],
         read_operations: &[
             "fact_current",
             "fact_lineage",

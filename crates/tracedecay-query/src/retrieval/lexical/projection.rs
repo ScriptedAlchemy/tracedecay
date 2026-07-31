@@ -45,17 +45,12 @@ pub struct CodeLexicalProjectionMetadataV1 {
 
 impl CodeLexicalProjectionMetadataV1 {
     fn validate(&self) -> Result<(), RetrievalPortError> {
-        self.generation
-            .validate()
-            .map_err(contract_error)?;
+        self.generation.validate().map_err(contract_error)?;
         if let Some(repository_id) = &self.repository_id {
-            repository_id
-                .validate()
-                .map_err(contract_error)?;
+            repository_id.validate().map_err(contract_error)?;
         }
         for (file, path) in &self.logical_paths {
-            file.validate()
-                .map_err(contract_error)?;
+            file.validate().map_err(contract_error)?;
             if path.is_empty() {
                 return Err(RetrievalPortError::Contract(
                     "lexical projection logical paths must not be empty".to_owned(),
@@ -80,9 +75,7 @@ impl CodeLexicalProjectionMetadataV1 {
         self.lexical_retriever_revision
             .validate()
             .map_err(contract_error)?;
-        self.exact_score_domain
-            .validate()
-            .map_err(contract_error)
+        self.exact_score_domain.validate().map_err(contract_error)
     }
 }
 
@@ -395,9 +388,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(chunks.len());
         for chunk in chunks {
-            chunk
-                .validate()
-                .map_err(contract_error)?;
+            chunk.validate().map_err(contract_error)?;
             if !extraction_admitted
                 && chunk
                     .exact_terms
@@ -755,8 +746,7 @@ impl CodeLexicalProjectionAdapterV1 {
         );
         Ok(CompactCandidate {
             anchor_id: retrieval_anchor(evidence_id.clone())?,
-            logical_evidence_id: LogicalEvidenceId::new(evidence_id)
-                .map_err(contract_error)?,
+            logical_evidence_id: LogicalEvidenceId::new(evidence_id).map_err(contract_error)?,
             source_occurrence_id: SourceOccurrenceId::new(format!(
                 "code-chunk:{generation}:{chunk_id}"
             ))

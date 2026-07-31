@@ -1988,15 +1988,13 @@ fn host_component_result(
         registration: Some(HostBundleRegistrationStateV1::Current),
         artifacts: artifact_states
             .iter()
-            .map(
-                |(relative_path, state)| HostBundleArtifactDoctorResultV1 {
-                    relative_path: (*relative_path).to_string(),
-                    expected_digest: [1; 32],
-                    observed_digest: Some([2; 32]),
-                    ownership_marker: "tracedecay.cursor-desktop.core".to_string(),
-                    state: *state,
-                },
-            )
+            .map(|(relative_path, state)| HostBundleArtifactDoctorResultV1 {
+                relative_path: (*relative_path).to_string(),
+                expected_digest: [1; 32],
+                observed_digest: Some([2; 32]),
+                ownership_marker: "tracedecay.cursor-desktop.core".to_string(),
+                state: *state,
+            })
             .collect(),
         repair_action: "run `tracedecay reinstall --component core --yes` (backs up and re-owns)"
             .to_string(),
@@ -2014,7 +2012,10 @@ fn drifted_host_component_warns_and_keeps_a_clean_exit() {
     let component = host_component_result(
         State::Drifted,
         &[
-            (".cursor/plugins/local/tracedecay/hooks/hooks.json", State::Drifted),
+            (
+                ".cursor/plugins/local/tracedecay/hooks/hooks.json",
+                State::Drifted,
+            ),
             (".cursor/plugins/local/tracedecay/mcp.json", State::Current),
         ],
     );
@@ -2035,7 +2036,10 @@ fn ownership_conflict_still_fails_the_doctor_run() {
     let mut counters = DoctorCounters::new();
     let component = host_component_result(
         State::OwnershipConflict,
-        &[(".cursor/plugins/local/tracedecay/mcp.json", State::OwnershipConflict)],
+        &[(
+            ".cursor/plugins/local/tracedecay/mcp.json",
+            State::OwnershipConflict,
+        )],
     );
 
     super::report_host_component_state(&mut counters, &component);
@@ -2071,7 +2075,10 @@ fn drift_warning_names_only_the_drifted_paths() {
     let component = host_component_result(
         State::Drifted,
         &[
-            (".cursor/plugins/local/tracedecay/hooks/hooks.json", State::Drifted),
+            (
+                ".cursor/plugins/local/tracedecay/hooks/hooks.json",
+                State::Drifted,
+            ),
             (
                 ".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json",
                 State::Drifted,
@@ -2094,8 +2101,12 @@ fn doctor_result_fails_when_checks_report_issues() {
     let mut counters = DoctorCounters::new();
     counters.fail("broken integration");
 
-    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), &DatabaseHealth::Healthy)
-        .unwrap_err();
+    let error = super::doctor_result(
+        &counters,
+        Ok(serde_json::json!({})),
+        &DatabaseHealth::Healthy,
+    )
+    .unwrap_err();
     assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
 }
 
@@ -2104,7 +2115,12 @@ fn doctor_result_allows_warnings_without_issues() {
     let mut counters = DoctorCounters::new();
     counters.warn("optional check unavailable");
 
-    super::doctor_result(&counters, Ok(serde_json::json!({})), &DatabaseHealth::Healthy).unwrap();
+    super::doctor_result(
+        &counters,
+        Ok(serde_json::json!({})),
+        &DatabaseHealth::Healthy,
+    )
+    .unwrap();
 }
 
 #[test]

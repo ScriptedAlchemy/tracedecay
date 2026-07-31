@@ -235,8 +235,11 @@ fn feedback_surface_catalog_contribution_for_handlers(
         let callable = handlers.contains(&handler_descriptor(spec)?);
         let mut binding_ids = Vec::new();
         if callable {
-            let (spec_bindings, spec_binding_ids) =
-                current_bindings(&capability_id, spec.operation, spec.surfaces.iter().copied())?;
+            let (spec_bindings, spec_binding_ids) = current_bindings(
+                &capability_id,
+                spec.operation,
+                spec.surfaces.iter().copied(),
+            )?;
             bindings.extend(spec_bindings);
             binding_ids = spec_binding_ids;
         }

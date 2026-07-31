@@ -38,7 +38,8 @@ pub const RETRIEVAL_ANCHORS_SCHEMA_DDL: &str = "
 /// [`crate::diagnostics::codec`]; the default of `'current'` and the partial
 /// unique index on the publication table together enforce that at most one
 /// generation is current at a time.
-pub const GENERATION_DIAGNOSTICS_SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS generation_diagnostics (
+pub const GENERATION_DIAGNOSTICS_SCHEMA_DDL: &str =
+    "CREATE TABLE IF NOT EXISTS generation_diagnostics (
         diagnostic_anchor TEXT PRIMARY KEY,
         generation_id TEXT NOT NULL,
         repository TEXT NOT NULL,

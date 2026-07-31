@@ -51,13 +51,9 @@ impl CodeGraphEvidenceAdapterV1 {
         edges: &[CanonicalRelationEdgeV1],
         chunks: &[CodeSearchChunkV1],
     ) -> Result<Self, RetrievalPortError> {
-        generation
-            .validate()
-            .map_err(contract_error)?;
+        generation.validate().map_err(contract_error)?;
         if let Some(repository_id) = &repository_id {
-            repository_id
-                .validate()
-                .map_err(contract_error)?;
+            repository_id.validate().map_err(contract_error)?;
         }
         freshness
             .source_namespace
@@ -240,8 +236,8 @@ impl CodeGraphEvidenceAdapterV1 {
                     let occurrence = format!("code-graph:{}", edge.to_occurrence.as_str());
                     let evidence_id = format!("code-symbol:{}", edge.to_occurrence.as_str());
                     let anchor_id = retrieval_anchor(evidence_id.clone())?;
-                    let logical_evidence_id = LogicalEvidenceId::new(evidence_id)
-                        .map_err(contract_error)?;
+                    let logical_evidence_id =
+                        LogicalEvidenceId::new(evidence_id).map_err(contract_error)?;
                     let candidate = CompactCandidate {
                         anchor_id,
                         logical_evidence_id,
