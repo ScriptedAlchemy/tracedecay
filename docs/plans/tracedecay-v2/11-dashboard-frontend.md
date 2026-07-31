@@ -94,23 +94,19 @@ keyboard, and touch behavior. Trapped panes, undersized targets, unnamed
 internal scrollers, and forced-colors checkbox state are fixed. Exact scenario,
 scan, test, and canary counts are intentionally not plan requirements.
 
-**Transfer budgets and list bounds closed (2026-07-27).** The two payload
-ceilings this plan states are now measured and enforced by
-`scripts/check-dashboard-budget.mjs`, run in the `dashboard-assets` CI job and
-locked into `tests/dashboard_workflow_contract_test.sh` beside the
-accessibility gates. It Brotli-compresses the real artifact, so these are
-transfer sizes rather than a proxy, and it fails on a missing lazy-chunk
-directory so a non-code-split bundle cannot pass by measuring nothing.
+**Payload budgets withdrawn (owner decision, 2026-07-31).** The owner removed
+the transfer-payload ceilings as acceptance criteria ("dont care about
+dashbaord bugets we can delete that"). `scripts/check-dashboard-budget.mjs`,
+its `dashboard-assets` CI step, and the
+`tests/dashboard_workflow_contract_test.sh` lock on it are deleted; no payload
+budget is measured or enforced. This withdraws only the byte ceilings — it is
+not permission to regress code splitting or ship falsified measurements.
 
-Its first run found a live breach: `Chart` imported all of ECharts, producing a
-1,080 KiB raw / 288 KiB Brotli async chunk against the 200 KiB per-chunk
-ceiling. The product draws only bar and line series on a grid with a tooltip, so
-`dashboard/src/viz/chart/echarts.ts` now registers exactly that, taking the
-chunk to 536 KiB raw / 150 KiB Brotli. The initial payload measures 138 KiB
-Brotli against its 250 KiB ceiling. Because ECharts answers an unregistered
-series with an empty canvas rather than an error, `Chart` refuses to render a
-series type outside that registered set and says so, rather than presenting a
-blank canvas as a measurement.
+Retained code that budget enforcement previously motivated stays on its own
+merits: `dashboard/src/viz/chart/echarts.ts` registers only the bar/line/grid/
+tooltip modules the product draws, and `Chart` refuses to render a series type
+outside that registered set (ECharts answers an unregistered series with an
+empty canvas rather than an error, which would be a falsified reading).
 
 The virtualization bound is likewise asserted rather than described:
 `VirtualList.dom.test.tsx` proves a 100-row page and the 200-row threshold stay
@@ -828,9 +824,9 @@ runs start from one settled representative projection. The artifact records
 browser/build revision, machine profile, samples, median/p95, failures, and
 threshold:
 
-- initial shell HTML, critical CSS, and executable JavaScript ≤250 KiB Brotli;
-  initial workspace chunk ≤200 KiB; initial API response ≤256 KiB compressed
-  and 1 MiB decoded; initial graph payload ≤1 MiB compressed and 4 MiB decoded;
+- payload-size ceilings withdrawn by owner decision 2026-07-31 (see "Payload
+  budgets withdrawn" above); no shell, chunk, API, or graph byte budget is an
+  acceptance criterion;
 - LCP and keyboard-ready ≤2.5 s, CLS ≤0.1, pending acknowledgement ≤100 ms,
   loaded selection/filter/brush ≤150 ms, linked selection ≤200 ms, and cached
   evidence inspector ≤200 ms;
