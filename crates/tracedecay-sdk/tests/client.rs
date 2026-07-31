@@ -4,8 +4,7 @@ use std::thread;
 
 use serde_json::{Value, json};
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ClientError, ConnectionMode, RequestOptions, StreamOptions,
-    StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
 };
 use tracedecay_sdk::operations::{
     TypedOperation, WorkCreate, WorkSnapshot, base_operation_capabilities,
@@ -144,7 +143,6 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
     .origin("https://client.example")
     .build()
     .unwrap();
-    let options = RequestOptions;
 
     let request = serde_json::from_value(json!({
         "command_id": "command.sdk",
@@ -153,10 +151,8 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
         "title": "SDK task"
     }))
     .unwrap();
-    let local_result = local
-        .execute::<WorkCreate>(&request, options.clone())
-        .unwrap();
-    let remote_result = remote.execute::<WorkCreate>(&request, options).unwrap();
+    let local_result = local.execute::<WorkCreate>(&request).unwrap();
+    let remote_result = remote.execute::<WorkCreate>(&request).unwrap();
 
     assert_eq!(
         serde_json::to_value(local_result.result).unwrap()["task_id"],
@@ -201,7 +197,7 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
 
     assert_eq!(
         client
-            .cancel_operation("request.operation", None)
+            .cancel_operation("request.operation")
             .unwrap()
             .status,
         CancellationStatus::Requested
@@ -258,9 +254,7 @@ fn typed_work_result_rejects_malformed_payloads() {
         json!({"page_size": 1}),
     )
     .unwrap();
-    let error = client
-        .execute::<WorkSnapshot>(&request, RequestOptions)
-        .unwrap_err();
+    let error = client.execute::<WorkSnapshot>(&request).unwrap_err();
 
     assert!(matches!(error, ClientError::Protocol { .. }));
     let requests = server.join().unwrap();
@@ -330,7 +324,7 @@ fn malformed_success_and_problem_fields_are_protocol_errors() {
     .unwrap();
     for _ in 0..6 {
         assert!(matches!(
-            client.execute::<WorkSnapshot>(&request, RequestOptions),
+            client.execute::<WorkSnapshot>(&request),
             Err(ClientError::Protocol { .. })
         ));
     }

@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ClientError, ConnectionMode, RequestOptions, StreamOptions,
-    StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
 };
 use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish, WorkSnapshot};
 
@@ -113,7 +112,7 @@ fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability()
     )
     .unwrap();
     let request_id = client
-        .execute::<WorkSnapshot>(&request, RequestOptions)
+        .execute::<WorkSnapshot>(&request)
         .unwrap_or_else(|error| panic!("WorkSnapshot must succeed: {error}"))
         .request_id;
     match client.stream_operation(&request_id, StreamOptions::default()) {
@@ -158,7 +157,7 @@ fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability()
         }
         Err(error) => panic!("production stream failed unexpectedly: {error}"),
     }
-    match client.cancel_operation(&request_id, None) {
+    match client.cancel_operation(&request_id) {
         Ok(cancellation) => assert!(matches!(
             cancellation.status,
             CancellationStatus::Requested
@@ -187,7 +186,7 @@ fn assert_work_attempt_finish_route_admits_missing_attempt(client: &Client) {
     }))
     .expect("canonical missing-attempt finish request");
     let error = client
-        .execute::<WorkAttemptFinish>(&request, RequestOptions)
+        .execute::<WorkAttemptFinish>(&request)
         .expect_err("a nonexistent Work attempt must not finish");
     let ClientError::Problem(problem) = error else {
         panic!("mounted attempt_finish route must return a typed Work problem: {error}");

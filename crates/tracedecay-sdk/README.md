@@ -5,7 +5,7 @@ paging, and resumable SSE streams.
 
 ```rust
 use serde_json::json;
-use tracedecay_sdk::client::{Client, ConnectionMode, RequestOptions};
+use tracedecay_sdk::client::{Client, ConnectionMode};
 use tracedecay_sdk::operations::{TypedOperation, WorkSnapshot};
 
 let client = Client::builder(ConnectionMode::local(
@@ -16,7 +16,7 @@ let client = Client::builder(ConnectionMode::local(
 .build()?;
 let request: <WorkSnapshot as TypedOperation>::Request =
     serde_json::from_value(json!({"page_size": 25}))?;
-let snapshot = client.execute::<WorkSnapshot>(&request, RequestOptions::default())?;
+let snapshot = client.execute::<WorkSnapshot>(&request)?;
 # Ok::<(), tracedecay_sdk::client::ClientError>(())
 ```
 
