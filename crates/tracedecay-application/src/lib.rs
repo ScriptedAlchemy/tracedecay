@@ -107,8 +107,8 @@ pub use feedback::{
     feedback_surface_handler_descriptors, feedback_surface_operation,
 };
 pub use framed_log::{
-    DirectorySyncPolicy, append_durable, atomic_write, file_len, io_error, read_bounded,
-    replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
+    DirectorySyncPolicy, append_durable, atomic_write, atomic_write_prepared, file_len, io_error,
+    read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
 pub use git::{

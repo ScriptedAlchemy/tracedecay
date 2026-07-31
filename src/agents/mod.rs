@@ -925,10 +925,16 @@ pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>
         }
     };
     persist_host_config_write_intent(path, contents, metadata.as_ref())?;
-    if let Err(e) = tracedecay_application::atomic_write(
+    if let Err(e) = tracedecay_application::atomic_write_prepared(
         path,
         "host-config",
         contents,
+        |temporary| {
+            if let Some(metadata) = &metadata {
+                restore_host_file_metadata(temporary, metadata)?;
+            }
+            Ok(())
+        },
         tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
     ) {
         let hint = if let Some(b) = backup {
@@ -943,25 +949,6 @@ pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>
         return Err(TraceDecayError::Config {
             message: format!("failed to atomically replace {}: {e}{hint}", path.display()),
         });
-    }
-    if let Some(metadata) = &metadata {
-        restore_host_file_metadata(path, metadata).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to restore metadata on {}: {e}", path.display()),
-        })?;
-        std::fs::File::open(path)
-            .and_then(|file| file.sync_all())
-            .and_then(|()| {
-                tracedecay_application::sync_parent_directory(
-                    path,
-                    tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
-                )
-            })
-            .map_err(|e| TraceDecayError::Config {
-                message: format!(
-                    "failed to durably preserve {} permissions: {e}",
-                    path.display()
-                ),
-            })?;
     }
     #[cfg(feature = "test-transport")]
     if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()

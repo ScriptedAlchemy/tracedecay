@@ -210,6 +210,30 @@ pub fn atomic_write(
     )
 }
 
+pub fn atomic_write_prepared(
+    destination: &Path,
+    kind: &str,
+    bytes: &[u8],
+    prepare: impl FnOnce(&Path) -> io::Result<()>,
+    directory_policy: DirectorySyncPolicy,
+) -> io::Result<()> {
+    validate_regular_or_missing(destination)?;
+    let (temporary, mut output) = create_owned_temp(destination, kind)?;
+    let result = (|| {
+        output.write_all(bytes)?;
+        output.sync_all()?;
+        drop(output);
+        prepare(&temporary)?;
+        File::open(&temporary)?.sync_all()?;
+        replace_via_rename(&temporary, destination)?;
+        sync_parent_directory(destination, directory_policy)
+    })();
+    if result.is_err() {
+        remove_owned_temp(&temporary);
+    }
+    result
+}
+
 pub fn append_durable(
     path: &Path,
     frame: &[u8],
