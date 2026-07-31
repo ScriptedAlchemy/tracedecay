@@ -69,7 +69,15 @@ macro_rules! string_id {
     )+};
 }
 
-fn validate_integrity_digest(value: &str, field: &'static str) -> Result<(), DomainError> {
+/// Reject values that are not an algorithm-tagged, lowercase-hex integrity
+/// digest: `sha256:`/`blake3:` over 64 hex characters, `sha512:` over 128.
+///
+/// Every digest newtype in the domain — research, code-intelligence, and
+/// retrieval alike — accepts and rejects exactly this set.
+pub(crate) fn validate_integrity_digest(
+    value: &str,
+    field: &'static str,
+) -> Result<(), DomainError> {
     if value.is_empty() {
         return Err(DomainError::Empty { field });
     }
@@ -97,17 +105,15 @@ fn validate_integrity_digest(value: &str, field: &'static str) -> Result<(), Dom
     Ok(())
 }
 
-macro_rules! digest_id {
-    ($($name:ident),+ $(,)?) => {$(
-        #[doc = concat!("Strongly typed algorithm-tagged integrity digest: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
+/// Emit the constructor, accessor, validator, and conversions shared by every
+/// arm of [`digest_id!`].
+macro_rules! digest_id_body {
+    ($name:ident, $error:ty, $map:path) => {
         impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
+            pub fn new(value: impl Into<String>) -> Result<Self, $error> {
                 let value = value.into();
-                validate_integrity_digest(&value, stringify!($name))?;
+                $crate::research::id::validate_integrity_digest(&value, stringify!($name))
+                    .map_err($map)?;
                 Ok(Self(value))
             }
 
@@ -115,8 +121,9 @@ macro_rules! digest_id {
                 &self.0
             }
 
-            pub fn validate(&self) -> Result<(), DomainError> {
-                validate_integrity_digest(&self.0, stringify!($name))
+            pub fn validate(&self) -> Result<(), $error> {
+                $crate::research::id::validate_integrity_digest(&self.0, stringify!($name))
+                    .map_err($map)
             }
         }
 
@@ -131,7 +138,7 @@ macro_rules! digest_id {
         }
 
         impl TryFrom<String> for $name {
-            type Error = DomainError;
+            type Error = $error;
 
             fn try_from(value: String) -> Result<Self, Self::Error> {
                 Self::new(value)
@@ -143,8 +150,37 @@ macro_rules! digest_id {
                 formatter.write_str(&self.0)
             }
         }
+    };
+}
+
+/// Declare one or more algorithm-tagged integrity-digest newtypes.
+///
+/// `$error` is the contract error the constructors surface and `$map` converts
+/// the shared [`validate_integrity_digest`] failure into it, so modules that
+/// already speak [`DomainError`] pass `std::convert::identity`. The `@schema`
+/// arm additionally derives `JsonSchema`.
+macro_rules! digest_id {
+    (@schema $error:ty, $map:path; $($name:ident),+ $(,)?) => {$(
+        #[doc = concat!("Strongly typed algorithm-tagged integrity digest: `", stringify!($name), "`.")]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        $crate::research::id::digest_id_body!($name, $error, $map);
+    )+};
+
+    ($error:ty, $map:path; $($name:ident),+ $(,)?) => {$(
+        #[doc = concat!("Strongly typed algorithm-tagged integrity digest: `", stringify!($name), "`.")]
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        $crate::research::id::digest_id_body!($name, $error, $map);
     )+};
 }
+
+pub(crate) use digest_id;
+pub(crate) use digest_id_body;
 
 string_id!(
     EntityId,
@@ -221,6 +257,7 @@ string_id!(
 );
 
 digest_id!(
+    @schema DomainError, std::convert::identity;
     ManifestDigest,
     LocatorDigest,
     AccessPolicyDigest,
