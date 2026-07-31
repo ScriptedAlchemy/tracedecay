@@ -39,7 +39,7 @@ pub async fn create_verified_sqlite_backup_artifact(
         .snapshot_to(destination, authority)
         .await
         .map_err(RemoteRuntimeRecoveryErrorV1::Writer)?;
-    Ok(artifact_from_online_receipt(artifact_id, family, receipt)?)
+    artifact_from_online_receipt(artifact_id, family, receipt)
 }
 
 fn artifact_from_online_receipt(
@@ -436,6 +436,7 @@ mod tests {
                     "revoked_at": null,
                     "capabilities": ["read_backup"],
                     "scope": {
+                        "project_id": "project.runtime",
                         "repository_id": "repository.runtime",
                         "worktree_id": "worktree.runtime",
                         "reference": "refs/heads/main",

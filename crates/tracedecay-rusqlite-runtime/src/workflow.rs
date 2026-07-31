@@ -132,7 +132,7 @@ fn statement(
     MigrationSqlStatement::new(sql.to_owned(), params)
 }
 
-fn migration_text<'a>(values: &'a [MigrationSqlValue], index: usize) -> Option<&'a str> {
+fn migration_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
         MigrationSqlValue::Text(value) => Some(value),
         _ => None,
@@ -646,7 +646,7 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             .ok_or(WorkflowExecutionAuthorityError::Conflict)?;
         if stored.terminal.is_some()
             || &stored.fence != fence
-            || &stored.plan_digest != &checkpoint.plan_digest
+            || stored.plan_digest != checkpoint.plan_digest
         {
             let _ = transaction.rollback();
             return Err(WorkflowExecutionAuthorityError::Conflict);

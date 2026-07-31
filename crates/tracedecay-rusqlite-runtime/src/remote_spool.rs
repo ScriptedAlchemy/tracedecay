@@ -203,10 +203,10 @@ impl PersistedRemoteCaptureV2 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DurableSpoolRecordV2 {
     Pending {
-        capture: PersistedRemoteCaptureV2,
+        capture: Box<PersistedRemoteCaptureV2>,
     },
     Transition {
-        transition: RemoteReplayTransitionV1,
+        transition: Box<RemoteReplayTransitionV1>,
         receipt: RemoteReplayTransitionReceiptV1,
     },
     ReplayAttempt {
@@ -256,6 +256,7 @@ impl RemoteCaptureSpool {
         lease_path.push(".lock");
         let lease = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(PathBuf::from(lease_path))
@@ -330,7 +331,7 @@ impl RemoteCaptureSpool {
         }
         validate_next_sequence(&snapshot, &capture)?;
         self.append(&DurableSpoolRecordV2::Pending {
-            capture: capture.clone(),
+            capture: Box::new(capture.clone()),
         })?;
         Ok(receipt(
             &capture,
@@ -343,6 +344,7 @@ impl RemoteCaptureSpool {
         for record in self.read_records()? {
             match record {
                 DurableSpoolRecordV2::Pending { capture } => {
+                    let capture = *capture;
                     if capture.event_id != derive_persisted_event_id(&capture)?
                         || events
                             .insert(
@@ -564,7 +566,7 @@ impl RemoteReplaySpoolPortV1 for RemoteCaptureSpool {
             },
         };
         self.append(&DurableSpoolRecordV2::Transition {
-            transition,
+            transition: Box::new(transition),
             receipt: receipt.clone(),
         })
         .map_err(map_persistence_error)?;
@@ -1822,7 +1824,7 @@ mod tests {
         bounded.maximum_events = 1;
         let capture_spool = RemoteCaptureSpool::open(
             path.clone(),
-            bounded.clone(),
+            bounded,
             Box::new(XorEncryption(0xA5)),
             Box::new(Offline),
         )
