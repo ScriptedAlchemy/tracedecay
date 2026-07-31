@@ -7,6 +7,12 @@
 //! (re-running `install` + `post_install` for each tracked agent), so a
 //! separate `tracedecay reinstall` is not needed after an upgrade. Pass
 //! `--no-reinstall` to skip that agent-integration refresh.
+//!
+//! Hosts that own a canonical first-party component set are refreshed only by
+//! that tracked-agent pass, which routes them through the receipt-backed
+//! component-set transaction. The generated-plugin refresh deliberately skips
+//! them: it is not part of the transaction, so rewriting a receipt-owned
+//! artifact there would leave the receipt stale until the next reseal.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -29,6 +35,28 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
     )
 }
 
+/// Whether a host owns a canonical first-party component set.
+///
+/// For those hosts the receipt-backed component-set transaction is the sole
+/// writer of the deployed artifacts: `reinstall_agent_integrations` routes them
+/// through `apply_default_canonical_component_set` and never calls
+/// `install` / `update_plugin`. A second writer outside that transaction (this
+/// generated-artifact refresh) rewrote the very files the receipt claims,
+/// before the transaction resealed them, so every version bump left the
+/// receipt stale and Doctor reported a component-ownership conflict.
+///
+/// `integration_id_for_host` is many-to-one (CursorCloud and CursorDesktop both
+/// map to `cursor`), so an id counts as canonical when ANY host behind it has a
+/// non-empty default component set — the transaction owns that id's artifacts.
+fn host_owns_canonical_component_set(agent_id: &str) -> bool {
+    tracedecay::agents::host_bundle_v2::stock_host_kinds()
+        .into_iter()
+        .any(|host| {
+            tracedecay::agents::integration_id_for_host(host) == agent_id
+                && !tracedecay::agents::host_bundle_registry::default_components(host).is_empty()
+        })
+}
+
 fn refresh_generated_plugins_at(
     integrations: Vec<Box<dyn tracedecay::agents::AgentIntegration>>,
     home: &Path,
@@ -44,6 +72,14 @@ fn refresh_generated_plugins_at(
     let mut refreshed_any = false;
     let mut failures: Vec<String> = Vec::new();
     for ag in integrations {
+        if host_owns_canonical_component_set(ag.id()) {
+            eprintln!(
+                "  \x1b[2m·\x1b[0m {}: owned by the receipt-backed component-set transaction; \
+                 skipped here so the receipt is not left stale",
+                ag.id()
+            );
+            continue;
+        }
         let hermes_was_installed = ag.id() == "hermes" && ag.has_tracedecay(home);
         // Generated-plugin refresh never rewrites Hermes profile config, so it
         // must not be blocked by an unresolved historical session migration.
@@ -1014,10 +1050,11 @@ mod tests {
     use super::verify_forward_only_binary_version;
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
-        dogfood_forward_only_target_state, health_pass_failure_result, normalize_bin_path,
-        partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, refresh_generated_plugins_at, reinstall_failure_result,
-        restart_daemon_service_with, run_install_then_refresh,
+        dogfood_forward_only_target_state, health_pass_failure_result,
+        host_owns_canonical_component_set, normalize_bin_path, partition_reinstall_results,
+        post_update_binary, post_update_binary_from, prepare_post_update_lease,
+        refresh_generated_plugins_at, reinstall_failure_result, restart_daemon_service_with,
+        run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -1247,6 +1284,11 @@ mod tests {
         ));
     }
 
+    /// Kimi owns a canonical component set, so the receipt-backed transaction
+    /// (`reinstall_agent_integrations` → `apply_default_canonical_component_set`)
+    /// is its sole writer. The generated-artifact refresh must leave it alone —
+    /// including its staging directory — and must still succeed rather than
+    /// treating the skip as a failure that blocks maintenance.
     #[test]
     fn deferred_kimi_refresh_does_not_block_maintenance() {
         let home = TempDir::new().unwrap();
@@ -1265,10 +1307,57 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(std::fs::read(installed_path).unwrap(), original);
         assert!(
-            home.path()
+            !home
+                .path()
                 .join(".tracedecay/host-bundle-stage/kimi/tracedecay/.kimi-plugin/plugin.json")
-                .is_file()
+                .exists(),
+            "the component-set transaction owns the Kimi staging bundle"
         );
+    }
+
+    /// Post-update writer ordering. Every host with a canonical component set
+    /// is written exclusively by the receipt-backed transaction; a second
+    /// writer running before the transaction reseals the receipt is exactly
+    /// what left Cursor Core's receipt stale on every version bump and made
+    /// Doctor report a component-ownership conflict.
+    #[test]
+    fn canonical_component_set_hosts_are_not_refreshed_by_a_second_writer() {
+        for agent_id in ["claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode"] {
+            assert!(
+                host_owns_canonical_component_set(agent_id),
+                "{agent_id} owns a canonical component set"
+            );
+        }
+        for agent_id in ["gemini", "copilot", "zed", "cline", "roo-code", "kilo"] {
+            assert!(
+                !host_owns_canonical_component_set(agent_id),
+                "{agent_id} has no canonical component set and keeps the generated refresh"
+            );
+        }
+    }
+
+    /// Cursor's receipt-owned plugin bundle must not be rewritten outside the
+    /// component-set transaction: `.cursor-plugin/plugin.json` carries the
+    /// stamped manifest version and `hooks/hooks.json` bakes the resolved
+    /// binary path, so a refresh here guarantees byte drift from the receipt.
+    #[test]
+    fn cursor_plugin_bundle_is_left_to_the_component_set_transaction() {
+        let home = TempDir::new().unwrap();
+        let manifest_path = home
+            .path()
+            .join(".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json");
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        let receipt_owned = br#"{"name":"tracedecay","version":"0.0.0-receipt"}"#;
+        std::fs::write(&manifest_path, receipt_owned).unwrap();
+
+        let result = refresh_generated_plugins_at(
+            vec![Box::new(tracedecay::agents::CursorIntegration)],
+            home.path(),
+            "new-tracedecay",
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), receipt_owned);
     }
 
     #[test]
