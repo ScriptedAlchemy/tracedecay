@@ -6,6 +6,13 @@ Normative PR19 plan. PR19 performs the complete forward migration from released
 V1 data and root wiring, atomically makes V2 authoritative, provides bounded
 recovery, and deletes migration-only and superseded V1 paths.
 
+Here V1/V2 name the released product path and the TraceDecay V2 product
+cutover, not a blanket requirement to version every branch contract. Migration
+inventory includes only a predecessor proven on `origin/master`, in a
+published package/release, or in live persisted data. Branch-local schemas,
+aliases, and adapters change to their final shape in place and require no
+archive, compatibility reader, or migration.
+
 **Memory cutover correction (updated 2026-07-27).** The delivered Memory
 V1→V2 branch-store cutover is complete. Its typed owner archive covers all 33
 authoritative Memory V2 families; the physical adapters are checked for
@@ -72,8 +79,8 @@ after cutover; it never restores V1 as a writer.
 ## End-to-end production path
 
 1. The owning daemon acquires a maintenance fence that pauses ingest, sync, and
-   other writers for the affected store. Preflight discovers every supported V1
-   family, schema/version, source path, destination scope, required space, and
+   other writers for the affected store. Preflight discovers every evidenced
+   released/live V1 family, schema/version, source path, destination scope, required space, and
    blocking corruption, and returns an actionable outcome when complete
    migration cannot be proved.
 2. Before any source mutation, the daemon creates and verifies a recoverable
@@ -134,9 +141,10 @@ family corruption remains preserve-and-escalate.
 - Ship preflight, verified backup, maintenance fencing, family-by-family
   staging, durable checkpoints, and restart/resume as one callable daemon
   upgrade path.
-- Migrate all detected supported families. Unknown or corrupt required data
-  blocks the upgrade with Doctor guidance; PR19 has no skipped-family or
-  deferred-family success state.
+- Migrate all detected supported families whose predecessor is proven released
+  or live. Unknown or corrupt required data blocks the upgrade with Doctor
+  guidance; PR19 has no skipped-family or deferred-family success state.
+  Branch-local families are finalized in place and never enter this inventory.
 - Classify corruption by family. Deterministically rebuildable indexes and
   projections may be repaired under exclusive maintenance authority;
   authoritative facts, observations, sessions, and receipts are preserved and
@@ -148,9 +156,10 @@ family corruption remains preserve-and-escalate.
   still authoritative and any comparison remains read-only.
 - Publish one verified V2 epoch atomically, reconnect clients, and reject an
   older or stale client/daemon with an actionable upgrade error.
-- Preserve stable public compatibility names only as thin delegates to
-  canonical V2 application operations. They own no storage, policy, lifecycle,
-  or migration logic.
+- Preserve stable public compatibility names only when `origin/master` or a
+  published package/release proves the name was public, and then only as thin
+  delegates to canonical V2 application operations. They own no storage,
+  policy, lifecycle, or migration logic.
 
 ### Recover forward, then delete
 
@@ -183,7 +192,7 @@ implementation or a permanent migration runtime.
 
 ## Direct acceptance
 
-- Real V1 fixtures containing every supported family migrate through the
+- Real V1 fixtures derived from evidenced released/live families migrate through the
   production upgrade entry point and produce semantically equivalent V2 reads,
   searches, identities, references, and lineage.
 - Fault injection at every preflight, backup, staging transaction, checkpoint,
