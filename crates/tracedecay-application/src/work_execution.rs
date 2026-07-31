@@ -235,13 +235,16 @@ where
     pub fn acquire_lease(
         &self,
         authority: &WorkAuthority,
-        snapshot: &WorkProjectionSnapshotV1,
-        identity: WorkAttemptIdentityV1,
-        projection_binding: WorkAttemptProjectionBindingV1,
-        execution: WorkExecutionEnvelopeV1,
-        lease: WorkLeaseFenceV1,
-        requested_route: WorkProviderRouteV1,
+        request: WorkAttemptAcquireLeaseRequestV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
+        let WorkAttemptAcquireLeaseRequestV1 {
+            snapshot,
+            identity,
+            projection_binding,
+            execution,
+            lease,
+            requested_route,
+        } = request;
         let attempt = WorkAttemptV1::new(
             identity,
             projection_binding,
@@ -256,7 +259,7 @@ where
             None,
             None,
         )?;
-        attempt.validate_snapshot(snapshot)?;
+        attempt.validate_snapshot(&snapshot)?;
         match self.persistence.insert(authority, &attempt) {
             Ok(()) => Ok(attempt),
             Err(WorkExecutionPersistenceError::Conflict) => {

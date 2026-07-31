@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, CancellationContext, CapabilityGrantSnapshot,
     CreateWorkCommand, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
-    ReviewProposalCommand, WorkAttemptPersistencePort, WorkExecutionPersistenceError,
-    WorkExecutionService, WorkService,
+    ReviewProposalCommand, WorkAttemptAcquireLeaseRequestV1, WorkAttemptPersistencePort,
+    WorkExecutionPersistenceError, WorkExecutionService, WorkService,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
@@ -254,24 +254,28 @@ fn application_execution_service_composes_with_sqlite_adapter() {
     let leased = service
         .acquire_lease(
             &owner,
-            &snapshot,
-            identity.clone(),
-            projection_binding,
-            execution,
-            lease(1),
-            requested_route(),
+            WorkAttemptAcquireLeaseRequestV1 {
+                snapshot: snapshot.clone(),
+                identity: identity.clone(),
+                projection_binding,
+                execution,
+                lease: lease(1),
+                requested_route: requested_route(),
+            },
         )
         .unwrap();
     assert_eq!(
         service
             .acquire_lease(
                 &owner,
-                &snapshot,
-                identity.clone(),
-                leased.projection_binding().clone(),
-                leased.execution().clone(),
-                lease(1),
-                leased.requested_route().clone(),
+                WorkAttemptAcquireLeaseRequestV1 {
+                    snapshot: snapshot.clone(),
+                    identity: identity.clone(),
+                    projection_binding: leased.projection_binding().clone(),
+                    execution: leased.execution().clone(),
+                    lease: lease(1),
+                    requested_route: leased.requested_route().clone(),
+                },
             )
             .unwrap(),
         leased
@@ -498,16 +502,18 @@ fn forged_projection_generation_rejects_insert_with_no_attempt_row() {
     let owner = authority(&context);
     let mut forged = leased(&owner, task_id);
     // Rebuild with a caller-forged generation while keeping admitted projection data.
+    let forged_identity = forged.identity().clone();
+    let forged_binding = WorkAttemptProjectionBindingV1::new(
+        id::<ProjectionGenerationId>("generation.work.forged-by-caller"),
+        forged.projection_binding().sequence(),
+        forged.projection_binding().work_version(),
+        forged.projection_binding().accepted_proposal().clone(),
+    )
+    .unwrap();
     forged = WorkAttemptV1::new(
-        forged.identity().clone(),
-        WorkAttemptProjectionBindingV1::new(
-            id::<ProjectionGenerationId>("generation.work.forged-by-caller"),
-            forged.projection_binding().sequence(),
-            forged.projection_binding().work_version(),
-            forged.projection_binding().accepted_proposal().clone(),
-        )
-        .unwrap(),
-        forged.execution().clone(),
+        forged_identity.clone(),
+        forged_binding.clone(),
+        execution_envelope(&owner, forged_identity, forged_binding),
         forged.lease().clone(),
         forged.state(),
         None,
