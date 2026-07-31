@@ -15,8 +15,7 @@ use crate::application::semantic_runtime::SemanticRuntimeStateV1 as Runtime;
 
 /// Resolve the lifecycle store root under the user data directory.
 pub(crate) fn default_lifecycle_root() -> Option<PathBuf> {
-    crate::config::user_data_dir()
-        .map(|root| tracedecay_semantic::default_lifecycle_root_in(&root))
+    crate::config::user_data_dir().map(|root| tracedecay_semantic::default_lifecycle_root_in(&root))
 }
 
 /// Process-wide lifecycle owner under the user semantic-models root.
