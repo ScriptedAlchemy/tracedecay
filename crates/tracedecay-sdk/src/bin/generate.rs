@@ -68,7 +68,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     write(
         &root.join("crates/tracedecay-sdk/src/operations.rs"),
-        &render_rust_operations(&operations)?,
+        // rustfmt the emitted Rust so `cargo fmt --check` and the codegen
+        // drift check agree on one canonical byte form (the pinned toolchain
+        // makes the formatting deterministic across machines and CI).
+        &rustfmt(&render_rust_operations(&operations)?)?,
     )?;
     Ok(())
 }
@@ -1006,6 +1009,29 @@ fn render_index() -> String {
          export * from \"./server-operations\";\n\
          export * from \"./types\";\n"
     )
+}
+
+/// Format emitted Rust through the pinned toolchain's rustfmt. Failing loudly
+/// is deliberate: unformatted output would put the fmt gate and the codegen
+/// drift gate in permanent tension.
+fn rustfmt(contents: &str) -> Result<String, Box<dyn Error>> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("rustfmt")
+        .args(["--edition", "2024", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("rustfmt stdin unavailable")?
+        .write_all(contents.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(format!("rustfmt failed with {}", output.status).into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 fn write(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
