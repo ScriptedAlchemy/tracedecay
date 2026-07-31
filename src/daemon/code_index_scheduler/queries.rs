@@ -1,4 +1,4 @@
-//! Callable application operations over the latest sealed PR9 generation.
+//! Callable application operations over the latest sealed query generation.
 //!
 //! This is the production consumer of the exact, lexical, and graph owners.
 //! It selects one already-mounted worktree generation and translates the
@@ -72,15 +72,13 @@ pub(in crate::daemon) fn unpinned_latest_generation() -> CodeGenerationId {
 }
 
 pub(in crate::daemon) fn callable_query_sanitizer_revision() -> SanitizerRevision {
-    SanitizerRevision::new(tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)
+    SanitizerRevision::new(tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1)
         .unwrap_or_else(|_| panic!("static sanitizer revision"))
 }
 
 pub(in crate::daemon) fn callable_query_normalization_revision() -> QueryNormalizationRevision {
-    QueryNormalizationRevision::new(
-        tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
-    )
-    .unwrap_or_else(|_| panic!("static normalization revision"))
+    QueryNormalizationRevision::new(tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1)
+        .unwrap_or_else(|_| panic!("static normalization revision"))
 }
 
 fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
@@ -145,7 +143,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Compose real exact/lexical/graph lane outcomes only through the
     /// accepted profile and query/cursor key authority mounted for this exact
     /// admitted scope.
-    pub(in crate::daemon) async fn compose_pr9_fallback(
+    pub(in crate::daemon) async fn compose_query_fallback(
         &self,
         scope: &tracedecay_application::ResolvedScope,
         request: &tracedecay_domain::RetrievalRequest,
@@ -154,13 +152,13 @@ impl CodeIndexSchedulerRegistryV1 {
         page_size: usize,
         cursor: Option<&tracedecay_domain::RetrievalCursor>,
     ) -> Result<
-        tracedecay_query::retrieval::AuthorizedPr9FallbackV1,
-        tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1,
+        tracedecay_query::retrieval::AuthorizedQueryFallbackV1,
+        tracedecay_query::retrieval::QueryAuthorityErrorV1,
     > {
         let authority = self
-            .pr9_query_authority_for_scope(scope)
+            .query_authority_for_scope(scope)
             .await
-            .ok_or(tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable)?;
+            .ok_or(tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable)?;
         authority.compose(request, query_view, lanes, page_size, cursor)
     }
 
@@ -168,7 +166,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// complete code generation.
     ///
     /// No semantic query is constructed until an accepted calibration
-    /// authority exists. That keeps ordinary PR9 fallback byte-stable and
+    /// authority exists. That keeps ordinary query fallback byte-stable and
     /// makes a strict request fail with a typed reason instead of inventing a
     /// score, profile, or candidate.
     pub(in crate::daemon) async fn semantic_mcp_abstention(
@@ -264,30 +262,45 @@ impl CodeIndexSchedulerRegistryV1 {
         request: &RequestContext,
         requested: &CodeGenerationId,
         page: &tracedecay_application::PageRequest,
-    ) -> Option<LatestCompleteCodeIndexV1> {
-        let wait = remaining_generation_resolution_wait(request)?;
+        authority: &tracedecay_query::retrieval::QueryAuthorityV1,
+        routing: &PreparedQueryRoutingBindingsV1,
+    ) -> Result<LatestCompleteCodeIndexV1, CallableCodeCursorError> {
+        let wait = remaining_generation_resolution_wait(request)
+            .ok_or(CallableCodeCursorError::Unavailable)?;
         let resolution = async {
-            if is_unpinned_latest(requested) {
-                if let Some(cursor) = page.cursor.as_ref() {
-                    let cursor = inspect_prepared_query_cursor(cursor.as_str()).ok()?;
-                    self.generation_for(request.scope(), &cursor.generation)
-                        .await
-                } else {
-                    self.latest_complete_fresh_for_scope(request.scope()).await
-                }
+            if let Some(cursor) = page.cursor.as_ref() {
+                let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
+                let scope = request.scope().clone();
+                route_authenticated_prepared_query_cursor(
+                    authority,
+                    routing,
+                    cursor.as_str(),
+                    current_utc_micros()?,
+                    expected_generation,
+                    |generation| async move { self.generation_for(&scope, &generation).await },
+                )?
+                .await
+                .ok_or(CallableCodeCursorError::Unavailable)
+            } else if is_unpinned_latest(requested) {
+                self.latest_complete_fresh_for_scope(request.scope())
+                    .await
+                    .ok_or(CallableCodeCursorError::Unavailable)
             } else {
-                self.generation_for(request.scope(), requested).await
+                self.generation_for(request.scope(), requested)
+                    .await
+                    .ok_or(CallableCodeCursorError::Unavailable)
             }
         };
         let latest = tokio::time::timeout(wait, resolution)
             .await
-            .ok()
-            .flatten()?;
-        matches!(
-            request.admission_at(current_utc_micros().ok()?),
+            .map_err(|_| CallableCodeCursorError::Unavailable)??;
+        if !matches!(
+            request.admission_at(current_utc_micros()?),
             RequestAdmission::Admitted
-        )
-        .then_some(latest)
+        ) {
+            return Err(CallableCodeCursorError::Unavailable);
+        }
+        Ok(latest)
     }
 }
 
@@ -780,17 +793,22 @@ struct PreparedCallableQueryV1 {
 }
 
 macro_rules! prepare_callable_query_or_return {
-    ($registry:expr, $context:expr, $request:expr) => {
+    ($registry:expr, $context:expr, $request:expr, $operation:expr, $binding:expr) => {{
+        let Ok(query_binding_digest) = canonical_sha256(&$binding) else {
+            return unavailable(query_finished_at());
+        };
         match $registry
             .prepare_callable_query(
                 &$context,
                 &$request.scope.generation,
                 &$request.meta.page,
                 $request.meta.temporal,
+                $operation,
+                query_binding_digest.clone(),
             )
             .await
         {
-            Ok(prepared) => prepared,
+            Ok(prepared) => (prepared, query_binding_digest),
             Err(error) => {
                 return rejected_cursor(
                     query_finished_at(),
@@ -799,7 +817,7 @@ macro_rules! prepare_callable_query_or_return {
                 );
             }
         }
-    };
+    }};
 }
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -809,19 +827,29 @@ impl CodeIndexSchedulerRegistryV1 {
         generation: &CodeGenerationId,
         page: &tracedecay_application::PageRequest,
         temporal: TemporalModeV1,
+        operation: &'static str,
+        query_binding_digest: ManifestDigest,
     ) -> Result<PreparedCallableQueryV1, CallableCodeCursorError> {
-        let latest = self
-            .resolve_serving_generation(context.request, generation, page)
-            .await
-            .ok_or(if page.cursor.is_some() {
-                CallableCodeCursorError::Invalid
-            } else {
-                CallableCodeCursorError::Unavailable
-            })?;
         let authority = self
-            .pr9_query_authority_for_scope(context.request.scope())
+            .query_authority_for_scope(context.request.scope())
             .await
             .ok_or(CallableCodeCursorError::Unavailable)?;
+        let routing = prepared_routing_bindings(
+            context,
+            temporal,
+            operation,
+            query_binding_digest,
+            page.page_size,
+        )?;
+        let latest = self
+            .resolve_serving_generation(
+                context.request,
+                generation,
+                page,
+                authority.as_ref(),
+                &routing,
+            )
+            .await?;
         let base = base_request(context, &latest, temporal, authority.profile())
             .map_err(|_| CallableCodeCursorError::Unavailable)?;
         let query = PreparedQueryV1::prepare(
@@ -899,7 +927,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
                 pagination.items,
                 Some(pagination.total),
                 next_cursor,
-                page.pr9_fallback,
+                page.query_fallback,
             )
             .unwrap_or_else(|_| panic!("prepared query creates a valid application page"));
             bounded_result(page, coverage, finished_at, None, cursor_expires_at)
@@ -1170,7 +1198,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             };
             let authority = CentralExactAdmissionAuthorityV1::new(
                 ExactAdmissionRuleRevision::new(
-                    tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                    tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
                 )
                 .unwrap_or_else(|_| panic!("static exact rule revision")),
             );
@@ -1269,11 +1297,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .collect(),
                 fuzzy_budget: request.fuzzy_budget,
                 lexical_profile_revision: ComponentRevision::new(
-                    tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                    tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
                 )
                 .unwrap_or_else(|_| panic!("static lexical profile")),
                 score_domain: ScoreDomainId::new(
-                    tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                    tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
                 )
                 .unwrap_or_else(|_| panic!("static lexical score domain")),
                 budget: base.budget,

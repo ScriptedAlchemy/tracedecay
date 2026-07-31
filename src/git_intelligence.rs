@@ -1,4 +1,4 @@
-//! PR9 read-only native Git intelligence adapter (Plan 36).
+//! query read-only native Git intelligence adapter (Plan 36).
 //!
 //! This module is the fixed internal adapter for the typed read-only Git
 //! contracts in [`tracedecay_domain::git`]: repository status,

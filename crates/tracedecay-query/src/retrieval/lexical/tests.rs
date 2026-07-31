@@ -3,7 +3,7 @@
 //! coverage, and deterministic continuation. Ports are in-memory fakes (the
 //! `src/query` test pattern): the store-side posting adapters that implement
 //! `LexicalPostingReadPort` against the lexical projection land with the
-//! pr9/i3 composition packet.
+//! query/i3 composition packet.
 
 use std::collections::BTreeMap;
 use std::fmt;

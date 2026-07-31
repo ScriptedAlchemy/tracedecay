@@ -130,9 +130,9 @@
   "decision_policy": {
     "required_cancellation": "bounded_typed_cancelled",
     "required_fallback_byte_stability": true,
-    "required_offline": "no_network_and_pr9_fallback_available"
+    "required_offline": "no_network_and_query_fallback_available"
   },
-  "expected_pr9_fallback_digests": {
+  "expected_query_fallback_digests": {
     "train": "sha256:80fd668d9b7b6dfabd1977c7b8e0f5605225a33a26081cc2e8e22f4801815cd4",
     "validation": "sha256:105bb59aa0e537b99d2f71db234cc9c2722213209692b4d168351d424a42f7c7"
   },
@@ -141,7 +141,7 @@
       "calibration_threshold_ppm": 0,
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
-      "profile_id": "pr9-fallback",
+      "profile_id": "query-fallback",
       "rerank_weight_ppm": 0,
       "semantic_weight_ppm": 0
     },
@@ -693,5 +693,5 @@
   "schema_version": 1,
   "source_repository_commit": "8312618fee8109b16be09e65f45118b4e550fa14",
   "source_repository_tree": "587aed48f162f74765da3a35fc41850523ea377d",
-  "workload_id": "pr9-pr10-production-candidate-workload-v1"
+  "workload_id": "query-semantic-production-candidate-workload-v1"
 }

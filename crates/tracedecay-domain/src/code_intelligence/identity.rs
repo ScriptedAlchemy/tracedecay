@@ -1,5 +1,5 @@
 //! Occurrence identity, source spans, and revision/digest primitives for the
-//! PR9 code-intelligence model (Plan 25, "Identity and lineage" and
+//! query code-intelligence model (Plan 25, "Identity and lineage" and
 //! "Code-search chunk and projection contract").
 //!
 //! Generation-local occurrence identity is exact. Logical identity remains

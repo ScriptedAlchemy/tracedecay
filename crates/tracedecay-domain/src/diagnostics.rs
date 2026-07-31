@@ -1,5 +1,5 @@
 //! Generation-bound diagnostic records (Plan 35, "Universal managed
-//! diagnostics"; pr9/12-diagnostic-persistence authority packet).
+//! diagnostics"; query/12-diagnostic-persistence authority packet).
 //!
 //! These are storage-neutral logical records: no store rows, no runtime, no
 //! transport. Every durable diagnostic is bound to an immutable

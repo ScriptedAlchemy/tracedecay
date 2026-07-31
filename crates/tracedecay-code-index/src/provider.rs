@@ -165,7 +165,7 @@ pub enum GenerationProviderContractErrorV1 {
     StateCoverageMismatch,
 }
 
-/// Read adapter implemented by the existing Git authority for the PR9 query
+/// Read adapter implemented by the existing Git authority for the query
 /// owner. Joined values are views over native Git results, never Git storage.
 pub trait GenerationGitJoinReadPort {
     fn read_git_diff(

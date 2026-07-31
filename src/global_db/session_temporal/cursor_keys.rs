@@ -2,7 +2,12 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
-use tracedecay_domain::{SessionCursorKeyIdV1, SessionCursorVersionV1, SignedCursorKeyRefV1};
+use tracedecay_domain::{
+    PrivacyDomainId, RetrievalCursorKeyId, SessionCursorKeyIdV1, SessionCursorVersionV1,
+    SignedCursorKeyRefV1, canonical_sha256,
+};
+use tracedecay_query::retrieval::QUERY_CURSOR_TTL_MICROS_V1;
+use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
 use crate::db::engine::{Executor, ReadSnapshot, params};
@@ -254,6 +259,58 @@ impl GlobalDbCursorKeyProvider {
             authenticators,
         })
     }
+    pub(crate) fn retrieval_keyring(
+        &self,
+        privacy_domain: PrivacyDomainId,
+    ) -> Result<RetrievalCursorKeyringV1, GlobalDbCursorKeyProviderError> {
+        let derivation_context =
+            canonical_sha256(&("tracedecay.query-cursor-key.v1", &privacy_domain))
+                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+        let active_authenticator = self
+            .authenticators
+            .iter()
+            .find(|(key, _)| key == &self.active_key)
+            .ok_or_else(|| GlobalDbCursorKeyProviderError::ActiveKeyUnavailable {
+                expected: self.active_key.clone(),
+            })?;
+        let active_id = retrieval_key_id(&self.active_key)?;
+        let active_epoch = u64::from(self.active_key.version.value());
+        let active_material = active_authenticator
+            .1
+            .derive_key_material(&self.active_key, derivation_context.as_str().as_bytes())
+            .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+        let mut keyring = RetrievalCursorKeyringV1::new(
+            privacy_domain,
+            active_id,
+            active_epoch,
+            active_material.to_vec(),
+            QUERY_CURSOR_TTL_MICROS_V1,
+        )
+        .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+        for (key, authenticator) in &self.authenticators {
+            if key == &self.active_key {
+                continue;
+            }
+            let material = authenticator
+                .derive_key_material(key, derivation_context.as_str().as_bytes())
+                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+            keyring
+                .retain(
+                    retrieval_key_id(key)?,
+                    u64::from(key.version.value()),
+                    material.to_vec(),
+                )
+                .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)?;
+        }
+        Ok(keyring)
+    }
+}
+
+fn retrieval_key_id(
+    key: &SignedCursorKeyRefV1,
+) -> Result<RetrievalCursorKeyId, GlobalDbCursorKeyProviderError> {
+    RetrievalCursorKeyId::new(key.key_id.as_str())
+        .map_err(|_| GlobalDbCursorKeyProviderError::InvalidRetrievalKey)
 }
 
 impl fmt::Debug for GlobalDbCursorKeyProvider {

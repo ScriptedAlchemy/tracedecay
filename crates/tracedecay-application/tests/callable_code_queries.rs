@@ -23,8 +23,9 @@ use tracedecay_application::{
     callable_code_operations,
 };
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, Pr9FallbackSubpayload, PublicRetrieverStatus,
-    QueryNormalizationRevision, RetrieverKind, SanitizerRevision, TemporalModeV1, UtcMicros,
+    CodeGenerationId, EphemeralSanitizedQueryViewV1, PublicRetrieverStatus,
+    QueryFallbackSubpayload, QueryNormalizationRevision, RetrieverKind, SanitizerRevision,
+    TemporalModeV1, UtcMicros,
 };
 use tracedecay_policy::authorization::SourceAuthorizationEvaluatorV1;
 use tracedecay_tool_catalog::{
@@ -60,11 +61,11 @@ fn query(text: &str) -> EphemeralSanitizedQueryViewV1 {
     .unwrap()
 }
 
-fn fallback() -> Pr9FallbackSubpayload {
-    let mut fallback = Pr9FallbackSubpayload {
-        profile_id: common::id("profile.pr9.fixture"),
+fn fallback() -> QueryFallbackSubpayload {
+    let mut fallback = QueryFallbackSubpayload {
+        profile_id: common::id("profile.query.fixture"),
         ordered_candidates: Vec::new(),
-        public_pr9_lane_coverage: [
+        public_fallback_lane_coverage: [
             (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
             (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
             (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
@@ -116,9 +117,9 @@ impl ExactOnlyPort {
         } else {
             generation.clone()
         };
-        let mut pr9_fallback = fallback();
+        let mut query_fallback = fallback();
         if matches!(self.scenario, ExactPortScenario::InvalidFallback) {
-            pr9_fallback.digest = common::id(common::SHA256_B);
+            query_fallback.digest = common::id(common::SHA256_B);
         }
         let next_cursor = matches!(
             self.scenario,
@@ -131,7 +132,7 @@ impl ExactOnlyPort {
             items: Vec::new(),
             total: Some(total),
             next_cursor: next_cursor.clone(),
-            pr9_fallback: Some(pr9_fallback),
+            query_fallback: Some(query_fallback),
         };
         let mut evidence = common::evidence(page);
         evidence.temporal.source_generation =
@@ -508,7 +509,7 @@ fn callable_code_service_preserves_generation_coverage_and_fallback() {
     assert_eq!(packet.coverage.returned, 0);
     let page = packet.payload.unwrap();
     assert!(page.next_cursor.is_none());
-    page.pr9_fallback.as_ref().unwrap().validate().unwrap();
+    page.query_fallback.as_ref().unwrap().validate().unwrap();
 }
 
 #[test]
@@ -535,7 +536,7 @@ fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
 }
 
 #[test]
-fn callable_code_page_preserves_generation_cursor_and_pr9_fallback() {
+fn callable_code_page_preserves_generation_cursor_and_query_fallback() {
     let cursor = OpaqueCursor::new("cursor.generation.fixture.page-2").unwrap();
     let page = CodeQueryPage::<String>::new(
         scope().generation,
@@ -552,7 +553,7 @@ fn callable_code_page_preserves_generation_cursor_and_pr9_fallback() {
         page.next_cursor.as_ref().unwrap().as_str(),
         "cursor.generation.fixture.page-2"
     );
-    page.pr9_fallback.as_ref().unwrap().validate().unwrap();
+    page.query_fallback.as_ref().unwrap().validate().unwrap();
 
     let outcome = RetrievalPortOutcome::Completed(common::evidence(page));
     assert_eq!(

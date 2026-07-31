@@ -208,7 +208,7 @@ fn cursor_query_identity_is_bound_to_the_privacy_domain_and_key_epoch() {
 }
 
 #[test]
-fn pr9_cursor_mac_authenticates_the_semantic_continuation_envelope() {
+fn query_cursor_mac_authenticates_the_semantic_continuation_envelope() {
     let (kernel, output) =
         composed_with_graph_outcome(RetrieverOutcome::Complete(batch(Vec::new(), "empty")));
     let request = request();
@@ -249,7 +249,7 @@ fn pr9_cursor_mac_authenticates_the_semantic_continuation_envelope() {
 
     kernel
         .paginate_at(&request, &query_view, &keys, &output, 2, Some(&cursor), NOW)
-        .expect("PR9 validates first through the shared cursor MAC");
+        .expect("query authority validates first through the shared cursor MAC");
 
     let mut missing_continuation = cursor.clone();
     missing_continuation.semantic = None;

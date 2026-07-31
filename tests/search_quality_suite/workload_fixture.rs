@@ -1,4 +1,4 @@
-//! PR9/PR10 candidate-workload fixture integrity.
+//! query/semantic candidate-workload fixture integrity.
 //!
 //! This test validates the checked-in workload against the root-owned
 //! `search_eval` module and the root-checked-in fixture corpus, so it stays
@@ -14,10 +14,10 @@ use tracedecay::search_eval::{
 };
 
 #[test]
-fn pr10_workload_and_incremental_fixture_are_byte_exact() {
+fn semantic_workload_and_incremental_fixture_are_byte_exact() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workload_path =
-        repo_root.join("tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json");
+        repo_root.join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json");
     let workload = load_candidate_workload(&workload_path).expect("checked-in workload parses");
     let summary =
         validate_direct_workload(repo_root, None).expect("checked-in workload is authoritative");

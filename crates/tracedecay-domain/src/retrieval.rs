@@ -6,7 +6,7 @@
 //! [Plan 05](../../../../docs/plans/tracedecay-v2/05-query-crate.md) owns the
 //! query execution that composes them;
 //! [Plan 25](../../../../docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md)
-//! owns the PR9 code-generation evidence that code adapters carry.
+//! owns the query code-generation evidence that code adapters carry.
 //!
 //! This module contains values and validation only. It performs no I/O,
 //! persistence, query execution, policy evaluation, host integration, or async
@@ -27,10 +27,10 @@ use crate::research::watermark::VectorWatermark;
 use crate::research::{DomainError, canonical_sha256};
 use crate::session::TemporalModeV1;
 
-/// Schema/domain separator for the independently hashed PR9 fallback
+/// Schema/domain separator for the independently hashed query fallback
 /// subpayload (Plan 15, "typed retrieval contract"). The digest field itself
 /// is excluded from the hashed bytes.
-pub const PR9_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN: &str = "tracedecay.pr9-fallback.v1";
+pub const QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN: &str = "tracedecay.query-fallback.v1";
 const RETRIEVAL_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.retrieval-scope.v1";
 const RETRIEVAL_SNAPSHOT_DIGEST_DOMAIN: &str = "tracedecay.retrieval-snapshot.v1";
 
@@ -289,9 +289,11 @@ pub enum RetrievalContractError {
     FixedPointOverflow { operation: &'static str },
     #[error("a score-domain calibration must have a positive raw score span")]
     InvalidCalibrationRange,
-    #[error("the PR9 fallback subpayload may only cover ExactLiteral, Lexical, and Graph lanes")]
+    #[error("the query fallback subpayload may only cover ExactLiteral, Lexical, and Graph lanes")]
     FallbackLaneViolation,
-    #[error("the PR9 fallback subpayload must report all three PR9 lanes exactly once")]
+    #[error(
+        "the query fallback subpayload must report all three query fallback lanes exactly once"
+    )]
     IncompleteFallbackLaneCoverage,
     #[error("{field} is not in canonical order")]
     NonCanonicalOrder { field: &'static str },
@@ -336,8 +338,8 @@ pub enum RetrieverKind {
 }
 
 impl RetrieverKind {
-    /// The lanes admitted to the PR9 fallback subpayload.
-    pub const PR9_FALLBACK_LANES: [Self; 3] = [Self::ExactLiteral, Self::Lexical, Self::Graph];
+    /// The lanes admitted to the query fallback subpayload.
+    pub const QUERY_FALLBACK_LANES: [Self; 3] = [Self::ExactLiteral, Self::Lexical, Self::Graph];
 
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -348,7 +350,7 @@ impl RetrieverKind {
         }
     }
 
-    pub const fn is_pr9_fallback_lane(self) -> bool {
+    pub const fn is_query_fallback_lane(self) -> bool {
         matches!(self, Self::ExactLiteral | Self::Lexical | Self::Graph)
     }
 }
@@ -430,7 +432,7 @@ impl ScoreDomainCalibrationV1 {
     }
 }
 
-/// PR9 scope is explicitly single-root (Plan 25: federation means composing
+/// query scope is explicitly single-root (Plan 25: federation means composing
 /// independent evidence lanes within one authorized root; Plan 16 multi-root
 /// execution remains PR15 work).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1189,8 +1191,8 @@ pub struct RetrievalCursor {
     pub ranking_revision: RankingRevision,
     /// First final ordinal in the next page of the frozen candidate set.
     pub next_ordinal: u32,
-    /// Optional PR10 continuation authenticated by the same PR9 cursor key.
-    /// Its absence preserves the canonical PR9 cursor bytes.
+    /// Optional semantic continuation authenticated by the same query cursor key.
+    /// Its absence preserves the canonical query cursor bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic: Option<SemanticRetrievalContinuationV1>,
     pub expiry: UtcMicros,
@@ -1262,7 +1264,7 @@ pub enum SanitizedStageFailure {
     Internal,
 }
 
-/// Semantic/rerank outcome reported outside the PR9 fallback subpayload
+/// Semantic/rerank outcome reported outside the query fallback subpayload
 /// (Plan 15). It may never change the subpayload, its digest, or cursor
 /// identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1272,56 +1274,56 @@ pub struct SemanticRerankOutcome {
     pub rerank: OptionalStagePublicStatus,
 }
 
-/// The typed, independently hashed PR9 fallback subpayload (Plan 15/PR10
+/// The typed, independently hashed query fallback subpayload (Plan 15/SEMANTIC
 /// boundary). Canonical-encoded and hashed with
-/// [`PR9_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
+/// [`QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
 /// from the hashed bytes. It contains the complete accepted
 /// exact+lexical+graph result — IDs, order, contributions, explanations,
-/// coverage, and cursor bytes. PR10 must preserve it byte-for-byte whenever
+/// coverage, and cursor bytes. semantic must preserve it byte-for-byte whenever
 /// the semantic or rerank stage is disabled, unavailable, rejected, or
 /// cancelled.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Pr9FallbackSubpayload {
+pub struct QueryFallbackSubpayload {
     pub profile_id: FusionProfileId,
     pub ordered_candidates: Vec<RankedCandidate>,
-    pub public_pr9_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    pub public_fallback_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub freshness: Vec<SourceFreshness>,
     pub cursor: Option<RetrievalCursor>,
     pub digest: FallbackSubpayloadDigest,
 }
 
 #[derive(Serialize)]
-struct Pr9FallbackSubpayloadDigestInput<'a> {
+struct QueryFallbackSubpayloadDigestInput<'a> {
     domain: &'static str,
     profile_id: &'a FusionProfileId,
     ordered_candidates: &'a [RankedCandidate],
-    public_pr9_lane_coverage: &'a BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    public_fallback_lane_coverage: &'a BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     freshness: &'a [SourceFreshness],
     cursor: &'a Option<RetrievalCursor>,
 }
 
-impl Pr9FallbackSubpayload {
-    /// Construct one canonical PR9 fallback payload and compute its
+impl QueryFallbackSubpayload {
+    /// Construct one canonical query fallback payload and compute its
     /// domain-separated digest without exposing any placeholder identity.
     pub fn new(
         profile_id: FusionProfileId,
         ordered_candidates: Vec<RankedCandidate>,
-        public_pr9_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+        public_fallback_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
         freshness: Vec<SourceFreshness>,
         cursor: Option<RetrievalCursor>,
     ) -> Result<Self, RetrievalContractError> {
-        let digest = compute_pr9_fallback_subpayload_digest(
+        let digest = compute_query_fallback_subpayload_digest(
             &profile_id,
             &ordered_candidates,
-            &public_pr9_lane_coverage,
+            &public_fallback_lane_coverage,
             &freshness,
             &cursor,
         )?;
         let payload = Self {
             profile_id,
             ordered_candidates,
-            public_pr9_lane_coverage,
+            public_fallback_lane_coverage,
             freshness,
             cursor,
             digest,
@@ -1330,12 +1332,16 @@ impl Pr9FallbackSubpayload {
         Ok(payload)
     }
 
-    /// Validate the PR9 lane invariant: the subpayload covers only
+    /// Validate the query lane invariant: the subpayload covers only
     /// `ExactLiteral`, `Lexical`, and `Graph` (Plan 15).
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
-        let actual_lanes: BTreeSet<_> = self.public_pr9_lane_coverage.keys().copied().collect();
-        let expected_lanes: BTreeSet<_> = RetrieverKind::PR9_FALLBACK_LANES.into_iter().collect();
-        if actual_lanes.iter().any(|lane| !lane.is_pr9_fallback_lane()) {
+        let actual_lanes: BTreeSet<_> =
+            self.public_fallback_lane_coverage.keys().copied().collect();
+        let expected_lanes: BTreeSet<_> = RetrieverKind::QUERY_FALLBACK_LANES.into_iter().collect();
+        if actual_lanes
+            .iter()
+            .any(|lane| !lane.is_query_fallback_lane())
+        {
             return Err(RetrievalContractError::FallbackLaneViolation);
         }
         if actual_lanes != expected_lanes {
@@ -1348,11 +1354,11 @@ impl Pr9FallbackSubpayload {
                     field: "fallback cursor profile",
                 });
             }
-            if cursor.public_lane_statuses != self.public_pr9_lane_coverage
+            if cursor.public_lane_statuses != self.public_fallback_lane_coverage
                 || cursor
                     .public_lane_statuses
                     .keys()
-                    .any(|lane| !lane.is_pr9_fallback_lane())
+                    .any(|lane| !lane.is_query_fallback_lane())
             {
                 return Err(RetrievalContractError::InvalidCursorBinding {
                     field: "fallback cursor lane statuses",
@@ -1370,11 +1376,11 @@ impl Pr9FallbackSubpayload {
                 .candidate
                 .contributions
                 .iter()
-                .any(|contribution| !contribution.retriever.is_pr9_fallback_lane())
+                .any(|contribution| !contribution.retriever.is_query_fallback_lane())
                 || ranked.candidate.decisions.iter().any(|decision| {
                     decision
                         .retriever
-                        .is_some_and(|retriever| !retriever.is_pr9_fallback_lane())
+                        .is_some_and(|retriever| !retriever.is_query_fallback_lane())
                 })
             {
                 return Err(RetrievalContractError::FallbackLaneViolation);
@@ -1386,10 +1392,10 @@ impl Pr9FallbackSubpayload {
     /// Compute the canonical domain-separated digest of this subpayload,
     /// excluding the `digest` field itself.
     pub fn compute_digest(&self) -> Result<FallbackSubpayloadDigest, RetrievalContractError> {
-        compute_pr9_fallback_subpayload_digest(
+        compute_query_fallback_subpayload_digest(
             &self.profile_id,
             &self.ordered_candidates,
-            &self.public_pr9_lane_coverage,
+            &self.public_fallback_lane_coverage,
             &self.freshness,
             &self.cursor,
         )
@@ -1405,18 +1411,18 @@ impl Pr9FallbackSubpayload {
     }
 }
 
-fn compute_pr9_fallback_subpayload_digest(
+fn compute_query_fallback_subpayload_digest(
     profile_id: &FusionProfileId,
     ordered_candidates: &[RankedCandidate],
-    public_pr9_lane_coverage: &BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    public_fallback_lane_coverage: &BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     freshness: &[SourceFreshness],
     cursor: &Option<RetrievalCursor>,
 ) -> Result<FallbackSubpayloadDigest, RetrievalContractError> {
-    let input = Pr9FallbackSubpayloadDigestInput {
-        domain: PR9_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN,
+    let input = QueryFallbackSubpayloadDigestInput {
+        domain: QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN,
         profile_id,
         ordered_candidates,
-        public_pr9_lane_coverage,
+        public_fallback_lane_coverage,
         freshness,
         cursor,
     };
@@ -1433,7 +1439,7 @@ fn compute_pr9_fallback_subpayload_digest(
 pub struct RetrievalResult {
     pub snapshot: RetrievalSnapshot,
     pub profile_id: FusionProfileId,
-    pub pr9_fallback: Pr9FallbackSubpayload,
+    pub query_fallback: QueryFallbackSubpayload,
     pub ordered_candidates: Vec<RankedCandidate>,
     #[serde(skip)]
     pub internal_lane_outcomes: BTreeMap<RetrieverKind, RetrieverOutcome<()>>,
@@ -1475,11 +1481,11 @@ mod tests {
         }
     }
 
-    fn subpayload(lanes: &[RetrieverKind]) -> Pr9FallbackSubpayload {
-        let mut payload = Pr9FallbackSubpayload {
+    fn subpayload(lanes: &[RetrieverKind]) -> QueryFallbackSubpayload {
+        let mut payload = QueryFallbackSubpayload {
             profile_id: id("profile.fixture.v1"),
             ordered_candidates: vec![],
-            public_pr9_lane_coverage: lanes
+            public_fallback_lane_coverage: lanes
                 .iter()
                 .map(|lane| (*lane, PublicRetrieverStatus::Complete))
                 .collect(),
@@ -1538,20 +1544,22 @@ mod tests {
     }
 
     #[test]
-    fn fallback_subpayload_admits_only_pr9_lanes() {
+    fn fallback_subpayload_admits_only_fallback_lanes() {
         let accepted = subpayload(&[
             RetrieverKind::ExactLiteral,
             RetrieverKind::Lexical,
             RetrieverKind::Graph,
         ]);
-        accepted.validate().expect("PR9 lanes are admissible");
+        accepted
+            .validate()
+            .expect("query fallback lanes are admissible");
 
         let lane = RetrieverKind::Semantic;
         let rejected = subpayload(&[lane]);
         assert_eq!(
             rejected.validate(),
             Err(RetrievalContractError::FallbackLaneViolation),
-            "lane {lane:?} must not enter the PR9 fallback subpayload"
+            "lane {lane:?} must not enter the query fallback subpayload"
         );
     }
 
@@ -1566,11 +1574,11 @@ mod tests {
     }
 
     #[test]
-    fn fallback_subpayload_requires_all_pr9_lanes_and_a_matching_digest() {
+    fn fallback_subpayload_requires_all_fallback_lanes_and_a_matching_digest() {
         let incomplete = subpayload(&[RetrieverKind::ExactLiteral, RetrieverKind::Lexical]);
         assert!(incomplete.validate().is_err());
 
-        let mut stale_digest = subpayload(&RetrieverKind::PR9_FALLBACK_LANES);
+        let mut stale_digest = subpayload(&RetrieverKind::QUERY_FALLBACK_LANES);
         stale_digest.profile_id = id("profile.changed.v1");
         assert_eq!(
             stale_digest.validate(),
@@ -1579,8 +1587,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_subpayload_rejects_noncanonical_ordinals_and_non_pr9_contributions() {
-        let mut payload = subpayload(&RetrieverKind::PR9_FALLBACK_LANES);
+    fn fallback_subpayload_rejects_noncanonical_ordinals_and_non_query_contributions() {
+        let mut payload = subpayload(&RetrieverKind::QUERY_FALLBACK_LANES);
         payload.ordered_candidates = vec![RankedCandidate {
             candidate: FusedCandidate {
                 anchor_id: crate::research::id::RetrievalAnchorId::new("anchor.fused").unwrap(),

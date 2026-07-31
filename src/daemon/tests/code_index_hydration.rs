@@ -265,8 +265,8 @@ fn hydration_budget_rejects_payload_read_after_preflight() {
 }
 
 #[test]
-fn accepted_semantic_budget_replaces_distinct_pr9_hydration_budget() {
-    let pr9_budget = request(1).budget;
+fn accepted_semantic_budget_replaces_distinct_query_hydration_budget() {
+    let query_budget = request(1).budget;
     let semantic_budget = RetrievalBudget {
         max_candidates_per_lane: 7,
         max_fused_candidates: 6,
@@ -276,12 +276,12 @@ fn accepted_semantic_budget_replaces_distinct_pr9_hydration_budget() {
     };
 
     assert_eq!(
-        code_index_search_hydration_budget(Some(&semantic_budget), &pr9_budget),
+        code_index_search_hydration_budget(Some(&semantic_budget), &query_budget),
         semantic_budget
     );
     assert_eq!(
-        code_index_search_hydration_budget(None, &pr9_budget),
-        pr9_budget
+        code_index_search_hydration_budget(None, &query_budget),
+        query_budget
     );
 }
 
@@ -314,8 +314,7 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
 
     let store = TempDir::new().expect("store");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
-        tracedecay_domain::ProjectId::new("project.code-index-hydration")
-            .expect("valid project"),
+        tracedecay_domain::ProjectId::new("project.code-index-hydration").expect("valid project"),
         project.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),

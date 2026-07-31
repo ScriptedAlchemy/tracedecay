@@ -47,7 +47,7 @@ use super::{
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
 };
 use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
-use tracedecay_query::retrieval::Pr9QueryAuthorityV1;
+use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
@@ -427,7 +427,7 @@ fn query_meta() -> RetrievalRequestMeta {
     )
 }
 
-fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<Pr9QueryAuthorityV1> {
+fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
         profile_id: id("profile.code-index.fixture")
@@ -436,7 +436,7 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<Pr9QueryAuthorityV1> 
         evaluation_result_anchor: id("evaluation.code-index.fixture")
             .try_into()
             .expect("evaluation anchor"),
-        calibrations: RetrieverKind::PR9_FALLBACK_LANES
+        calibrations: RetrieverKind::QUERY_FALLBACK_LANES
             .into_iter()
             .map(|lane| {
                 (
@@ -489,7 +489,7 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<Pr9QueryAuthorityV1> 
     )
     .expect("cursor keyring");
     Arc::new(
-        Pr9QueryAuthorityV1::new(
+        QueryAuthorityV1::new(
             profile,
             diversity,
             ComponentRevision::new("ranking.code-index.fixture").expect("ranking revision"),
@@ -506,7 +506,7 @@ async fn mount_query_authority(
     privacy_domain: PrivacyDomainId,
 ) {
     registry
-        .mount_pr9_query_authority(
+        .mount_query_authority(
             project_root,
             context.scope(),
             query_authority(privacy_domain),
@@ -920,11 +920,7 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
     let project_id = ProjectId::new("project.linked-worktrees").expect("valid project");
 
     let mut first_scheduler = registry
-        .open_worktree(
-            project_id.clone(),
-            first.path(),
-            store.path().join("first"),
-        )
+        .open_worktree(project_id.clone(), first.path(), store.path().join("first"))
         .expect("first scheduler");
     let mut second_scheduler = registry
         .open_worktree(project_id.clone(), &linked, store.path().join("second"))
@@ -1211,7 +1207,7 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
 }
 
 #[tokio::test]
-async fn bundled_pr9_profile_composes_live_code_index_lanes() {
+async fn bundled_query_profile_composes_live_code_index_lanes() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -1231,61 +1227,63 @@ async fn bundled_pr9_profile_composes_live_code_index_lanes() {
         .expect("live generation");
     let snapshot = latest.generation.snapshot();
     let scope = ResolvedScope::new(
-        ProjectId::new("project.bundled-pr9.fixture").expect("project id"),
+        ProjectId::new("project.bundled-query.fixture").expect("project id"),
         snapshot.repository.clone(),
         snapshot.worktree.clone().expect("worktree id"),
         snapshot.reference.clone(),
     )
     .expect("resolved scope");
     let (_, accepted, _) =
-        crate::application::semantic_runtime::bundled_pr9_authority().expect("bundled authority");
+        crate::application::semantic_runtime::bundled_query_authority().expect("bundled authority");
     let keyring = RetrievalCursorKeyringV1::new(
         latest.generation.manifest().privacy_domain.clone(),
-        RetrievalCursorKeyId::new("retrieval-key.bundled-pr9.fixture").expect("cursor key id"),
+        RetrievalCursorKeyId::new("retrieval-key.bundled-query.fixture").expect("cursor key id"),
         1,
         vec![7_u8; 32],
         1_000_000,
     )
     .expect("cursor keyring");
     let authority = Arc::new(
-        Pr9QueryAuthorityV1::new(
+        QueryAuthorityV1::new(
             accepted.profile().clone(),
             accepted.diversity().clone(),
-            ComponentRevision::new(tracedecay_query::retrieval::PR9_RANKING_REVISION_V1)
+            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
                 .expect("ranking revision"),
             keyring,
         )
         .expect("query authority"),
     );
     registry
-        .mount_pr9_query_authority(fixture.path(), &scope, authority)
+        .mount_query_authority(fixture.path(), &scope, authority)
         .await
         .expect("mount bundled authority");
 
-    let request = super::pr9_runtime::Pr9SearchExecutionRequestV1::new(
+    let request = super::query_runtime::QuerySearchExecutionRequestV1::new(
         "main",
-        super::pr9_runtime::Pr9SearchExecutionPolicyV1 {
-            principal: PrincipalId::new("principal.bundled-pr9.fixture").expect("principal"),
-            authorization_revision: AuthorizationRevision::new("authorization.bundled-pr9.fixture")
-                .expect("authorization revision"),
+        super::query_runtime::QuerySearchExecutionPolicyV1 {
+            principal: PrincipalId::new("principal.bundled-query.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.bundled-query.fixture",
+            )
+            .expect("authorization revision"),
             sanitizer_revision: SanitizerRevision::new(
-                tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
+                tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
             )
             .expect("sanitizer revision"),
             normalization_revision: QueryNormalizationRevision::new(
-                tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+                tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1,
             )
             .expect("normalization revision"),
             exact_rule_revision: ExactAdmissionRuleRevision::new(
-                tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
             )
             .expect("exact rules revision"),
             lexical_profile_revision: ComponentRevision::new(
-                tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
             )
             .expect("lexical profile revision"),
             lexical_score_domain: ScoreDomainId::new(
-                tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
             )
             .expect("lexical score domain"),
             fuzzy_budget: tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
@@ -1296,9 +1294,9 @@ async fn bundled_pr9_profile_composes_live_code_index_lanes() {
         },
     );
     let executed = registry
-        .execute_pr9_search(&scope, request)
+        .execute_query_search(&scope, request)
         .await
-        .expect("bundled PR9 composes live lanes");
+        .expect("bundled query composes live lanes");
     assert!(
         !executed.authorized.fallback.ordered_candidates.is_empty(),
         "live main symbol is returned"

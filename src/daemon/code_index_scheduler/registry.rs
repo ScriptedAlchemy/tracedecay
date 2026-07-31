@@ -45,9 +45,9 @@ pub(crate) struct CodeIndexSchedulerMemoryStatsV1 {
 pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) repository_id: RepositoryId,
     pub(super) worktree_id: WorktreeId,
-    pub(super) pr9_query_authority: Option<(
+    pub(super) query_authority: Option<(
         ManifestDigest,
-        Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>,
+        Arc<tracedecay_query::retrieval::QueryAuthorityV1>,
     )>,
     pub(super) semantic_query_authority: Option<(
         ManifestDigest,
@@ -542,7 +542,7 @@ impl CodeIndexSchedulerRegistryV1 {
             MountedCodeIndexWorktreeV1 {
                 repository_id,
                 worktree_id,
-                pr9_query_authority: None,
+                query_authority: None,
                 semantic_query_authority: None,
                 scheduler,
                 serving_generation,
@@ -571,14 +571,14 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(true)
     }
 
-    /// Mount the accepted PR9 profile and query/cursor key owner for one exact
+    /// Mount the accepted query profile and query/cursor key owner for one exact
     /// admitted scope. The authority cannot be inherited by another project,
     /// repository, worktree, or ref.
-    pub(in crate::daemon) async fn mount_pr9_query_authority(
+    pub(in crate::daemon) async fn mount_query_authority(
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
-        authority: Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>,
+        authority: Arc<tracedecay_query::retrieval::QueryAuthorityV1>,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
         scope
             .validate()
@@ -587,24 +587,24 @@ impl CodeIndexSchedulerRegistryV1 {
         let mut mounted = self.mounted.lock().await;
         let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
             CodeIndexSchedulerErrorV1::Identity(
-                "cannot mount PR9 query authority before its worktree".to_owned(),
+                "cannot mount query authority before its worktree".to_owned(),
             )
         })?;
         if worktree.repository_id != scope.repository_id
             || worktree.worktree_id != scope.worktree_id
         {
             return Err(CodeIndexSchedulerErrorV1::Identity(
-                "PR9 query authority scope does not match the mounted worktree".to_owned(),
+                "query authority scope does not match the mounted worktree".to_owned(),
             ));
         }
-        worktree.pr9_query_authority = Some((scope.scope_digest.clone(), authority));
+        worktree.query_authority = Some((scope.scope_digest.clone(), authority));
         Ok(())
     }
 
-    /// Revoke the live PR9 authority for one exact admitted scope before a
+    /// Revoke the live query authority for one exact admitted scope before a
     /// committed profile refresh. A failed replacement therefore leaves
     /// search unavailable instead of serving the prior profile.
-    pub(in crate::daemon) async fn clear_pr9_query_authority(
+    pub(in crate::daemon) async fn clear_query_authority(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
@@ -622,7 +622,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .collect::<Vec<_>>();
         if roots.is_empty() {
             return Err(CodeIndexSchedulerErrorV1::Identity(
-                "cannot clear PR9 query authority before its worktree".to_owned(),
+                "cannot clear query authority before its worktree".to_owned(),
             ));
         }
         let mut scope_mismatch = false;
@@ -631,28 +631,28 @@ impl CodeIndexSchedulerRegistryV1 {
                 CodeIndexSchedulerErrorV1::Identity("worktree disappeared".to_owned())
             })?;
             scope_mismatch |= worktree
-                .pr9_query_authority
+                .query_authority
                 .as_ref()
                 .is_some_and(|(digest, _)| digest != &scope.scope_digest);
-            worktree.pr9_query_authority = None;
+            worktree.query_authority = None;
         }
         if roots.len() != 1 {
             return Err(CodeIndexSchedulerErrorV1::Identity(
-                "PR9 query authority scope is ambiguous".to_owned(),
+                "query authority scope is ambiguous".to_owned(),
             ));
         }
         if scope_mismatch {
             return Err(CodeIndexSchedulerErrorV1::Identity(
-                "PR9 query authority scope does not match the mounted authority".to_owned(),
+                "query authority scope does not match the mounted authority".to_owned(),
             ));
         }
         Ok(())
     }
 
-    pub(super) async fn pr9_query_authority_for_scope(
+    pub(super) async fn query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
-    ) -> Option<Arc<tracedecay_query::retrieval::Pr9QueryAuthorityV1>> {
+    ) -> Option<Arc<tracedecay_query::retrieval::QueryAuthorityV1>> {
         let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
         for worktree in mounted.values() {
@@ -661,7 +661,7 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 continue;
             }
-            let Some((scope_digest, authority)) = &worktree.pr9_query_authority else {
+            let Some((scope_digest, authority)) = &worktree.query_authority else {
                 return None;
             };
             if scope_digest != &scope.scope_digest || matched.is_some() {
@@ -673,11 +673,11 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     #[cfg(test)]
-    pub(crate) async fn has_pr9_query_authority_for_scope(
+    pub(crate) async fn has_query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> bool {
-        self.pr9_query_authority_for_scope(scope).await.is_some()
+        self.query_authority_for_scope(scope).await.is_some()
     }
 
     /// Whether a worktree is currently mounted for `project_root`. Read-only

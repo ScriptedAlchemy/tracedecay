@@ -1,4 +1,4 @@
-//! Daemon-owned activation state and process-local key authority for PR9.
+//! Daemon-owned query activation and durable cursor-key authority.
 //!
 //! This provider never chooses retrieval weights, calibration, diversity, or
 //! evaluation identity. It exposes only the exact profile already accepted by
@@ -11,14 +11,12 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    ComponentRevision, ManifestDigest, PrivacyDomainId, RetrievalAnchorId, RetrievalCursorKeyId,
-    RetrieverKind,
+    ComponentRevision, ManifestDigest, PrivacyDomainId, RetrievalAnchorId, RetrieverKind,
 };
-use zeroize::Zeroizing;
 
-use super::code_index_scheduler::pr9_runtime::{
-    AcceptedPr9EvaluationV1, Pr9AuthorityMaterialV1, Pr9AuthorityProviderErrorV1,
-    Pr9AuthorityProviderV1,
+use super::code_index_scheduler::query_runtime::{
+    AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
+    QueryAuthorityProviderV1,
 };
 use crate::application::semantic_runtime::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
@@ -29,14 +27,9 @@ use crate::application::semantic_runtime::{
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
 };
-use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
-
-const PR9_KEY_BYTES: usize = 32;
-const PR9_KEY_ID_BYTES: usize = 16;
-const PR9_KEY_EPOCH: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pr9AuthorityUnavailableReasonV1 {
+pub(crate) enum QueryAuthorityUnavailableReasonV1 {
     ActivationUnavailable,
     ActivationNotCurrent,
     ScopeRequired,
@@ -46,7 +39,7 @@ pub(crate) enum Pr9AuthorityUnavailableReasonV1 {
     AmbiguousActivatedProfile,
 }
 
-impl Pr9AuthorityUnavailableReasonV1 {
+impl QueryAuthorityUnavailableReasonV1 {
     fn as_str(self) -> &'static str {
         match self {
             Self::ActivationUnavailable => "activation_unavailable",
@@ -61,109 +54,70 @@ impl Pr9AuthorityUnavailableReasonV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Pr9AuthorityProviderStatusV1 {
+pub(crate) enum QueryAuthorityProviderStatusV1 {
     Available {
         scope_digest: ManifestDigest,
         profile_id: tracedecay_domain::FusionProfileId,
         evaluation_anchor: RetrievalAnchorId,
     },
     Unavailable {
-        reason: Pr9AuthorityUnavailableReasonV1,
+        reason: QueryAuthorityUnavailableReasonV1,
     },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum Pr9AuthorityUpdateErrorV1 {
-    #[error("PR9 activated scope is invalid")]
+pub(crate) enum QueryAuthorityUpdateErrorV1 {
+    #[error("query activated scope is invalid")]
     InvalidScope,
-    #[error("PR9 initial profile state is not the exact evaluated fallback")]
+    #[error("query initial profile state is not the exact evaluated fallback")]
     InvalidInitialState,
-    #[error("PR9 profile state does not contain a successful current activation")]
+    #[error("query profile state does not contain a successful current activation")]
     ActivationNotCurrent,
-    #[error("PR9 activation does not match the provider's exact current scope")]
+    #[error("query activation does not match the provider's exact current scope")]
     ScopeMismatch,
-    #[error("PR9 activation compare-and-swap state is stale")]
+    #[error("query activation compare-and-swap state is stale")]
     CasConflict,
 }
 
-struct ProcessLocalPr9KeyV1 {
-    key_id: RetrievalCursorKeyId,
-    secret: Zeroizing<Vec<u8>>,
-}
-
-impl ProcessLocalPr9KeyV1 {
-    fn generate() -> Option<Self> {
-        let mut random = Zeroizing::new(vec![0_u8; PR9_KEY_ID_BYTES + PR9_KEY_BYTES]);
-        getrandom::getrandom(random.as_mut_slice()).ok()?;
-        let key_id = RetrievalCursorKeyId::new(format!(
-            "retrieval-key.pr9.{}",
-            hex::encode(&random[..PR9_KEY_ID_BYTES])
-        ))
-        .ok()?;
-        Some(Self {
-            key_id,
-            secret: Zeroizing::new(random[PR9_KEY_ID_BYTES..].to_vec()),
-        })
-    }
-
-    fn keyring(&self, privacy_domain: PrivacyDomainId) -> Option<RetrievalCursorKeyringV1> {
-        RetrievalCursorKeyringV1::new(
-            privacy_domain,
-            self.key_id.clone(),
-            PR9_KEY_EPOCH,
-            self.secret.to_vec(),
-            tracedecay_query::retrieval::PR9_CURSOR_TTL_MICROS_V1,
-        )
-        .ok()
-    }
-}
-
-impl fmt::Debug for ProcessLocalPr9KeyV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ProcessLocalPr9KeyV1")
-            .field("key_id", &self.key_id)
-            .field("key_material", &"REDACTED")
-            .finish()
-    }
-}
-
 #[derive(Clone)]
-struct ActivatedPr9StateV1 {
+struct ActivatedQueryStateV1 {
     scope: ResolvedScope,
     state: RetrievalProfileStateV1,
+    cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
 }
 
-/// Daemon-generation owner for the current accepted PR9 profile and its
-/// process-local query/cursor key.
+/// Daemon owner for the current accepted query profile and the
+/// durable project cursor-key authority loaded from its registered store.
 #[derive(Clone)]
-pub(crate) struct DaemonPr9AuthorityProviderV1 {
-    activated: Arc<RwLock<BTreeMap<ManifestDigest, ActivatedPr9StateV1>>>,
-    key: Option<Arc<ProcessLocalPr9KeyV1>>,
+pub(crate) struct DaemonQueryAuthorityProviderV1 {
+    activated: Arc<RwLock<BTreeMap<ManifestDigest, ActivatedQueryStateV1>>>,
 }
 
 #[derive(Clone)]
-pub(crate) struct DaemonPr9ActivationRegistrarV1 {
-    provider: DaemonPr9AuthorityProviderV1,
+pub(crate) struct DaemonQueryActivationRegistrarV1 {
+    provider: DaemonQueryAuthorityProviderV1,
     registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_root: std::path::PathBuf,
+    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
 }
 
-impl DaemonPr9ActivationRegistrarV1 {
+impl DaemonQueryActivationRegistrarV1 {
     pub(crate) fn new(
-        provider: DaemonPr9AuthorityProviderV1,
+        provider: DaemonQueryAuthorityProviderV1,
         registry: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         project_root: std::path::PathBuf,
+        session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     ) -> Self {
         Self {
             provider,
             registry,
             project_root,
+            session_db,
         }
     }
 }
 
-impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
+impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
     fn activation_committed(
         &self,
         committed: CommittedRetrievalProfileStateV1,
@@ -171,22 +125,33 @@ impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
         let provider = self.provider.clone();
         let registry = self.registry.clone();
         let project_root = self.project_root.clone();
+        let session_db = Arc::clone(&self.session_db);
         Box::pin(async move {
             let scope = committed.scope.clone();
             let semantic_enabled = committed.state.active().compatibility().semantic.is_some();
             unregister_project_semantic_redundancy_authority(&project_root);
-            provider
-                .update_after_successful_activation(scope.clone(), committed.state.clone())
-                .map_err(map_update_observer_error)?;
             registry
                 .clear_semantic_query_authority(&scope)
                 .await
                 .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
             registry
-                .clear_pr9_query_authority(&scope)
+                .clear_query_authority(&scope)
                 .await
                 .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
-            super::code_index_scheduler::pr9_runtime::mount_pr9_query_authority_on_project_open(
+            let cursor_keys = Arc::new(
+                session_db
+                    .load_session_cursor_key_provider_result()
+                    .await
+                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?,
+            );
+            provider
+                .update_after_successful_activation(
+                    scope.clone(),
+                    committed.state.clone(),
+                    cursor_keys,
+                )
+                .map_err(map_update_observer_error)?;
+            super::code_index_scheduler::query_runtime::mount_query_authority_on_project_open(
                 &registry,
                 &project_root,
                 &scope,
@@ -213,19 +178,18 @@ impl RetrievalProfileActivationObserverV1 for DaemonPr9ActivationRegistrarV1 {
     }
 }
 
-impl Default for DaemonPr9AuthorityProviderV1 {
+impl Default for DaemonQueryAuthorityProviderV1 {
     fn default() -> Self {
         Self {
             activated: Arc::new(RwLock::new(BTreeMap::new())),
-            key: ProcessLocalPr9KeyV1::generate().map(Arc::new),
         }
     }
 }
 
-impl fmt::Debug for DaemonPr9AuthorityProviderV1 {
+impl fmt::Debug for DaemonQueryAuthorityProviderV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("DaemonPr9AuthorityProviderV1")
+            .debug_struct("DaemonQueryAuthorityProviderV1")
             .field(
                 "activated_scope_count",
                 &self
@@ -239,24 +203,25 @@ impl fmt::Debug for DaemonPr9AuthorityProviderV1 {
     }
 }
 
-impl DaemonPr9AuthorityProviderV1 {
+impl DaemonQueryAuthorityProviderV1 {
     /// Restore the evaluated fallback installed as the configuration store's
     /// initial state. Initial installation has no mutation audit event, so it
-    /// is admitted only while the exact PR9 profile is active with no rollback
+    /// is admitted only while the exact query profile is active with no rollback
     /// slot or audit history.
     pub(crate) fn install_evaluated_initial_state(
         &self,
         scope: ResolvedScope,
         initial: RetrievalProfileStateV1,
-    ) -> Result<Pr9AuthorityProviderStatusV1, Pr9AuthorityUpdateErrorV1> {
+        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+    ) -> Result<QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1> {
         scope
             .validate()
-            .map_err(|_| Pr9AuthorityUpdateErrorV1::InvalidScope)?;
+            .map_err(|_| QueryAuthorityUpdateErrorV1::InvalidScope)?;
         if !initial.audit().is_empty()
             || initial.rollback_profile().is_some()
-            || exact_pr9_profile(&initial).is_err()
+            || exact_query_profile(&initial).is_err()
         {
-            return Err(Pr9AuthorityUpdateErrorV1::InvalidInitialState);
+            return Err(QueryAuthorityUpdateErrorV1::InvalidInitialState);
         }
         let mut current = self
             .activated
@@ -264,20 +229,20 @@ impl DaemonPr9AuthorityProviderV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(prior) = current.get(&scope.scope_digest) {
             if prior.scope != scope {
-                return Err(Pr9AuthorityUpdateErrorV1::ScopeMismatch);
+                return Err(QueryAuthorityUpdateErrorV1::ScopeMismatch);
             }
             if prior.state != initial {
-                return Err(Pr9AuthorityUpdateErrorV1::CasConflict);
+                return Err(QueryAuthorityUpdateErrorV1::CasConflict);
             }
-        } else {
-            current.insert(
-                scope.scope_digest.clone(),
-                ActivatedPr9StateV1 {
-                    scope: scope.clone(),
-                    state: initial,
-                },
-            );
         }
+        current.insert(
+            scope.scope_digest.clone(),
+            ActivatedQueryStateV1 {
+                scope: scope.clone(),
+                state: initial,
+                cursor_keys,
+            },
+        );
         drop(current);
         Ok(self.status(Some(&scope)))
     }
@@ -290,64 +255,63 @@ impl DaemonPr9AuthorityProviderV1 {
         &self,
         scope: ResolvedScope,
         activated: RetrievalProfileStateV1,
-    ) -> Result<Pr9AuthorityProviderStatusV1, Pr9AuthorityUpdateErrorV1> {
+        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+    ) -> Result<QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1> {
         scope
             .validate()
-            .map_err(|_| Pr9AuthorityUpdateErrorV1::InvalidScope)?;
+            .map_err(|_| QueryAuthorityUpdateErrorV1::InvalidScope)?;
         let event = current_transition(&activated)
-            .ok_or(Pr9AuthorityUpdateErrorV1::ActivationNotCurrent)?;
+            .ok_or(QueryAuthorityUpdateErrorV1::ActivationNotCurrent)?;
         let mut current = self
             .activated
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(prior) = current.get(&scope.scope_digest) {
             if prior.scope != scope {
-                return Err(Pr9AuthorityUpdateErrorV1::ScopeMismatch);
+                return Err(QueryAuthorityUpdateErrorV1::ScopeMismatch);
             }
             if prior.state.active().profile_digest() != &event.prior_active_digest {
-                return Err(Pr9AuthorityUpdateErrorV1::CasConflict);
+                return Err(QueryAuthorityUpdateErrorV1::CasConflict);
             }
         }
         current.insert(
             scope.scope_digest.clone(),
-            ActivatedPr9StateV1 {
+            ActivatedQueryStateV1 {
                 scope: scope.clone(),
                 state: activated,
+                cursor_keys,
             },
         );
         drop(current);
         Ok(self.status(Some(&scope)))
     }
 
-    pub(crate) fn status(&self, scope: Option<&ResolvedScope>) -> Pr9AuthorityProviderStatusV1 {
+    pub(crate) fn status(&self, scope: Option<&ResolvedScope>) -> QueryAuthorityProviderStatusV1 {
         let current = self
             .activated
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(scope) = scope else {
             return if current.is_empty() {
-                unavailable(Pr9AuthorityUnavailableReasonV1::ActivationUnavailable)
+                unavailable(QueryAuthorityUnavailableReasonV1::ActivationUnavailable)
             } else {
-                unavailable(Pr9AuthorityUnavailableReasonV1::ScopeRequired)
+                unavailable(QueryAuthorityUnavailableReasonV1::ScopeRequired)
             };
         };
         let Some(activated) = current.get(&scope.scope_digest) else {
-            return unavailable(Pr9AuthorityUnavailableReasonV1::ActivationUnavailable);
+            return unavailable(QueryAuthorityUnavailableReasonV1::ActivationUnavailable);
         };
         if scope != &activated.scope {
-            return unavailable(Pr9AuthorityUnavailableReasonV1::ScopeMismatch);
+            return unavailable(QueryAuthorityUnavailableReasonV1::ScopeMismatch);
         }
-        if self.key.is_none() {
-            return unavailable(Pr9AuthorityUnavailableReasonV1::KeyUnavailable);
+        if !has_current_query_authority(&activated.state) {
+            return unavailable(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
         }
-        if !has_current_pr9_authority(&activated.state) {
-            return unavailable(Pr9AuthorityUnavailableReasonV1::ActivationNotCurrent);
-        }
-        let profile = match exact_pr9_profile(&activated.state) {
+        let profile = match exact_query_profile(&activated.state) {
             Ok(profile) => profile,
             Err(reason) => return unavailable(reason),
         };
-        Pr9AuthorityProviderStatusV1::Available {
+        QueryAuthorityProviderStatusV1::Available {
             scope_digest: activated.scope.scope_digest.clone(),
             profile_id: profile.profile().profile_id.clone(),
             evaluation_anchor: profile.profile().evaluation_result_anchor.clone(),
@@ -358,10 +322,10 @@ impl DaemonPr9AuthorityProviderV1 {
         &self,
         scope: &ResolvedScope,
         privacy_domain: &PrivacyDomainId,
-    ) -> Result<Pr9AuthorityMaterialV1, Pr9AuthorityUnavailableReasonV1> {
+    ) -> Result<QueryAuthorityMaterialV1, QueryAuthorityUnavailableReasonV1> {
         match self.status(Some(scope)) {
-            Pr9AuthorityProviderStatusV1::Available { .. } => {}
-            Pr9AuthorityProviderStatusV1::Unavailable { reason } => return Err(reason),
+            QueryAuthorityProviderStatusV1::Available { .. } => {}
+            QueryAuthorityProviderStatusV1::Unavailable { reason } => return Err(reason),
         }
         let current = self
             .activated
@@ -369,47 +333,48 @@ impl DaemonPr9AuthorityProviderV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let activated = current
             .get(&scope.scope_digest)
-            .ok_or(Pr9AuthorityUnavailableReasonV1::ActivationUnavailable)?;
+            .ok_or(QueryAuthorityUnavailableReasonV1::ActivationUnavailable)?;
         if &activated.scope != scope {
-            return Err(Pr9AuthorityUnavailableReasonV1::ScopeMismatch);
+            return Err(QueryAuthorityUnavailableReasonV1::ScopeMismatch);
         }
-        if !has_current_pr9_authority(&activated.state) {
-            return Err(Pr9AuthorityUnavailableReasonV1::ActivationNotCurrent);
+        if !has_current_query_authority(&activated.state) {
+            return Err(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
         }
-        let pr9 = exact_pr9_profile(&activated.state)?;
+        let query = exact_query_profile(&activated.state)?;
         let ranking_revision =
-            ComponentRevision::new(tracedecay_query::retrieval::PR9_RANKING_REVISION_V1)
-                .map_err(|_| Pr9AuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
-        let keyring = self
-            .key
-            .as_ref()
-            .and_then(|key| key.keyring(privacy_domain.clone()))
-            .ok_or(Pr9AuthorityUnavailableReasonV1::KeyUnavailable)?;
-        Ok(Pr9AuthorityMaterialV1 {
+            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+                .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
+        let keyring = activated
+            .cursor_keys
+            .retrieval_keyring(privacy_domain.clone())
+            .map_err(|_| QueryAuthorityUnavailableReasonV1::KeyUnavailable)?;
+        Ok(QueryAuthorityMaterialV1 {
             scope: activated.scope.clone(),
-            evaluation: AcceptedPr9EvaluationV1 {
+            evaluation: AcceptedQueryEvaluationV1 {
                 status: crate::search_eval::DirectEvaluationStatusV1::Pass,
                 scope_digest: activated.scope.scope_digest.clone(),
-                profile_id: pr9.profile().profile_id.clone(),
-                evaluation_result_anchor: pr9.profile().evaluation_result_anchor.clone(),
+                profile_id: query.profile().profile_id.clone(),
+                evaluation_result_anchor: query.profile().evaluation_result_anchor.clone(),
             },
-            profile: pr9.profile().clone(),
-            diversity: pr9.diversity().clone(),
+            profile: query.profile().clone(),
+            diversity: query.diversity().clone(),
             ranking_revision,
             keyring: Some(keyring),
         })
     }
 }
 
-impl Pr9AuthorityProviderV1 for DaemonPr9AuthorityProviderV1 {
+impl QueryAuthorityProviderV1 for DaemonQueryAuthorityProviderV1 {
     fn accepted_authorities(
         &self,
         scope: &ResolvedScope,
         privacy_domain: &PrivacyDomainId,
-    ) -> Result<Vec<Pr9AuthorityMaterialV1>, Pr9AuthorityProviderErrorV1> {
+    ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1> {
         self.material_for(scope, privacy_domain)
             .map(|material| vec![material])
-            .map_err(|reason| Pr9AuthorityProviderErrorV1::Unavailable(reason.as_str().to_owned()))
+            .map_err(|reason| {
+                QueryAuthorityProviderErrorV1::Unavailable(reason.as_str().to_owned())
+            })
     }
 }
 
@@ -432,39 +397,39 @@ fn current_transition(
     Some(event)
 }
 
-fn has_current_pr9_authority(state: &RetrievalProfileStateV1) -> bool {
+fn has_current_query_authority(state: &RetrievalProfileStateV1) -> bool {
     current_transition(state).is_some()
         || (state.audit().is_empty()
             && state.rollback_profile().is_none()
-            && exact_pr9_profile(state).is_ok())
+            && exact_query_profile(state).is_ok())
 }
 
-fn exact_pr9_profile(
+fn exact_query_profile(
     state: &RetrievalProfileStateV1,
-) -> Result<&AcceptedRetrievalProfileV1, Pr9AuthorityUnavailableReasonV1> {
-    exact_pr9_profile_from_slots(state.active(), state.rollback_profile())
+) -> Result<&AcceptedRetrievalProfileV1, QueryAuthorityUnavailableReasonV1> {
+    exact_query_profile_from_slots(state.active(), state.rollback_profile())
 }
 
-fn exact_pr9_profile_from_slots<'a>(
+fn exact_query_profile_from_slots<'a>(
     active: &'a AcceptedRetrievalProfileV1,
     rollback: Option<&'a AcceptedRetrievalProfileV1>,
-) -> Result<&'a AcceptedRetrievalProfileV1, Pr9AuthorityUnavailableReasonV1> {
+) -> Result<&'a AcceptedRetrievalProfileV1, QueryAuthorityUnavailableReasonV1> {
     let mut matches = [Some(active), rollback]
         .into_iter()
         .flatten()
-        .filter(|profile| is_exact_pr9_profile(profile));
+        .filter(|profile| is_exact_query_profile(profile));
     let profile = matches
         .next()
-        .ok_or(Pr9AuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
+        .ok_or(QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
     if matches.next().is_some() {
-        return Err(Pr9AuthorityUnavailableReasonV1::AmbiguousActivatedProfile);
+        return Err(QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile);
     }
     Ok(profile)
 }
 
-fn is_exact_pr9_profile(active: &AcceptedRetrievalProfileV1) -> bool {
+fn is_exact_query_profile(active: &AcceptedRetrievalProfileV1) -> bool {
     let profile = active.profile();
-    let expected = BTreeSet::from(RetrieverKind::PR9_FALLBACK_LANES);
+    let expected = BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES);
     profile
         .calibrations
         .keys()
@@ -482,20 +447,20 @@ fn is_exact_pr9_profile(active: &AcceptedRetrievalProfileV1) -> bool {
         && active.compatibility().rerank.is_none()
 }
 
-fn unavailable(reason: Pr9AuthorityUnavailableReasonV1) -> Pr9AuthorityProviderStatusV1 {
-    Pr9AuthorityProviderStatusV1::Unavailable { reason }
+fn unavailable(reason: QueryAuthorityUnavailableReasonV1) -> QueryAuthorityProviderStatusV1 {
+    QueryAuthorityProviderStatusV1::Unavailable { reason }
 }
 
 fn map_update_observer_error(
-    error: Pr9AuthorityUpdateErrorV1,
+    error: QueryAuthorityUpdateErrorV1,
 ) -> RetrievalProfileActivationObserverErrorV1 {
     match error {
-        Pr9AuthorityUpdateErrorV1::InvalidScope
-        | Pr9AuthorityUpdateErrorV1::InvalidInitialState
-        | Pr9AuthorityUpdateErrorV1::ActivationNotCurrent => {
+        QueryAuthorityUpdateErrorV1::InvalidScope
+        | QueryAuthorityUpdateErrorV1::InvalidInitialState
+        | QueryAuthorityUpdateErrorV1::ActivationNotCurrent => {
             RetrievalProfileActivationObserverErrorV1::Rejected
         }
-        Pr9AuthorityUpdateErrorV1::ScopeMismatch | Pr9AuthorityUpdateErrorV1::CasConflict => {
+        QueryAuthorityUpdateErrorV1::ScopeMismatch | QueryAuthorityUpdateErrorV1::CasConflict => {
             RetrievalProfileActivationObserverErrorV1::Conflict
         }
     }
@@ -518,7 +483,7 @@ pub(crate) mod tests {
         DirectQualityMetricsV1, DirectRatioMetricV1, OptionalStageMeasurementV1,
         OptionalStageMeasurementsV1,
     };
-    use std::{path::Path, process::Command};
+    use std::{collections::BTreeMap, path::Path, process::Command};
     use tempfile::TempDir;
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
     use tracedecay_domain::{
@@ -527,6 +492,11 @@ pub(crate) mod tests {
         EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
         EmbeddingTruncationSideV1, FusionProfile, ManifestDigest, ProjectId, RetrievalBudget,
         UtcMicros, VectorGenerationIdV1, canonical_sha256,
+    };
+    use tracedecay_domain::{
+        EphemeralSanitizedQueryViewV1, PrincipalId, QueryNormalizationRevision, RepositoryId,
+        RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverOutcome,
+        SanitizerRevision, SingleRootScopeV1, TemporalModeV1, VectorWatermark, WorktreeId,
     };
     use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 
@@ -664,24 +634,24 @@ pub(crate) mod tests {
             truncation_side: EmbeddingTruncationSideV1::Right,
             truncation_length: 128,
             runtime_backend: "fastembed-ort".to_owned(),
-            runtime_build_revision: "runtime.pr9-activation-test.v1".to_owned(),
+            runtime_build_revision: "runtime.query-activation-test.v1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
             dimensions: 4,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,
             precision: EmbeddingPrecisionV1::Fp32,
             chunk_schema_revision: "code-search-chunk.v1".to_owned(),
-            chunker_revision: id::<ChunkerRevision>("chunker.pr9-activation-test.v1"),
-            privacy_domain: id("privacy.pr9-activation-test"),
+            chunker_revision: id::<ChunkerRevision>("chunker.query-activation-test.v1"),
+            privacy_domain: id("privacy.query-activation-test"),
             privacy_key_epoch: 1,
         }
         .admit()
         .expect("admitted semantic projection");
         let vector_generation_id = VectorGenerationIdV1::new(digest('d'));
         SemanticCompatibilityPinsV1 {
-            implementation_revision: ComponentRevision::new("semantic.pr9-activation-test.v1")
+            implementation_revision: ComponentRevision::new("semantic.query-activation-test.v1")
                 .expect("implementation revision"),
-            fusion_revision: ComponentRevision::new("fusion.pr9-activation-test.v1")
+            fusion_revision: ComponentRevision::new("fusion.query-activation-test.v1")
                 .expect("fusion revision"),
             artifact_manifest_digest: artifact,
             runtime_compatibility_digest: digest('e'),
@@ -712,7 +682,7 @@ pub(crate) mod tests {
     }
 
     fn semantic_committed_state(scope: ResolvedScope) -> CommittedRetrievalProfileStateV1 {
-        let pr9 = accepted_profile("pr9-baseline", &RetrieverKind::PR9_FALLBACK_LANES);
+        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
         let pins = semantic_pins();
         let semantic = accepted_profile_with_compatibility(
             "semantic-active",
@@ -727,9 +697,10 @@ pub(crate) mod tests {
                 rerank: None,
             },
         );
-        let base_revision = id::<ConfigurationRevisionId>("configuration.pr9-activation-test.1");
-        let result_revision = id::<ConfigurationRevisionId>("configuration.pr9-activation-test.2");
-        let actor_id = id("actor.pr9-activation-test");
+        let base_revision = id::<ConfigurationRevisionId>("configuration.query-activation-test.1");
+        let result_revision =
+            id::<ConfigurationRevisionId>("configuration.query-activation-test.2");
+        let actor_id = id("actor.query-activation-test");
         let operation = RetrievalProfileAuditOperationV1::Activate;
         let freshness_vector_digest = digest('2');
         let occurred_at = UtcMicros(20);
@@ -738,9 +709,9 @@ pub(crate) mod tests {
                 "tracedecay.retrieval.profile-audit.v1",
                 &actor_id,
                 &operation,
-                &pr9.profile().profile_id,
+                &query.profile().profile_id,
                 &semantic.profile().profile_id,
-                pr9.profile_digest(),
+                query.profile_digest(),
                 semantic.profile_digest(),
                 &semantic.profile().evaluation_result_anchor,
                 &freshness_vector_digest,
@@ -751,9 +722,9 @@ pub(crate) mod tests {
             .expect("audit digest"),
             actor_id,
             operation,
-            prior_active_profile_id: pr9.profile().profile_id.clone(),
+            prior_active_profile_id: query.profile().profile_id.clone(),
             resulting_active_profile_id: semantic.profile().profile_id.clone(),
-            prior_active_digest: pr9.profile_digest().clone(),
+            prior_active_digest: query.profile_digest().clone(),
             resulting_active_digest: semantic.profile_digest().clone(),
             evaluation_anchor: semantic.profile().evaluation_result_anchor.clone(),
             freshness_vector_digest,
@@ -764,7 +735,7 @@ pub(crate) mod tests {
         let state = serde_json::from_value::<RetrievalProfileStateSnapshotV1>(serde_json::json!({
             "configuration_revision": result_revision,
             "active": semantic,
-            "rollback": pr9,
+            "rollback": query,
             "audit": [audit],
         }))
         .expect("persisted semantic retrieval state")
@@ -773,7 +744,7 @@ pub(crate) mod tests {
         let configuration = SemanticConfigurationPinV1 {
             revision_id: state.configuration_revision().clone(),
             snapshot_id: id::<ConfigurationSnapshotId>(
-                "configuration.snapshot.pr9-activation-test",
+                "configuration.snapshot.query-activation-test",
             ),
             effective_behavior_digest: digest('3'),
         };
@@ -805,54 +776,35 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn process_key_debug_never_emits_secret_bytes() {
-        let secret = vec![0xab; PR9_KEY_BYTES];
-        let key = ProcessLocalPr9KeyV1 {
-            key_id: RetrievalCursorKeyId::new("retrieval-key.pr9.test").unwrap(),
-            secret: Zeroizing::new(secret.clone()),
-        };
-
-        let debug = format!("{key:?}");
-        assert!(!debug.contains(&hex::encode(secret)));
-        assert!(debug.contains("REDACTED"));
-    }
-
-    #[test]
     fn unavailable_provider_status_contains_no_key_material() {
-        let provider = DaemonPr9AuthorityProviderV1 {
-            activated: Arc::new(RwLock::new(BTreeMap::new())),
-            key: Some(Arc::new(ProcessLocalPr9KeyV1 {
-                key_id: RetrievalCursorKeyId::new("retrieval-key.pr9.test").unwrap(),
-                secret: Zeroizing::new(vec![0xcd; PR9_KEY_BYTES]),
-            })),
-        };
+        let provider = DaemonQueryAuthorityProviderV1::default();
 
         assert_eq!(
             provider.status(None),
-            Pr9AuthorityProviderStatusV1::Unavailable {
-                reason: Pr9AuthorityUnavailableReasonV1::ActivationUnavailable,
+            QueryAuthorityProviderStatusV1::Unavailable {
+                reason: QueryAuthorityUnavailableReasonV1::ActivationUnavailable,
             }
         );
-        assert!(!format!("{provider:?}").contains(&hex::encode(vec![0xcd; PR9_KEY_BYTES])));
+        assert!(format!("{provider:?}").contains("REDACTED"));
     }
 
     #[test]
-    fn semantic_activation_selects_exact_pr9_rollback_profile() {
-        let pr9 = accepted_profile("pr9-baseline", &RetrieverKind::PR9_FALLBACK_LANES);
+    fn semantic_activation_selects_exact_query_rollback_profile() {
+        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
         let semantic_active = accepted_profile(
             "semantic-active",
             &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
         );
 
-        let selected = exact_pr9_profile_from_slots(&semantic_active, Some(&pr9))
-            .expect("rollback PR9 profile");
+        let selected = exact_query_profile_from_slots(&semantic_active, Some(&query))
+            .expect("rollback query profile");
 
-        assert_eq!(selected.profile().profile_id, pr9.profile().profile_id);
+        assert_eq!(selected.profile().profile_id, query.profile().profile_id);
     }
 
-    #[test]
-    fn evaluated_initial_pr9_state_is_available_without_a_fake_activation_event() {
-        let provider = DaemonPr9AuthorityProviderV1::default();
+    #[tokio::test]
+    async fn evaluated_initial_query_state_is_available_without_a_fake_activation_event() {
+        let provider = DaemonQueryAuthorityProviderV1::default();
         let scope = ResolvedScope::new(
             id("project.initial"),
             id("repository.initial"),
@@ -860,10 +812,10 @@ pub(crate) mod tests {
             Some(id("refs/heads/main")),
         )
         .expect("scope");
-        let pr9 = accepted_profile("pr9-baseline", &RetrieverKind::PR9_FALLBACK_LANES);
+        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
         let state = RetrievalProfileStateV1::new(
-            id::<ConfigurationRevisionId>("configuration.pr9-initial.1"),
-            pr9.clone(),
+            id::<ConfigurationRevisionId>("configuration.query-initial.1"),
+            query.clone(),
             &RetrievalRuntimeCompatibilityV1 {
                 retrieval_ceiling: RetrievalBudget {
                     max_candidates_per_lane: 32,
@@ -880,52 +832,75 @@ pub(crate) mod tests {
         )
         .expect("initial state");
 
+        let directory = TempDir::new().expect("temporary cursor store");
+        let profile_root = directory.path().join("profile");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let _scope_guard =
+            crate::db::enter_daemon_database_scope(&profile_root, 1, "query-initial")
+                .expect("database scope");
+        let session_registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("session registry");
+        let database = session_registry
+            .profile_sessions()
+            .await
+            .expect("session database");
+        let cursor_keys = Arc::new(
+            database
+                .load_session_cursor_key_provider_result()
+                .await
+                .expect("cursor keys"),
+        );
         let status = provider
-            .install_evaluated_initial_state(scope.clone(), state)
+            .install_evaluated_initial_state(scope.clone(), state, cursor_keys)
             .expect("evaluated initial state");
 
         assert!(matches!(
             status,
-            Pr9AuthorityProviderStatusV1::Available { profile_id, .. }
-                if profile_id == pr9.profile().profile_id
+            QueryAuthorityProviderStatusV1::Available { profile_id, .. }
+                if profile_id == query.profile().profile_id
         ));
     }
 
     #[test]
-    fn semantic_rollback_selects_restored_exact_pr9_active_profile() {
-        let pr9 = accepted_profile("pr9-baseline", &RetrieverKind::PR9_FALLBACK_LANES);
+    fn semantic_rollback_selects_restored_exact_query_active_profile() {
+        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
         let prior_semantic = accepted_profile(
             "semantic-prior",
             &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
         );
 
-        let selected =
-            exact_pr9_profile_from_slots(&pr9, Some(&prior_semantic)).expect("active PR9 profile");
+        let selected = exact_query_profile_from_slots(&query, Some(&prior_semantic))
+            .expect("active query profile");
 
-        assert_eq!(selected.profile().profile_id, pr9.profile().profile_id);
+        assert_eq!(selected.profile().profile_id, query.profile().profile_id);
     }
 
     #[test]
-    fn zero_or_multiple_exact_pr9_profiles_fail_closed() {
-        let non_pr9 = accepted_profile(
+    fn zero_or_multiple_exact_query_profiles_fail_closed() {
+        let non_query = accepted_profile(
             "semantic-active",
             &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
         );
         assert!(matches!(
-            exact_pr9_profile_from_slots(&non_pr9, None),
-            Err(Pr9AuthorityUnavailableReasonV1::InvalidActivatedProfile)
+            exact_query_profile_from_slots(&non_query, None),
+            Err(QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)
         ));
 
-        let first = accepted_profile("pr9-first", &RetrieverKind::PR9_FALLBACK_LANES);
-        let second = accepted_profile("pr9-second", &RetrieverKind::PR9_FALLBACK_LANES);
+        let first = accepted_profile("query-first", &RetrieverKind::QUERY_FALLBACK_LANES);
+        let second = accepted_profile("query-second", &RetrieverKind::QUERY_FALLBACK_LANES);
         assert!(matches!(
-            exact_pr9_profile_from_slots(&first, Some(&second)),
-            Err(Pr9AuthorityUnavailableReasonV1::AmbiguousActivatedProfile)
+            exact_query_profile_from_slots(&first, Some(&second)),
+            Err(QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile)
         ));
     }
 
     #[tokio::test]
-    async fn semantic_activation_keeps_the_exact_pr9_fallback_available() {
+    async fn semantic_activation_keeps_the_exact_query_fallback_available() {
         let project = TempDir::new().expect("project root");
         git(project.path(), &["init", "-q", "-b", "main"]);
         git(project.path(), &["config", "user.name", "TraceDecay Test"]);
@@ -939,7 +914,7 @@ pub(crate) mod tests {
         git(project.path(), &["add", "."]);
         git(project.path(), &["commit", "-qm", "fixture"]);
 
-        let project_id = ProjectId::new("project.pr9-semantic-activation").expect("project id");
+        let project_id = ProjectId::new("project.query-semantic-activation").expect("project id");
         let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
             project.path(),
             &project_id,
@@ -951,11 +926,29 @@ pub(crate) mod tests {
             .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
             .await
             .expect("mount code index");
-        let provider = DaemonPr9AuthorityProviderV1::default();
-        let registrar = DaemonPr9ActivationRegistrarV1::new(
+        let cursor_store = TempDir::new().expect("cursor store");
+        let profile_root = cursor_store.path().join("profile");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let _cursor_scope =
+            crate::db::enter_daemon_database_scope(&profile_root, 2, "query-semantic-activation")
+                .expect("database scope");
+        let session_registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("session registry");
+        let session_db = session_registry
+            .profile_sessions()
+            .await
+            .expect("session database");
+        let provider = DaemonQueryAuthorityProviderV1::default();
+        let registrar = DaemonQueryActivationRegistrarV1::new(
             provider.clone(),
             registry.clone(),
             project.path().to_path_buf(),
+            session_db,
         );
 
         registrar
@@ -965,32 +958,33 @@ pub(crate) mod tests {
 
         assert!(matches!(
             provider.status(Some(&scope)),
-            Pr9AuthorityProviderStatusV1::Available { profile_id, .. }
-                if profile_id.as_str() == "profile.pr9-baseline"
+            QueryAuthorityProviderStatusV1::Available { profile_id, .. }
+                if profile_id.as_str() == "profile.query-baseline"
         ));
         assert!(
-            registry.has_pr9_query_authority_for_scope(&scope).await,
-            "semantic activation must keep the mounted PR9 fallback query authority"
+            registry.has_query_authority_for_scope(&scope).await,
+            "semantic activation must keep the mounted query fallback query authority"
         );
         registry.shutdown().await;
     }
+
     fn restart_request(profile: &tracedecay_domain::FusionProfile) -> RetrievalRequest {
         RetrievalRequest {
-            principal: PrincipalId::new("principal.pr9-restart").expect("principal"),
+            principal: PrincipalId::new("principal.query-restart").expect("principal"),
             scope: RetrievalScope {
-                privacy_domain: PrivacyDomainId::new("privacy.pr9-restart")
+                privacy_domain: PrivacyDomainId::new("privacy.query-restart")
                     .expect("privacy domain"),
                 root: SingleRootScopeV1 {
-                    repository: RepositoryId::new("repository.pr9-restart").expect("repository"),
-                    worktree: Some(WorktreeId::new("worktree.pr9-restart").expect("worktree")),
+                    repository: RepositoryId::new("repository.query-restart").expect("repository"),
+                    worktree: Some(WorktreeId::new("worktree.query-restart").expect("worktree")),
                     reference: None,
                 },
             },
             temporal_mode: TemporalModeV1::Current,
             snapshot: RetrievalSnapshot {
                 watermarks: VectorWatermark::default(),
-                freshness_digest: id("freshness.pr9-restart"),
-                authorization_revision: id("authorization.pr9-restart"),
+                freshness_digest: id("freshness.query-restart"),
+                authorization_revision: id("authorization.query-restart"),
                 captured_at: UtcMicros(100),
             },
             profile_id: profile.profile_id.clone(),
@@ -999,7 +993,7 @@ pub(crate) mod tests {
     }
 
     fn empty_restart_lanes() -> Vec<tracedecay_query::retrieval::fusion::CompositionLaneInput> {
-        RetrieverKind::PR9_FALLBACK_LANES
+        RetrieverKind::QUERY_FALLBACK_LANES
             .into_iter()
             .map(|lane| {
                 tracedecay_query::retrieval::fusion::CompositionLaneInput::new(
@@ -1024,10 +1018,10 @@ pub(crate) mod tests {
             .expect("profile identity");
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
-        let project_id = ProjectId::new("project.pr9-restart").expect("project id");
+        let project_id = ProjectId::new("project.query-restart").expect("project id");
         let profile_sessions_path = crate::sessions::user_sessions_db_path(identity.profile_root());
         let _scope_guard =
-            crate::db::enter_daemon_database_scope(&profile_root, 1, "pr9-cursor-restart")
+            crate::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
                 .expect("daemon database scope");
         let session_registry =
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
@@ -1052,14 +1046,14 @@ pub(crate) mod tests {
         );
         let scope = ResolvedScope::new(
             project_id.clone(),
-            id("repository.pr9-restart"),
-            id("worktree.pr9-restart"),
+            id("repository.query-restart"),
+            id("worktree.query-restart"),
             None,
         )
         .expect("resolved scope");
-        let accepted = accepted_profile("pr9-restart", &RetrieverKind::PR9_FALLBACK_LANES);
+        let accepted = accepted_profile("query-restart", &RetrieverKind::QUERY_FALLBACK_LANES);
         let state = RetrievalProfileStateV1::new(
-            id::<ConfigurationRevisionId>("configuration.pr9-restart.1"),
+            id::<ConfigurationRevisionId>("configuration.query-restart.1"),
             accepted.clone(),
             &RetrievalRuntimeCompatibilityV1 {
                 retrieval_ceiling: accepted.profile().retrieval_budget,
@@ -1070,29 +1064,28 @@ pub(crate) mod tests {
             },
         )
         .expect("initial state");
-        let provider = DaemonPr9AuthorityProviderV1::default();
+        let provider = DaemonQueryAuthorityProviderV1::default();
         provider
             .install_evaluated_initial_state(scope.clone(), state.clone(), cursor_keys)
             .expect("install first production authority");
-        let authority =
-            super::super::code_index_scheduler::pr9_runtime::prepare_pr9_query_authority(
-                &scope,
-                &PrivacyDomainId::new("privacy.pr9-restart").expect("privacy domain"),
-                &provider,
-            )
-            .expect("first production query authority");
+        let authority = super::super::code_index_scheduler::query_runtime::prepare_query_authority(
+            &scope,
+            &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
+            &provider,
+        )
+        .expect("first production query authority");
         let request = restart_request(accepted.profile());
         let query = EphemeralSanitizedQueryViewV1::sanitize(
             "restart-stable query",
-            SanitizerRevision::new("query-sanitizer.pr9-restart").expect("sanitizer"),
-            QueryNormalizationRevision::new("query-normalization.pr9-restart")
+            SanitizerRevision::new("query-sanitizer.query-restart").expect("sanitizer"),
+            QueryNormalizationRevision::new("query-normalization.query-restart")
                 .expect("normalization"),
         )
         .expect("query view");
         let bindings = tracedecay_query::retrieval::PreparedQueryBindingsV1::new(
             "code_symbol_search",
             scope.scope_digest.clone(),
-            CodeGenerationId::new("generation.pr9-restart").expect("generation"),
+            CodeGenerationId::new("generation.query-restart").expect("generation"),
             digest('8'),
         )
         .expect("prepared bindings");
@@ -1142,14 +1135,14 @@ pub(crate) mod tests {
                 .await
                 .expect("reopened durable cursor key provider"),
         );
-        let reopened_provider = DaemonPr9AuthorityProviderV1::default();
+        let reopened_provider = DaemonQueryAuthorityProviderV1::default();
         reopened_provider
             .install_evaluated_initial_state(scope.clone(), state, reopened_keys)
             .expect("install reopened production authority");
         let reopened_authority =
-            super::super::code_index_scheduler::pr9_runtime::prepare_pr9_query_authority(
+            super::super::code_index_scheduler::query_runtime::prepare_query_authority(
                 &scope,
-                &PrivacyDomainId::new("privacy.pr9-restart").expect("privacy domain"),
+                &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
                 &reopened_provider,
             )
             .expect("reopened production query authority");

@@ -1,4 +1,4 @@
-//! Storage-neutral, runtime/store-free code-intelligence contracts for PR9
+//! Storage-neutral, runtime/store-free code-intelligence contracts for QUERY
 //! (Plan 25: Code Intelligence Indexing).
 //!
 //! These values are immutable logical records: no storage rows, no parser
@@ -8,7 +8,7 @@
 //!
 //! Ownership: Plan 25 owns these code-specific contracts. Plan 15 owns the
 //! shared retrieval kernel (`crate::retrieval`); Plan 35 owns
-//! `GenerationDiagnosticV1` (`crate::diagnostics`, pr9/12 packet); Plan 36
+//! `GenerationDiagnosticV1` (`crate::diagnostics`, query/12 packet); Plan 36
 //! owns native read-only Git semantics. This module stores only typed
 //! references to those contracts.
 

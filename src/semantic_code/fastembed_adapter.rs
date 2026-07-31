@@ -1,4 +1,4 @@
-//! PR10 `FastEmbed` semantic adapter
+//! semantic `FastEmbed` semantic adapter
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
 //! Root-private embedding runtime port surface. This file owns the typed
@@ -15,7 +15,7 @@
 //! Design decisions for this port, where Plan 31 leaves the choice open:
 //!
 //! - Sync vs async: Plan 31 does not state whether the runtime port is async.
-//!   FastEmbed/ORT inference is blocking CPU work, and PR9's
+//!   FastEmbed/ORT inference is blocking CPU work, and query fallback's
 //!   `src/query/retrieval/ports.rs` sets the precedent that ports are
 //!   synchronous contracts with scheduling/cancellation above them. This port
 //!   is therefore synchronous; async wrapping is an integration concern.
@@ -27,12 +27,12 @@
 //!   from the admitted projection-artifact authority. Callers cannot pair an
 //!   independent projection identity with an artifact.
 //! - Budget type: Plan 31 says deadline/cancellation limits are fields of the
-//!   shared PR9 `RetrievalBudget` and PR10 introduces no semantic-only budget
+//!   shared query `RetrievalBudget` and semantic introduces no semantic-only budget
 //!   type. That domain type is outside this root-private module, so deadlines
 //!   are modelled here as a `Duration` against the injected pool clock and
 //!   cancellation as the [`CancellationSignal`] trait; the integrator adapts
 //!   `RetrievalBudget` onto both.
-#![allow(dead_code)] // PR10 fastembed adapter; Plan 31 — staged
+#![allow(dead_code)] // semantic fastembed adapter; Plan 31 — staged
 
 #[cfg(feature = "semantic-fastembed")]
 use fastembed::{

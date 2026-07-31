@@ -10,7 +10,7 @@ use tracedecay_domain::{
     EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
     EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, EvidenceRole,
     ExactClass, FreshnessCompatibilityV1, FusionProfile, LogicalEvidenceId, ManifestDigest,
-    Pr9FallbackSubpayload, PrincipalId, ProjectionKeyV1, PublicRetrieverStatus, QueryDigest,
+    PrincipalId, ProjectionKeyV1, PublicRetrieverStatus, QueryDigest, QueryFallbackSubpayload,
     QueryMac, QueryNormalizationRevision, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
     RetrievalRequest, RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
@@ -832,11 +832,11 @@ fn cancellation_and_deadline_are_rechecked_before_completion() {
     ));
 }
 
-fn fallback() -> Arc<Pr9FallbackSubpayload> {
-    let mut fallback = Pr9FallbackSubpayload {
-        profile_id: id("profile.pr9.fixture"),
+fn fallback() -> Arc<QueryFallbackSubpayload> {
+    let mut fallback = QueryFallbackSubpayload {
+        profile_id: id("profile.query.fixture"),
         ordered_candidates: Vec::new(),
-        public_pr9_lane_coverage: BTreeMap::from([
+        public_fallback_lane_coverage: BTreeMap::from([
             (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
             (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
             (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
@@ -1242,7 +1242,7 @@ fn calibrated_distance_and_margin_thresholds_abstain_without_relabeling_scores()
 }
 
 #[test]
-fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes() {
+fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_query_bytes() {
     let query_view = query_view();
     let projection = projection();
     let request = request(&query_view, &projection, 4);
@@ -1288,7 +1288,7 @@ fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes()
             )
             .expect("ordinary search bypasses a non-ready semantic lane");
         let SemanticQueryServiceOutcomeV1::Fallback { abstention, .. } = &outcome else {
-            panic!("non-ready semantic state must preserve the PR9 fallback");
+            panic!("non-ready semantic state must preserve the query fallback");
         };
         assert_eq!(abstention, &expected);
         assert_eq!(
@@ -1354,7 +1354,7 @@ fn mismatched_complete_generation_bypasses_semantic_authorities() {
 }
 
 #[test]
-fn partial_cancelled_and_failed_semantic_attempts_preserve_pr9_bytes() {
+fn partial_cancelled_and_failed_semantic_attempts_preserve_query_bytes() {
     let query_view = query_view();
     let projection = projection();
     let request = request(&query_view, &projection, 4);

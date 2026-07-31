@@ -4,7 +4,7 @@
 //!
 //! These are storage-neutral logical records. The index stores only typed
 //! references to Plan 35's `GenerationDiagnosticV1` contract (owned by
-//! `crates/tracedecay-domain/src/diagnostics.rs`, delivered by the pr9/12
+//! `crates/tracedecay-domain/src/diagnostics.rs`, delivered by the query/12
 //! diagnostic-persistence authority packet) — never a duplicate diagnostic
 //! record.
 
@@ -450,7 +450,7 @@ pub struct LineageAbstentionV1 {
 
 /// A typed reference to Plan 35's generation-bound diagnostic contract. The
 /// diagnostic record itself is owned by
-/// `crates/tracedecay-domain/src/diagnostics.rs` (pr9/12 authority packet);
+/// `crates/tracedecay-domain/src/diagnostics.rs` (query/12 authority packet);
 /// the index stores only anchor-bound references (Plan 25).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

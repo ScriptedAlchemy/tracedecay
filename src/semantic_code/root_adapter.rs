@@ -14,7 +14,7 @@ pub(super) use crate::application::semantic_runtime::{
 };
 pub(super) use crate::config::retrieval::RerankCompatibilityPinsV1;
 pub(super) use crate::config::{DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings};
-pub(super) use crate::search_eval::pr10_native::AdmittedNativeRerankExecutorV1;
+pub(super) use crate::search_eval::semantic_native::AdmittedNativeRerankExecutorV1;
 
 pub(super) fn default_lifecycle_root() -> Option<PathBuf> {
     crate::config::user_data_dir().map(|root| root.join("semantic-models"))

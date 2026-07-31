@@ -1,4 +1,4 @@
-//! Production-bound PR9/PR10 candidate-output generator.
+//! Production-bound query/semantic candidate-output generator.
 //!
 //! Builds one published code generation from checked-in sanitized corpus
 //! fixtures, then runs the shared `CompositionKernel` over the real exact,
@@ -20,12 +20,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::pr10_native::{
-    Pr10ChannelAblationV1, Pr10NativeHydrationMeasurementV1, Pr10NativePr9StageMeasurementsV1,
-    Pr10NativeQueryInputV1, Pr10NativeQueryOutputV1, Pr10NativeRerankInputV1,
-    Pr10NativeResourceEvidenceV1, Pr10NativeResourceSampleV1, Pr10NativeSemanticInputV1,
-    Pr10NativeStageMeasurementV1, Pr10NativeStageResultV1, Pr10ProjectionCaseSampleV1,
-    Pr10ProjectionCaseV1, evaluate_native_query,
+use super::semantic_native::{
+    SemanticChannelAblationV1, SemanticNativeHydrationMeasurementV1, SemanticNativeQueryInputV1,
+    SemanticNativeQueryOutputV1, SemanticNativeQueryStageMeasurementsV1,
+    SemanticNativeRerankInputV1, SemanticNativeResourceEvidenceV1, SemanticNativeResourceSampleV1,
+    SemanticNativeSemanticInputV1, SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1,
+    SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1, evaluate_native_query,
 };
 use crate::application::code_index::{
     ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -54,10 +54,10 @@ use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
     ComponentRevision, DiversityPolicy, DiversityPolicyId, EphemeralSanitizedQueryViewV1,
     ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId,
-    HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest, PolicyRevisionId,
-    Pr9FallbackSubpayload, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, PublicRetrieverStatus, QueryNormalizationRevision, RelationEdgeKindV1,
+    HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId,
+    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
     RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalFailure,
     RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
@@ -85,14 +85,15 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 
-const WORKLOAD_RELATIVE: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
+const WORKLOAD_RELATIVE: &str =
+    "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
 pub(super) const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
 pub(super) const EVALUATION_MODEL_REVISION: &str =
     "JinaEmbeddingsV2BaseCode@516f4baf13dec4ddddda8631e019b5737c8bc250";
 pub(super) const EVALUATION_PROJECTION_REVISION: &str = "retriever.semantic-flat.evaluation.v1";
 pub(super) const EVALUATION_RUNTIME_REVISION: &str = "semantic.fastembed.production.v1";
 const REQUIRED_CANCELLATION: &str = "bounded_typed_cancelled";
-const REQUIRED_OFFLINE: &str = "no_network_and_pr9_fallback_available";
+const REQUIRED_OFFLINE: &str = "no_network_and_query_fallback_available";
 pub(super) const EVALUATION_SEED: &str = "not_applicable_deterministic_no_rng";
 pub(super) const EVALUATION_CACHE_STATE: &str = "cold_empty_in_memory_publication";
 const CORPUS_DIGEST_DOMAIN: &str = "tracedecay.search-eval.corpus-content.v1";
@@ -131,7 +132,7 @@ pub struct CandidateWorkloadV1 {
     pub profile_matrix: Vec<ProfileSpecV1>,
     pub resource_budgets: ResourceBudgetsV1,
     pub decision_policy: DecisionPolicySliceV1,
-    pub expected_pr9_fallback_digests: BTreeMap<String, String>,
+    pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
 }
 
@@ -280,7 +281,7 @@ pub struct QueryCandidateRowV1 {
     pub abstained: bool,
     pub historical: HistoricalQueryExecutionV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native: Option<Pr10NativeQueryOutputV1>,
+    pub native: Option<SemanticNativeQueryOutputV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -347,15 +348,15 @@ pub struct ProductionCandidateOutputV1 {
     pub hardware: String,
     pub profile_material_digest: String,
     pub fallback_digest: String,
-    pub pr9_fallback_digest: String,
-    pub expected_pr9_fallback_digest: String,
-    pub pr9_fallback_matches_expected: bool,
+    pub query_fallback_digest: String,
+    pub expected_query_fallback_digest: String,
+    pub query_fallback_matches_expected: bool,
     pub cancellation: String,
     pub offline: String,
     pub optional_stages: OptionalStageMeasurementsV1,
     pub resources: BTreeMap<String, ResourceSampleV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_resources: Option<Pr10NativeResourceEvidenceV1>,
+    pub native_resources: Option<SemanticNativeResourceEvidenceV1>,
     pub queries: Vec<QueryCandidateRowV1>,
 }
 
@@ -372,8 +373,8 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     pub profile_ids: Option<&'a [String]>,
 }
 
-/// Immutable identity and request material prepared by the production PR9
-/// generator for one native PR10 query.
+/// Immutable identity and request material prepared by the production QUERY
+/// generator for one native semantic query.
 pub struct ProductionCandidateNativeQueryContextV1<'a> {
     pub profile: &'a ProfileSpecV1,
     pub query: &'a WorkloadQueryV1,
@@ -387,8 +388,8 @@ pub struct ProductionCandidateNativeQueryContextV1<'a> {
 
 /// Genuine optional runtime inputs borrowed only for the evaluator call.
 pub struct ProductionCandidateNativeQueryInputsV1<'a> {
-    pub semantic: Option<Pr10NativeSemanticInputV1<'a>>,
-    pub rerank: Option<Pr10NativeRerankInputV1<'a>>,
+    pub semantic: Option<SemanticNativeSemanticInputV1<'a>>,
+    pub rerank: Option<SemanticNativeRerankInputV1<'a>>,
 }
 
 /// Genuine code generations used as canonical inputs to the production
@@ -432,13 +433,13 @@ pub struct ProductionCandidateNativeGenerationResourcesV1 {
     pub cache_bytes: u64,
     pub clean_projection_build_micros: u64,
     pub incremental_rebuild_micros: u64,
-    pub projection_cases: BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
+    pub projection_cases: BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
 }
 
 /// Production authority that supplies admitted semantic/rerank runtimes.
 ///
 /// The callback is the only way to produce a query result: candidate
-/// generation invokes `pr10_native::evaluate_native_query` inside it.
+/// generation invokes `semantic_native::evaluate_native_query` inside it.
 pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
     fn with_query_inputs(
         &self,
@@ -452,7 +453,7 @@ pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
         &self,
         context: ProductionCandidateNativeResourceContextV1<'_>,
         execute_queries: &mut dyn FnMut() -> Result<Vec<u64>, CandidateOutputError>,
-    ) -> Result<Pr10NativeStageResultV1<Pr10NativeResourceSampleV1>, CandidateOutputError>;
+    ) -> Result<SemanticNativeStageResultV1<SemanticNativeResourceSampleV1>, CandidateOutputError>;
 }
 
 #[derive(Clone, Default)]
@@ -639,11 +640,13 @@ fn build_query_projections(
             .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
             .collect(),
         freshness: freshness.clone(),
-        exact_retriever_revision: id(tracedecay_query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1)?,
-        lexical_retriever_revision: id(
-            tracedecay_query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1,
+        exact_retriever_revision: id(
+            tracedecay_query::retrieval::QUERY_EXACT_RETRIEVER_REVISION_V1,
         )?,
-        exact_score_domain: id(tracedecay_query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1)?,
+        lexical_retriever_revision: id(
+            tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
+        )?,
+        exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
     };
     let admitted = generation
         .admitted_chunks()
@@ -692,7 +695,7 @@ fn build_query_projections(
     Ok((lexical, graph))
 }
 
-/// Load the checked-in PR9/PR10 direct-evaluation workload.
+/// Load the checked-in query/semantic direct-evaluation workload.
 pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, CandidateOutputError> {
     let bytes = fs::read(path).map_err(|source| CandidateOutputError::Read {
         path: path.to_path_buf(),
@@ -1039,19 +1042,19 @@ pub fn validate_workload_for_tuning(
             )));
         }
     }
-    if workload.expected_pr9_fallback_digests.len() != 2
+    if workload.expected_query_fallback_digests.len() != 2
         || !["train", "validation"].into_iter().all(|partition| {
             workload
-                .expected_pr9_fallback_digests
+                .expected_query_fallback_digests
                 .contains_key(partition)
         })
     {
         return Err(CandidateOutputError::Contract(
-            "expected PR9 fallback digests must bind train and validation".to_owned(),
+            "expected query fallback digests must bind train and validation".to_owned(),
         ));
     }
     if workload
-        .expected_pr9_fallback_digests
+        .expected_query_fallback_digests
         .values()
         .any(|digest| {
             digest.len() != 71
@@ -1062,7 +1065,7 @@ pub fn validate_workload_for_tuning(
         })
     {
         return Err(CandidateOutputError::Contract(
-            "expected PR9 fallback digest is not canonical".to_owned(),
+            "expected query fallback digest is not canonical".to_owned(),
         ));
     }
     Ok(())
@@ -1168,8 +1171,8 @@ pub fn generate_candidate_outputs(
     })
 }
 
-/// Generate the same byte-stable PR9 fallback plus evidence-bearing native
-/// PR10 semantic/rerank results. Missing optional authorities remain pending.
+/// Generate the same byte-stable query fallback plus evidence-bearing native
+/// semantic/rerank results. Missing optional authorities remain pending.
 pub fn generate_candidate_outputs_with_native(
     options: &GenerateCandidateOutputsOptions<'_>,
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
@@ -1228,7 +1231,7 @@ pub fn generate_candidate_outputs_with_native(
             &corpus_digest,
             "10x",
         )?;
-        let evidence = Pr10NativeResourceEvidenceV1 {
+        let evidence = SemanticNativeResourceEvidenceV1 {
             samples: BTreeMap::from([("current".to_owned(), current), ("10x".to_owned(), ten_x)]),
         };
         evidence
@@ -1252,7 +1255,7 @@ fn measure_native_partition(
 ) -> Result<
     (
         Vec<QueryCandidateRowV1>,
-        Pr10NativeStageResultV1<Pr10NativeResourceSampleV1>,
+        SemanticNativeStageResultV1<SemanticNativeResourceSampleV1>,
     ),
     CandidateOutputError,
 > {
@@ -1297,7 +1300,7 @@ fn measure_native_partition(
             "native resource authority did not execute the exact query workload".to_owned(),
         )
     })?;
-    if let Pr10NativeStageResultV1::Complete(sample) = &evidence {
+    if let SemanticNativeStageResultV1::Complete(sample) = &evidence {
         let source_manifest_digest = &generation.projection().request().changes.manifest_digest;
         if sample.provenance.workload_digest != workload_digest
             || sample.provenance.corpus_digest != corpus_digest
@@ -1386,13 +1389,13 @@ fn retrieve_one_native_query(
             .as_ref()
             .map(|rerank| rerank.policy.policy_id.clone());
         native = Some(
-            evaluate_native_query(Pr10NativeQueryInputV1 {
+            evaluate_native_query(SemanticNativeQueryInputV1 {
                 profile_spec: profile,
                 fusion_profile: &fusion,
                 diversity_policy: &prepared.diversity,
                 kernel: &prepared.kernel,
-                pr9_lanes: &prepared.pr9_lanes,
-                pr9_measurements: prepared.pr9_measurements,
+                fallback_lanes: &prepared.fallback_lanes,
+                query_measurements: prepared.query_measurements,
                 semantic: inputs.semantic,
                 fallback: &prepared.fallback,
                 rerank: inputs.rerank,
@@ -1421,8 +1424,8 @@ fn retrieve_one_native_query(
         ))
     })?;
     let ranked = match &native.rerank.on {
-        Pr10NativeStageResultV1::Complete(ranked) => ranked.clone(),
-        Pr10NativeStageResultV1::NotRequested | Pr10NativeStageResultV1::Pending { .. } => {
+        SemanticNativeStageResultV1::Complete(ranked) => ranked.clone(),
+        SemanticNativeStageResultV1::NotRequested | SemanticNativeStageResultV1::Pending { .. } => {
             native.rerank.off.clone()
         }
     };
@@ -1447,15 +1450,15 @@ fn retrieve_one_native_query(
 
 fn validate_native_query_output(
     profile: &ProfileSpecV1,
-    fallback: &Pr9FallbackSubpayload,
-    native: &Pr10NativeQueryOutputV1,
+    fallback: &QueryFallbackSubpayload,
+    native: &SemanticNativeQueryOutputV1,
 ) -> Result<(), CandidateOutputError> {
     if native.profile_id != profile.profile_id
         || native.fallback_digest != fallback.digest.as_str()
         || !native.fallback_bytes_unchanged
     {
         return Err(CandidateOutputError::Contract(format!(
-            "native query output does not preserve the exact PR9 fallback for {}",
+            "native query output does not preserve the exact query fallback for {}",
             profile.profile_id
         )));
     }
@@ -1465,11 +1468,11 @@ fn validate_native_query_output(
         .map(|result| result.ablation)
         .collect::<BTreeSet<_>>();
     if observed.len() != native.ablations.len()
-        || !observed.contains(&Pr10ChannelAblationV1::ExactLexical)
-        || !observed.contains(&Pr10ChannelAblationV1::Pr9ExactLexicalGraph)
+        || !observed.contains(&SemanticChannelAblationV1::ExactLexical)
+        || !observed.contains(&SemanticChannelAblationV1::QueryExactLexicalGraph)
     {
         return Err(CandidateOutputError::Contract(
-            "native query output is missing required PR9 baseline ablations".to_owned(),
+            "native query output is missing required query baseline ablations".to_owned(),
         ));
     }
     for ablation in &native.ablations {
@@ -1493,13 +1496,13 @@ fn validate_native_query_output(
         ));
     }
     let semantic_ablations = [
-        Pr10ChannelAblationV1::ExactLexicalSemantic,
-        Pr10ChannelAblationV1::HybridExactLexicalGraphSemantic,
+        SemanticChannelAblationV1::ExactLexicalSemantic,
+        SemanticChannelAblationV1::HybridExactLexicalGraphSemantic,
     ];
     match (&native.exact_flat_oracle, &native.measurements.semantic) {
         (
-            Pr10NativeStageResultV1::Complete(oracle),
-            Pr10NativeStageResultV1::Complete(measurement),
+            SemanticNativeStageResultV1::Complete(oracle),
+            SemanticNativeStageResultV1::Complete(measurement),
         ) => {
             if measurement.output_candidates != oracle.hits.len() as u64 {
                 return Err(CandidateOutputError::Contract(
@@ -1515,8 +1518,11 @@ fn validate_native_query_output(
                 ));
             }
         }
-        (Pr10NativeStageResultV1::NotRequested, Pr10NativeStageResultV1::NotRequested)
-        | (Pr10NativeStageResultV1::Pending { .. }, Pr10NativeStageResultV1::Pending { .. }) => {
+        (SemanticNativeStageResultV1::NotRequested, SemanticNativeStageResultV1::NotRequested)
+        | (
+            SemanticNativeStageResultV1::Pending { .. },
+            SemanticNativeStageResultV1::Pending { .. },
+        ) => {
             if semantic_ablations
                 .iter()
                 .any(|ablation| observed.contains(ablation))
@@ -1561,13 +1567,13 @@ fn native_optional_stage_measurements(
 
 fn aggregate_native_stage<'a, T: 'a>(
     requested: bool,
-    results: impl Iterator<Item = &'a Pr10NativeStageResultV1<T>>,
+    results: impl Iterator<Item = &'a SemanticNativeStageResultV1<T>>,
 ) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
     let results = results.collect::<Vec<_>>();
     if !requested {
         if results
             .iter()
-            .any(|result| !matches!(result, Pr10NativeStageResultV1::NotRequested))
+            .any(|result| !matches!(result, SemanticNativeStageResultV1::NotRequested))
         {
             return Err(CandidateOutputError::Contract(
                 "unrequested native stage reported execution".to_owned(),
@@ -1577,7 +1583,7 @@ fn aggregate_native_stage<'a, T: 'a>(
     }
     if results
         .iter()
-        .any(|result| matches!(result, Pr10NativeStageResultV1::NotRequested))
+        .any(|result| matches!(result, SemanticNativeStageResultV1::NotRequested))
     {
         return Err(CandidateOutputError::Contract(
             "requested native stage reported not_requested".to_owned(),
@@ -1586,7 +1592,7 @@ fn aggregate_native_stage<'a, T: 'a>(
     Ok(
         if results
             .iter()
-            .all(|result| matches!(result, Pr10NativeStageResultV1::Complete(_)))
+            .all(|result| matches!(result, SemanticNativeStageResultV1::Complete(_)))
         {
             OptionalStageMeasurementV1::Complete
         } else {
@@ -1597,15 +1603,21 @@ fn aggregate_native_stage<'a, T: 'a>(
 
 fn aggregate_native_rerank_stage(
     requested: bool,
-    native: &[&Pr10NativeQueryOutputV1],
+    native: &[&SemanticNativeQueryOutputV1],
 ) -> Result<OptionalStageMeasurementV1, CandidateOutputError> {
     for output in native {
         let states_agree = match (&output.rerank.on, &output.rerank.execution) {
-            (Pr10NativeStageResultV1::NotRequested, Pr10NativeStageResultV1::NotRequested)
-            | (Pr10NativeStageResultV1::Complete(_), Pr10NativeStageResultV1::Complete(_)) => true,
             (
-                Pr10NativeStageResultV1::Pending { reason: left },
-                Pr10NativeStageResultV1::Pending { reason: right },
+                SemanticNativeStageResultV1::NotRequested,
+                SemanticNativeStageResultV1::NotRequested,
+            )
+            | (
+                SemanticNativeStageResultV1::Complete(_),
+                SemanticNativeStageResultV1::Complete(_),
+            ) => true,
+            (
+                SemanticNativeStageResultV1::Pending { reason: left },
+                SemanticNativeStageResultV1::Pending { reason: right },
             ) => left == right,
             _ => false,
         };
@@ -1620,7 +1632,7 @@ fn aggregate_native_rerank_stage(
 
 fn apply_native_resource_evidence(
     output: &mut ProductionCandidateOutputV1,
-    evidence: &Pr10NativeResourceEvidenceV1,
+    evidence: &SemanticNativeResourceEvidenceV1,
 ) -> Result<(), CandidateOutputError> {
     let expected_chunks = output
         .resources
@@ -1633,7 +1645,7 @@ fn apply_native_resource_evidence(
             CandidateOutputError::Contract(format!("unknown native resource scale {scale}"))
         })?;
         let sample = match stage {
-            Pr10NativeStageResultV1::Complete(sample) => {
+            SemanticNativeStageResultV1::Complete(sample) => {
                 let projected = sample.as_existing_evaluator_sample().ok_or_else(|| {
                     CandidateOutputError::Contract(format!(
                         "complete native resource sample {scale} is incomplete"
@@ -1646,17 +1658,17 @@ fn apply_native_resource_evidence(
                 }
                 projected
             }
-            Pr10NativeStageResultV1::Pending { reason } => ResourceSampleV1 {
+            SemanticNativeStageResultV1::Pending { reason } => ResourceSampleV1 {
                 status: ResourceMeasurementStatusV1::Pending,
                 eligible_chunks,
                 peak_rss_bytes: None,
                 latency_samples_us: Vec::new(),
                 measured_queries: 0,
                 pending_reason: Some(format!(
-                    "native PR10 resource measurement pending: {reason:?}"
+                    "native semantic resource measurement pending: {reason:?}"
                 )),
             },
-            Pr10NativeStageResultV1::NotRequested => {
+            SemanticNativeStageResultV1::NotRequested => {
                 return Err(CandidateOutputError::Contract(format!(
                     "native resource sample {scale} cannot be not_requested"
                 )));
@@ -1791,35 +1803,35 @@ fn generate_partition_output(
     );
 
     let mut fallback_digests = Vec::with_capacity(queries.len());
-    let mut pr9_digests = Vec::with_capacity(queries.len());
+    let mut query_digests = Vec::with_capacity(queries.len());
     for query in &queries {
         fallback_digests.push((
             query.query_id.as_str(),
             fallback_digest_for_query(published, profile, query)?,
         ));
-        pr9_digests.push((
+        query_digests.push((
             query.query_id.as_str(),
-            pr9_fallback_digest_for_query(published, profile, query)?,
+            query_fallback_digest_for_query(published, profile, query)?,
         ));
     }
     let fallback_digest = canonical_sha256(&(
         "tracedecay.search-eval.partition-fallbacks.v1",
         &fallback_digests,
     ))?;
-    let pr9_digest = canonical_sha256(&(
+    let query_digest = canonical_sha256(&(
         "tracedecay.search-eval.partition-fallbacks.v1",
-        &pr9_digests,
+        &query_digests,
     ))?;
-    let expected_pr9_fallback_digest = workload
-        .expected_pr9_fallback_digests
+    let expected_query_fallback_digest = workload
+        .expected_query_fallback_digests
         .get(partition)
         .cloned()
         .ok_or_else(|| {
             CandidateOutputError::Contract(format!(
-                "missing expected PR9 fallback digest for {partition}"
+                "missing expected query fallback digest for {partition}"
             ))
         })?;
-    let pr9_fallback_matches_expected = pr9_digest == expected_pr9_fallback_digest;
+    let query_fallback_matches_expected = query_digest == expected_query_fallback_digest;
 
     let mut resources = BTreeMap::new();
     resources.insert("current".to_owned(), current);
@@ -1839,9 +1851,9 @@ fn generate_partition_output(
         hardware: hardware_fingerprint(),
         profile_material_digest: compute_profile_material_digest(profile)?,
         fallback_digest,
-        pr9_fallback_digest: pr9_digest,
-        expected_pr9_fallback_digest,
-        pr9_fallback_matches_expected,
+        query_fallback_digest: query_digest,
+        expected_query_fallback_digest,
+        query_fallback_matches_expected,
         cancellation: REQUIRED_CANCELLATION.to_owned(),
         offline: REQUIRED_OFFLINE.to_owned(),
         optional_stages: optional_stage_measurements(profile),
@@ -1934,7 +1946,7 @@ fn compose_production_query(
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<CompositionOutputV1, CandidateOutputError> {
-    Ok(prepare_production_query(published, profile, query)?.pr9_output)
+    Ok(prepare_production_query(published, profile, query)?.query_output)
 }
 
 struct PreparedProductionQueryV1 {
@@ -1942,10 +1954,10 @@ struct PreparedProductionQueryV1 {
     request: RetrievalRequest,
     query_view: EphemeralSanitizedQueryViewV1,
     kernel: CompositionKernel,
-    pr9_lanes: Vec<CompositionLaneInput>,
-    pr9_measurements: Pr10NativePr9StageMeasurementsV1,
-    pr9_output: CompositionOutputV1,
-    fallback: Pr9FallbackSubpayload,
+    fallback_lanes: Vec<CompositionLaneInput>,
+    query_measurements: SemanticNativeQueryStageMeasurementsV1,
+    query_output: CompositionOutputV1,
+    fallback: QueryFallbackSubpayload,
     diversity: DiversityPolicy,
     rerank_policy: Option<RerankPolicy>,
 }
@@ -1959,9 +1971,9 @@ fn prepare_production_query(
     let request = retrieval_request(&profile.profile_id, published)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
         &query.query,
-        id::<SanitizerRevision>(tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)?,
+        id::<SanitizerRevision>(tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1)?,
         id::<QueryNormalizationRevision>(
-            tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+            tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1,
         )?,
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
@@ -1978,7 +1990,7 @@ fn prepare_production_query(
             ))
         })?;
     let authority = CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>(
-        tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+        tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
     )?);
     let exact_lane = ExactLane::new(
         authority.clone(),
@@ -2010,7 +2022,7 @@ fn prepare_production_query(
     let exact_outcome = exact_lane
         .retrieve_exact(&exact_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let exact_measurement = Pr10NativeStageMeasurementV1 {
+    let exact_measurement = SemanticNativeStageMeasurementV1 {
         elapsed_micros: elapsed_micros(exact_started),
         input_candidates: exact_request.literals.len() as u64,
         output_candidates: retriever_outcome_candidate_count(&exact_outcome),
@@ -2027,8 +2039,10 @@ fn prepare_production_query(
         phrases: lexical_parts.phrases,
         field_filters: Vec::new(),
         fuzzy_budget: 8,
-        lexical_profile_revision: id(tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1)?,
-        score_domain: id(tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1)?,
+        lexical_profile_revision: id(
+            tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+        )?,
+        score_domain: id(tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1)?,
         budget,
     };
     let lexical_input_candidates = lexical_request
@@ -2042,7 +2056,7 @@ fn prepare_production_query(
     let lexical_outcome = lexical_lane
         .retrieve_lexical(&lexical_request)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let lexical_measurement = Pr10NativeStageMeasurementV1 {
+    let lexical_measurement = SemanticNativeStageMeasurementV1 {
         elapsed_micros: elapsed_micros(lexical_started),
         input_candidates: lexical_input_candidates,
         output_candidates: retriever_outcome_candidate_count(&lexical_outcome),
@@ -2072,18 +2086,18 @@ fn prepare_production_query(
             .retrieve_graph(&graph_request)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
     };
-    let graph_measurement = Pr10NativeStageMeasurementV1 {
+    let graph_measurement = SemanticNativeStageMeasurementV1 {
         elapsed_micros: elapsed_micros(graph_started),
         input_candidates: graph_input_candidates,
         output_candidates: retriever_outcome_candidate_count(&graph_outcome),
     };
 
     let kernel = CompositionKernel::new(id::<ComponentRevision>(
-        tracedecay_query::retrieval::PR9_RANKING_REVISION_V1,
+        tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1,
     )?);
-    let fallback_profile = pr9_fallback_profile(profile);
+    let fallback_profile = query_fallback_profile(profile);
     let fusion_profile = fusion_profile(&fallback_profile, &budget, false)?;
-    let pr9_lanes = vec![
+    let fallback_lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
         CompositionLaneInput::new(RetrieverKind::Lexical, lexical_outcome)
@@ -2092,48 +2106,48 @@ fn prepare_production_query(
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
     ];
     let diversity = evaluated_diversity_policy()?;
-    let pr9_output = kernel
+    let query_output = kernel
         .compose(
             &FusionStageInput {
                 profile: fusion_profile,
-                lanes: pr9_lanes.clone(),
+                lanes: fallback_lanes.clone(),
             },
             &diversity,
         )
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let fallback = pr9_fallback_from_composition(&pr9_output)?;
+    let fallback = query_fallback_from_composition(&query_output)?;
     let rerank_policy = evaluated_rerank_policy(profile)?;
     Ok(PreparedProductionQueryV1 {
         code_generation: generation_id,
         request,
         query_view,
         kernel,
-        pr9_lanes,
-        pr9_measurements: Pr10NativePr9StageMeasurementsV1 {
+        fallback_lanes,
+        query_measurements: SemanticNativeQueryStageMeasurementsV1 {
             exact: exact_measurement,
             lexical: lexical_measurement,
             graph: graph_measurement,
         },
-        pr9_output,
+        query_output,
         fallback,
         diversity,
         rerank_policy,
     })
 }
 
-fn pr9_fallback_digest_for_query(
+fn query_fallback_digest_for_query(
     published: &PublishedCorpus,
     profile: &ProfileSpecV1,
     query: &WorkloadQueryV1,
 ) -> Result<String, CandidateOutputError> {
-    // PR9-only profile compose for digest stability measurement.
-    let pr9_profile = pr9_fallback_profile(profile);
-    fallback_digest_for_query(published, &pr9_profile, query)
+    // query-only profile compose for digest stability measurement.
+    let query_profile = query_fallback_profile(profile);
+    fallback_digest_for_query(published, &query_profile, query)
 }
 
-fn pr9_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
+fn query_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
     let mut fallback = profile.clone();
-    "pr9-fallback".clone_into(&mut fallback.profile_id);
+    "query-fallback".clone_into(&mut fallback.profile_id);
     fallback.semantic_weight_ppm = 0;
     fallback.rerank_weight_ppm = 0;
     fallback
@@ -2145,15 +2159,15 @@ fn fallback_digest_for_query(
     query: &WorkloadQueryV1,
 ) -> Result<String, CandidateOutputError> {
     let composed = compose_production_query(published, profile, query)?;
-    let fallback = pr9_fallback_from_composition(&composed)?;
+    let fallback = query_fallback_from_composition(&composed)?;
     Ok(fallback.digest.as_str().to_owned())
 }
 
-fn pr9_fallback_from_composition(
+fn query_fallback_from_composition(
     output: &CompositionOutputV1,
-) -> Result<Pr9FallbackSubpayload, CandidateOutputError> {
+) -> Result<QueryFallbackSubpayload, CandidateOutputError> {
     let mut coverage = BTreeMap::new();
-    for lane in RetrieverKind::PR9_FALLBACK_LANES {
+    for lane in RetrieverKind::QUERY_FALLBACK_LANES {
         coverage.insert(
             lane,
             output
@@ -2163,7 +2177,7 @@ fn pr9_fallback_from_composition(
                 .unwrap_or(PublicRetrieverStatus::Unavailable),
         );
     }
-    let fallback = Pr9FallbackSubpayload::new(
+    let fallback = QueryFallbackSubpayload::new(
         output.profile_id.clone(),
         output.ranked_candidates.clone(),
         coverage,
@@ -2299,7 +2313,7 @@ fn measure_late_hydration(
     request: &RetrievalRequest,
     ranked: &[tracedecay_domain::RankedCandidate],
     budget: &RetrievalBudget,
-) -> Result<Pr10NativeHydrationMeasurementV1, CandidateOutputError> {
+) -> Result<SemanticNativeHydrationMeasurementV1, CandidateOutputError> {
     let mut source = CandidateCorpusHydrationSourceV1 {
         published,
         source_fetches: 0,
@@ -2313,7 +2327,7 @@ fn measure_late_hydration(
         .iter()
         .map(|receipt| receipt.bytes_hydrated)
         .sum();
-    Ok(Pr10NativeHydrationMeasurementV1 {
+    Ok(SemanticNativeHydrationMeasurementV1 {
         elapsed_micros: elapsed_micros(started),
         selected_candidates: page.results.len() as u64,
         source_fetches: source.source_fetches,
@@ -3205,15 +3219,15 @@ fn fusion_profile(
     let score_domain_calibrations = [
         (
             RetrieverKind::ExactLiteral,
-            tracedecay_query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
+            tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
         ),
         (
             RetrieverKind::Lexical,
-            tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+            tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
         ),
         (
             RetrieverKind::Graph,
-            tracedecay_query::retrieval::PR9_GRAPH_SCORE_DOMAIN_V1,
+            tracedecay_query::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
         ),
         (RetrieverKind::Semantic, "score.semantic.candidate.v1"),
     ]
@@ -3433,7 +3447,7 @@ fn hardware_fingerprint() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search_eval::pr10_native::Pr10NativePendingReasonV1;
+    use crate::search_eval::semantic_native::SemanticNativePendingReasonV1;
 
     struct TestRepositoryFixture {
         _temp: tempfile::TempDir,
@@ -3498,7 +3512,7 @@ mod tests {
         let spec = workload
             .profile_matrix
             .iter()
-            .find(|profile| profile.profile_id == "pr9-fallback")
+            .find(|profile| profile.profile_id == "query-fallback")
             .expect("checked-in fallback profile");
         let material = load_direct_evaluated_profile_material(&repo_root(), None, &spec.profile_id)
             .expect("evaluated profile material");
@@ -3562,9 +3576,9 @@ mod tests {
 
     #[test]
     fn native_stage_completes_only_when_every_query_has_real_evidence() {
-        let complete = Pr10NativeStageResultV1::Complete(());
-        let pending = Pr10NativeStageResultV1::<()>::Pending {
-            reason: Pr10NativePendingReasonV1::SemanticGenerationUnavailable,
+        let complete = SemanticNativeStageResultV1::Complete(());
+        let pending = SemanticNativeStageResultV1::<()>::Pending {
+            reason: SemanticNativePendingReasonV1::SemanticGenerationUnavailable,
         };
 
         assert_eq!(
@@ -3710,19 +3724,19 @@ mod tests {
     }
 
     #[test]
-    fn workload_requires_immutable_pr9_fallback_digests_for_both_partitions() {
+    fn workload_requires_immutable_query_fallback_digests_for_both_partitions() {
         let mut missing = workload();
-        missing.expected_pr9_fallback_digests.remove("validation");
+        missing.expected_query_fallback_digests.remove("validation");
         let error =
             validate_workload_for_tuning(&missing).expect_err("missing validation fallback digest");
         assert!(
             error
                 .to_string()
-                .contains("expected PR9 fallback digests must bind train and validation")
+                .contains("expected query fallback digests must bind train and validation")
         );
 
         let mut malformed = workload();
-        malformed.expected_pr9_fallback_digests.insert(
+        malformed.expected_query_fallback_digests.insert(
             "train".to_owned(),
             "sha256:not-a-canonical-digest".to_owned(),
         );
@@ -3731,7 +3745,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("expected PR9 fallback digest is not canonical")
+                .contains("expected query fallback digest is not canonical")
         );
     }
 
@@ -3740,7 +3754,7 @@ mod tests {
         let error = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &repo_root(),
             workload_path: None,
-            profile_ids: Some(&["pr9-fallback".to_owned(), "unknown-profile".to_owned()]),
+            profile_ids: Some(&["query-fallback".to_owned(), "unknown-profile".to_owned()]),
         })
         .expect_err("unknown profile");
         assert!(error.to_string().contains("unknown requested profile_id"));
@@ -3754,7 +3768,7 @@ mod tests {
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
             workload_path: None,
-            profile_ids: Some(&["pr9-fallback".to_owned()]),
+            profile_ids: Some(&["query-fallback".to_owned()]),
         })
         .expect("generate");
         assert_eq!(result.outputs.len(), 2);
@@ -3766,14 +3780,14 @@ mod tests {
             assert_eq!(output.production_boundary, PRODUCTION_BOUNDARY);
             assert_eq!(output.cancellation, REQUIRED_CANCELLATION);
             assert_eq!(output.offline, REQUIRED_OFFLINE);
-            assert_eq!(output.fallback_digest, output.pr9_fallback_digest);
+            assert_eq!(output.fallback_digest, output.query_fallback_digest);
             assert_eq!(
-                output.expected_pr9_fallback_digest,
-                workload.expected_pr9_fallback_digests[&output.partition]
+                output.expected_query_fallback_digest,
+                workload.expected_query_fallback_digests[&output.partition]
             );
             assert_eq!(
-                output.pr9_fallback_matches_expected,
-                output.pr9_fallback_digest == output.expected_pr9_fallback_digest
+                output.query_fallback_matches_expected,
+                output.query_fallback_digest == output.expected_query_fallback_digest
             );
             assert_eq!(output.corpus_digest, expected_corpus_digest);
             assert_eq!(output.seed, EVALUATION_SEED);
@@ -3951,31 +3965,31 @@ mod tests {
     }
 
     #[test]
-    fn native_pr9_stages_and_late_hydration_emit_raw_measurements() {
+    fn native_query_stages_and_late_hydration_emit_raw_measurements() {
         let fixture = authenticated_repo_fixture();
         let workload = workload();
         let published = publish_corpus(&fixture.root, &workload).expect("published corpus");
         let profile = workload
             .profile_matrix
             .iter()
-            .find(|profile| profile.profile_id == "pr9-fallback")
+            .find(|profile| profile.profile_id == "query-fallback")
             .expect("fallback profile");
         let query = workload.queries.first().expect("query");
         let prepared =
             prepare_production_query(&published, profile, query).expect("prepared query");
         let fusion = fusion_profile(profile, &retrieval_budget(), true).expect("fusion");
-        let mut native = evaluate_native_query(Pr10NativeQueryInputV1 {
+        let mut native = evaluate_native_query(SemanticNativeQueryInputV1 {
             profile_spec: profile,
             fusion_profile: &fusion,
             diversity_policy: &prepared.diversity,
             kernel: &prepared.kernel,
-            pr9_lanes: &prepared.pr9_lanes,
-            pr9_measurements: prepared.pr9_measurements,
+            fallback_lanes: &prepared.fallback_lanes,
+            query_measurements: prepared.query_measurements,
             semantic: None,
             fallback: &prepared.fallback,
             rerank: None,
         })
-        .expect("native PR9 evaluation");
+        .expect("native query evaluation");
         let ranked = native.rerank.off.clone();
         native.measurements.hydration = Some(
             measure_late_hydration(&published, &prepared.request, &ranked, &retrieval_budget())
@@ -3983,9 +3997,9 @@ mod tests {
         );
 
         assert_eq!(
-            native.measurements.pr9.lexical.output_candidates,
+            native.measurements.query.lexical.output_candidates,
             prepared
-                .pr9_lanes
+                .fallback_lanes
                 .iter()
                 .find(|lane| lane.lane == RetrieverKind::Lexical)
                 .map(|lane| retriever_outcome_candidate_count(&lane.outcome))
@@ -4036,7 +4050,7 @@ mod tests {
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
             workload_path: None,
-            profile_ids: Some(&["pr9-fallback".to_owned()]),
+            profile_ids: Some(&["query-fallback".to_owned()]),
         })
         .expect("generate");
         let report =
@@ -4192,7 +4206,7 @@ mod tests {
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
             workload_path: None,
-            profile_ids: Some(&["pr9-fallback".to_owned()]),
+            profile_ids: Some(&["query-fallback".to_owned()]),
         })
         .expect("generate");
 
@@ -4284,19 +4298,19 @@ mod tests {
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &fixture.root,
             workload_path: None,
-            profile_ids: Some(&["pr9-fallback".to_owned()]),
+            profile_ids: Some(&["query-fallback".to_owned()]),
         })
         .expect("generate");
         let train = result
             .outputs
             .iter()
-            .find(|output| output.partition == "train" && output.profile_id == "pr9-fallback")
+            .find(|output| output.partition == "train" && output.profile_id == "query-fallback")
             .expect("train output");
         let probe = train.queries.first().expect("at least one train query");
         let direct = retrieve_partition_query_bytes(
             &fixture.root,
             &workload,
-            "pr9-fallback",
+            "query-fallback",
             &probe.query_id,
         )
         .expect("direct retrieve");
@@ -4308,13 +4322,17 @@ mod tests {
     }
 
     #[test]
-    fn pr9_phrase_and_historical_queries_reach_their_checked_in_anchors() {
+    fn query_phrase_and_historical_queries_reach_their_checked_in_anchors() {
         let fixture = authenticated_repo_fixture();
         let workload = workload();
         let retrieve = |query_id: &str| {
-            let bytes =
-                retrieve_partition_query_bytes(&fixture.root, &workload, "pr9-fallback", query_id)
-                    .expect("direct retrieve");
+            let bytes = retrieve_partition_query_bytes(
+                &fixture.root,
+                &workload,
+                "query-fallback",
+                query_id,
+            )
+            .expect("direct retrieve");
             serde_json::from_slice::<QueryCandidateRowV1>(&bytes).expect("candidate row")
         };
 

@@ -10,8 +10,8 @@ use crate::timeutil::nearest_rank;
 
 #[path = "candidate_output.rs"]
 pub mod candidate_output;
-#[path = "pr10_native.rs"]
-pub mod pr10_native;
+#[path = "semantic_native.rs"]
+pub mod semantic_native;
 
 pub use candidate_output::{
     CandidateOutputError, CandidateWorkloadV1, DirectEvaluatedProfileMaterialV1,
@@ -27,10 +27,11 @@ pub use candidate_output::{
     validate_workload_for_tuning, write_generate_outputs,
 };
 
-const DEFAULT_WORKLOAD: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
+const DEFAULT_WORKLOAD: &str =
+    "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
 const DEFAULT_WORKLOAD_SHA256: &str =
     "78782062ce57b3b0dcea3f82e103c1b6b9e50b362af49d3868b04994db54909b";
-const PR9_BASELINE_PROFILE: &str = "pr9-fallback";
+const QUERY_BASELINE_PROFILE: &str = "query-fallback";
 const SEMANTIC_PROFILE: &str = "hybrid-conservative";
 const RERANK_PROFILE: &str = "hybrid-reranked";
 const METRIC_SCALE_PPM: u64 = 1_000_000;
@@ -241,12 +242,12 @@ fn validate_activation_profile_matrix(
                 ))
             })
     };
-    let baseline = profile(PR9_BASELINE_PROFILE)?;
+    let baseline = profile(QUERY_BASELINE_PROFILE)?;
     let semantic = profile(SEMANTIC_PROFILE)?;
     let rerank = profile(RERANK_PROFILE)?;
     if baseline.semantic_weight_ppm != 0 || baseline.rerank_weight_ppm != 0 {
         return Err(SearchEvalError::Contract(
-            "PR9 baseline must disable semantic and rerank lanes".to_owned(),
+            "query baseline must disable semantic and rerank lanes".to_owned(),
         ));
     }
     if semantic.semantic_weight_ppm == 0 || semantic.rerank_weight_ppm != 0 {
@@ -274,9 +275,9 @@ fn activation_profile_chain(
 ) -> Result<Vec<String>, SearchEvalError> {
     validate_activation_profile_matrix(workload)?;
     let profile_ids = match evaluated_profile_id {
-        PR9_BASELINE_PROFILE => vec![PR9_BASELINE_PROFILE],
-        SEMANTIC_PROFILE => vec![PR9_BASELINE_PROFILE, SEMANTIC_PROFILE],
-        RERANK_PROFILE => vec![PR9_BASELINE_PROFILE, SEMANTIC_PROFILE, RERANK_PROFILE],
+        QUERY_BASELINE_PROFILE => vec![QUERY_BASELINE_PROFILE],
+        SEMANTIC_PROFILE => vec![QUERY_BASELINE_PROFILE, SEMANTIC_PROFILE],
+        RERANK_PROFILE => vec![QUERY_BASELINE_PROFILE, SEMANTIC_PROFILE, RERANK_PROFILE],
         _ => {
             return Err(SearchEvalError::Contract(format!(
                 "{evaluated_profile_id} is not an activation-eligible checked-in profile"
@@ -341,7 +342,7 @@ pub fn compare_direct(
 /// semantic/rerank authorities.
 ///
 /// The selected profile determines the required comparison chain:
-/// PR9 baseline; semantic with semantic-disabled PR9 ablations; and, for the
+/// query baseline; semantic with semantic-disabled query ablations; and, for the
 /// reranked profile, the same semantic profile with rerank disabled.
 pub fn evaluate_default_activation_candidate(
     repo_root: &Path,
@@ -548,24 +549,24 @@ fn evaluate_profile(
     }
     results.sort_by(|left, right| left.query_id.cmp(&right.query_id));
     let expected_fallback_digest = workload
-        .expected_pr9_fallback_digests
+        .expected_query_fallback_digests
         .get(&output.partition)
         .ok_or_else(|| {
             SearchEvalError::Contract(format!(
-                "missing expected PR9 fallback digest for {}",
+                "missing expected query fallback digest for {}",
                 output.partition
             ))
         })?;
-    if output.expected_pr9_fallback_digest != *expected_fallback_digest {
+    if output.expected_query_fallback_digest != *expected_fallback_digest {
         return Err(SearchEvalError::Contract(format!(
-            "{}:{} does not bind the checked-in expected PR9 fallback digest",
+            "{}:{} does not bind the checked-in expected query fallback digest",
             output.profile_id, output.partition
         )));
     }
-    let fallback_matches_expected = output.pr9_fallback_matches_expected
-        && output.pr9_fallback_digest == *expected_fallback_digest;
+    let fallback_matches_expected = output.query_fallback_matches_expected
+        && output.query_fallback_digest == *expected_fallback_digest;
     let fallback_stable =
-        output.fallback_digest == output.pr9_fallback_digest && fallback_matches_expected;
+        output.fallback_digest == output.query_fallback_digest && fallback_matches_expected;
     let cancellation_bounded =
         output.cancellation == workload.decision_policy.required_cancellation;
     let offline = output.offline == workload.decision_policy.required_offline;
@@ -660,16 +661,16 @@ fn validate_stage_request<T>(
     requested: bool,
     status: OptionalStageMeasurementV1,
     stage: &str,
-    results: &[&pr10_native::Pr10NativeStageResultV1<T>],
+    results: &[&semantic_native::SemanticNativeStageResultV1<T>],
     query_count: usize,
 ) -> Result<(), SearchEvalError> {
-    use pr10_native::Pr10NativeStageResultV1;
+    use semantic_native::SemanticNativeStageResultV1;
 
     match (requested, status) {
         (false, OptionalStageMeasurementV1::NotRequested) => {
             if results
                 .iter()
-                .any(|result| !matches!(result, Pr10NativeStageResultV1::NotRequested))
+                .any(|result| !matches!(result, SemanticNativeStageResultV1::NotRequested))
             {
                 return Err(SearchEvalError::Contract(format!(
                     "unrequested {stage} stage reported native execution"
@@ -685,7 +686,7 @@ fn validate_stage_request<T>(
             if results.len() != query_count
                 || results
                     .iter()
-                    .any(|result| !matches!(result, Pr10NativeStageResultV1::Complete(_)))
+                    .any(|result| !matches!(result, SemanticNativeStageResultV1::Complete(_)))
             {
                 return Err(SearchEvalError::Contract(format!(
                     "complete {stage} status lacks complete native evidence for every query"
@@ -696,7 +697,7 @@ fn validate_stage_request<T>(
             if results.len() == query_count
                 && results
                     .iter()
-                    .all(|result| matches!(result, Pr10NativeStageResultV1::Complete(_)))
+                    .all(|result| matches!(result, SemanticNativeStageResultV1::Complete(_)))
             {
                 return Err(SearchEvalError::Contract(format!(
                     "{stage} status is pending despite complete native evidence"
@@ -711,25 +712,25 @@ fn validate_rerank_stage_request<On, Execution>(
     requested: bool,
     status: OptionalStageMeasurementV1,
     results: &[(
-        &pr10_native::Pr10NativeStageResultV1<On>,
-        &pr10_native::Pr10NativeStageResultV1<Execution>,
+        &semantic_native::SemanticNativeStageResultV1<On>,
+        &semantic_native::SemanticNativeStageResultV1<Execution>,
     )],
     query_count: usize,
 ) -> Result<(), SearchEvalError> {
-    use pr10_native::Pr10NativeStageResultV1;
+    use semantic_native::SemanticNativeStageResultV1;
 
     for (on, execution) in results {
         let matching_state = matches!(
             (on, execution),
             (
-                Pr10NativeStageResultV1::NotRequested,
-                Pr10NativeStageResultV1::NotRequested
+                SemanticNativeStageResultV1::NotRequested,
+                SemanticNativeStageResultV1::NotRequested
             ) | (
-                Pr10NativeStageResultV1::Complete(_),
-                Pr10NativeStageResultV1::Complete(_)
+                SemanticNativeStageResultV1::Complete(_),
+                SemanticNativeStageResultV1::Complete(_)
             ) | (
-                Pr10NativeStageResultV1::Pending { .. },
-                Pr10NativeStageResultV1::Pending { .. }
+                SemanticNativeStageResultV1::Pending { .. },
+                SemanticNativeStageResultV1::Pending { .. }
             )
         );
         if !matching_state {
@@ -1228,7 +1229,7 @@ fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEv
         profile.profile_id == SEMANTIC_PROFILE || profile.profile_id == RERANK_PROFILE
     }) {
         let Some(baseline) = profiles.iter().find(|profile| {
-            profile.profile_id == PR9_BASELINE_PROFILE && profile.partition == candidate.partition
+            profile.profile_id == QUERY_BASELINE_PROFILE && profile.partition == candidate.partition
         }) else {
             unavailable = true;
             continue;
@@ -1300,7 +1301,7 @@ fn pairwise_candidate_status(profiles: &[DirectProfileEvaluationV1]) -> DirectEv
 #[cfg(test)]
 mod tests {
     use super::{
-        PR9_BASELINE_PROFILE, RERANK_PROFILE, SEMANTIC_PROFILE, activation_profile_chain,
+        QUERY_BASELINE_PROFILE, RERANK_PROFILE, SEMANTIC_PROFILE, activation_profile_chain,
         aggregate_profile_status, aggregate_quality, evaluate_query,
         load_authoritative_default_workload, p99_latency_us, ratio_metric,
     };
@@ -1419,17 +1420,20 @@ mod tests {
             load_authoritative_default_workload(repo_root).expect("authoritative workload");
 
         assert_eq!(
-            activation_profile_chain(&workload, PR9_BASELINE_PROFILE).expect("PR9 chain"),
-            vec![PR9_BASELINE_PROFILE.to_owned()]
+            activation_profile_chain(&workload, QUERY_BASELINE_PROFILE).expect("query chain"),
+            vec![QUERY_BASELINE_PROFILE.to_owned()]
         );
         assert_eq!(
             activation_profile_chain(&workload, SEMANTIC_PROFILE).expect("semantic chain"),
-            vec![PR9_BASELINE_PROFILE.to_owned(), SEMANTIC_PROFILE.to_owned()]
+            vec![
+                QUERY_BASELINE_PROFILE.to_owned(),
+                SEMANTIC_PROFILE.to_owned()
+            ]
         );
         assert_eq!(
             activation_profile_chain(&workload, RERANK_PROFILE).expect("rerank chain"),
             vec![
-                PR9_BASELINE_PROFILE.to_owned(),
+                QUERY_BASELINE_PROFILE.to_owned(),
                 SEMANTIC_PROFILE.to_owned(),
                 RERANK_PROFILE.to_owned()
             ]
@@ -1544,7 +1548,7 @@ mod tests {
     #[test]
     fn candidate_without_pairwise_natural_language_gain_fails() {
         for profile_id in [SEMANTIC_PROFILE, RERANK_PROFILE] {
-            let baseline = passing_profile(PR9_BASELINE_PROFILE, 500_000, 1_000_000);
+            let baseline = passing_profile(QUERY_BASELINE_PROFILE, 500_000, 1_000_000);
             let candidate = passing_profile(profile_id, 500_000, 1_000_000);
 
             assert_eq!(
@@ -1556,7 +1560,7 @@ mod tests {
 
     #[test]
     fn candidate_with_protected_quality_regression_fails() {
-        let baseline = passing_profile(PR9_BASELINE_PROFILE, 500_000, 1_000_000);
+        let baseline = passing_profile(QUERY_BASELINE_PROFILE, 500_000, 1_000_000);
         let candidate = passing_profile(SEMANTIC_PROFILE, 600_000, 900_000);
 
         assert_eq!(
@@ -1577,7 +1581,7 @@ mod tests {
 
     #[test]
     fn candidate_with_pairwise_gain_and_no_regression_passes() {
-        let baseline = passing_profile(PR9_BASELINE_PROFILE, 500_000, 1_000_000);
+        let baseline = passing_profile(QUERY_BASELINE_PROFILE, 500_000, 1_000_000);
         let candidate = passing_profile(SEMANTIC_PROFILE, 500_001, 1_000_000);
 
         assert_eq!(

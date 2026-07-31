@@ -46,10 +46,10 @@ describe('threadsFrom', () => {
 
   it('labels a thread by title when there is one and by id when there is not', () => {
     const { threads } = threadsFrom([
-      session({ session_id: 'a', title: 'Verify PR9 scheduler' }),
+      session({ session_id: 'a', title: 'Verify QUERY scheduler' }),
       session({ session_id: 'b', title: '   ' }),
     ]);
-    expect(threads[0]?.label).toBe('Verify PR9 scheduler');
+    expect(threads[0]?.label).toBe('Verify QUERY scheduler');
     expect(threads[1]?.label).toBe('b');
   });
 

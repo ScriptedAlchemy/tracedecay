@@ -76,15 +76,15 @@ include = [
     "/tests/fixtures/packaged_host_events/**",
     "/tests/fixtures/provider_normalization/**",
     "/tests/fixtures/redundancy_eval_labeled.json",
-    "/tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json",
+    "/tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json",
     "/tests/fixtures/transcript_golden/cline_like/**",
     "/tests/session_suite/lcm_schema/**",
     "/benchmarks/queries/default.toml",
     "/benchmarks/pr5-observation/**",
     "/benchmarks/pr7-memory/**",
     "/benchmarks/pr8-temporal/**",
-    "/benchmarks/pr9-code-index/**",
-    "/benchmarks/search-quality/pr9-fallback-report-v1.json",
+    "/benchmarks/query-code-index/**",
+    "/benchmarks/search-quality/query-fallback-report-v1.json",
     "/scripts/run-pr8-temporal-benchmark.sh",
     "/plugin/.claude-plugin/**",
     "/plugin/.cursor-plugin/**",
@@ -182,7 +182,7 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 # it and are link-checked separately.
 rusqlite-parity-helper = ["dep:tracedecay-rusqlite-parity"]
 
-# PR10 FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
+# SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally
 # verified artifact bytes; daemon-owned acquisition uses hf-hub against the
 # immutable catalog pins, never query-time ambient cache discovery.

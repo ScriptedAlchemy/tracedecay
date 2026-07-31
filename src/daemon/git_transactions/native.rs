@@ -82,7 +82,7 @@ pub(crate) trait GitIndexPreviewAssembler {
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError>;
 }
 
-/// Concrete PR11 assembler backed by the fixed PR9 read-only authority and
+/// Concrete PR11 assembler backed by the fixed query read-only authority and
 /// the isolated-index preview mechanics in [`FixedGitIndexRunner`].
 pub(crate) struct NativeGitIndexPreviewAssembler {
     repository_root: PathBuf,

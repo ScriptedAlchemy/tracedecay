@@ -1,4 +1,4 @@
-//! PR9 generation-aware Git query core (Plan 36, `pr9/21-git-query-core`).
+//! query generation-aware Git query core (Plan 36, `query/21-git-query-core`).
 //!
 //! This module is the typed query layer above the fixed read-only adapter in
 //! [`crate::git_intelligence`]. It composes the adapter's [`GitReadPort`] into

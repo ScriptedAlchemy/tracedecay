@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "workload_id": "pr9-code-index-v1",
+  "workload_id": "query-code-index-v1",
   "scales": [
     {
       "name": "current",

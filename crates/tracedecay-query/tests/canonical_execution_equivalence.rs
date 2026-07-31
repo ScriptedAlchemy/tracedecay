@@ -27,8 +27,9 @@ use tracedecay_query::retrieval::semantic::{
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSemanticRecordV1, NativeSymbolRecordV1, PR9_RANKING_REVISION_V1, Pr9QueryAuthorityV1,
-    PreparedQueryBindingsV1, PreparedQueryV1, inspect_prepared_query_cursor,
+    NativeSemanticRecordV1, NativeSymbolRecordV1, PreparedQueryBindingsV1,
+    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
+    authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
 };
 
 fn id<T>(value: &str) -> T
@@ -497,10 +498,14 @@ fn retrieval_request() -> RetrievalRequest {
     }
 }
 
-fn query_authority() -> Arc<Pr9QueryAuthorityV1> {
+fn query_authority() -> Arc<QueryAuthorityV1> {
+    query_authority_with_secret(0x5a)
+}
+
+fn query_authority_with_secret(secret: u8) -> Arc<QueryAuthorityV1> {
     let evaluation = RetrievalAnchorId::new("evaluation.canonical-equivalence")
         .expect("valid evaluation anchor");
-    let calibrations = RetrieverKind::PR9_FALLBACK_LANES
+    let calibrations = RetrieverKind::QUERY_FALLBACK_LANES
         .into_iter()
         .map(|lane| {
             (
@@ -512,7 +517,7 @@ fn query_authority() -> Arc<Pr9QueryAuthorityV1> {
             )
         })
         .collect();
-    let score_domain_calibrations = RetrieverKind::PR9_FALLBACK_LANES
+    let score_domain_calibrations = RetrieverKind::QUERY_FALLBACK_LANES
         .into_iter()
         .map(|lane| {
             let score_domain: ScoreDomainId =
@@ -562,19 +567,19 @@ fn query_authority() -> Arc<Pr9QueryAuthorityV1> {
         id("privacy.canonical-equivalence"),
         id::<RetrievalCursorKeyId>("cursor-key.canonical-equivalence.v1"),
         7,
-        vec![0x5a; 32],
+        vec![secret; 32],
         15 * 60 * 1_000_000,
     )
     .expect("valid cursor keyring");
 
     Arc::new(
-        Pr9QueryAuthorityV1::new(
+        QueryAuthorityV1::new(
             profile,
             diversity,
-            id::<ComponentRevision>(PR9_RANKING_REVISION_V1),
+            id::<ComponentRevision>(QUERY_RANKING_REVISION_V1),
             keyring,
         )
-        .expect("valid PR9 query authority"),
+        .expect("valid query authority"),
     )
 }
 

@@ -1119,7 +1119,7 @@ async fn database_store_survives_restart_and_preserves_superseded_generations() 
     let replay_build = rebuilt
         .rebuild_generation(next_plan.clone())
         .await
-        .expect("restart deterministic rebuild from PR9 inputs");
+        .expect("restart deterministic rebuild from query inputs");
     rebuilt
         .commit_batch(&replay_build, None, next.clone())
         .await

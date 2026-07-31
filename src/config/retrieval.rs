@@ -339,8 +339,8 @@ impl AcceptedRetrievalProfileV1 {
         &self.evaluation
     }
 
-    pub(crate) fn is_exact_pr9_fallback(&self) -> bool {
-        let expected = BTreeSet::from(RetrieverKind::PR9_FALLBACK_LANES);
+    pub(crate) fn is_exact_query_fallback(&self) -> bool {
+        let expected = BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES);
         self.profile
             .calibrations
             .keys()

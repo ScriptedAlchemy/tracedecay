@@ -1,4 +1,4 @@
-//! Direct PR9/PR10 search-quality evaluation CLI.
+//! Direct query/semantic search-quality evaluation CLI.
 //!
 //! Kept as a single `src/bin` entry so Cargo does not auto-discover a duplicate
 //! `tracedecay-search-eval-direct` target beside the intended binary name.

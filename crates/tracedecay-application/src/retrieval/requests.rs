@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, ManifestDigest,
-    Pr9FallbackSubpayload, RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId,
+    QueryFallbackSubpayload, RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId,
     TemporalModeV1, TestAttributionEvidenceClassV1, UtcMicros,
 };
 
@@ -78,7 +78,7 @@ impl RetrievalRequestMeta {
     }
 }
 
-/// Concrete PR9-backed symbol retrieval request. Its query view is
+/// Concrete QUERY-backed symbol retrieval request. Its query view is
 /// receipt/sanitization-bound and intentionally non-serializable.
 #[derive(Debug)]
 pub struct SymbolSearchRequest {
@@ -100,12 +100,12 @@ impl SymbolSearchRequest {
     }
 }
 
-/// The application-facing PR9 fallback boundary. The exact/lexical/graph
-/// subpayload is preserved byte-for-byte by the owning PR9 lane.
+/// The application-facing query fallback boundary. The exact/lexical/graph
+/// subpayload is preserved byte-for-byte by the owning query lane.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolSearchResult {
-    pub pr9_fallback: Pr9FallbackSubpayload,
+    pub query_fallback: QueryFallbackSubpayload,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

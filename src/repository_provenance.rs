@@ -3,7 +3,7 @@
 //! This adapter deliberately exposes no generic Git command surface, object
 //! traversal or worktree-status probing. It reads only bounded
 //! repository/worktree/HEAD/ref/remote identity plus persisted index metadata
-//! through `gix`; PR9 owns status, diff, history, blame, and hunk intelligence.
+//! through `gix`; query owns status, diff, history, blame, and hunk intelligence.
 
 use std::path::{Path, PathBuf};
 
@@ -596,7 +596,7 @@ fn observe_index(repo: &gix::Repository) -> IndexObservation {
         (EvidenceAvailabilityV1::Known(index_tree), Some(head_tree)) if index_tree != &head_tree
     ) {
         // A differing persisted index proves staged dirtiness. Equality cannot
-        // prove cleanliness without a worktree traversal, which belongs to PR9.
+        // prove cleanliness without a worktree traversal, which belongs to QUERY.
         EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Dirty)
     } else {
         EvidenceAvailabilityV1::Unknown

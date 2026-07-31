@@ -1,4 +1,4 @@
-//! Scope-bound application authority for PR9 read-only Git intelligence.
+//! Scope-bound application authority for query read-only Git intelligence.
 //!
 //! The transport supplies an already admitted project/repository/worktree
 //! scope. This owner refuses scope drift before opening the existing typed

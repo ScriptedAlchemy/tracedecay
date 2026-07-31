@@ -2365,7 +2365,7 @@ const LOOM_MODELS = [
   'gpt-5.6-terra-max',
 ] as const;
 const LOOM_TITLES = [
-  'Verify PR9 scheduler',
+  'Verify QUERY scheduler',
   'Deliver Git primitive runtime',
   'Normalize daemon service logging',
   'Bound and validate Hermes snapshots',

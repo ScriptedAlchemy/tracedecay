@@ -128,7 +128,7 @@ pub struct GitIndexPreviewRequestV1 {
     /// The daemon-issued opaque preview identity that every selected
     /// `HunkRefV1` must already carry.
     pub preview_id: GitIndexPreviewId,
-    /// Exact PR9 read-only repository authority snapshot. The daemon captures
+    /// Exact query read-only repository authority snapshot. The daemon captures
     /// current native state independently and requires byte-for-byte typed
     /// equality before it mints an applicable mutation preview.
     pub repository_snapshot: RepositoryStateSnapshotV1,

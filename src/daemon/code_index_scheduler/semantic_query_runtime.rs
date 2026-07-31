@@ -1,6 +1,6 @@
 //! Exact-scope activation and execution for optional semantic augmentation.
 //!
-//! This owner is deliberately separate from the PR9 fallback authority. PR9
+//! This owner is deliberately separate from the query fallback authority. QUERY
 //! remains an exact three-lane profile; semantic influence requires a second,
 //! independently activated PASS profile carrying exact calibration and vector
 //! compatibility pins.
@@ -17,8 +17,8 @@ use tracedecay_domain::{
 };
 
 use super::CodeIndexSchedulerRegistryV1;
-use super::pr9_runtime::{
-    ExecutedPr9SearchV1, Pr9SearchExecutionErrorV1, Pr9SearchExecutionRequestV1,
+use super::query_runtime::{
+    ExecutedQuerySearchV1, QuerySearchExecutionErrorV1, QuerySearchExecutionRequestV1,
 };
 use crate::application::semantic_runtime::{
     CommittedRetrievalProfileStateV1, ProductionProjectSemanticSearchBridgeV1,
@@ -28,8 +28,8 @@ use crate::application::semantic_runtime::{
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityPinsV1};
 use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
-use tracedecay_query::retrieval::AuthorizedPr9FallbackV1;
-use tracedecay_query::retrieval::Pr9QueryAuthorityV1;
+use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
+use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_set};
 use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
@@ -138,33 +138,33 @@ pub(in crate::daemon) enum SemanticQueryAuthorityErrorV1 {
     Mount(String),
 }
 
-pub(in crate::daemon) struct ExecutedPr9SemanticSearchV1 {
-    pub pr9: ExecutedPr9SearchV1,
+pub(in crate::daemon) struct ExecutedQuerySemanticSearchV1 {
+    pub query: ExecutedQuerySearchV1,
     pub semantic: SemanticAugmentationOutcomeV1,
 }
 
 /// Augmented payload carried behind a `Box` so the augmented arm does not
 /// dominate the size of every `SemanticAugmentationOutcomeV1`, whose abstaining
-/// arm holds only a reason and the shared PR9 fallback.
+/// arm holds only a reason and the shared query fallback.
 pub(in crate::daemon) struct SemanticAugmentedCompositionV1 {
     pub composition: CompositionOutputV1,
     pub cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub hydration_budget: tracedecay_domain::RetrievalBudget,
     pub calibration: SemanticCalibrationEvidenceV1,
     pub rerank: OptionalStagePublicStatus,
-    pub fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
+    pub fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
 }
 
 pub(in crate::daemon) enum SemanticAugmentationOutcomeV1 {
     Augmented(Box<SemanticAugmentedCompositionV1>),
     Fallback {
         abstention: SemanticAbstentionV1,
-        fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
+        fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
     },
 }
 
 impl SemanticAugmentationOutcomeV1 {
-    fn fallback(&self) -> &Arc<tracedecay_domain::Pr9FallbackSubpayload> {
+    fn fallback(&self) -> &Arc<tracedecay_domain::QueryFallbackSubpayload> {
         match self {
             Self::Augmented(augmented) => &augmented.fallback,
             Self::Fallback { fallback, .. } => fallback,
@@ -173,9 +173,9 @@ impl SemanticAugmentationOutcomeV1 {
 }
 
 #[derive(Debug, Error)]
-pub(in crate::daemon) enum Pr9SemanticSearchExecutionErrorV1 {
+pub(in crate::daemon) enum QuerySemanticSearchExecutionErrorV1 {
     #[error(transparent)]
-    Pr9(#[from] Pr9SearchExecutionErrorV1),
+    Query(#[from] QuerySearchExecutionErrorV1),
     #[error(
         "strict semantic retrieval is unavailable for code generation {generation}: {abstention:?}"
     )]
@@ -190,15 +190,15 @@ pub(in crate::daemon) enum Pr9SemanticSearchExecutionErrorV1 {
 fn bind_semantic_execution_error(
     generation: &tracedecay_domain::CodeGenerationId,
     error: SemanticQueryServiceError,
-) -> Pr9SemanticSearchExecutionErrorV1 {
+) -> QuerySemanticSearchExecutionErrorV1 {
     match error {
         SemanticQueryServiceError::StrictUnavailable(abstention) => {
-            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+            QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
                 generation: generation.clone(),
                 abstention,
             }
         }
-        error => Pr9SemanticSearchExecutionErrorV1::Semantic(error),
+        error => QuerySemanticSearchExecutionErrorV1::Semantic(error),
     }
 }
 
@@ -324,57 +324,57 @@ impl CodeIndexSchedulerRegistryV1 {
         matched
     }
 
-    /// Run canonical PR9 first, then attempt semantic influence against the
+    /// Run canonical query first, then attempt semantic influence against the
     /// same authenticated query and immutable code generation.
-    pub(in crate::daemon) async fn execute_pr9_with_semantic<C>(
+    pub(in crate::daemon) async fn execute_query_with_semantic<C>(
         &self,
         project_root: &Path,
         scope: &ResolvedScope,
-        input: Pr9SearchExecutionRequestV1,
+        input: QuerySearchExecutionRequestV1,
         control: &C,
         mode: SemanticQueryModeV1,
-    ) -> Result<ExecutedPr9SemanticSearchV1, Pr9SemanticSearchExecutionErrorV1>
+    ) -> Result<ExecutedQuerySemanticSearchV1, QuerySemanticSearchExecutionErrorV1>
     where
         C: SemanticExecutionControl + Sync,
     {
-        let pr9 = self.execute_pr9_search(scope, input).await?;
-        let Some(latest) = self.generation_for(scope, &pr9.generation).await else {
+        let query = self.execute_query_search(scope, input).await?;
+        let Some(latest) = self.generation_for(scope, &query.generation).await else {
             let semantic = semantic_abstention(
                 mode,
                 SemanticAbstentionV1::IndexStale,
-                Arc::clone(&pr9.authorized.fallback),
+                Arc::clone(&query.authorized.fallback),
             )
-            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
-            return Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic });
+            .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
+            return Ok(ExecutedQuerySemanticSearchV1 { query, semantic });
         };
         let semantic = self
-            .execute_semantic_after_pr9(
+            .execute_semantic_after_query(
                 project_root,
                 scope,
                 &latest.generation,
-                pr9.sanitized.request(),
-                pr9.sanitized.query_view(),
-                &pr9.authorized,
+                query.sanitized.request(),
+                query.sanitized.query_view(),
+                &query.authorized,
                 control,
                 mode,
             )
             .await
-            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
-        Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic })
+            .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
+        Ok(ExecutedQuerySemanticSearchV1 { query, semantic })
     }
 
     /// Execute optional semantic augmentation against the exact active config,
-    /// code generation, vector generation, calibration, and authenticated PR9
-    /// query. Every abstention returns the original canonical PR9 `Arc`.
+    /// code generation, vector generation, calibration, and authenticated QUERY
+    /// query. Every abstention returns the original canonical query `Arc`.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::daemon) async fn execute_semantic_after_pr9<C>(
+    pub(in crate::daemon) async fn execute_semantic_after_query<C>(
         &self,
         project_root: &Path,
         scope: &ResolvedScope,
         code_generation: &CodeIndexPublishedGenerationV1,
         base: &RetrievalRequest,
         query_view: &EphemeralSanitizedQueryViewV1,
-        authorized_pr9: &AuthorizedPr9FallbackV1,
+        authorized_query: &AuthorizedQueryFallbackV1,
         control: &C,
         mode: SemanticQueryModeV1,
     ) -> Result<SemanticAugmentationOutcomeV1, SemanticQueryServiceError>
@@ -385,12 +385,12 @@ impl CodeIndexSchedulerRegistryV1 {
             return semantic_abstention(
                 mode,
                 SemanticAbstentionV1::CalibrationUnavailable,
-                Arc::clone(&authorized_pr9.fallback),
+                Arc::clone(&authorized_query.fallback),
             );
         };
         let pins = authority.pins();
         if !semantic_cursor_matches_activation(
-            authorized_pr9.request_cursor.as_ref(),
+            authorized_query.request_cursor.as_ref(),
             &authority.execution.profile().profile_id,
             &authority.profile_digest,
             &code_generation.manifest().generation_id,
@@ -402,12 +402,12 @@ impl CodeIndexSchedulerRegistryV1 {
             return semantic_abstention(
                 mode,
                 SemanticAbstentionV1::Stale,
-                Arc::clone(&authorized_pr9.fallback),
+                Arc::clone(&authorized_query.fallback),
             );
         }
         let request = SemanticRetrievalRequestV1 {
             base: base.clone(),
-            query_digest: authorized_pr9.query_digest.clone(),
+            query_digest: authorized_query.query_digest.clone(),
             query_view,
             projection: &pins.projection,
             search_index_key: &pins.search_index_key,
@@ -420,7 +420,7 @@ impl CodeIndexSchedulerRegistryV1 {
             return semantic_abstention(
                 mode,
                 SemanticAbstentionV1::IndexIncompatible,
-                Arc::clone(&authorized_pr9.fallback),
+                Arc::clone(&authorized_query.fallback),
             );
         }
         let outcome = ProductionProjectSemanticSearchBridgeV1
@@ -431,7 +431,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Some(&pins.calibration),
                 control,
                 mode,
-                authorized_pr9,
+                authorized_query,
             )
             .await?;
         let mut rerank_executor = authority
@@ -461,7 +461,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let outcome = authority.execution.execute(
             base,
-            authorized_pr9,
+            authorized_query,
             outcome,
             semantic_abstention_disposition(mode),
             rerank_readiness,
@@ -476,14 +476,14 @@ impl CodeIndexSchedulerRegistryV1 {
             }),
             SemanticCompositionExecutionOutcomeV1::Augmented(executed) => {
                 let mut composition = executed.composition;
-                let Some(pr9_authority) = self.pr9_query_authority_for_scope(scope).await else {
+                let Some(query_authority) = self.query_authority_for_scope(scope).await else {
                     return Err(SemanticQueryServiceError::InvalidCursor);
                 };
                 let cursor = paginate_semantic_composition(
-                    pr9_authority.as_ref(),
+                    query_authority.as_ref(),
                     base,
                     query_view,
-                    authorized_pr9,
+                    authorized_query,
                     &authority.profile_digest,
                     &code_generation.manifest().generation_id,
                     &pins.vector_generation_id,
@@ -579,10 +579,10 @@ where
 }
 
 fn paginate_semantic_composition(
-    pr9_authority: &Pr9QueryAuthorityV1,
+    query_authority: &QueryAuthorityV1,
     request: &RetrievalRequest,
     query_view: &EphemeralSanitizedQueryViewV1,
-    authorized_pr9: &AuthorizedPr9FallbackV1,
+    authorized_query: &AuthorizedQueryFallbackV1,
     profile_digest: &tracedecay_domain::ManifestDigest,
     code_generation: &tracedecay_domain::CodeGenerationId,
     vector_generation: &tracedecay_domain::VectorGenerationIdV1,
@@ -598,7 +598,7 @@ fn paginate_semantic_composition(
     let ranking_revision =
         tracedecay_domain::RankingRevision::new(semantic_ranking_revision.as_str().to_owned())
             .map_err(|_| SemanticQueryServiceError::InvalidCursor)?;
-    let supplied_semantic = authorized_pr9
+    let supplied_semantic = authorized_query
         .request_cursor
         .as_ref()
         .and_then(|cursor| cursor.semantic.as_ref());
@@ -630,7 +630,7 @@ fn paginate_semantic_composition(
     }
     let semantic_page_size = usize::try_from(semantic_budget.max_hydrated_results)
         .map_err(|_| SemanticQueryServiceError::InvalidCursor)?;
-    let semantic_page_size = semantic_page_size.min(authorized_pr9.page_size);
+    let semantic_page_size = semantic_page_size.min(authorized_query.page_size);
     if semantic_page_size == 0 {
         return Err(SemanticQueryServiceError::InvalidCursor);
     }
@@ -639,22 +639,27 @@ fn paginate_semantic_composition(
         .min(composition.ranked_candidates.len());
     let page = composition.ranked_candidates[semantic_start..semantic_end].to_vec();
 
-    let pr9_start = authorized_pr9
+    let query_start = authorized_query
         .request_cursor
         .as_ref()
         .map_or(0, |cursor| cursor.next_ordinal as usize);
-    if pr9_start > authorized_pr9.composition.ranked_candidates.len() {
+    if query_start > authorized_query.composition.ranked_candidates.len() {
         return Err(SemanticQueryServiceError::InvalidCursor);
     }
-    let pr9_end = pr9_start
+    let query_end = query_start
         .saturating_add(page.len())
-        .min(authorized_pr9.composition.ranked_candidates.len());
+        .min(authorized_query.composition.ranked_candidates.len());
     let has_more = semantic_end < composition.ranked_candidates.len();
     let cursor = if has_more {
-        let mut cursor = pr9_authority
-            .continuation_cursor_at(request, query_view, &authorized_pr9.composition, pr9_end)
+        let mut cursor = query_authority
+            .continuation_cursor_at(
+                request,
+                query_view,
+                &authorized_query.composition,
+                query_end,
+            )
             .map_err(|_| SemanticQueryServiceError::InvalidCursor)?;
-        pr9_authority
+        query_authority
             .bind_semantic_continuation(
                 &mut cursor,
                 SemanticRetrievalContinuationV1 {
@@ -690,7 +695,7 @@ fn paginate_semantic_composition(
 fn semantic_abstention(
     mode: SemanticQueryModeV1,
     abstention: SemanticAbstentionV1,
-    fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
+    fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
 ) -> Result<SemanticAugmentationOutcomeV1, SemanticQueryServiceError> {
     match mode {
         SemanticQueryModeV1::FallbackAllowed => Ok(SemanticAugmentationOutcomeV1::Fallback {
@@ -717,12 +722,12 @@ mod tests {
     use tracedecay_domain::{
         AuthorizationRevision, CalibrationProfileId, CodeGenerationId, ComponentRevision,
         DiversityPolicy, ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile,
-        LogicalEvidenceId, ManifestDigest, Pr9FallbackSubpayload, PrincipalId, ProjectionKeyV1,
-        ProjectionKindV1, PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate,
-        RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
-        RetrievalSnapshot, SanitizerRevision, SemanticSearchIndexKeyV1,
-        SemanticSearchIndexProfileV1, SingleRootScopeV1, TemporalModeV1, UtcMicros,
-        VectorGenerationIdV1, VectorWatermark,
+        LogicalEvidenceId, ManifestDigest, PrincipalId, ProjectionKeyV1, ProjectionKindV1,
+        PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision,
+        RankedCandidate, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
+        RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizerRevision,
+        SemanticSearchIndexKeyV1, SemanticSearchIndexProfileV1, SingleRootScopeV1, TemporalModeV1,
+        UtcMicros, VectorGenerationIdV1, VectorWatermark,
     };
 
     use super::*;
@@ -750,10 +755,10 @@ mod tests {
             .expect("exact-flat search index key")
     }
 
-    fn fallback() -> Arc<Pr9FallbackSubpayload> {
+    fn fallback() -> Arc<QueryFallbackSubpayload> {
         Arc::new(
-            Pr9FallbackSubpayload::new(
-                "profile.pr9.semantic-bridge.v1"
+            QueryFallbackSubpayload::new(
+                "profile.query.semantic-bridge.v1"
                     .to_owned()
                     .try_into()
                     .expect("profile id"),
@@ -766,7 +771,7 @@ mod tests {
                 Vec::new(),
                 None,
             )
-            .expect("canonical PR9 fallback"),
+            .expect("canonical query fallback"),
         )
     }
 
@@ -787,11 +792,11 @@ mod tests {
         }
     }
 
-    fn pr9_profile() -> FusionProfile {
-        let lanes = RetrieverKind::PR9_FALLBACK_LANES;
+    fn query_profile() -> FusionProfile {
+        let lanes = RetrieverKind::QUERY_FALLBACK_LANES;
         FusionProfile {
-            profile_id: id("profile.pr9.pagination.v1"),
-            evaluation_result_anchor: id("evaluation.pr9.pagination.v1"),
+            profile_id: id("profile.query.pagination.v1"),
+            evaluation_result_anchor: id("evaluation.query.pagination.v1"),
             calibrations: lanes
                 .into_iter()
                 .map(|lane| {
@@ -812,15 +817,15 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            diversity_policy_id: id("diversity.pr9.pagination.v1"),
+            diversity_policy_id: id("diversity.query.pagination.v1"),
             rerank_policy_id: None,
             retrieval_budget: budget(),
         }
     }
 
-    fn pr9_authority(request: &RetrievalRequest) -> Pr9QueryAuthorityV1 {
-        let profile = pr9_profile();
-        Pr9QueryAuthorityV1::new(
+    fn query_authority(request: &RetrievalRequest) -> QueryAuthorityV1 {
+        let profile = query_profile();
+        QueryAuthorityV1::new(
             profile.clone(),
             DiversityPolicy {
                 policy_id: profile.diversity_policy_id,
@@ -833,17 +838,17 @@ mod tests {
                 per_copy_cluster: None,
                 per_evidence_role: None,
             },
-            id("ranking.pr9.pagination.v1"),
+            id("ranking.query.pagination.v1"),
             RetrievalCursorKeyringV1::new(
                 request.scope.privacy_domain.clone(),
-                id::<RetrievalCursorKeyId>("cursor-key.pr9.pagination.v1"),
+                id::<RetrievalCursorKeyId>("cursor-key.query.pagination.v1"),
                 7,
                 vec![7_u8; 32],
                 1_000_000,
             )
             .expect("cursor keyring"),
         )
-        .expect("PR9 authority")
+        .expect("query authority")
     }
 
     fn request() -> RetrievalRequest {
@@ -864,7 +869,7 @@ mod tests {
                 authorization_revision: id::<AuthorizationRevision>("authorization.pagination.v1"),
                 captured_at: UtcMicros(7),
             },
-            profile_id: pr9_profile().profile_id,
+            profile_id: query_profile().profile_id,
             budget: budget(),
         }
     }
@@ -908,7 +913,7 @@ mod tests {
         }
     }
 
-    fn fallback_page(ordinals: &[u32]) -> Arc<Pr9FallbackSubpayload> {
+    fn fallback_page(ordinals: &[u32]) -> Arc<QueryFallbackSubpayload> {
         let candidates = ordinals
             .iter()
             .copied()
@@ -920,8 +925,8 @@ mod tests {
             })
             .collect();
         Arc::new(
-            Pr9FallbackSubpayload::new(
-                pr9_profile().profile_id,
+            QueryFallbackSubpayload::new(
+                query_profile().profile_id,
                 candidates,
                 BTreeMap::from([
                     (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
@@ -931,7 +936,7 @@ mod tests {
                 Vec::new(),
                 None,
             )
-            .expect("canonical PR9 fallback page"),
+            .expect("canonical query fallback page"),
         )
     }
 
@@ -944,9 +949,11 @@ mod tests {
             id::<QueryNormalizationRevision>("normalization.pagination.v1"),
         )
         .expect("query view");
-        let authority = pr9_authority(&request);
-        let pr9_composition =
-            composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES);
+        let authority = query_authority(&request);
+        let query_composition = composition(
+            query_profile().profile_id,
+            &RetrieverKind::QUERY_FALLBACK_LANES,
+        );
         let semantic_profile =
             id::<tracedecay_domain::FusionProfileId>("profile.semantic.pagination.v1");
         let code_generation = id::<CodeGenerationId>("code-generation.pagination.v1");
@@ -972,13 +979,13 @@ mod tests {
                     RetrieverKind::Semantic,
                 ],
             );
-            let authorized = AuthorizedPr9FallbackV1 {
+            let authorized = AuthorizedQueryFallbackV1 {
                 query_digest: authority
                     .authenticate_query(&request, &query_view)
                     .expect("query digest"),
                 fallback: Arc::clone(&fallback),
-                composition: pr9_composition.clone(),
-                pr9_lanes: Vec::new(),
+                composition: query_composition.clone(),
+                fallback_lanes: Vec::new(),
                 page_size: 5,
                 request_cursor,
             };
@@ -1027,7 +1034,7 @@ mod tests {
             id::<QueryNormalizationRevision>("normalization.pagination.v1"),
         )
         .expect("query view");
-        let authority = pr9_authority(&request);
+        let authority = query_authority(&request);
         let mut semantic_composition = composition(
             id("profile.semantic.pagination.v1"),
             &[
@@ -1037,13 +1044,16 @@ mod tests {
                 RetrieverKind::Semantic,
             ],
         );
-        let authorized = AuthorizedPr9FallbackV1 {
+        let authorized = AuthorizedQueryFallbackV1 {
             query_digest: authority
                 .authenticate_query(&request, &query_view)
                 .expect("query digest"),
             fallback: fallback(),
-            composition: composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES),
-            pr9_lanes: Vec::new(),
+            composition: composition(
+                query_profile().profile_id,
+                &RetrieverKind::QUERY_FALLBACK_LANES,
+            ),
+            fallback_lanes: Vec::new(),
             page_size: 1,
             request_cursor: None,
         };
@@ -1084,9 +1094,11 @@ mod tests {
             id::<QueryNormalizationRevision>("normalization.pagination.v1"),
         )
         .expect("query view");
-        let authority = pr9_authority(&request);
-        let pr9_composition =
-            composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES);
+        let authority = query_authority(&request);
+        let query_composition = composition(
+            query_profile().profile_id,
+            &RetrieverKind::QUERY_FALLBACK_LANES,
+        );
         let profile_digest = digest::<ManifestDigest>('c');
         let code_generation = id::<CodeGenerationId>("code-generation.pagination.v1");
         let vector_generation = VectorGenerationIdV1::new(digest::<ManifestDigest>('a'));
@@ -1109,13 +1121,13 @@ mod tests {
         for (ordinal, candidate) in first.ranked_candidates.iter_mut().enumerate() {
             candidate.final_ordinal = ordinal as u32;
         }
-        let authorized = AuthorizedPr9FallbackV1 {
+        let authorized = AuthorizedQueryFallbackV1 {
             query_digest: authority
                 .authenticate_query(&request, &query_view)
                 .expect("query digest"),
             fallback: fallback(),
-            composition: pr9_composition.clone(),
-            pr9_lanes: Vec::new(),
+            composition: query_composition.clone(),
+            fallback_lanes: Vec::new(),
             page_size: 2,
             request_cursor: None,
         };
@@ -1168,13 +1180,13 @@ mod tests {
                 "anchor.pagination.0",
             ]
         );
-        let authorized = AuthorizedPr9FallbackV1 {
+        let authorized = AuthorizedQueryFallbackV1 {
             query_digest: authority
                 .authenticate_query(&request, &query_view)
                 .expect("query digest"),
             fallback: fallback(),
-            composition: pr9_composition,
-            pr9_lanes: Vec::new(),
+            composition: query_composition,
+            fallback_lanes: Vec::new(),
             page_size: 2,
             request_cursor: Some(cursor),
         };
@@ -1207,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn augmented_pagination_stops_when_semantic_candidates_end_before_pr9() {
+    fn augmented_pagination_stops_when_semantic_candidates_end_before_query() {
         let request = request();
         let query_view = EphemeralSanitizedQueryViewV1::sanitize(
             "pagination",
@@ -1215,9 +1227,11 @@ mod tests {
             id::<QueryNormalizationRevision>("normalization.pagination.v1"),
         )
         .expect("query view");
-        let authority = pr9_authority(&request);
-        let pr9_composition =
-            composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES);
+        let authority = query_authority(&request);
+        let query_composition = composition(
+            query_profile().profile_id,
+            &RetrieverKind::QUERY_FALLBACK_LANES,
+        );
         let mut semantic_composition = composition(
             id("profile.semantic.pagination.v1"),
             &[
@@ -1228,13 +1242,13 @@ mod tests {
             ],
         );
         semantic_composition.ranked_candidates.truncate(2);
-        let authorized = AuthorizedPr9FallbackV1 {
+        let authorized = AuthorizedQueryFallbackV1 {
             query_digest: authority
                 .authenticate_query(&request, &query_view)
                 .expect("query digest"),
             fallback: fallback(),
-            composition: pr9_composition,
-            pr9_lanes: Vec::new(),
+            composition: query_composition,
+            fallback_lanes: Vec::new(),
             page_size: 5,
             request_cursor: None,
         };
@@ -1262,7 +1276,7 @@ mod tests {
 
         assert!(
             cursor.is_none(),
-            "PR9 remainder cannot extend semantic paging"
+            "query remainder cannot extend semantic paging"
         );
         assert_eq!(
             semantic_composition
@@ -1275,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_activation_mid_pr9_pagination_preserves_the_existing_page() {
+    fn semantic_activation_mid_query_pagination_preserves_the_existing_page() {
         let request = request();
         let query_view = EphemeralSanitizedQueryViewV1::sanitize(
             "pagination",
@@ -1283,12 +1297,14 @@ mod tests {
             id::<QueryNormalizationRevision>("normalization.pagination.v1"),
         )
         .expect("query view");
-        let authority = pr9_authority(&request);
-        let pr9_composition =
-            composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES);
+        let authority = query_authority(&request);
+        let query_composition = composition(
+            query_profile().profile_id,
+            &RetrieverKind::QUERY_FALLBACK_LANES,
+        );
         let legacy_cursor = authority
-            .continuation_cursor_at(&request, &query_view, &pr9_composition, 2)
-            .expect("authenticated PR9 continuation");
+            .continuation_cursor_at(&request, &query_view, &query_composition, 2)
+            .expect("authenticated query continuation");
         let semantic_profile =
             id::<tracedecay_domain::FusionProfileId>("profile.semantic.pagination.v1");
         let code_generation = id::<CodeGenerationId>("code-generation.pagination.v1");
@@ -1343,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_profile_change_mid_pagination_preserves_the_pr9_page() {
+    fn semantic_profile_change_mid_pagination_preserves_the_query_page() {
         let request = request();
         let query_view = EphemeralSanitizedQueryViewV1::sanitize(
             "pagination",
@@ -1351,9 +1367,11 @@ mod tests {
             id::<QueryNormalizationRevision>("normalization.pagination.v1"),
         )
         .expect("query view");
-        let authority = pr9_authority(&request);
-        let pr9_composition =
-            composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES);
+        let authority = query_authority(&request);
+        let query_composition = composition(
+            query_profile().profile_id,
+            &RetrieverKind::QUERY_FALLBACK_LANES,
+        );
         let original_profile =
             id::<tracedecay_domain::FusionProfileId>("profile.semantic.pagination.v1");
         let changed_profile =
@@ -1375,13 +1393,13 @@ mod tests {
                 RetrieverKind::Semantic,
             ],
         );
-        let authorized = AuthorizedPr9FallbackV1 {
+        let authorized = AuthorizedQueryFallbackV1 {
             query_digest: authority
                 .authenticate_query(&request, &query_view)
                 .expect("query digest"),
             fallback: fallback_page(&[0, 1]),
-            composition: pr9_composition,
-            pr9_lanes: Vec::new(),
+            composition: query_composition,
+            fallback_lanes: Vec::new(),
             page_size: 2,
             request_cursor: None,
         };
@@ -1509,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_semantic_execution_error_preserves_the_pr9_generation() {
+    fn strict_semantic_execution_error_preserves_the_query_generation() {
         let generation = id::<CodeGenerationId>("code-generation.strict-semantic-selected.v1");
         let error = bind_semantic_execution_error(
             &generation,
@@ -1520,7 +1538,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+            QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
                 generation: selected,
                 abstention: SemanticAbstentionV1::CalibrationUnavailable,
             } if selected == generation
