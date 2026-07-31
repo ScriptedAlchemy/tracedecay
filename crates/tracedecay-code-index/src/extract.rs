@@ -100,10 +100,17 @@ pub(crate) fn rebind_extraction_batch(
     batch: &ExtractionBatchV1,
     file: &ReceiptBoundCodeFileV1,
 ) -> Result<ExtractionBatchV1, ExtractionFailureV1> {
-    if authority != file.authority() || batch.content_digest != authority.content_digest {
+    let target_authority = file.authority();
+    if authority.project_id != target_authority.project_id
+        || authority.repository_id != target_authority.repository_id
+        || authority.logical_path != target_authority.logical_path
+        || authority.content_digest != target_authority.content_digest
+        || batch.content_digest != authority.content_digest
+    {
         return Err(ExtractionFailureV1::IncompatibleDescriptor {
-            detail: "extraction authority does not match target project, repository, scope, path, or content"
-                .to_owned(),
+            detail:
+                "extraction authority does not match target project, repository, path, or content"
+                    .to_owned(),
         });
     }
     let target = file.validated_file();
@@ -496,7 +503,7 @@ mod tests {
     use tracedecay_domain::{
         CodeGenerationId, FileOccurrenceId, ProjectId, RepositoryId, SanitizationReceiptId,
         SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-        UtcMicros, ValidatedCodeFileV1,
+        UtcMicros, ValidatedCodeFileV1, WorktreeId,
     };
 
     use crate::intake::{CodeIndexIntake, SanitizedCodeIntake};
@@ -511,6 +518,14 @@ mod tests {
     }
 
     fn validated_file(path: &str, bytes: &[u8]) -> ReceiptBoundCodeFileV1 {
+        validated_file_in_worktree(path, bytes, None)
+    }
+
+    fn validated_file_in_worktree(
+        path: &str,
+        bytes: &[u8],
+        worktree: Option<WorktreeId>,
+    ) -> ReceiptBoundCodeFileV1 {
         let file = SanitizedCodeFileV1 {
             file_occurrence_id: FileOccurrenceId::new("file.fixture").expect("valid id"),
             logical_path: path.to_owned(),
@@ -526,7 +541,7 @@ mod tests {
         let capability = intake
             .admit(SanitizedCodeSnapshotV1 {
                 repository: RepositoryId::new("repo.fixture").expect("valid id"),
-                worktree: None,
+                worktree,
                 reference: None,
                 source_revision: None,
                 sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid id"),
@@ -714,6 +729,32 @@ mod tests {
             "file.carried"
         );
         assert_eq!(extraction.logical_path(), "src/lib.rs");
+    }
+
+    #[test]
+    fn rebind_allows_same_project_path_across_linked_worktrees() {
+        let extractor = TreeSitterExtractor::new();
+        let primary = validated_file_in_worktree(
+            "src/lib.rs",
+            RUST_SOURCE.as_bytes(),
+            Some(WorktreeId::new("worktree.primary").expect("valid worktree")),
+        );
+        let linked = validated_file_in_worktree(
+            "src/lib.rs",
+            RUST_SOURCE.as_bytes(),
+            Some(WorktreeId::new("worktree.linked").expect("valid worktree")),
+        );
+        let mut extraction = extractor
+            .extract(&primary, &rust_descriptor(), &NeverCancelled)
+            .expect("primary extraction");
+
+        extraction
+            .rebind_file_occurrence(&linked)
+            .expect("same project, repository, path, and content may be physically reused");
+        assert_eq!(
+            extraction.batch().content_digest,
+            linked.authority().content_digest
+        );
     }
 
     #[test]
