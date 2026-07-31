@@ -1,4 +1,4 @@
-//! One canonical branch/PR fixture proving the four advisory pillars coexist.
+//! Integrated feedback-cycle behavior across diagnostics, CI, review, and proximity.
 
 use tracedecay_application::feedback::{GitHubReviewReadRequestV1, GitHubReviewReadResponseV1};
 use tracedecay_application::{AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1};
@@ -22,11 +22,11 @@ fn anchor(value: &str) -> RetrievalAnchorId {
 
 fn scope() -> FeedbackScopeV1 {
     FeedbackScopeV1 {
-        project_id: ProjectId::new("project.pr13.fixture").unwrap(),
-        repository_id: RepositoryId::new("repository.pr13.fixture").unwrap(),
-        worktree_id: WorktreeId::new("worktree.pr13.fixture").unwrap(),
-        branch_ref: "refs/heads/feature/pr13".to_owned(),
-        head_commit_id: CommitId::new("commit.pr13.head").unwrap(),
+        project_id: ProjectId::new("project.feedback.fixture").unwrap(),
+        repository_id: RepositoryId::new("repository.feedback.fixture").unwrap(),
+        worktree_id: WorktreeId::new("worktree.feedback.fixture").unwrap(),
+        branch_ref: "refs/heads/feature/feedback".to_owned(),
+        head_commit_id: CommitId::new("commit.feedback.head").unwrap(),
     }
 }
 
@@ -43,7 +43,7 @@ fn finding(id: &str, retrieval_anchor_id: RetrievalAnchorId) -> FeedbackFindingV
 }
 
 #[test]
-fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
+fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
     let scope = scope();
     let file = FileOccurrenceId::new("file.pr13.fixture").unwrap();
     let symbol = SymbolOccurrenceId::new("symbol.pr13.fixture").unwrap();

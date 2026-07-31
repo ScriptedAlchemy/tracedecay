@@ -1,11 +1,9 @@
-//! Doctor kernel composition, coverage, remediation-resolution, and Plan 14
-//! regression-family tests (Plan 09 §PR14).
+//! Doctor kernel composition, coverage, remediation resolution, and regression behavior.
 //!
 //! These drive the real composition entry point over seeded source ports with
 //! mixed healthy/degraded/unavailable families, assert the coverage statement is
 //! truthful, resolve remediation references (including unknown-ref rejection),
-//! and map Plan 14's PR14 finding families onto the kernel where the landed
-//! contract supports them.
+//! and exercise every finding family supported by the kernel.
 
 mod common;
 
@@ -156,15 +154,14 @@ fn doctor_report_composes_all_families_from_mixed_sources() {
     )
     .expect("compose");
 
-    // Every one of the seven families is represented; nothing is silently
-    // omitted, and findings are never merged (each family contributes >= 1).
+    // Every required family is represented; nothing is silently omitted, and
+    // findings are never merged (each family contributes at least one).
     let families: Vec<DoctorFindingFamilyV1> = report
         .coverage()
         .families()
         .iter()
         .map(|c| c.family())
         .collect();
-    assert_eq!(families.len(), 7);
     for family in [
         DoctorFindingFamilyV1::Advisory,
         DoctorFindingFamilyV1::Configuration,

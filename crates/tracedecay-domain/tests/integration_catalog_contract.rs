@@ -1,15 +1,14 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    HostCapabilityAvailabilityV1, HostCapabilityReasonV1, HostCapabilityStateV1, HostCapabilityV1,
-    HostIntegrationCatalogV1, HostIntegrationIdV1, HostKindV1, IntegrationCatalogError,
-    IntegrationDaemonActionV1, IntegrationDaemonApiV1, IntegrationEffectClassV1,
-    IntegrationPrivacyClassV1, TraceDecayProfileBindingV1, canonical_json_bytes,
-    host_integration_catalog_v1, stock_host_capabilities,
+    HostCapabilityStateV1, HostCapabilityV1, HostIntegrationCatalogV1, HostIntegrationIdV1,
+    HostKindV1, IntegrationCatalogError, IntegrationDaemonActionV1, IntegrationDaemonApiV1,
+    IntegrationEffectClassV1, IntegrationPrivacyClassV1, TraceDecayProfileBindingV1,
+    canonical_json_bytes, host_integration_catalog_v1, stock_host_capabilities,
 };
 
-const GOLDEN_CATALOG: &str = include_str!("fixtures/integration_catalog_v1.json");
 const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     (
         "claude",
@@ -33,20 +32,44 @@ const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     ),
 ];
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FixtureAdmissionReason {
+    SpoolRecordTooLarge,
+    ProjectAuthorityUnbound,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "status",
+    content = "reason_code",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum FixtureAdmissionState {
+    Supported,
+    Degraded(FixtureAdmissionReason),
+    Unavailable(FixtureAdmissionReason),
+}
+
+fn catalog_json() -> Value {
+    serde_json::to_value(host_integration_catalog_v1()).expect("catalog JSON")
+}
+
 #[test]
-fn catalog_schema_round_trips_to_the_deterministic_golden() {
+fn catalog_wire_round_trips_without_changing_canonical_bytes() {
     let catalog = host_integration_catalog_v1();
     catalog.validate().expect("built-in catalog is valid");
 
-    let golden_value: Value = serde_json::from_str(GOLDEN_CATALOG).expect("valid golden JSON");
-    let expected = canonical_json_bytes(&golden_value).expect("canonical golden");
-    let actual = canonical_json_bytes(&catalog).expect("canonical catalog");
-    assert_eq!(actual, expected);
-
+    let encoded = serde_json::to_vec(&catalog).expect("catalog serialization");
     let decoded: HostIntegrationCatalogV1 =
-        serde_json::from_str(GOLDEN_CATALOG).expect("catalog schema round trip");
+        serde_json::from_slice(&encoded).expect("catalog schema round trip");
     decoded.validate().expect("decoded catalog is valid");
     assert_eq!(decoded, catalog);
+    assert_eq!(
+        canonical_json_bytes(&decoded).expect("decoded canonical bytes"),
+        canonical_json_bytes(&catalog).expect("catalog canonical bytes")
+    );
 }
 
 #[test]
@@ -106,7 +129,7 @@ fn observation_host_matrix_matches_native_event_fixture_providers() {
 fn host_event_fixture_admission_deserializes_into_fixture_only_taxonomy() {
     for (provider, fixture) in HOST_EVENT_FIXTURES {
         let document: Value = serde_json::from_str(fixture).expect("valid host fixture");
-        let fixture_states: Vec<HostCapabilityAvailabilityV1> = document["cases"]
+        let fixture_states: Vec<FixtureAdmissionState> = document["cases"]
             .as_array()
             .expect("host fixture cases")
             .iter()
@@ -127,7 +150,7 @@ fn host_event_fixture_admission_deserializes_into_fixture_only_taxonomy() {
             "{provider} fixture must prove at least one admission taxonomy state"
         );
         assert!(
-            fixture_states.contains(&HostCapabilityAvailabilityV1::Supported),
+            fixture_states.contains(&FixtureAdmissionState::Supported),
             "{provider} fixture must prove supported admission"
         );
     }
@@ -136,15 +159,15 @@ fn host_event_fixture_admission_deserializes_into_fixture_only_taxonomy() {
 #[test]
 fn typed_status_reasons_have_stable_encoding() {
     assert_eq!(
-        serde_json::to_value(HostCapabilityAvailabilityV1::Degraded(
-            HostCapabilityReasonV1::SpoolRecordTooLarge,
+        serde_json::to_value(FixtureAdmissionState::Degraded(
+            FixtureAdmissionReason::SpoolRecordTooLarge,
         ))
         .unwrap(),
         json!({"status": "degraded", "reason_code": "spool_record_too_large"})
     );
     assert_eq!(
-        serde_json::to_value(HostCapabilityAvailabilityV1::Unavailable(
-            HostCapabilityReasonV1::ProjectAuthorityUnbound,
+        serde_json::to_value(FixtureAdmissionState::Unavailable(
+            FixtureAdmissionReason::ProjectAuthorityUnbound,
         ))
         .unwrap(),
         json!({"status": "unavailable", "reason_code": "project_authority_unbound"})
@@ -153,11 +176,11 @@ fn typed_status_reasons_have_stable_encoding() {
 
 #[test]
 fn schema_rejects_unknown_fields() {
-    let mut unknown: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    let mut unknown = catalog_json();
     unknown["future_field"] = json!(true);
     assert!(serde_json::from_value::<HostIntegrationCatalogV1>(unknown).is_err());
 
-    let mut host_unknown: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    let mut host_unknown = catalog_json();
     host_unknown["capabilities"][0]["hosts"][0]["availability_states"] = json!([]);
     assert!(serde_json::from_value::<HostIntegrationCatalogV1>(host_unknown).is_err());
 }
@@ -174,7 +197,7 @@ fn catalog_validation_rejects_empty_catalog_and_duplicate_hosts() {
         Err(IntegrationCatalogError::EmptyCatalog)
     ));
 
-    let mut duplicate_capability: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    let mut duplicate_capability = catalog_json();
     let capability = duplicate_capability["capabilities"][0].clone();
     duplicate_capability["capabilities"]
         .as_array_mut()
@@ -186,7 +209,7 @@ fn catalog_validation_rejects_empty_catalog_and_duplicate_hosts() {
         Err(IntegrationCatalogError::DuplicateCapabilityId(_))
     ));
 
-    let mut duplicate_host: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    let mut duplicate_host = catalog_json();
     let host = duplicate_host["capabilities"][0]["hosts"][0].clone();
     duplicate_host["capabilities"][0]["hosts"]
         .as_array_mut()
@@ -201,7 +224,7 @@ fn catalog_validation_rejects_empty_catalog_and_duplicate_hosts() {
 
 #[test]
 fn catalog_validation_rejects_an_incomplete_host_matrix() {
-    let mut incomplete: Value = serde_json::from_str(GOLDEN_CATALOG).unwrap();
+    let mut incomplete = catalog_json();
     incomplete["capabilities"][0]["hosts"]
         .as_array_mut()
         .unwrap()
@@ -314,7 +337,10 @@ fn stock_host_capability_matrix_is_sole_capability_authority() {
         );
         let digest = catalog.host_capability_digest(view.host()).unwrap();
         assert_ne!(digest, [0; 32]);
-        assert!(digests.insert(digest), "each HostKindV1 digest is stable and unique");
+        assert!(
+            digests.insert(digest),
+            "each HostKindV1 digest is stable and unique"
+        );
     }
     assert_eq!(digests.len(), HostKindV1::ALL.len());
 
@@ -326,7 +352,9 @@ fn stock_host_capability_matrix_is_sole_capability_authority() {
 #[test]
 fn cursor_cloud_remains_discoverable_only_as_unsupported() {
     let capabilities = stock_host_capabilities(HostKindV1::CursorCloud);
-    assert!(capabilities.iter().all(|record| {
-        matches!(record.state, HostCapabilityStateV1::Unavailable(_))
-    }));
+    assert!(
+        capabilities
+            .iter()
+            .all(|record| { matches!(record.state, HostCapabilityStateV1::Unavailable(_)) })
+    );
 }

@@ -1,4 +1,4 @@
-//! Behavioral acceptance for closed GitHub review reads and scope-bound CI/proximity.
+//! Closed GitHub review reads and scope-bound CI/proximity requests.
 
 use tracedecay_application::feedback::{
     CiFailureLocalizationRequestV1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
@@ -10,11 +10,11 @@ use tracedecay_domain::{CommitId, ProjectId, RepositoryId, UtcMicros, WorktreeId
 
 fn scope() -> FeedbackScopeV1 {
     FeedbackScopeV1 {
-        project_id: ProjectId::new("project.pr13.runtime").unwrap(),
-        repository_id: RepositoryId::new("repository.pr13.runtime").unwrap(),
-        worktree_id: WorktreeId::new("worktree.pr13.runtime").unwrap(),
-        branch_ref: "refs/heads/pr13-runtime".to_owned(),
-        head_commit_id: CommitId::new("commit.pr13.runtime").unwrap(),
+        project_id: ProjectId::new("project.advisory.runtime").unwrap(),
+        repository_id: RepositoryId::new("repository.advisory.runtime").unwrap(),
+        worktree_id: WorktreeId::new("worktree.advisory.runtime").unwrap(),
+        branch_ref: "refs/heads/advisory-runtime".to_owned(),
+        head_commit_id: CommitId::new("commit.advisory.runtime").unwrap(),
     }
 }
 
@@ -23,7 +23,7 @@ fn github_request_only_admits_closed_read_operations() {
     let request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::RestListPullRequestReviews,
         scope: scope(),
-        pull_request_id: GitHubPullRequestIdV1::new("pull-request.pr13.runtime").unwrap(),
+        pull_request_id: GitHubPullRequestIdV1::new("pull-request.advisory.runtime").unwrap(),
     };
     request.validate().unwrap();
     for mutation in [
@@ -47,12 +47,12 @@ fn ci_and_proximity_requests_are_exactly_scope_bound() {
     CiFailureLocalizationRequestV1 {
         scope: scope.clone(),
         run: CiFailureRunIdentityV1 {
-            workflow_id: "workflow.pr13.runtime".to_owned(),
-            job_id: "job.pr13.runtime".to_owned(),
-            check_suite_id: "suite.pr13.runtime".to_owned(),
-            check_run_id: "check.pr13.runtime".to_owned(),
-            run_id: "run.pr13.runtime".to_owned(),
-            attempt_id: "attempt.pr13.runtime".to_owned(),
+            workflow_id: "workflow.advisory.runtime".to_owned(),
+            job_id: "job.advisory.runtime".to_owned(),
+            check_suite_id: "suite.advisory.runtime".to_owned(),
+            check_run_id: "check.advisory.runtime".to_owned(),
+            run_id: "run.advisory.runtime".to_owned(),
+            attempt_id: "attempt.advisory.runtime".to_owned(),
         },
     }
     .validate()

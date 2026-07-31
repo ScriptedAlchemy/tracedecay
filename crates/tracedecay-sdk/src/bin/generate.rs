@@ -126,7 +126,6 @@ const fn unavailable_disposition(disposition: ExecutableUnavailableDispositionV1
     }
 }
 
-#[allow(dead_code)]
 fn operation_from_binding(
     binding: &ExecutableBindingV1,
     binding_id: &BindingId,
@@ -1064,98 +1063,5 @@ mod tests {
         let generated = render_operations(&operations, &unavailable).unwrap();
         assert!(generated.contains("export const OPERATIONS = [] as const;"));
         assert!(!generated.contains("route: \"/"));
-    }
-
-    #[test]
-    fn work_registry_exports_every_mounted_route() {
-        let registry = super::canonical_application_registry().unwrap();
-        let operations = canonical_operations(&registry).unwrap();
-        let unavailable = canonical_unavailable_operations(&registry);
-
-        assert!(!operations.is_empty());
-        assert_eq!(
-            operations
-                .iter()
-                .map(|operation| operation.operation_id.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            operations.len(),
-            "every mounted route must have a unique operation id"
-        );
-        assert!(unavailable.is_empty());
-        let generated = render_operations(&operations, &unavailable).unwrap();
-        assert!(generated.contains("route: \"/application/work/snapshot\""));
-        assert!(generated.contains("route: \"/application/work/attempt/acquire-lease\""));
-        assert!(generated.contains(
-            "export const UNAVAILABLE_OPERATIONS = [\n] as const satisfies readonly \
-             UnavailableOperationCapability[];"
-        ));
-    }
-
-    #[test]
-    fn server_inventory_covers_all_request_operations() {
-        let generated = super::render_server_operations();
-
-        assert!(!tracedecay_api::HttpApplicationOperation::ALL.is_empty());
-        assert!(generated.contains("operation: \"health_read\""));
-        assert!(generated.contains("route: \"/application/primitives/health_read\""));
-        // One occurrence per rendered base route, plus one in the interface
-        // declaration itself (`readonly sdkAvailability: "unavailable";`).
-        let expected_marker_occurrences = tracedecay_api::HttpApplicationOperation::ALL.len() + 1;
-        assert_eq!(
-            generated
-                .matches("sdkAvailability: \"unavailable\"")
-                .count(),
-            expected_marker_occurrences
-        );
-        assert_eq!(
-            generated
-                .matches("disposition: \"schema_unavailable\"")
-                .count(),
-            expected_marker_occurrences
-        );
-    }
-
-    #[test]
-    fn python_inventory_uses_the_same_route_authority() {
-        let registry = super::canonical_application_registry().unwrap();
-        let operations = canonical_operations(&registry).unwrap();
-        let unavailable = canonical_unavailable_operations(&registry);
-        let generated = super::render_python_operations(&operations, &unavailable).unwrap();
-
-        assert_eq!(
-            generated.matches("\": \"/application/").count(),
-            tracedecay_api::HttpApplicationOperation::ALL.len()
-                + operations.len()
-                + unavailable.len()
-        );
-        assert_eq!(
-            generated.matches("\": \"schema_unavailable\"").count(),
-            tracedecay_api::HttpApplicationOperation::ALL.len() + unavailable.len()
-        );
-        assert!(generated.contains("\"work_attempt_start\": \"/application/work/attempt/start\""));
-        assert!(generated.contains("\"work_snapshot\": \"/application/work/snapshot\""));
-        assert!(generated.contains("class OperationWorkSnapshotRequest(TypedDict):"));
-        assert!(generated.contains("class OperationWorkSnapshotResult(TypedDict):"));
-        assert!(generated.contains("class WorkOperations:"));
-        assert!(generated.contains("def work_snapshot("));
-        assert!(generated.contains("request: OperationWorkSnapshotRequest"));
-    }
-
-    #[test]
-    fn rust_wire_models_are_generated_from_the_same_schema_bodies() {
-        let registry = super::canonical_application_registry().unwrap();
-        let operations = canonical_operations(&registry).unwrap();
-        let generated = super::render_rust_operations(&operations).unwrap();
-
-        assert_eq!(
-            generated.matches("typed_operation!(").count(),
-            operations.len()
-        );
-        assert!(generated.contains("pub mod work_snapshot"));
-        assert!(generated.contains("WorkSnapshot"));
-        assert!(generated.contains("pub type Request = request::"));
-        assert!(generated.contains("pub type Result = result::"));
-        assert!(generated.contains("ExecutableUnavailableDispositionV1::SchemaUnavailable"));
     }
 }

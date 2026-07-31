@@ -14,10 +14,6 @@ use tracedecay_application::{ApplicationProblemEnvelope, ApplicationProblemKind}
 
 use crate::http::HttpApplicationOperation;
 
-/// Dashboard route for the project-scoped configuration batch write.
-pub const PROJECT_SETTINGS_ROUTE_PATH: &str = "/api/settings/project";
-/// Dashboard route for the profile-scoped user settings write.
-pub const USER_SETTINGS_ROUTE_PATH: &str = "/api/settings/user";
 /// Application operation behind the project settings write.
 pub const PROJECT_SETTINGS_APPLY_OPERATION: &str =
     HttpApplicationOperation::ConfigurationBatch.as_str();
@@ -25,49 +21,6 @@ pub const PROJECT_SETTINGS_APPLY_OPERATION: &str =
 pub const USER_SETTINGS_APPLY_OPERATION: &str = "user_settings_mutate";
 /// Application operation used to refresh configuration state.
 pub const SETTINGS_REFRESH_OPERATION: &str = HttpApplicationOperation::ConfigurationList.as_str();
-
-/// One dashboard settings write route. `application_operation` is present only
-/// when the route is dispatched through the canonical application surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DashboardConfigurationWriteRouteV1 {
-    pub method: &'static str,
-    pub path: &'static str,
-    pub operation: &'static str,
-    pub application_operation: Option<HttpApplicationOperation>,
-}
-
-const DASHBOARD_CONFIGURATION_WRITE_ROUTES: [DashboardConfigurationWriteRouteV1; 2] = [
-    DashboardConfigurationWriteRouteV1 {
-        method: "PATCH",
-        path: PROJECT_SETTINGS_ROUTE_PATH,
-        operation: PROJECT_SETTINGS_APPLY_OPERATION,
-        application_operation: Some(HttpApplicationOperation::ConfigurationBatch),
-    },
-    DashboardConfigurationWriteRouteV1 {
-        method: "PATCH",
-        path: USER_SETTINGS_ROUTE_PATH,
-        operation: USER_SETTINGS_APPLY_OPERATION,
-        application_operation: None,
-    },
-];
-
-/// Every dashboard settings write route, in mount order.
-#[must_use]
-pub const fn dashboard_configuration_write_routes() -> &'static [DashboardConfigurationWriteRouteV1]
-{
-    &DASHBOARD_CONFIGURATION_WRITE_ROUTES
-}
-
-/// Resolve an exact dashboard settings write route.
-#[must_use]
-pub fn dashboard_configuration_write_route(
-    method: &str,
-    path: &str,
-) -> Option<&'static DashboardConfigurationWriteRouteV1> {
-    dashboard_configuration_write_routes()
-        .iter()
-        .find(|route| route.method == method && route.path == path)
-}
 
 /// Project-scoped settings patch accepted by `PATCH /api/settings/project`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]

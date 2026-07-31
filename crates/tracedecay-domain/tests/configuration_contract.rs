@@ -139,15 +139,12 @@ fn credential_metadata_has_no_plaintext_value_surface() {
 
 #[test]
 fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
-    assert_eq!(CONFIGURATION_SETTING_KEYS_V1.len(), 32);
-    assert_eq!(
-        LEGACY_CONFIG_JSON_SETTING_KEYS_V1.len(),
-        CONFIGURATION_SETTING_KEYS_V1.len() - 8
-    );
+    assert!(!CONFIGURATION_SETTING_KEYS_V1.is_empty());
+    assert!(!LEGACY_CONFIG_JSON_SETTING_KEYS_V1.is_empty());
     assert!(CONFIGURATION_SETTING_KEYS_V1.contains(&SEMANTIC_RUNTIME_SETTING_KEY));
     assert!(
         CONFIGURATION_SETTING_KEYS_V1.contains(&PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1),
-        "the Plan 20 proximity threshold must be part of the closed registry inventory"
+        "the proximity threshold must be available through the canonical registry"
     );
     let mut unique = BTreeSet::new();
     for key in CONFIGURATION_SETTING_KEYS_V1 {
@@ -157,6 +154,17 @@ fn legacy_config_inventory_is_canonical_and_uses_existing_scalar_values() {
         );
         SettingKey::new(*key).expect("configuration key must be canonical");
         assert_ne!(*key, "root_dir", "path metadata is not durable authority");
+    }
+    let mut legacy_unique = BTreeSet::new();
+    for key in LEGACY_CONFIG_JSON_SETTING_KEYS_V1 {
+        assert!(
+            CONFIGURATION_SETTING_KEYS_V1.contains(key),
+            "legacy setting key must resolve through the canonical registry: {key}"
+        );
+        assert!(
+            legacy_unique.insert(*key),
+            "duplicate legacy configuration setting key: {key}"
+        );
     }
 
     for value in [

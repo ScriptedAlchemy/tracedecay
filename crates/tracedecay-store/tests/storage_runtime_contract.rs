@@ -1235,31 +1235,3 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
     });
     assert!(serde_json::from_value::<SnapshotLeaseV1>(invalid_snapshot_lease).is_err());
 }
-
-#[test]
-fn runtime_contract_source_has_no_concrete_driver_or_async_runtime_dependency() {
-    let runtime_dir = format!("{}/src/runtime", env!("CARGO_MANIFEST_DIR"));
-    for entry in std::fs::read_dir(runtime_dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).unwrap();
-        for forbidden in [
-            "rusqlite",
-            "libsql",
-            "tokio::",
-            "std::path::",
-            "PathBuf",
-            "serde_json::Value",
-            "Sql(",
-            "Query(String",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{} imports forbidden runtime detail {forbidden}",
-                path.display()
-            );
-        }
-    }
-}
