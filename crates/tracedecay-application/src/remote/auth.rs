@@ -104,6 +104,14 @@ pub enum RemoteEnrollmentAuthorityErrorV1 {
     IdentityConflict,
 }
 
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum RemoteEnrollmentEvidenceErrorV1 {
+    #[error("remote enrollment evidence contains an invalid field")]
+    InvalidField,
+    #[error("remote enrollment evidence does not match its authority")]
+    AuthorityMismatch,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteEnrollmentAdmissionEvidenceV1 {
@@ -132,19 +140,20 @@ impl RemoteEnrollmentAdmissionEvidenceV1 {
         catalog_digest: ManifestDigest,
         privacy_digest: ManifestDigest,
         effective_deadline: Deadline,
-    ) -> Result<Self, ()> {
+    ) -> Result<Self, RemoteEnrollmentEvidenceErrorV1> {
         let identity = format!("{}.{}", grant.grant_id.as_str(), grant.revision);
         let evidence = Self {
             result_contract: remote_enrollment_result_contract_v1(),
             scope,
             authority,
             actor,
-            operation: UseCaseId::new(REMOTE_ENROLLMENT_USE_CASE_ID_V1).map_err(|_| ())?,
+            operation: UseCaseId::new(REMOTE_ENROLLMENT_USE_CASE_ID_V1)
+                .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?,
             effect_id: EffectId::new(format!("effect.remote.enrollment.{identity}"))
-                .map_err(|_| ())?,
+                .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?,
             effect_class: EffectClass::Administrative,
             idempotency_key: IdempotencyKey::new(format!("remote.enrollment.{identity}"))
-                .map_err(|_| ())?,
+                .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?,
             configuration_digest,
             catalog_digest,
             privacy_digest,
@@ -154,13 +163,27 @@ impl RemoteEnrollmentAdmissionEvidenceV1 {
         Ok(evidence)
     }
 
-    pub fn validate_for(&self, grant: &EnrollmentGrantV1) -> Result<(), ()> {
-        self.scope.validate().map_err(|_| ())?;
-        self.authority.validate_for(&self.scope).map_err(|_| ())?;
-        self.configuration_digest.validate().map_err(|_| ())?;
-        self.catalog_digest.validate().map_err(|_| ())?;
-        self.privacy_digest.validate().map_err(|_| ())?;
-        let grant_digest = canonical_sha256(grant).map_err(|_| ())?;
+    pub fn validate_for(
+        &self,
+        grant: &EnrollmentGrantV1,
+    ) -> Result<(), RemoteEnrollmentEvidenceErrorV1> {
+        self.scope
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        self.authority
+            .validate_for(&self.scope)
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        self.configuration_digest
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        self.catalog_digest
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        self.privacy_digest
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        let grant_digest = canonical_sha256(grant)
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
         if self.authority.grant_id.as_str() != grant.grant_id.as_str()
             || self.authority.grant_revision != grant.revision
             || self.authority.grant_digest != grant_digest
@@ -187,7 +210,7 @@ impl RemoteEnrollmentAdmissionEvidenceV1 {
                 .effective_deadline
                 .is_elapsed_at(self.authority.revalidated_at)
         {
-            return Err(());
+            return Err(RemoteEnrollmentEvidenceErrorV1::AuthorityMismatch);
         }
         Ok(())
     }
@@ -309,19 +332,29 @@ pub struct RemoteEnrollmentCommitReceiptV1 {
 }
 
 impl RemoteEnrollmentCommitReceiptV1 {
-    pub fn validate(&self) -> Result<(), ()> {
-        self.enrollment.validate().map_err(|_| ())?;
-        self.prior_grant_digest.validate().map_err(|_| ())?;
-        self.input_digest.validate().map_err(|_| ())?;
-        self.committed_state_digest.validate().map_err(|_| ())?;
+    pub fn validate(&self) -> Result<(), RemoteEnrollmentEvidenceErrorV1> {
+        self.enrollment
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        self.prior_grant_digest
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        self.input_digest
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        self.committed_state_digest
+            .validate()
+            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
         if self.prior_grant_digest != self.admission.authority.grant_digest
-            || self.committed_state_digest != canonical_sha256(&self.enrollment).map_err(|_| ())?
+            || self.committed_state_digest
+                != canonical_sha256(&self.enrollment)
+                    .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?
             || self.consumed_at != self.enrollment.issued_at
             || self.admission.authority.revalidated_at > self.consumed_at
             || self.budget.units_consumed == 0
             || self.budget.bytes_consumed == 0
         {
-            return Err(());
+            return Err(RemoteEnrollmentEvidenceErrorV1::AuthorityMismatch);
         }
         Ok(())
     }
@@ -478,7 +511,7 @@ where
             request_id: request.request_id,
             actor: admission.actor().clone(),
             scope: admission.scope().clone(),
-            effect_class: admission.effect_class().clone(),
+            effect_class: *admission.effect_class(),
             idempotency_key: admission.idempotency_key().clone(),
             input_digest,
             expected_state: receipt.prior_grant_digest.clone(),
@@ -492,7 +525,7 @@ where
         };
         let effect = EffectResult::new(
             admission.effect_id().clone(),
-            admission.effect_class().clone(),
+            *admission.effect_class(),
             admission.idempotency_key().clone(),
             admission.authority().clone(),
             receipt.prior_grant_digest,
