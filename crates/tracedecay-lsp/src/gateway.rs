@@ -123,13 +123,10 @@ impl AdmittedRoot {
     }
 
     pub(crate) fn document_root_depth(&self, document_uri: &str) -> Option<usize> {
-        self.contains_document(document_uri).then(|| {
-            strict_file_uri_path(&self.uri)
-                .expect("validated admitted root")
-                .1
-                .components()
-                .count()
-        })
+        self.contains_document(document_uri)
+            .then_some(())
+            .and_then(|()| strict_file_uri_path(&self.uri))
+            .map(|(_, path)| path.components().count())
     }
 }
 
@@ -2737,7 +2734,7 @@ mod tests {
     };
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll};
 
     #[derive(Default)]
     struct Feedback {
@@ -3080,18 +3077,13 @@ mod tests {
         fn abort(&self) {}
     }
 
-    struct InlineWake;
-
-    impl Wake for InlineWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     struct InlineSpawner;
 
     impl LspRuntimeSpawner for InlineSpawner {
         fn spawn(&self, mut future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
-            let waker = Waker::from(Arc::new(InlineWake));
-            let mut context = Context::from_waker(&waker);
+            // These harness futures must complete synchronously; a wake would
+            // indicate that the test spawner is not a valid runtime for them.
+            let mut context = Context::from_waker(std::task::Waker::noop());
             assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
             Box::new(InlineTask)
         }

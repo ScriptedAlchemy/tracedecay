@@ -1,4 +1,16 @@
-use super::*;
+use super::{
+    AdmittedRoot, AnalyzerCancellationPort, Arc, AuthorizedLspWorkspace, BTreeMap,
+    CancellationOutcome, CapabilityAvailability, CapabilityParseError, ClientCapabilities,
+    ContextController, ContextProjectionPort, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspGateway,
+    DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController, EffectiveCapabilities,
+    FeedbackCyclePort, GatewayCapabilities, GatewayMethod, LifecycleError, LspRequestFailure,
+    LspRequestId, LspSessionControl, MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason,
+    OutboundController, OverlayError, OverlayStore, RpcFailure, SemanticController,
+    SemanticProviderPort, SessionLifecycle, TRACEDECAY_CONTEXT_EXPAND_METHOD,
+    TRACEDECAY_CONTEXT_METHOD, UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value,
+    error_response, initialized_workspace_uris, is_supported_context_projection, json,
+    negotiate_capabilities, overlay_failure, request_id, request_id_value, success_response,
+};
 
 pub(super) struct LifecycleController<P, S>
 where
@@ -252,14 +264,13 @@ where
         let semantic = std::mem::take(&mut self.semantic.pending);
         for (request_id, pending) in semantic {
             let _ = self.lifecycle.control.cancel_request(&request_id);
-            if let Some(cancellation) = &self.semantic.cancellation {
-                if let Some(root) = pending
+            if let Some(cancellation) = &self.semantic.cancellation
+                && let Some(root) = pending
                     .request
                     .document_uri()
                     .and_then(|uri| self.document_root(uri).ok())
-                {
-                    let _ = cancellation.cancel_upstream(&root, &request_id);
-                }
+            {
+                let _ = cancellation.cancel_upstream(&root, &request_id);
             }
             self.complete_context_request(
                 request_id,
@@ -273,13 +284,13 @@ where
         let snapshots = std::mem::take(&mut self.context.pending_requests);
         for (request_id, pending) in snapshots {
             let _ = self.lifecycle.control.cancel_request(&request_id);
-            if let Some(context) = &self.context.port {
-                if let Ok(root) = self.optional_document_root(
+            if let Some(context) = &self.context.port
+                && let Ok(root) = self.optional_document_root(
                     pending.request.document_uri.as_deref(),
                     TRACEDECAY_CONTEXT_METHOD,
-                ) {
-                    let _ = context.cancel_request(&root, &pending.operation_id);
-                }
+                )
+            {
+                let _ = context.cancel_request(&root, &pending.operation_id);
             }
             self.complete_context_request(
                 request_id,
@@ -293,10 +304,10 @@ where
         let expansions = std::mem::take(&mut self.context.pending_expansions);
         for (request_id, pending) in expansions {
             let _ = self.lifecycle.control.cancel_request(&request_id);
-            if let Some(context) = &self.context.port {
-                if let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD) {
-                    let _ = context.cancel_request(&root, &pending.operation_id);
-                }
+            if let Some(context) = &self.context.port
+                && let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD)
+            {
+                let _ = context.cancel_request(&root, &pending.operation_id);
             }
             self.complete_context_request(
                 request_id,
@@ -587,18 +598,18 @@ where
                 let _ = cancellation.cancel_upstream(&root, id);
             }
             if let Some(context) = &self.context.port {
-                if let Some(pending) = context_pending.as_ref() {
-                    if let Ok(root) = self.optional_document_root(
+                if let Some(pending) = context_pending.as_ref()
+                    && let Ok(root) = self.optional_document_root(
                         pending.request.document_uri.as_deref(),
                         TRACEDECAY_CONTEXT_METHOD,
-                    ) {
-                        let _ = context.cancel_request(&root, &pending.operation_id);
-                    }
+                    )
+                {
+                    let _ = context.cancel_request(&root, &pending.operation_id);
                 }
-                if let Some(pending) = expansion_pending.as_ref() {
-                    if let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD) {
-                        let _ = context.cancel_request(&root, &pending.operation_id);
-                    }
+                if let Some(pending) = expansion_pending.as_ref()
+                    && let Ok(root) = self.workspace_root(TRACEDECAY_CONTEXT_EXPAND_METHOD)
+                {
+                    let _ = context.cancel_request(&root, &pending.operation_id);
                 }
                 if context_pending.is_none() && expansion_pending.is_none() {
                     for root in self.lifecycle.gateway.workspace().roots() {

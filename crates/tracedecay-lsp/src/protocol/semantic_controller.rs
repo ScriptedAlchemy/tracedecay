@@ -1,4 +1,9 @@
-use super::*;
+use super::{
+    AnalyzerCancellationPort, Arc, BTreeMap, CompletionDisposition, DaemonLspProtocolSession,
+    DiagnosticSnapshotPort, FeedbackCyclePort, GatewayResponse, LspRequestFailure, LspRequestId,
+    RpcFailure, SemanticProviderPort, SemanticRequest, Value, error_response, json,
+    partial_failure_data, request_id, semantic_response_value, success_response,
+};
 
 #[derive(Clone)]
 pub(super) struct PendingSemanticRequest {
@@ -217,7 +222,8 @@ where
 
 #[cfg(test)]
 mod controller_tests {
-    use super::*;
+    use super::{SemanticRequest, Value};
+    use crate::diagnostics::LspPosition;
 
     #[test]
     fn semantic_controller_projects_provider_result() {
