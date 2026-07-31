@@ -45,45 +45,11 @@ pub const KNOWN_DOCTOR_FINDING_FAMILIES: [DoctorFindingFamilyV1; 7] = [
     DoctorFindingFamilyV1::Observability,
 ];
 
-/// One read-only Doctor/health route this adapter owns.
-///
-/// `family` is the fixed family a compatibility route projects; `None` means the
-/// route accepts the caller's [`DoctorFindingsQueryV1`] filter instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DoctorHealthReadRouteV1 {
-    pub method: &'static str,
-    pub path: &'static str,
-    pub family: Option<DoctorFindingFamilyV1>,
-    pub refresh_operation: &'static str,
-}
-
 /// Path of the Doctor finding read route, filtered by the caller's query.
 pub const DOCTOR_FINDINGS_ROUTE_PATH: &str = "/api/doctor/findings";
 
 /// Path of the storage-family compatibility projection of the same report.
 pub const STORAGE_FINDINGS_ROUTE_PATH: &str = "/api/storage/findings";
-
-const DOCTOR_HEALTH_READ_ROUTES: [DoctorHealthReadRouteV1; 2] = [
-    DoctorHealthReadRouteV1 {
-        method: "GET",
-        path: DOCTOR_FINDINGS_ROUTE_PATH,
-        family: None,
-        refresh_operation: DOCTOR_FINDINGS_REFRESH_OPERATION,
-    },
-    DoctorHealthReadRouteV1 {
-        method: "GET",
-        path: STORAGE_FINDINGS_ROUTE_PATH,
-        family: Some(DoctorFindingFamilyV1::Storage),
-        refresh_operation: DOCTOR_FINDINGS_REFRESH_OPERATION,
-    },
-];
-
-/// Every read-only Doctor/health route, in mount order. The executable mounts
-/// exactly this set so no path can drift from the descriptors documented here.
-#[must_use]
-pub const fn doctor_health_read_routes() -> &'static [DoctorHealthReadRouteV1] {
-    &DOCTOR_HEALTH_READ_ROUTES
-}
 
 /// Query DTO for the Doctor findings read route.
 ///
@@ -490,21 +456,6 @@ mod tests {
                 "family label {label} must parse back to its own family"
             );
         }
-    }
-
-    #[test]
-    fn read_routes_are_exact_and_read_only() {
-        let routes = doctor_health_read_routes();
-        assert_eq!(routes.len(), 2);
-        for route in routes {
-            assert_eq!(route.method, "GET");
-            assert!(route.path.starts_with("/api/"));
-            assert_eq!(route.refresh_operation, DOCTOR_FINDINGS_REFRESH_OPERATION);
-        }
-        assert_eq!(routes[0].path, DOCTOR_FINDINGS_ROUTE_PATH);
-        assert_eq!(routes[0].family, None);
-        assert_eq!(routes[1].path, STORAGE_FINDINGS_ROUTE_PATH);
-        assert_eq!(routes[1].family, Some(DoctorFindingFamilyV1::Storage));
     }
 
     #[test]

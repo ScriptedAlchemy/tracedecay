@@ -1,8 +1,7 @@
 use axum::http::StatusCode;
 use serde_json::json;
 use tracedecay_api::configuration::{
-    configuration_revision_conflict_error, dashboard_configuration_write_routes,
-    parse_project_settings_patch, parse_user_settings_patch,
+    configuration_revision_conflict_error, parse_project_settings_patch, parse_user_settings_patch,
 };
 use tracedecay_api::feedback::{
     FeedbackStatusCoverageV1, FeedbackStatusDenominatorsV1, FeedbackStatusPresentationV1,
@@ -13,7 +12,7 @@ use tracedecay_api::read_model::{
 };
 use tracedecay_api::remediation::{
     DoctorRemediationErrorPresentationV1, DoctorRemediationOperationPresentationV1,
-    doctor_remediation_envelope, doctor_remediation_routes,
+    doctor_remediation_envelope,
 };
 
 fn scope() -> DashboardScopeV1 {
@@ -25,16 +24,7 @@ fn scope() -> DashboardScopeV1 {
 }
 
 #[test]
-fn configuration_write_descriptors_and_cas_errors_are_api_owned() {
-    let routes = dashboard_configuration_write_routes();
-    assert_eq!(routes.len(), 2);
-    assert_eq!(routes[0].method, "PATCH");
-    assert_eq!(routes[0].path, "/api/settings/project");
-    assert_eq!(routes[0].operation, "configuration_batch");
-    assert_eq!(routes[1].method, "PATCH");
-    assert_eq!(routes[1].path, "/api/settings/user");
-    assert_eq!(routes[1].operation, "user_settings_mutate");
-
+fn configuration_patch_and_cas_errors_are_api_owned() {
     let project = parse_project_settings_patch(json!({
         "expected_revision_id": "revision.project.1",
         "include": ["src/**"],
@@ -67,16 +57,7 @@ fn configuration_write_descriptors_and_cas_errors_are_api_owned() {
 }
 
 #[test]
-fn remediation_write_descriptors_and_presentation_preserve_truthfulness() {
-    let routes = doctor_remediation_routes();
-    assert_eq!(routes.len(), 3);
-    assert_eq!(routes[0].method, "POST");
-    assert_eq!(routes[0].path, "/api/doctor/remediations/preview");
-    assert_eq!(routes[1].method, "POST");
-    assert_eq!(routes[1].path, "/api/doctor/remediations/apply");
-    assert_eq!(routes[2].method, "GET");
-    assert_eq!(routes[2].path, "/api/doctor/remediations/{operation_id}");
-
+fn remediation_presentation_preserves_truthfulness() {
     let operation = doctor_remediation_envelope(
         scope(),
         Ok::<_, (String, DoctorRemediationErrorPresentationV1)>((

@@ -16,45 +16,6 @@ use crate::read_model::{
     DashboardScopeV1,
 };
 
-/// Route for submitting a remediation preview.
-pub const DOCTOR_REMEDIATION_PREVIEW_ROUTE_PATH: &str = "/api/doctor/remediations/preview";
-/// Route for applying a confirmed remediation.
-pub const DOCTOR_REMEDIATION_APPLY_ROUTE_PATH: &str = "/api/doctor/remediations/apply";
-/// Route for reading one remediation operation.
-pub const DOCTOR_REMEDIATION_STATUS_ROUTE_PATH: &str = "/api/doctor/remediations/{operation_id}";
-
-/// One Doctor remediation route mounted by the dashboard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DoctorRemediationRouteV1 {
-    pub method: &'static str,
-    pub path: &'static str,
-    pub operation: &'static str,
-}
-
-const DOCTOR_REMEDIATION_ROUTES: [DoctorRemediationRouteV1; 3] = [
-    DoctorRemediationRouteV1 {
-        method: "POST",
-        path: DOCTOR_REMEDIATION_PREVIEW_ROUTE_PATH,
-        operation: "doctor_remediation_preview",
-    },
-    DoctorRemediationRouteV1 {
-        method: "POST",
-        path: DOCTOR_REMEDIATION_APPLY_ROUTE_PATH,
-        operation: "doctor_remediation_apply",
-    },
-    DoctorRemediationRouteV1 {
-        method: "GET",
-        path: DOCTOR_REMEDIATION_STATUS_ROUTE_PATH,
-        operation: "doctor_remediation_status",
-    },
-];
-
-/// Every Doctor remediation route, in mount order.
-#[must_use]
-pub const fn doctor_remediation_routes() -> &'static [DoctorRemediationRouteV1] {
-    &DOCTOR_REMEDIATION_ROUTES
-}
-
 /// Request DTO for a remediation preview. The executable supplies the
 /// owner-specific target type while this crate owns the stable outer shape.
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -339,33 +339,6 @@ impl IntegrationDaemonRequirementV1 {
     }
 }
 
-/// Bounded reasons proven by native host-event fixture admission cases.
-///
-/// This taxonomy deserializes fixture `admission.status` / `reason_code`
-/// values in tests. It is not part of the production host-capability catalog.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum HostCapabilityReasonV1 {
-    SpoolRecordTooLarge,
-    ProjectAuthorityUnbound,
-}
-
-/// Fixture-only observation admission taxonomy (not catalog authority).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(
-    tag = "status",
-    content = "reason_code",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-#[non_exhaustive]
-pub enum HostCapabilityAvailabilityV1 {
-    Supported,
-    Degraded(HostCapabilityReasonV1),
-    Unavailable(HostCapabilityReasonV1),
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCapabilityViewV1 {

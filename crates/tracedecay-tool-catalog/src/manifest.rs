@@ -423,11 +423,8 @@ impl TerminalStateContract {
 
 /// Availability metadata used for policy and profile filtering.
 ///
-/// Closed final-V2 set: `Available` and `Unavailable { NotImplemented }`.
-/// Prior redesign-branch deprecation-window and unused-reason variants never
-/// shipped on `origin/master` and are intentionally absent; source
-/// compatibility for those unshipped symbols is waived. A future deprecation
-/// ship can reintroduce a typed window without inventing unused reasons.
+/// The current wire contract distinguishes callable capabilities from
+/// capabilities that have not been implemented.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum AvailabilityContract {
