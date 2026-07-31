@@ -1166,6 +1166,7 @@ fn work_application_router_with_executor(
     }))
 }
 
+#[allow(dead_code)]
 fn multi_root_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> axum::Router {
@@ -1825,7 +1826,6 @@ pub fn http_application_router_with_executor(
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     let event_executor = Arc::clone(&executor);
     let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
-    let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor));
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1833,7 +1833,6 @@ pub fn http_application_router_with_executor(
             &APPLICATION_SURFACE_OPERATIONS,
         )?)
         .merge(work_router)
-        .merge(multi_root_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,

@@ -374,6 +374,25 @@ describe("TraceDecayClient generated operation bindings", () => {
         token: "sdk-secret",
       }).operations,
     ).toBe(true);
+    const quarantined = [
+      "multi_root_scope_set_read",
+      "multi_root_scope_set_compare_and_swap",
+      "multi_root_execute",
+    ];
+    const serverOperations: string[] = SERVER_OPERATIONS.map(
+      (operation) => operation.operation,
+    );
+    const clientOperations = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+    }).operations;
+    for (const operation of quarantined) {
+      expect(serverOperations).not.toContain(operation);
+      expect(available).not.toContain(operation);
+      expect(unavailable).not.toContain(operation);
+      expect(operation in clientOperations).toBe(false);
+    }
   });
 
   it("publishes work_attempt_finish with the canonical descriptor identity", () => {

@@ -2300,66 +2300,20 @@ async fn execute_feedback(
 
 async fn execute_feedback_advisory_cycle(
     wire_request_id: String,
-    invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
-    feedback_owner: Option<DaemonFeedbackInvocationOwner>,
-    document_uri: String,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
+    _invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
+    _feedback_owner: Option<DaemonFeedbackInvocationOwner>,
+    _document_uri: String,
+    _observed_at: UtcMicros,
+    _deadline: Deadline,
+    _cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    let Some(invoker) = invoker else {
-        return application_problem(
-            wire_request_id,
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "feedback.advisory_cycle_unavailable".to_owned(),
-                message: "The advisory feedback cycle is unavailable".to_owned(),
-            }),
-        );
-    };
-    let invocation = match invoker
-        .invoke(Pr13AdvisoryCycleInvocationRequestV1 {
-            request_id: wire_request_id.clone(),
-            document_uri,
-            observed_at,
-            deadline: deadline.clone(),
-            cancellation: cancellation.clone(),
-        })
-        .await
-    {
-        Ok(invocation) => invocation,
-        Err(problem) => return application_problem(wire_request_id, problem),
-    };
-    let Pr13AdvisoryCycleInvocationOutcomeV1 {
-        request_handle,
-        cycle,
-    } = invocation;
-    let mut response = execute_feedback(
+    application_problem(
         wire_request_id,
-        feedback_owner,
-        DaemonInvocationOperation::FeedbackDiagnostics,
-        request_handle.clone(),
-        observed_at,
-        deadline,
-        cancellation,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "feedback.advisory_cycle_quarantined".to_owned(),
+            message: "The advisory feedback cycle is quarantined".to_owned(),
+        }),
     )
-    .await;
-    if let DaemonInvocationOutcome::Feedback { result, .. } = &mut response.outcome {
-        let diagnostics = result.payload.take();
-        // `cycle` keeps the four-pillar terminal state visible even when the
-        // publication-backed diagnostics read has nothing to return, so an
-        // incomplete-coverage cycle never renders as a clean empty result.
-        result.payload = Some(serde_json::json!({
-            "request_handle": request_handle,
-            "diagnostics": diagnostics,
-            "cycle": cycle,
-            "producer_contributions": [
-                "github_review_ingest",
-                "ci_failure_localize",
-                "feedback_proximity"
-            ]
-        }));
-    }
-    response
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9343,7 +9297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisory_cycle_reads_diagnostics_with_daemon_minted_handle() {
+    async fn advisory_cycle_refuses_before_invoking_any_effect() {
         let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
         let project_id = ProjectId::new("project.feedback-cycle").expect("project");
         let response = execute_feedback_advisory_cycle(
@@ -9365,16 +9319,41 @@ mod tests {
         assert!(matches!(
             response.outcome,
             DaemonInvocationOutcome::ApplicationProblem {
-                problem: ApplicationProblem::NotFoundOrNotAuthorized { .. }
-            }
+                problem: ApplicationProblem::Unavailable {
+                    diagnostic: SafeDiagnostic { ref code, .. }
+                }
+            } if code == "feedback.advisory_cycle_quarantined"
         ));
         assert_eq!(
             handles
                 .lock()
                 .expect("recorded feedback handles")
                 .as_slice(),
-            ["rh.daemon.minted"]
+            []
         );
+    }
+
+    #[tokio::test]
+    async fn advisory_cycle_refuses_when_no_effect_authority_is_registered() {
+        let response = execute_feedback_advisory_cycle(
+            "request.feedback-cycle-unmounted".to_owned(),
+            None,
+            None,
+            "file:///project/src/lib.rs".to_owned(),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.feedback-cycle-unmounted").expect("cancellation"),
+        )
+        .await;
+
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::ApplicationProblem {
+                problem: ApplicationProblem::Unavailable {
+                    diagnostic: SafeDiagnostic { ref code, .. }
+                }
+            } if code == "feedback.advisory_cycle_quarantined"
+        ));
     }
 
     #[test]

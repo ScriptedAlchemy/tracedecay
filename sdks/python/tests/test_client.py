@@ -177,6 +177,15 @@ class ClientTest(unittest.TestCase):
             all(value == "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values())
         )
         self.assertFalse(hasattr(self.client(), "call"))
+        for operation in (
+            "multi_root_scope_set_read",
+            "multi_root_scope_set_compare_and_swap",
+            "multi_root_execute",
+        ):
+            self.assertNotIn(operation, server_names)
+            self.assertNotIn(operation, available_operations)
+            self.assertNotIn(operation, unavailable_operations)
+            self.assertFalse(hasattr(self.client().operations, operation))
 
     def test_work_attempt_finish_descriptor_matches_the_canonical_binding(self) -> None:
         self.assertIn("work_attempt_finish", WORK_OPERATIONS)
