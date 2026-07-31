@@ -4,7 +4,7 @@ Design authority for the PR14 fresh-start dashboard. Owned by the design
 owner; foundation and workspace lanes implement against this document and do
 not make structural, styling, or dependency decisions. Binding contracts
 (journeys, typed envelopes, state taxonomy, accessibility and performance
-gates) live in [Plan 11](11-dashboard-frontend.md); this file decides how
+acceptance criteria) live in [Plan 11](11-dashboard-frontend.md); this file decides how
 they look, sit, and move. Decided 2026-07-23.
 
 Plan 11's **Rejected and superseded frontend approaches** section is binding
@@ -12,10 +12,10 @@ design history. In particular, never delete or rename existing design tokens
 to simplify a theme, and never fork a workspace-local copy of a shared
 primitive; use additive token evolution and the shared UI primitive owner.
 
-**Visual-gate correction (2026-07-26).** `dashboard/stories/audit.ts` now makes
+**Visual-audit correction (2026-07-26).** `dashboard/stories/audit.ts` now makes
 render failures, uncaught page errors, axe violations, and any pixelmatch
 baseline drift set a failing process exit status. The baseline-diff language
-below is implemented gate behavior; the former run that measured pixel drift
+below is implemented audit behavior; the former run that measured pixel drift
 and still exited successfully is superseded.
 
 ## User authority versus design decisions
@@ -285,7 +285,7 @@ side is recorded as the final product requirement.
   tooling may support but not replace that pass. Report deviations truthfully
   in the normal work summary; do not attach a git-hash-tied self-audit record.
   "Compiles and tests pass" is not done; unaudited UI is unreviewable.
-- **CI**: the visual suite runs on the pinned runner in the frontend gate;
+- **CI**: the visual suite runs on the pinned frontend verification runner;
   diffs and axe failures block; the gallery uploads as a run artifact so
   review happens on real renders, not local claims.
 
@@ -358,10 +358,10 @@ Per-domain assignments:
 | Time series (Observatory/Costs) | streaming append + sliding window, LTTB sampling; visible truncation labels | ECharts; uPlot (MIT, ~50 KB) as the bounded escalation for the hottest always-live panels |
 | Row micro-viz | SVG-per-cell sparkline/coverage/freshness/score-kind glyph with mandatory text equivalents; shared-canvas escalation if profiling demands | bespoke (D3 scales) |
 
-Disqualifications and gates (from license/size research): elkjs (EPL-2.0,
+Disqualifications and adoption criteria (from license/size research): elkjs (EPL-2.0,
 ~500 KB) is banned from the default path; Cosmograph the product is
 CC BY-NC and disqualified — the optional GPU overflow adapter targets
-**cosmos.gl (MIT, OpenJS)** instead, under plan 11's existing gate. Any
+**cosmos.gl (MIT, OpenJS)** instead, under Plan 11's existing acceptance criteria. Any
 WebGL dependency must pass an eval/CSP audit before adoption.
 
 ## Implementation notes for foundation lanes
