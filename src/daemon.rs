@@ -9204,16 +9204,18 @@ mod wire_bound_tests {
         let server = listener.accept().await.expect("accept");
         let mut transport = BrokerStreamTransport::new(server);
 
-        client
-            .write_all(&vec![
-                b'x';
-                crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
-                    + 1
-            ])
-            .await
-            .expect("write oversized frame");
-        client.write_all(b"\n").await.expect("newline");
-        client.flush().await.expect("flush");
+        let writer = tokio::spawn(async move {
+            client
+                .write_all(&vec![
+                    b'x';
+                    crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
+                        + 1
+                ])
+                .await
+                .expect("write oversized frame");
+            client.write_all(b"\n").await.expect("newline");
+            client.flush().await.expect("flush");
+        });
 
         assert!(
             Transport::<rmcp::RoleServer>::receive(&mut transport)
@@ -9221,6 +9223,7 @@ mod wire_bound_tests {
                 .is_none(),
             "rmcp must receive the same bounded rejection as the daemon transport"
         );
+        writer.await.expect("oversized frame writer");
     }
 
     #[tokio::test]
