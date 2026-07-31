@@ -321,7 +321,6 @@ impl GitWatcher {
         // Active daemon handshakes call `ensure_watching` after publishing the
         // retained project server and graph handle.
 
-        // Start the single backstop timer.
         let watcher = self.clone();
         let handle = tokio::spawn(async move {
             backstop::run(watcher, profile_database).await;

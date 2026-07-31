@@ -26,8 +26,8 @@ use super::project_registry::{
     ProjectRegistrySelector, list_registered_projects, read_registered_project_context,
 };
 use super::support::{
-    effective_path, filter_by_scope, is_explicit_project_path_selector, require_node_id,
-    unique_file_paths,
+    effective_path, filter_by_scope, is_explicit_project_path_selector, rendered_tool_result,
+    require_node_id, unique_file_paths,
 };
 
 /// Daemon-only sync entry point used by the first-party CLI. It is deliberately
@@ -155,14 +155,12 @@ pub(super) async fn handle_status(
         if let Some(prefix) = scope_prefix {
             output["scope_prefix"] = json!(prefix);
         }
-        let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-            render::generic_md(&output)
-        });
-        return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": text }]
-            }),
+        return Ok(rendered_tool_result(
+            Some(cg.project_root()),
+            &args,
+            &output,
             vec![],
+            || render::generic_md(&output),
         ));
     }
 
@@ -283,14 +281,12 @@ pub(super) async fn handle_status(
         output["scope_prefix"] = json!(prefix);
     }
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render_status_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         vec![],
+        || render_status_md(&output),
     ))
 }
 
@@ -442,15 +438,9 @@ pub(super) fn handle_active_project(
 ) -> ToolResult {
     let branch = cg.branch_diagnostics();
     let output = active_project_context(cg, &branch, server_stats, scope_prefix);
-    let text = render::finalize(Some(cg.project_root()), args, &output, || {
+    rendered_tool_result(Some(cg.project_root()), args, &output, vec![], || {
         render::generic_md(&output)
-    });
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    })
 }
 
 fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
@@ -469,7 +459,7 @@ fn registry_result(args: &Value, payload: &Value) -> ToolResult {
 }
 
 fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) -> ToolResult {
-    let text = render::finalize(root, args, payload, || {
+    rendered_tool_result(root, args, payload, vec![], || {
         if payload.get("project_tree").is_some() {
             let view = serde_json::from_value::<ProjectRegistryView>(json!({
                 "summary": payload.get("summary").cloned().unwrap_or_else(|| json!({})),
@@ -484,13 +474,7 @@ fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) ->
             }
         }
         render::generic_md(payload)
-    });
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    })
 }
 
 fn registry_missing_payload() -> Value {
@@ -716,13 +700,12 @@ pub(super) async fn handle_files(
         "layout": layout,
         "files": file_values,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
-        render_files_md(&payload)
-    });
-
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &payload,
         touched_files,
+        || render_files_md(&payload),
     ))
 }
 
@@ -1002,14 +985,12 @@ pub(super) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
         "target_only_symbols": target_only,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
-        render::generic_md(&result)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &result,
         touched_files,
+        || render::generic_md(&result),
     ))
 }
 
@@ -1071,24 +1052,20 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
             "levels": [],
             "cycles": [],
         });
-        let text = render::finalize(Some(cg.project_root()), &args, &result, || {
-            render::generic_md(&result)
-        });
-        return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": text }]
-            }),
+        return Ok(rendered_tool_result(
+            Some(cg.project_root()),
+            &args,
+            &result,
             vec![],
+            || render::generic_md(&result),
         ));
     }
 
-    // Build node ID lookup
     let node_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
     let node_map: HashMap<&str, &crate::types::Node> =
         nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let id_set: HashSet<&str> = node_ids.iter().map(std::string::String::as_str).collect();
 
-    // Get internal edges (dependency edges between these nodes)
     let edges = cg.get_internal_edges(&node_ids).await?;
 
     // Build adjacency list and in-degree map for Kahn's algorithm.
@@ -1322,7 +1299,6 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         }));
     }
 
-    // Build output levels
     let levels_json: Vec<Value> = levels
         .iter()
         .enumerate()
@@ -1378,14 +1354,12 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         "cycles": cycles_json,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
-        render::generic_md(&result)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &result,
         touched_files,
+        || render::generic_md(&result),
     ))
 }
 
@@ -1503,12 +1477,12 @@ pub(super) async fn handle_simplify_scan(
         "coupling_warnings": coupling_warnings,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render_simplify_scan_markdown(&output)
-    });
-    Ok(ToolResult::new(
-        json!({"content": [{"type": "text", "text": text}]}),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         files,
+        || render_simplify_scan_markdown(&output),
     ))
 }
 
@@ -1684,12 +1658,12 @@ pub(super) async fn handle_type_hierarchy(cg: &TraceDecay, args: Value) -> Resul
         "max_depth": max_depth,
         "tree": tree,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
-        render_type_hierarchy_md(&payload)
-    });
-    Ok(ToolResult::new(
-        json!({"content": [{"type": "text", "text": text}]}),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &payload,
         touched_files,
+        || render_type_hierarchy_md(&payload),
     ))
 }
 
@@ -1834,14 +1808,12 @@ pub(super) async fn handle_body(
         "match_count": matches.len(),
         "matches": matches,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render_body_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         touched,
+        || render_body_md(&output),
     ))
 }
 
@@ -2118,14 +2090,12 @@ pub(super) async fn handle_todos(
         "by_kind": counts,
         "markers": markers,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         touched,
+        || render::generic_md(&output),
     ))
 }
 
@@ -2194,14 +2164,12 @@ pub(super) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
     if let Some(context) = output.context {
         payload["context"] = context;
     }
-    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
-        render_read_md(&payload)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &payload,
         vec![display_file],
+        || render_read_md(&payload),
     ))
 }
 
@@ -2310,15 +2278,12 @@ pub(super) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
             value["ast_grep_outline_error"] = json!(err.to_string());
         }
     }
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render_outline_md(&value)
-    });
-
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &value,
         vec![display_file],
+        || render_outline_md(&value),
     ))
 }
 
@@ -2485,14 +2450,12 @@ pub(super) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
         "match_count": matches.iter().filter(|m| m.get("found") != Some(&Value::Bool(false))).count(),
         "matches": matches,
     });
-    let text = render::finalize(Some(cg.project_root()), args, &payload, || {
-        render::generic_md(&payload)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        args,
+        &payload,
         touched,
+        || render::generic_md(&payload),
     ))
 }
 
@@ -2684,14 +2647,12 @@ pub(super) async fn handle_signature_search(
         "match_count": entries.len(),
         "matches": entries,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
-        render::generic_md(&payload)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &payload,
         touched,
+        || render::generic_md(&payload),
     ))
 }
 

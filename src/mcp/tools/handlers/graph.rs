@@ -22,7 +22,6 @@ use crate::types::{BuildContextOptions, EdgeKind, Node, NodeKind, TaskContext, V
 
 const CONTEXT_MEMORY_MATCH_LIMIT: usize = 3;
 const CONTEXT_MEMORY_MATCH_LIMIT_MAX: usize = 10;
-const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
 const CONTEXT_LANE_TRUNCATED_NOTE: &str =
     "\n... lane truncated; retrieve the full response handle for omitted details.\n";
 
@@ -30,7 +29,9 @@ use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
-    effective_path, filter_by_scope, require_node_id, string_array_values, unique_file_paths,
+    self, CONTEXT_MEMORY_ANALYTICS_KEY, effective_path, filter_by_scope, require_node_id,
+    string_array_values, take_internal_context_memory_analytics, text_tool_result,
+    unique_file_paths,
 };
 
 fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSearchModeV1> {
@@ -115,13 +116,7 @@ fn rendered_tool_result<F>(
 where
     F: FnOnce() -> String,
 {
-    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
-    let public_value = internal_analytics
-        .as_ref()
-        .and_then(|_| public_value_without_internal_context_memory_analytics(value));
-    let value = public_value.as_ref().unwrap_or(value);
-    let text = render::finalize(Some(cg.project_root()), args, value, md);
-    text_tool_result_with_analytics(&text, touched_files, internal_analytics)
+    support::rendered_tool_result(Some(cg.project_root()), args, value, touched_files, md)
 }
 
 fn rendered_context_tool_result(
@@ -142,38 +137,12 @@ fn rendered_context_tool_result(
             preview_markdown.unwrap_or(&full_markdown),
         )
     };
-    text_tool_result_with_analytics(&text, touched_files, internal_analytics)
-}
-
-fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
-    let mut value = value.clone();
-    take_internal_context_memory_analytics(&mut value).map(|_| value)
-}
-
-fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
-    value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
-}
-
-fn text_tool_result_with_analytics(
-    text: &str,
-    touched_files: Vec<String>,
-    internal_analytics: Option<Value>,
-) -> ToolResult {
-    let result = text_tool_result(text, touched_files);
+    let result = text_tool_result(&text, touched_files);
     if let Some(internal_analytics) = internal_analytics {
         result.with_internal_analytics(internal_analytics)
     } else {
         result
     }
-}
-
-fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        touched_files,
-    )
 }
 
 async fn legacy_search_fallback(
@@ -302,90 +271,15 @@ pub(super) async fn handle_search(
     if search_executor.is_none()
         && semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed
     {
-        let mut legacy_results =
-            filter_by_scope(cg.search(query, limit).await?, scope_prefix, |result| {
-                &result.node.file_path
-            });
-        let mut lazy_indexed_files = Vec::new();
-        if dependency_hints::lazy_indexing_requested(&args)
-            && dependency_hints::should_check_ignored_dependency_hint(legacy_results.len(), limit)
-        {
-            lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
-                cg,
-                query,
-                limit,
-                scope_prefix,
-            )
-            .await?;
-            if !lazy_indexed_files.is_empty() {
-                legacy_results =
-                    filter_by_scope(cg.search(query, limit).await?, scope_prefix, |result| {
-                        &result.node.file_path
-                    });
-            }
-        }
-        let coverage_hint = cg.index_coverage_hint(legacy_results.len());
-        let lazy_match_visible = legacy_results
-            .iter()
-            .any(|result| lazy_indexed_files.contains(&result.node.file_path));
-        let ignored_dependency_hint = if !lazy_match_visible
-            && dependency_hints::should_check_ignored_dependency_hint(legacy_results.len(), limit)
-        {
-            dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
-        } else {
-            None
-        };
-        let touched_files = unique_file_paths(
-            legacy_results
-                .iter()
-                .map(|result| result.node.file_path.as_str())
-                .chain(lazy_indexed_files.iter().map(String::as_str)),
-        );
-        let results = legacy_results
-            .into_iter()
-            .map(|result| {
-                json!({
-                    "id": result.node.id,
-                    "name": result.node.name,
-                    "kind": result.node.kind.as_str(),
-                    "file": result.node.file_path,
-                    "line": user_line(result.node.start_line),
-                    "signature": result.node.signature,
-                    "score": result.score,
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut output = json!({
-            "results": results,
-            "code_generation": Value::Null,
-            "query_fallback_digest": Value::Null,
-            "semantic": {
-                "mode": "fallback_allowed",
-                "status": "unavailable",
-                "reason": "retained semantic search authority was not constructed",
-            },
-            "status": "lexical_fallback",
-        });
-        if let Some(scope) = scope_prefix {
-            output["scope_prefix"] = json!(scope);
-            output["scope_prefix_applied"] = json!(true);
-        }
-        if !lazy_indexed_files.is_empty() {
-            output["lazy_indexed_ignored_dependency_files"] = json!(lazy_indexed_files);
-        }
-        if let Some(hint) = coverage_hint {
-            output["index_coverage_hint"] = json!(hint);
-        }
-        if let Some(hint) = ignored_dependency_hint {
-            output["ignored_dependency_hint"] = hint;
-        }
-        return Ok(rendered_tool_result(
+        return legacy_search_fallback(
             cg,
             &args,
-            &output,
-            touched_files,
-            || render_search_md(&output),
-        ));
+            query,
+            limit,
+            scope_prefix,
+            "retained semantic search authority was not constructed",
+        )
+        .await;
     }
     let outcome = execute_code_index_search(
         search_executor,

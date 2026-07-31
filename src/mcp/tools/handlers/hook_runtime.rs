@@ -30,7 +30,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::StoreShardScopeV1;
 
-use super::{SessionAuthorities, rendered_tool_json};
+use super::SessionAuthorities;
+use super::support::tool_json;
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -89,7 +90,7 @@ pub async fn handle_hook_runtime(
             )));
         }
     };
-    Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
+    Ok(tool_json(Some(cg.project_root()), &args, &output))
 }
 
 async fn opencode_lsp_updated(
@@ -159,7 +160,7 @@ pub(crate) async fn handle_projectless_hook_runtime(
         }
         _ => unreachable!("projectless hook action validated above"),
     };
-    Ok(rendered_tool_json(None, &args, &output))
+    Ok(tool_json(None, &args, &output))
 }
 
 fn projectless_action_allowed(action: &str, args: &Value) -> bool {

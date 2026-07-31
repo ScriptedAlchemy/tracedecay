@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::super::ToolResult;
 use super::super::render;
-use super::support::unique_file_paths;
+use super::support::{rendered_tool_result, unique_file_paths};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -34,15 +34,9 @@ fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &st
             "message": message,
         }
     });
-    let text = render::finalize(Some(cg.project_root()), args, &output, || {
+    rendered_tool_result(Some(cg.project_root()), args, &output, vec![], || {
         render::generic_md(&output)
-    });
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    })
     .with_semantic_error(true)
     .with_failure_message(message)
 }
@@ -247,14 +241,12 @@ pub(super) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
         },
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         touched_files,
+        || render::generic_md(&output),
     ))
 }
 
@@ -357,14 +349,12 @@ pub(super) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
         "affected_tests": tests_sorted,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         touched_files,
+        || render::generic_md(&output),
     ))
 }
 
@@ -544,7 +534,6 @@ fn git_changed_files(
             continue;
         }
 
-        // Check if file exists in HEAD tree
         let head_entry = head_tree
             .lookup_entry_by_path(std::path::Path::new(&path_str))
             .ok()
@@ -811,14 +800,12 @@ pub(super) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
         "files_not_indexed": modified,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
-        render::generic_md(&result)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &result,
         touched_files,
+        || render::generic_md(&result),
     ))
 }
 
@@ -844,12 +831,12 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
             "recent_commits": git_recent_commits(cg.project_root(), 5).unwrap_or_default(),
             "summary": "No changes detected.",
         });
-        let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-            render::generic_md(&output)
-        });
-        return Ok(ToolResult::new(
-            json!({"content": [{"type": "text", "text": text}]}),
+        return Ok(rendered_tool_result(
+            Some(cg.project_root()),
+            &args,
+            &output,
             vec![],
+            || render::generic_md(&output),
         ));
     }
 
@@ -906,12 +893,12 @@ pub(super) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         "summary": format!("{} file(s) changed, {} symbol(s) affected", changed_files.len(), total_symbols),
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({"content": [{"type": "text", "text": text}]}),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         changed_files,
+        || render::generic_md(&output),
     ))
 }
 
@@ -994,7 +981,6 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
             }
 
             if has_external_callers {
-                // Track impacted modules
                 for (caller, _) in &callers {
                     if !changed_files.contains(&caller.file_path) {
                         let dir = caller
@@ -1045,12 +1031,12 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         "impacted_modules": impacted_sorted,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({"content": [{"type": "text", "text": text}]}),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         changed_files,
+        || render::generic_md(&output),
     ))
 }
 
@@ -1106,15 +1092,9 @@ pub(super) fn handle_branch_list(cg: &TraceDecay, args: &Value) -> ToolResult {
         );
     }
 
-    let text = render::finalize(Some(cg.project_root()), args, &result, || {
+    rendered_tool_result(Some(cg.project_root()), args, &result, vec![], || {
         render::generic_md(&result)
-    });
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    })
 }
 
 /// Handles `tracedecay_branch_search` tool calls.
@@ -1165,14 +1145,12 @@ pub(super) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
         .collect();
 
     let items = json!(items);
-    let text = render::finalize(Some(cg.project_root()), &args, &items, || {
-        render::generic_md(&items)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &items,
         vec![],
+        || render::generic_md(&items),
     ))
 }
 
@@ -1217,14 +1195,12 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             "removed": [],
             "changed": [],
         });
-        let text = render::finalize(Some(cg.project_root()), &args, &result, || {
-            render::generic_md(&result)
-        });
-        return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": text }]
-            }),
+        return Ok(rendered_tool_result(
+            Some(cg.project_root()),
+            &args,
+            &result,
             vec![],
+            || render::generic_md(&result),
         ));
     }
 
@@ -1259,7 +1235,6 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     };
     let head_ref = head_cg.as_ref().unwrap_or(cg);
 
-    // Collect nodes from both branches
     let base_files = base_cg.get_all_files().await?;
     let head_files = head_ref.get_all_files().await?;
 
@@ -1294,7 +1269,6 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             .map(|n| (n.qualified_name.as_str(), n))
             .collect();
 
-        // Added: in head but not in base
         for (qn, node) in &head_map {
             if let Some(filter) = kind_filter
                 && node.kind.as_str() != filter
@@ -1314,7 +1288,6 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             }
         }
 
-        // Removed: in base but not in head
         for (qn, node) in &base_map {
             if let Some(filter) = kind_filter
                 && node.kind.as_str() != filter
@@ -1372,14 +1345,12 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     });
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
-    let text = render::finalize(Some(cg.project_root()), &args, &result, || {
-        render::generic_md(&result)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &result,
         touched_files,
+        || render::generic_md(&result),
     ))
 }
 
