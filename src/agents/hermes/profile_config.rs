@@ -6,16 +6,13 @@
 //! flows have explicit inputs and preserve the historical error messages.
 
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use tracedecay_application::{DirectorySyncPolicy, atomic_write};
 use yaml_edit::{Document, Mapping, Sequence, YamlNode};
 
-use crate::agents::backup_config_file;
+use crate::agents::{backup_config_file, safe_write_bytes_file};
 use crate::errors::{Result, TraceDecayError};
-
-const DIRECTORY_SYNC_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineEnding {
@@ -116,6 +113,10 @@ pub(super) fn registration_state(
 
 pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
+    let original_path = original_config_path(config_path);
+    if config_path.is_file() && !original_path.exists() {
+        crate::agents::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
+    }
     let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
         message: format!(
             "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
@@ -138,10 +139,27 @@ pub(super) fn disable_plugin(config_path: &Path) -> Result<()> {
             config_path.display()
         ),
     })?;
+    let original_path = original_config_path(config_path);
+    if let Ok(original) = std::fs::read(&original_path)
+        && std::str::from_utf8(&original)
+            .is_ok_and(|original| updated.trim_end() == original.trim_end())
+    {
+        crate::agents::safe_write_bytes_file(config_path, &original, None)?;
+        crate::agents::safe_remove_host_file(&original_path).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("failed to remove {}: {error}", original_path.display()),
+            }
+        })?;
+        return Ok(());
+    }
     if updated != existing {
         write_config_file(config_path, &updated)?;
     }
     Ok(())
+}
+
+pub(super) fn original_config_path(config_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
 // Error messages preserved from the historical line-oriented implementation so
@@ -640,13 +658,24 @@ fn collapse_if_empty(
     }) else {
         return Ok(text.to_string());
     };
-    let end = entry
+    let value_end = entry
         .value_node()
         .and_then(|node| value_end(&node))
-        .unwrap_or_else(|| line_end_including_newline(text, key_start));
-    let span = &text[key_start..end.min(text.len())];
+        .unwrap_or(key_start);
+    let span = &text[key_start..value_end.min(text.len())];
     if span.contains('#') || span.contains('&') || span.contains('*') {
         return Ok(text.to_string());
+    }
+    if !parent.is_flow_style() {
+        let mut start = line_start(text, key_start);
+        // `value_end` is inside the entry's final line (or at its key when
+        // removing a now-null `key:`). Expand to the line boundary exactly
+        // once so the following line and authored blank lines remain intact.
+        let end = line_end_including_newline(text, value_end);
+        if text[..start].ends_with("\n\n") {
+            start -= 1;
+        }
+        return Ok(format!("{}{}", &text[..start], &text[end..]));
     }
     remove_map_entry(text, parent, key)
 }
@@ -685,13 +714,7 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
         })?;
     }
     let backup = backup_config_file(path)?;
-    atomic_write(
-        path,
-        "hermes-config",
-        contents.as_bytes(),
-        DIRECTORY_SYNC_POLICY,
-    )
-    .map_err(|error| {
+    safe_write_bytes_file(path, contents.as_bytes(), backup.as_deref()).map_err(|error| {
         let backup_hint = backup
             .as_ref()
             .map(|path| format!(" Backup is at {}.", path.display()))
@@ -951,6 +974,44 @@ mod tests {
         disable_plugin(&config).unwrap();
 
         assert!(!config.exists());
+    }
+
+    #[test]
+    fn enable_then_disable_restores_existing_config_bytes() {
+        let original = "theme: dark\nplugins:\n  enabled:\n    - foreign\n";
+        let enabled = enable_plugin_config(original).unwrap();
+
+        assert_eq!(disable_plugin_config(&enabled).unwrap(), original);
+    }
+
+    #[test]
+    fn disable_empty_mapping_preserves_immediately_following_line() {
+        let input = concat!(
+            "memory:\n",
+            "  provider: tracedecay\n",
+            "user_setting: keep\n",
+        );
+
+        assert_eq!(
+            disable_plugin_config(input).unwrap(),
+            "user_setting: keep\n"
+        );
+    }
+
+    #[test]
+    fn disable_empty_mapping_preserves_following_authored_blank_lines() {
+        let input = concat!(
+            "memory:\n",
+            "  provider: tracedecay\n",
+            "\n",
+            "\n",
+            "user_setting: keep\n",
+        );
+
+        assert_eq!(
+            disable_plugin_config(input).unwrap(),
+            "\n\nuser_setting: keep\n"
+        );
     }
 
     #[test]

@@ -649,6 +649,10 @@ pub enum HostBundleError {
     OwnershipConflict,
     #[error("install target is absolute, traversing, symlinked, or otherwise unsafe")]
     UnsafeInstallPath,
+    #[error(
+        "Claude home configuration path ~/.claude is a symlink; replace it with a real directory before retrying"
+    )]
+    UnsafeClaudeHomeSymlink,
     #[error("observed installation state is incomplete or duplicated")]
     InvalidObservedState,
     #[error("Hermes must bind exactly one user TraceDecay profile")]
@@ -661,6 +665,14 @@ pub enum HostBundleError {
     StorageFailure,
     #[error("host bundle interrupted operation requires recovery before mutation")]
     RecoveryRequired,
+    #[error(
+        "a backed-up host configuration directory vanished and could not be recreated safely; restore the directory or its parent and retry recovery"
+    )]
+    RecoveryDirectoryUnavailable,
+    #[error(
+        "host recovery backup format is unsupported; use the TraceDecay version that created it or restore the host configuration from backup"
+    )]
+    UnsupportedRecoveryFormat,
     #[error("confirmed host lifecycle preview is stale or does not match apply")]
     StalePreview,
 }

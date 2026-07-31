@@ -81,6 +81,14 @@ impl AgentIntegration for HermesIntegration {
         Some(hermes_home(home).join("config.yaml"))
     }
 
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        let config = hermes_home(home).join("config.yaml");
+        vec![
+            config.clone(),
+            profile_config::original_config_path(&config),
+        ]
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
         detected_plugin_dirs(home)
             .into_iter()
@@ -338,7 +346,7 @@ pub(super) fn write_text_file(path: &Path, contents: &str) -> Result<()> {
 }
 
 pub(super) fn remove_generated_file(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
+    match super::safe_remove_host_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(TraceDecayError::Config {

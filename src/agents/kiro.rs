@@ -23,8 +23,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
-    safe_write_json_file,
+    backup_and_write_json, backup_config_file, config_backup_path, load_json_file,
+    load_json_file_strict, safe_write_json_file,
 };
 
 /// Kiro agent.
@@ -242,7 +242,7 @@ impl AgentIntegration for KiroIntegration {
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        uninstall_mcp_server(&mcp_config_path(&ctx.home));
+        uninstall_mcp_server(&mcp_config_path(&ctx.home))?;
         remove_steering_rules(&steering_path(&ctx.home));
         remove_kiro_managed_skill_index(&ctx.home, &managed_skill_index_path(&ctx.home));
         let agent_path = managed_agent_path(&ctx.home);
@@ -279,10 +279,10 @@ impl AgentIntegration for KiroIntegration {
             HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
         };
 
-        if component != HostBundleComponentV1::Core {
+        if component != HostBundleComponentV1::ContextMcp {
             return State::Missing;
         }
-        kiro_core_registration_state(&ctx.home)
+        kiro_context_mcp_registration_state(&ctx.home)
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -301,6 +301,41 @@ impl AgentIntegration for KiroIntegration {
             steering_path(home),
             managed_skill_index_path(home),
         ]
+    }
+
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+            let path = mcp_config_path(home);
+            vec![path.clone(), config_backup_path(&path)]
+        } else {
+            self.host_registration_paths(home)
+        }
+    }
+
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            install_mcp_server(&mcp_config_path(&ctx.home), &ctx.tracedecay_bin)?;
+        }
+        Ok(())
+    }
+
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            uninstall_mcp_server(&mcp_config_path(&ctx.home))?;
+        }
+        Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -685,39 +720,54 @@ or proprietary code from the bug description before submitting.",
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
-fn uninstall_mcp_server(path: &Path) {
+fn uninstall_mcp_server(path: &Path) -> Result<()> {
     if !path.exists() {
         eprintln!("  {} not found, skipping", path.display());
-        return;
+        return Ok(());
     }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
+    let contents = std::fs::read_to_string(path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to read {}: {error}", path.display()),
+    })?;
+    let mut config = serde_json::from_str::<serde_json::Value>(&contents).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("failed to parse {} as JSON: {error}", path.display()),
+        }
+    })?;
     let Some(servers) = config.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
         eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
-        return;
+        return Ok(());
     };
     let removed = servers.remove("tracedecay").is_some();
     if !removed {
         eprintln!("  No tracedecay MCP server in {}, skipping", path.display());
-        return;
+        return Ok(());
     }
     if servers.is_empty() {
         config.as_object_mut().map(|o| o.remove("mcpServers"));
     }
     let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
-        std::fs::remove_file(path).ok();
+        backup_config_file(path)?;
+        super::safe_remove_host_file(path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        })?;
+        tracedecay_application::sync_parent_directory(
+            path,
+            tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to durably remove {}: {error}", path.display()),
+        })?;
         eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else if backup_and_write_json(path, &config) {
+    } else {
+        let backup = backup_config_file(path)?;
+        safe_write_json_file(path, &config, backup.as_deref())?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
             path.display()
         );
     }
+    Ok(())
 }
 
 fn remove_steering_rules(path: &Path) {
@@ -746,7 +796,7 @@ fn remove_steering_rules(path: &Path) {
     }
     let new_contents = new_contents.trim().to_string();
     if new_contents.is_empty() {
-        std::fs::remove_file(path).ok();
+        super::safe_remove_host_file(path).ok();
         eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
     } else {
         std::fs::write(path, format!("{new_contents}\n")).ok();
@@ -765,14 +815,11 @@ fn uninstall_managed_agent(path: &Path) {
         eprintln!("  {} is user-managed, leaving unchanged", path.display());
         return;
     }
-    if std::fs::remove_file(path).is_ok() {
+    if super::safe_remove_host_file(path).is_ok() {
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay Kiro agent from {}",
             path.display()
         );
-        if let Some(parent) = path.parent() {
-            std::fs::remove_dir(parent).ok();
-        }
     }
 }
 
@@ -811,7 +858,7 @@ fn uninstall_default_agent(path: &Path, agent_path: &Path, owned_agent: bool) {
 
     let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
-        std::fs::remove_file(path).ok();
+        super::safe_remove_host_file(path).ok();
         eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
     } else if backup_and_write_json(path, &config) {
         eprintln!(
@@ -837,7 +884,7 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
             == Some(OWNED_AGENT_DESCRIPTION)
 }
 
-fn kiro_core_registration_state(
+fn kiro_context_mcp_registration_state(
     home: &Path,
 ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
     use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
@@ -866,52 +913,7 @@ fn kiro_core_registration_state(
     if !mcp_current {
         return State::Repairable;
     }
-
-    let Ok(steering) = std::fs::read_to_string(steering_path(home)) else {
-        return State::Repairable;
-    };
-    if !steering.contains(&prompt_rules_text()) {
-        return State::Repairable;
-    }
-
-    let Ok(agent_bytes) = std::fs::read(managed_agent_path(home)) else {
-        return State::Repairable;
-    };
-    let Ok(agent) = serde_json::from_slice::<serde_json::Value>(&agent_bytes) else {
-        return State::Corrupt;
-    };
-    if !is_owned_agent_config(&agent) {
-        return State::Corrupt;
-    }
-    let steering_resource = file_resource_uri(&steering_path(home));
-    let agent_current = agent
-        .get("includeMcpJson")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-        && agent
-            .get("resources")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|resources| {
-                resources
-                    .iter()
-                    .any(|resource| resource.as_str() == Some(steering_resource.as_str()))
-            })
-        && json_array_contains_str(&agent, "tools", KIRO_AGENT_ALL_TOOLS)
-        && json_array_contains_str(&agent, "allowedTools", KIRO_ALLOWED_BUILTIN_TOOLS)
-        && json_array_contains_str(&agent, "allowedTools", KIRO_ALLOWED_TRACEDECAY_TOOLS)
-        && KIRO_MANAGED_HOOKS.iter().all(|hook| {
-            find_agent_hook(&agent, hook.event, hook.matcher, hook.subcommand).is_some_and(
-                |entry| {
-                    entry.get("timeout_ms").and_then(serde_json::Value::as_u64)
-                        == Some(hook.timeout_ms)
-                },
-            )
-        });
-    if agent_current {
-        State::Current
-    } else {
-        State::Repairable
-    }
+    State::Current
 }
 
 /// True when the steering file carries either the current or the legacy

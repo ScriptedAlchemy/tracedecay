@@ -20,7 +20,6 @@
 //! tool-permission allowlist and the CLAUDE.md steering block have no plugin
 //! equivalent and are preserved.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -29,8 +28,9 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_and_write_json, expected_tool_perms, load_json_file, load_json_file_strict,
-    safe_write_json_file, safe_write_text_file, write_json_file,
+    backup_and_write_json, config_backup_path, expected_tool_perms, load_json_file,
+    load_json_file_strict, safe_write_bytes_file, safe_write_json_file, safe_write_text_file,
+    write_json_file,
 };
 
 /// Claude Code agent.
@@ -46,36 +46,9 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let claude_dir = ctx.home.join(".claude");
-        let settings_path = claude_dir.join("settings.json");
-        let claude_md_path = claude_dir.join("CLAUDE.md");
-
-        ensure_claude_dir(&claude_dir)?;
-
-        // Deploy the plugin bundle + register the marketplace + enable it.
+        // Deploy the plugin bundle before activating its native registration.
         let deploy_dir = deploy_plugin_bundle(&ctx.home, &ctx.tracedecay_bin)?;
-        register_marketplace(&ctx.home, &deploy_dir)?;
-
-        let mut settings = load_json_file_strict(&settings_path)?;
-        enable_plugin(&mut settings);
-        // Preserve MCP tool auto-approval: removing it would reintroduce
-        // per-tool prompts even though the server is now plugin-provided.
-        install_permissions(&mut settings, &ctx.tool_permissions);
-        write_json_file(&settings_path, &settings)?;
-
-        // Migrate off the old config-managed integration (idempotent).
-        migrate_off_config_managed(&ctx.home);
-
-        install_claude_md_rules(&claude_md_path)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &claude_md_path,
-            crate::automation::skill_targets::SkillInstallTarget::Claude,
-        )?;
-        let project_path = std::env::current_dir().map_err(|error| TraceDecayError::Config {
-            message: format!("failed to resolve Claude project path: {error}"),
-        })?;
-        install_clean_local_config(&project_path)?;
+        activate_claude_registration(ctx, &deploy_dir)?;
         sync_claude_plugin_cache(&ctx.home, &ctx.tracedecay_bin);
 
         eprintln!();
@@ -114,31 +87,25 @@ impl AgentIntegration for ClaudeIntegration {
             &claude_md_path,
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
-        uninstall_claude_md_rules(&claude_md_path);
-        Ok(())
+        uninstall_claude_md_rules(&claude_md_path)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let claude_dir = ctx.home.join(".claude");
-        let settings_path = claude_dir.join("settings.json");
-        let claude_md_path = claude_dir.join("CLAUDE.md");
-
-        // Remove the plugin: marketplace registration, enablement, deployed dir.
-        unregister_marketplace(&ctx.home)?;
-        uninstall_settings(&settings_path);
+        deactivate_claude_registration(ctx)?;
         remove_deployed_bundle(&ctx.home)?;
-
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &claude_md_path,
-            crate::automation::skill_targets::SkillInstallTarget::Claude,
-        )?;
-        uninstall_claude_md_rules(&claude_md_path);
 
         eprintln!();
         eprintln!("Uninstall complete. TraceDecay has been removed from Claude Code.");
         eprintln!("Restart Claude Code for changes to take effect.");
         Ok(())
+    }
+
+    fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        activate_claude_registration(ctx, &plugin_deploy_dir(&ctx.home))
+    }
+
+    fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        deactivate_claude_registration(ctx)
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
@@ -166,7 +133,7 @@ impl AgentIntegration for ClaudeIntegration {
         install_permissions(&mut settings, &ctx.tool_permissions);
         write_json_file(&settings_path, &settings)?;
 
-        migrate_off_config_managed(&ctx.home);
+        migrate_off_config_managed(&ctx.home)?;
 
         // Refresh the managed CLAUDE.md steering block so an `update-plugin`
         // rewrites a stale block to the current moment-trigger text. The block
@@ -197,17 +164,25 @@ impl AgentIntegration for ClaudeIntegration {
             HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
         };
 
-        let deploy_dir = plugin_deploy_dir(&ctx.home);
-        let manifest_path = plugin_marketplace_manifest_path(&ctx.home);
-        let settings = load_json_file(&ctx.home.join(".claude/settings.json"));
+        let settings = match read_optional_json(&ctx.home.join(".claude/settings.json")) {
+            Ok(Some(settings)) => settings,
+            Ok(None) => json!({}),
+            Err(()) => return State::Corrupt,
+        };
         let enabled = settings
             .pointer("/enabledPlugins/tracedecay@tracedecay")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        let marketplace_registered = load_json_file(&known_marketplaces_path(&ctx.home))
+        let marketplace = match read_optional_json(&known_marketplaces_path(&ctx.home)) {
+            Ok(Some(marketplace)) => marketplace,
+            Ok(None) => json!({}),
+            Err(()) => return State::Corrupt,
+        };
+        let marketplace_registered = marketplace
             .pointer("/tracedecay/source/source")
             .and_then(serde_json::Value::as_str)
             == Some("directory");
+        let marketplace_residue = marketplace.get("tracedecay").is_some();
         let permissions = settings
             .pointer("/permissions/allow")
             .and_then(serde_json::Value::as_array)
@@ -218,42 +193,39 @@ impl AgentIntegration for ClaudeIntegration {
                         .any(|value| value.as_str() == Some(expected.as_str()))
                 })
             });
-        let manifest_bytes = match std::fs::read(&manifest_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return if marketplace_registered || enabled || permissions {
-                    State::Repairable
-                } else {
-                    State::Missing
-                };
-            }
-            Err(_) => return State::Corrupt,
+        let settings_residue = settings
+            .pointer("/enabledPlugins/tracedecay@tracedecay")
+            .is_some()
+            || settings.pointer("/mcpServers/tracedecay").is_some()
+            || settings
+                .pointer("/permissions/allow")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .as_str()
+                            .is_some_and(|permission| permission.contains("tracedecay"))
+                    })
+                })
+            || settings_has_tracedecay_hooks(&ctx.home.join(".claude/settings.json"));
+        let legacy_residue = match claude_legacy_registration_residue(ctx) {
+            Ok(residue) => residue,
+            Err(()) => return State::Corrupt,
         };
-        let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) else {
-            return State::Corrupt;
-        };
-        if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
-            return State::Corrupt;
+        if !marketplace_residue && !settings_residue && !legacy_residue {
+            return State::Missing;
         }
-        let mcp_current = load_json_file(&deploy_dir.join(".mcp.json"))
-            .get("mcpServers")
-            .and_then(|servers| servers.get("graph"))
-            .is_some();
         if matches!(
             component,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
         ) {
-            return if marketplace_registered && enabled && permissions && mcp_current {
+            return if marketplace_registered && enabled && permissions {
                 State::Current
             } else {
                 State::Repairable
             };
         }
-        let core_current = marketplace_registered
-            && enabled
-            && permissions
-            && deploy_dir.join("hooks/hooks.json").is_file()
-            && deploy_dir.join(".lsp.json").is_file();
+        let core_current = marketplace_registered && enabled && permissions;
         if core_current {
             State::Current
         } else {
@@ -314,17 +286,31 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        let mut paths = vec![
+        vec![
             plugin_marketplace_manifest_path(home),
             known_marketplaces_path(home),
+            config_backup_path(&known_marketplaces_path(home)),
+            claude_original_config_path(&known_marketplaces_path(home)),
             home.join(".claude/settings.json"),
+            config_backup_path(&home.join(".claude/settings.json")),
+            claude_original_config_path(&home.join(".claude/settings.json")),
             home.join(".claude/CLAUDE.md"),
             home.join(".claude.json"),
-        ];
-        if let Ok(project_path) = std::env::current_dir() {
-            paths.push(project_path.join(".mcp.json"));
-            paths.push(project_path.join(".claude/settings.local.json"));
-        }
+            home.join(".claude/agents/code-explorer.md"),
+            home.join(".claude/agents/code-health-auditor.md"),
+            home.join(".claude/agents/session-historian.md"),
+        ]
+    }
+
+    fn host_component_registration_paths_at(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        project_path: &Path,
+    ) -> Vec<PathBuf> {
+        let mut paths = self.host_registration_paths(home);
+        paths.push(project_path.join(".mcp.json"));
+        paths.push(project_path.join(".claude/settings.local.json"));
         paths
     }
 
@@ -333,6 +319,85 @@ impl AgentIntegration for ClaudeIntegration {
         // the legacy config-managed path (loose ~/.claude.json MCP entry).
         plugin_marketplace_manifest_path(home).exists() || config_managed_mcp_present(home)
     }
+}
+
+fn activate_claude_registration(ctx: &InstallContext, deploy_dir: &Path) -> Result<()> {
+    let claude_dir = ctx.home.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+    ensure_claude_dir(&claude_dir)?;
+    register_marketplace(&ctx.home, deploy_dir)?;
+
+    let mut settings = load_json_file_strict(&settings_path)?;
+    let settings_backup = claude_original_config_path(&settings_path);
+    if settings
+        .pointer("/enabledPlugins/tracedecay@tracedecay")
+        .is_none()
+        && settings_path.is_file()
+        && !settings_backup.exists()
+    {
+        let original = std::fs::read(&settings_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to snapshot {}: {error}", settings_path.display()),
+        })?;
+        safe_write_bytes_file(&settings_backup, &original, None)?;
+    }
+    enable_plugin(&mut settings);
+    install_permissions(&mut settings, &ctx.tool_permissions);
+    write_json_file(&settings_path, &settings)?;
+    let project_path = std::env::current_dir().map_err(|error| TraceDecayError::Config {
+        message: format!("failed to resolve Claude project path: {error}"),
+    })?;
+    install_clean_local_config(&project_path)?;
+    migrate_off_config_managed(&ctx.home)?;
+    install_claude_md_rules(&claude_md_path)?;
+    super::install_managed_skill_prompt_index(
+        &ctx.home,
+        &claude_md_path,
+        crate::automation::skill_targets::SkillInstallTarget::Claude,
+    )
+}
+
+fn deactivate_claude_registration(ctx: &InstallContext) -> Result<()> {
+    let settings_path = ctx.home.join(".claude/settings.json");
+    let claude_md_path = ctx.home.join(".claude/CLAUDE.md");
+    unregister_marketplace(&ctx.home)?;
+    uninstall_settings(&settings_path)?;
+    restore_original_json_if_equivalent(&settings_path)?;
+    migrate_off_config_managed(&ctx.home)?;
+    let project_path = std::env::current_dir().map_err(|error| TraceDecayError::Config {
+        message: format!("failed to resolve Claude project path: {error}"),
+    })?;
+    install_clean_local_config(&project_path)?;
+    super::remove_managed_skill_prompt_index(
+        &ctx.home,
+        &claude_md_path,
+        crate::automation::skill_targets::SkillInstallTarget::Claude,
+    )?;
+    uninstall_claude_md_rules(&claude_md_path)
+}
+
+fn restore_original_json_if_equivalent(path: &Path) -> Result<bool> {
+    let backup_path = claude_original_config_path(path);
+    let Ok(original) = std::fs::read(&backup_path) else {
+        return Ok(false);
+    };
+    let current = std::fs::read(path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to read {}: {error}", path.display()),
+    })?;
+    if serde_json::from_slice::<serde_json::Value>(&original).ok()
+        != serde_json::from_slice::<serde_json::Value>(&current).ok()
+    {
+        return Ok(false);
+    }
+    safe_write_bytes_file(path, &original, None)?;
+    super::safe_remove_host_file(&backup_path).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to remove {}: {error}", backup_path.display()),
+    })?;
+    Ok(true)
+}
+
+fn claude_original_config_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.tracedecay-original", path.display()))
 }
 
 /// True when the legacy loose MCP server entry is still present in
@@ -346,6 +411,40 @@ fn config_managed_mcp_present(home: &Path) -> bool {
     json.get("mcpServers")
         .and_then(|v| v.get("tracedecay"))
         .is_some()
+}
+
+fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Value>, ()> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| ()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn claude_legacy_registration_residue(ctx: &HealthcheckContext) -> std::result::Result<bool, ()> {
+    for path in [
+        ctx.home.join(".claude.json"),
+        ctx.project_path.join(".mcp.json"),
+        ctx.project_path.join(".claude/settings.local.json"),
+    ] {
+        if read_optional_json(&path)?
+            .as_ref()
+            .is_some_and(|value| value.to_string().contains("tracedecay"))
+        {
+            return Ok(true);
+        }
+    }
+    let agents_dir = ctx.home.join(".claude/agents");
+    for file_name in LEGACY_SUBAGENT_FILES {
+        let path = agents_dir.join(file_name);
+        match std::fs::read_to_string(path) {
+            Ok(contents) if contents.contains("tracedecay") => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(false)
 }
 
 /// True when a project's local `.mcp.json` declares the tracedecay MCP server,
@@ -611,6 +710,13 @@ fn register_marketplace(home: &Path, deploy_dir: &Path) -> Result<()> {
     if unchanged {
         return Ok(());
     }
+    let backup_path = claude_original_config_path(&path);
+    if known.get(MARKETPLACE_NAME).is_none() && path.is_file() && !backup_path.exists() {
+        let original = std::fs::read(&path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to snapshot {}: {error}", path.display()),
+        })?;
+        safe_write_bytes_file(&backup_path, &original, None)?;
+    }
     known[MARKETPLACE_NAME] = json!({
         "source": source,
         "installLocation": install_location,
@@ -754,6 +860,17 @@ fn unregister_marketplace(home: &Path) -> Result<()> {
     if !removed {
         return Ok(());
     }
+    let backup_path = claude_original_config_path(&path);
+    if let Ok(original) = std::fs::read(&backup_path)
+        && serde_json::from_slice::<serde_json::Value>(&original).ok() == Some(known.clone())
+    {
+        safe_write_bytes_file(&path, &original, None)?;
+        super::safe_remove_host_file(&backup_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", backup_path.display()),
+        })?;
+        eprintln!("\x1b[32m✔\x1b[0m Restored {} byte-for-byte", path.display());
+        return Ok(());
+    }
     let is_empty = known.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
         super::safe_remove_host_file(&path).map_err(|error| TraceDecayError::Config {
@@ -830,55 +947,53 @@ const LEGACY_SUBAGENT_FILES: &[&str] = &[
 /// Run the full migration off the config-managed integration (idempotent):
 /// strip the loose MCP entry, the tracedecay hooks, and the loose subagents.
 /// Keeps the permission allowlist and CLAUDE.md rules (no plugin equivalent).
-fn migrate_off_config_managed(home: &Path) {
-    migrate_remove_loose_mcp(&home.join(".claude.json"));
-    migrate_remove_hooks(&home.join(".claude/settings.json"));
-    migrate_remove_loose_subagents(&home.join(".claude/agents"));
+fn migrate_off_config_managed(home: &Path) -> Result<()> {
+    migrate_remove_loose_mcp(&home.join(".claude.json"))?;
+    migrate_remove_hooks(&home.join(".claude/settings.json"))?;
+    migrate_remove_loose_subagents(&home.join(".claude/agents"))
 }
 
 /// Remove `mcpServers.tracedecay` from `~/.claude.json` (now plugin-provided).
-fn migrate_remove_loose_mcp(claude_json_path: &Path) {
+fn migrate_remove_loose_mcp(claude_json_path: &Path) -> Result<()> {
     if !claude_json_path.exists() {
-        return;
+        return Ok(());
     }
-    let Ok(mut claude_json) = load_json_file_strict(claude_json_path) else {
-        return;
-    };
+    let mut claude_json = load_json_file_strict(claude_json_path)?;
     let Some(servers) = claude_json
         .get_mut("mcpServers")
         .and_then(|v| v.as_object_mut())
     else {
-        return;
+        return Ok(());
     };
     if servers.remove("tracedecay").is_none() {
-        return;
+        return Ok(());
     }
     if servers.is_empty() {
         claude_json.as_object_mut().map(|o| o.remove("mcpServers"));
     }
-    if backup_and_write_json(claude_json_path, &claude_json) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Migrated: removed config-managed MCP server from {}",
-            claude_json_path.display()
-        );
-    }
+    safe_write_json_file(claude_json_path, &claude_json, None)?;
+    eprintln!(
+        "\x1b[32m✔\x1b[0m Migrated: removed config-managed MCP server from {}",
+        claude_json_path.display()
+    );
+    Ok(())
 }
 
 /// Remove every tracedecay hook (command contains `"tracedecay"`) from the
 /// five events in `settings.json`, leaving non-tracedecay hooks intact.
-fn migrate_remove_hooks(settings_path: &Path) {
+fn migrate_remove_hooks(settings_path: &Path) -> Result<()> {
     if !settings_path.exists() {
-        return;
+        return Ok(());
     }
-    let Ok(mut settings) = load_json_file_strict(settings_path) else {
-        return;
-    };
-    if remove_tracedecay_hooks(&mut settings) && backup_and_write_json(settings_path, &settings) {
+    let mut settings = load_json_file_strict(settings_path)?;
+    if remove_tracedecay_hooks(&mut settings) {
+        safe_write_json_file(settings_path, &settings, None)?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Migrated: removed config-managed hooks from {}",
             settings_path.display()
         );
     }
+    Ok(())
 }
 
 /// Strip tracedecay hook entries from all managed events. Returns true if
@@ -936,21 +1051,27 @@ fn hook_wrapper_is_tracedecay(wrapper: &serde_json::Value) -> bool {
 
 /// Remove the loose tracedecay-managed subagent files. A same-named file that
 /// does not reference tracedecay is user-authored and left untouched.
-fn migrate_remove_loose_subagents(agents_dir: &Path) {
+fn migrate_remove_loose_subagents(agents_dir: &Path) -> Result<()> {
     let mut removed = 0usize;
     for &file_name in LEGACY_SUBAGENT_FILES {
         let path = agents_dir.join(file_name);
-        if path.exists()
-            && subagent_file_is_tracedecay_managed(&path)
-            && std::fs::remove_file(&path).is_ok()
-        {
+        if !path.exists() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", path.display()),
+        })?;
+        if contents.contains("tracedecay") {
+            super::safe_remove_host_file(&path).map_err(|error| TraceDecayError::Config {
+                message: format!("failed to remove {}: {error}", path.display()),
+            })?;
             removed += 1;
         }
     }
     if removed > 0 {
-        std::fs::remove_dir(agents_dir).ok(); // only if now empty
         eprintln!("\x1b[32m✔\x1b[0m Migrated: removed {removed} loose tracedecay subagent(s)");
     }
+    Ok(())
 }
 
 /// True when a subagent file was written by tracedecay (references the tool)
@@ -1282,19 +1403,8 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
         let stripped = super::prompt_rules::splice_out(&existing_md, range.start, range.end);
         return super::prompt_rules::write_refreshed(claude_md_path, &stripped, &block);
     }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(claude_md_path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", claude_md_path.display()),
-        })?;
-    write!(f, "\n{block}\n").map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to append tracedecay rules to {}: {e}",
-            claude_md_path.display()
-        ),
-    })?;
+    let new_contents = format!("{existing_md}\n{block}\n");
+    safe_write_text_file(claude_md_path, &new_contents, None)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Appended tracedecay rules to {}",
         claude_md_path.display()
@@ -1347,13 +1457,13 @@ fn install_clean_local_config(project_path: &Path) -> Result<()> {
 
     let local_settings_path = project_path.join(".claude").join("settings.local.json");
     if local_settings_path.exists() {
-        clean_local_settings_file(project_path, &local_settings_path)?;
+        clean_local_settings_file(&local_settings_path)?;
     }
     Ok(())
 }
 
 /// Remove tracedecay entries from a local settings.local.json file.
-fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) -> Result<()> {
+fn clean_local_settings_file(local_settings_path: &Path) -> Result<()> {
     let contents =
         std::fs::read_to_string(local_settings_path).map_err(|error| TraceDecayError::Config {
             message: format!("failed to read {}: {error}", local_settings_path.display()),
@@ -1392,6 +1502,8 @@ fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) ->
         }
     }
 
+    modified |= remove_tracedecay_hooks(&mut local_val);
+
     if modified {
         clean_orphaned_local_mcp_keys(&mut local_val);
     }
@@ -1414,20 +1526,6 @@ fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) ->
             "\x1b[32m✔\x1b[0m Removed {} (tracedecay should only be in the plugin)",
             local_settings_path.display()
         );
-        let claude_dir = project_path.join(".claude");
-        match std::fs::remove_dir(&claude_dir) {
-            Ok(()) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                ) => {}
-            Err(error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!("failed to remove {}: {error}", claude_dir.display()),
-                });
-            }
-        }
     } else {
         safe_write_json_file(local_settings_path, &local_val, None)?;
         eprintln!(
@@ -1444,13 +1542,11 @@ fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) ->
 
 /// Remove plugin enablement, tracedecay tool permissions, any stale MCP
 /// server, and any leftover tracedecay hooks from settings.json.
-fn uninstall_settings(settings_path: &Path) {
+fn uninstall_settings(settings_path: &Path) -> Result<()> {
     if !settings_path.exists() {
-        return;
+        return Ok(());
     }
-    let Ok(mut settings) = load_json_file_strict(settings_path) else {
-        return;
-    };
+    let mut settings = load_json_file_strict(settings_path)?;
     let mut modified = false;
 
     modified |= disable_plugin(&mut settings);
@@ -1458,9 +1554,11 @@ fn uninstall_settings(settings_path: &Path) {
     modified |= remove_tracedecay_hooks(&mut settings);
     modified |= uninstall_permissions(&mut settings);
 
-    if modified && backup_and_write_json(settings_path, &settings) {
+    if modified {
+        safe_write_json_file(settings_path, &settings, None)?;
         eprintln!("\x1b[32m✔\x1b[0m Wrote {}", settings_path.display());
     }
+    Ok(())
 }
 
 /// Remove stale MCP server from settings.json. Returns true if modified.
@@ -1487,8 +1585,11 @@ fn uninstall_permissions(settings: &mut serde_json::Value) -> bool {
     let filtered: Vec<serde_json::Value> = arr
         .into_iter()
         .filter(|v| {
-            !v.as_str()
-                .is_some_and(|s| s.starts_with("mcp__tracedecay__"))
+            !v.as_str().is_some_and(|s| {
+                s.starts_with("mcp__tracedecay__")
+                    || s.starts_with("mcp__plugin_tracedecay_graph__")
+                    || s.starts_with("mcp__plugin_tracedecay_tracedecay__")
+            })
         })
         .collect();
     if filtered.len()
@@ -1518,35 +1619,39 @@ fn uninstall_permissions(settings: &mut serde_json::Value) -> bool {
 /// Remove tracedecay rules from CLAUDE.md.
 ///
 /// Handles the steady marker plus display-case product name.
-fn uninstall_claude_md_rules(claude_md_path: &Path) {
+fn uninstall_claude_md_rules(claude_md_path: &Path) -> Result<()> {
     if !claude_md_path.exists() {
-        return;
+        return Ok(());
     }
-    let Ok(contents) = std::fs::read_to_string(claude_md_path) else {
-        return;
-    };
+    let contents =
+        std::fs::read_to_string(claude_md_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", claude_md_path.display()),
+        })?;
     if !contents.contains("tracedecay") {
         eprintln!("  CLAUDE.md does not contain tracedecay rules, skipping");
-        return;
+        return Ok(());
     }
     // Try steady marker first, then display-case marker.
     let Some(range) = claude_md_rules_block_range(&contents, CLAUDE_MD_UNINSTALL_MARKERS) else {
-        return;
+        return Ok(());
     };
     let new_contents = super::prompt_rules::splice_out(&contents, range.start, range.end);
     if new_contents.is_empty() {
-        std::fs::remove_file(claude_md_path).ok();
+        super::safe_remove_host_file(claude_md_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", claude_md_path.display()),
+        })?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed {} (was empty)",
             claude_md_path.display()
         );
     } else {
-        std::fs::write(claude_md_path, format!("{new_contents}\n")).ok();
+        safe_write_text_file(claude_md_path, &format!("{new_contents}\n"), None)?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay rules from {}",
             claude_md_path.display()
         );
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1798,7 +1903,7 @@ fn doctor_check_local_config(dc: &mut DoctorCounters, project_path: &Path) {
 
     let local_settings_path = project_path.join(".claude").join("settings.local.json");
     if local_settings_path.exists() {
-        local_cleaned |= doctor_clean_local_settings(dc, project_path, &local_settings_path);
+        local_cleaned |= doctor_clean_local_settings(dc, &local_settings_path);
     }
 
     if !local_cleaned && !mcp_json_path.exists() && !local_settings_path.exists() {
@@ -1826,7 +1931,7 @@ fn doctor_clean_local_mcp_json(dc: &mut DoctorCounters, mcp_json_path: &Path) ->
     };
     servers.remove("tracedecay");
     if servers.is_empty() {
-        if std::fs::remove_file(mcp_json_path).is_ok() {
+        if super::safe_remove_host_file(mcp_json_path).is_ok() {
             dc.warn(&format!(
                 "Removed {} (tracedecay should only be in the plugin)",
                 mcp_json_path.display()
@@ -1843,11 +1948,7 @@ fn doctor_clean_local_mcp_json(dc: &mut DoctorCounters, mcp_json_path: &Path) ->
 
 /// Remove tracedecay from local .claude/settings.local.json.
 /// Returns true if cleaned.
-fn doctor_clean_local_settings(
-    dc: &mut DoctorCounters,
-    project_path: &Path,
-    local_settings_path: &Path,
-) -> bool {
+fn doctor_clean_local_settings(dc: &mut DoctorCounters, local_settings_path: &Path) -> bool {
     let Ok(contents) = std::fs::read_to_string(local_settings_path) else {
         return false;
     };
@@ -1891,13 +1992,11 @@ fn doctor_clean_local_settings(
 
     let is_empty = local_val.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
-        if std::fs::remove_file(local_settings_path).is_ok() {
+        if super::safe_remove_host_file(local_settings_path).is_ok() {
             dc.warn(&format!(
                 "Removed {} (tracedecay should only be in the plugin)",
                 local_settings_path.display()
             ));
-            let claude_dir = project_path.join(".claude");
-            std::fs::remove_dir(&claude_dir).ok();
         }
     } else if backup_and_write_json(local_settings_path, &local_val) {
         dc.warn(&format!(
@@ -1964,13 +2063,29 @@ pub fn check_install_stale() {
     {
         warn_missing_permissions(&settings);
     }
-    migrate_off_config_managed(&home);
+    if let Err(error) = migrate_off_config_managed(&home) {
+        eprintln!("warning: Claude legacy migration failed: {error}");
+    }
 
     // --- project-level: strip any tracedecay hooks a project pinned ---
-    if let Ok(cwd) = std::env::current_dir() {
-        let project_claude = cwd.join(".claude");
-        migrate_remove_hooks(&project_claude.join("settings.json"));
-        migrate_remove_hooks(&project_claude.join("settings.local.json"));
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("warning: Claude project path resolution failed: {error}");
+            return;
+        }
+    };
+    let project_claude = cwd.join(".claude");
+    for path in [
+        project_claude.join("settings.json"),
+        project_claude.join("settings.local.json"),
+    ] {
+        if let Err(error) = migrate_remove_hooks(&path) {
+            eprintln!(
+                "warning: Claude project hook migration failed for {}: {error}",
+                path.display()
+            );
+        }
     }
 }
 

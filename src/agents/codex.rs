@@ -15,14 +15,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use toml_edit::{DocumentMut, Item, Table, value};
 use tracedecay_domain::canonical_sha256;
 
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, InstallScope,
-    UpdatePluginOutcome, load_json_file, load_json_file_strict, load_toml_file,
-    safe_write_json_file, safe_write_text_file, write_toml_file,
+    AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
+    InstallScope, NonInteractiveInstallOutcome, UpdatePluginOutcome, config_backup_path,
+    load_json_file, load_json_file_strict, load_toml_file, safe_write_json_file,
+    safe_write_text_file,
 };
 
 /// `OpenAI` Codex CLI agent.
@@ -45,7 +47,9 @@ impl AgentIntegration for CodexIntegration {
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. In Codex, run: codex plugin add tracedecay@{marketplace_name}");
+        eprintln!(
+            "  2. In Codex's plugin UI, activate tracedecay from the {marketplace_name} marketplace"
+        );
         eprintln!("  3. Start a new Codex session — tracedecay tools are now available");
         announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
         Ok(())
@@ -53,6 +57,25 @@ impl AgentIntegration for CodexIntegration {
 
     fn supports_local_install(&self) -> bool {
         true
+    }
+
+    fn prepare_non_interactive_install(
+        &self,
+        ctx: &InstallContext,
+    ) -> Result<NonInteractiveInstallOutcome> {
+        install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
+        Ok(NonInteractiveInstallOutcome::DeferredUserAction(
+            DeferredUserAction {
+                remediation: "Non-interactive Codex plugin activation is unavailable. The plugin \
+                              source was staged but is not installed. In Codex's plugin UI, \
+                              activate tracedecay from the personal marketplace, then re-run doctor."
+                    .to_string(),
+                staged_paths: vec![
+                    codex_plugin_manifest_path(&ctx.home),
+                    codex_personal_marketplace_path(&ctx.home),
+                ],
+            },
+        ))
     }
 
     fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
@@ -83,8 +106,7 @@ impl AgentIntegration for CodexIntegration {
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let codex_dir = ctx.home.join(".codex");
         let config_path = codex_dir.join("config.toml");
-
-        uninstall_mcp_server(&config_path)?;
+        uninstall_codex_config(&config_path)?;
         uninstall_codex_plugin(&ctx.home)?;
 
         let agents_md = codex_dir.join("AGENTS.md");
@@ -158,7 +180,7 @@ impl AgentIntegration for CodexIntegration {
                 "\x1b[1mAction required:\x1b[0m migrated the legacy Codex config-managed \
                  install to the personal plugin bundle."
             );
-            eprintln!("  In Codex, run: codex plugin add tracedecay@personal");
+            eprintln!("  In Codex's plugin UI, activate tracedecay from the personal marketplace");
         }
         // Auto-trust the personal bundle's hooks whenever one is present, so a
         // refresh (which may have changed hook content) re-pins trust without a
@@ -255,12 +277,10 @@ impl AgentIntegration for CodexIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle_v2::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
 
         let candidates = [
             ctx.home.join(".codex/plugins/tracedecay"),
@@ -276,35 +296,10 @@ impl AgentIntegration for CodexIntegration {
         if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
             return State::Corrupt;
         }
-        let marketplace_current = load_json_file(&codex_personal_marketplace_path(&ctx.home))
-            .get("plugins")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|plugins| {
-                plugins.iter().any(|entry| {
-                    entry.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay")
-                })
-            });
-        let mcp_current =
-            codex_mcp_timeouts_current(&load_json_file(&plugin_dir.join(".mcp.json")));
-        if matches!(
-            component,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
-        ) {
-            return if marketplace_current && mcp_current {
-                State::Current
-            } else {
-                State::Repairable
-            };
-        }
-        let hooks = load_json_file(&plugin_dir.join("hooks/hooks.json"));
-        let hooks_current = CODEX_MANAGED_HOOKS
-            .iter()
-            .all(|hook| codex_hook_present(&hooks, hook.event, hook.subcommand));
-        if marketplace_current && hooks_current {
-            State::Current
-        } else {
-            State::Repairable
-        }
+        // Codex exposes no supported non-interactive activation/readback
+        // surface. A valid deployed source bundle is therefore repairable,
+        // never proof that the host activated any component.
+        State::Repairable
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -320,6 +315,25 @@ impl AgentIntegration for CodexIntegration {
         ))
     }
 
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        let mut paths = vec![
+            codex_config_path(home),
+            codex_personal_marketplace_path(home),
+        ];
+        paths.extend([
+            config_backup_path(&codex_config_path(home)),
+            config_backup_path(&codex_personal_marketplace_path(home)),
+        ]);
+        let current_cache = codex_plugin_current_cached_install_dir(home);
+        paths.extend(codex_plugin_managed_paths(&current_cache));
+        for cache in codex_plugin_cached_install_dirs(home) {
+            paths.extend(codex_plugin_managed_paths(&cache));
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     fn host_component_registration_paths(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -330,6 +344,24 @@ impl AgentIntegration for CodexIntegration {
             paths.extend(crate::automation::agent_targets::managed_agent_transaction_paths(home));
         }
         paths
+    }
+
+    fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        install_codex_marketplace_entry(
+            &codex_personal_marketplace_path(&ctx.home),
+            "personal",
+            "Personal",
+            "./plugins/tracedecay",
+        )?;
+        sync_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin)?;
+        Err(TraceDecayError::Config {
+            message: "Codex plugin activation is unavailable through a supported non-interactive host surface; activate tracedecay from Codex's plugin UI".to_string(),
+        })
+    }
+
+    fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        uninstall_codex_config(&codex_config_path(&ctx.home))?;
+        remove_codex_marketplace_entry(&ctx.home)
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -573,7 +605,7 @@ fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
             return;
         }
     }
-    if let Err(err) = uninstall_mcp_server(config_path) {
+    if let Err(err) = uninstall_codex_config(config_path) {
         eprintln!(
             "  Could not remove project-local Codex MCP config from {}: {err}",
             config_path.display()
@@ -1100,15 +1132,20 @@ struct CodexHookTrustSyncOutcome {
 fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookTrustSyncOutcome> {
     let (marketplace_name, entries) = codex_installed_hook_trust_entries(home)?;
     let config_path = codex_config_path(home);
-    let mut config = load_toml_file(&config_path)?;
-    let table = config
+    let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut document =
+        contents
+            .parse::<DocumentMut>()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to parse {} as TOML: {error}. Refusing to overwrite it.",
+                    config_path.display()
+                ),
+            })?;
+    let hooks = document
         .as_table_mut()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!("{} is not a TOML table", config_path.display()),
-        })?;
-    let hooks = table
         .entry("hooks")
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        .or_insert_with(|| Item::Table(Table::new()));
     let hooks = hooks
         .as_table_mut()
         .ok_or_else(|| TraceDecayError::Config {
@@ -1116,7 +1153,7 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
         })?;
     let state = hooks
         .entry("state")
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        .or_insert_with(|| Item::Table(Table::new()));
     let state = state
         .as_table_mut()
         .ok_or_else(|| TraceDecayError::Config {
@@ -1140,39 +1177,19 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
             skipped.push(entry.event_label.clone());
             continue;
         }
-        let mut record = toml::value::Table::new();
-        record.insert(
-            "trusted_hash".to_string(),
-            toml::Value::String(entry.hash.clone()),
-        );
-        state.insert(entry.trust_key.clone(), toml::Value::Table(record));
+        let mut record = Table::new();
+        record.insert("trusted_hash", value(entry.hash.clone()));
+        state.insert(&entry.trust_key, Item::Table(record));
         trusted += 1;
     }
 
-    write_codex_hook_trust_config(&config_path, &config)?;
+    write_codex_document(&config_path, &document)?;
     Ok(CodexHookTrustSyncOutcome { trusted, skipped })
 }
 
-/// Codex's hook loader requires the parent table to be explicit on disk. The
-/// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
-/// which parses equivalently but still triggers Codex's hook-review prompt.
-fn write_codex_hook_trust_config(config_path: &Path, config: &toml::Value) -> Result<()> {
-    super::backup_file(config_path)?;
-    let contents = toml::to_string_pretty(config).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to serialize {}: {error}", config_path.display()),
-    })?;
-    let Some(child_offset) = contents.find("[hooks.state.\"") else {
-        return Err(TraceDecayError::Config {
-            message: "Codex hook trust state serialized without hook entries".to_string(),
-        });
-    };
-    let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
-    updated.push_str(&contents[..child_offset]);
-    updated.push_str("[hooks.state]\n\n");
-    updated.push_str(&contents[child_offset..]);
-    std::fs::write(config_path, updated).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to write {}: {error}", config_path.display()),
-    })?;
+fn write_codex_document(config_path: &Path, document: &DocumentMut) -> Result<()> {
+    let backup = super::backup_config_file(config_path)?;
+    safe_write_text_file(config_path, &document.to_string(), backup.as_deref())?;
     eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
     Ok(())
 }
@@ -1406,7 +1423,7 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
         return Ok(());
     };
     if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(&skills_dir).map_err(|e| TraceDecayError::Config {
+        super::safe_remove_host_file(&skills_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", skills_dir.display()),
         })?;
     } else if metadata.is_dir() {
@@ -1433,7 +1450,7 @@ fn remove_codex_plugin_managed_skills(install_dir: &Path, skills_dir: &Path) -> 
     files.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for file in files {
         if managed.contains(&file) || codex_skill_file_is_legacy_tracedecay_managed(&file) {
-            std::fs::remove_file(&file).map_err(|e| TraceDecayError::Config {
+            super::safe_remove_host_file(&file).map_err(|e| TraceDecayError::Config {
                 message: format!("failed to remove {}: {e}", file.display()),
             })?;
         }
@@ -1522,7 +1539,7 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
         return Ok(());
     };
     if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(install_dir).map_err(|e| TraceDecayError::Config {
+        super::safe_remove_host_file(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),
         })?;
         return Ok(());
@@ -1550,7 +1567,7 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
         })?;
     } else {
         for path in codex_plugin_managed_paths(install_dir) {
-            std::fs::remove_file(&path).ok();
+            super::safe_remove_host_file(&path).ok();
         }
     }
     Ok(())
@@ -1680,6 +1697,68 @@ fn print_hook_trust_guidance() {
 // Uninstall helpers
 // ---------------------------------------------------------------------------
 
+fn uninstall_codex_config(config_path: &Path) -> Result<()> {
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let contents =
+        std::fs::read_to_string(config_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", config_path.display()),
+        })?;
+    let mut document =
+        contents
+            .parse::<DocumentMut>()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to parse {} as TOML: {error}. Refusing to overwrite it.",
+                    config_path.display()
+                ),
+            })?;
+    let mut changed = false;
+    if let Some(hooks) = document.get_mut("hooks").and_then(Item::as_table_mut) {
+        if let Some(state) = hooks.get_mut("state").and_then(Item::as_table_mut) {
+            let previous_len = state.len();
+            state.retain(|key, _| !key.starts_with("tracedecay@"));
+            changed |= state.len() != previous_len;
+            if state.is_empty() {
+                hooks.remove("state");
+            }
+        }
+        if hooks.is_empty() {
+            document.as_table_mut().remove("hooks");
+        }
+    }
+    if let Some(servers) = document.get_mut("mcp_servers").and_then(Item::as_table_mut) {
+        changed |= servers.remove("tracedecay").is_some();
+        if servers.is_empty() {
+            document.as_table_mut().remove("mcp_servers");
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let backup = super::backup_config_file(config_path)?;
+    let updated = document.to_string();
+    if updated.trim().is_empty() {
+        super::safe_remove_host_file(config_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", config_path.display()),
+        })?;
+        tracedecay_application::sync_parent_directory(
+            config_path,
+            tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to durably remove {}: {error}",
+                config_path.display()
+            ),
+        })?;
+    } else {
+        safe_write_text_file(config_path, &updated, backup.as_deref())?;
+    }
+    Ok(())
+}
+
 /// Remove tracedecay-owned hook groups from a Codex `hooks.json`.
 fn uninstall_hooks(hooks_path: &Path) {
     let subcommands: Vec<&str> = CODEX_MANAGED_HOOKS
@@ -1716,7 +1795,7 @@ fn uninstall_hooks(hooks_path: &Path) {
         .and_then(|h| h.as_object())
         .is_some_and(serde_json::Map::is_empty);
     if is_empty {
-        std::fs::remove_file(hooks_path).ok();
+        super::safe_remove_host_file(hooks_path).ok();
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed {} (was empty)",
             hooks_path.display()
@@ -1727,46 +1806,6 @@ fn uninstall_hooks(hooks_path: &Path) {
             hooks_path.display()
         );
     }
-}
-
-/// Remove MCP server from ~/.codex/config.toml.
-fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
-    if !config_path.exists() {
-        return Ok(());
-    }
-    let mut config = load_toml_file(config_path)?;
-    let Some(table) = config.as_table_mut() else {
-        return Ok(());
-    };
-    let Some(servers) = table.get_mut("mcp_servers").and_then(|v| v.as_table_mut()) else {
-        return Ok(());
-    };
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return Ok(());
-    }
-    if servers.is_empty() {
-        table.remove("mcp_servers");
-    }
-    if table.is_empty() {
-        let _ = super::backup_file(config_path);
-        std::fs::remove_file(config_path).ok();
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed {} (was empty)",
-            config_path.display()
-        );
-    } else {
-        write_toml_file(config_path, &config)?;
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        );
-    }
-    Ok(())
 }
 
 /// Remove tracedecay rules from AGENTS.md.
@@ -1800,7 +1839,7 @@ fn uninstall_prompt_rules(agents_md: &Path) {
     }
     let new_contents = new_contents.trim().to_string();
     if new_contents.is_empty() {
-        std::fs::remove_file(agents_md).ok();
+        super::safe_remove_host_file(agents_md).ok();
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed {} (was empty)",
             agents_md.display()

@@ -6,7 +6,7 @@
 //! `OpenCode` uses interactive runtime approval rather than declarative tool
 //! permissions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
@@ -234,7 +234,9 @@ impl AgentIntegration for OpenCodeIntegration {
         if components.contains(&HostBundleComponentV1::Core)
             || components.contains(&HostBundleComponentV1::ContextMcp)
         {
-            paths.push(opencode_config_path(home));
+            let config = opencode_config_path(home);
+            paths.push(config.clone());
+            paths.push(opencode_original_config_path(&config));
         }
         if components.contains(&HostBundleComponentV1::Core) {
             let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
@@ -243,6 +245,7 @@ impl AgentIntegration for OpenCodeIntegration {
                 &profile_root,
             ));
         }
+        paths.extend(external_opencode_asset_paths(home, components));
         paths
     }
 
@@ -275,6 +278,7 @@ impl AgentIntegration for OpenCodeIntegration {
                 crate::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
         }
+        mirror_external_opencode_assets(&ctx.home, components)?;
         Ok(())
     }
 
@@ -297,6 +301,7 @@ impl AgentIntegration for OpenCodeIntegration {
             )?;
             uninstall_prompt_rules(&prompt);
         }
+        remove_external_opencode_assets(&ctx.home, components)?;
         Ok(())
     }
 
@@ -363,36 +368,145 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Returns the path to opencode config (global).
-/// Prefers `$HOME/.config/opencode/opencode.json`. Falls back to
-/// `$XDG_CONFIG_HOME/opencode/opencode.json` only when the XDG path
-/// is under `home` (so tests with temp-dir homes are never polluted by
-/// the real user's environment).
+/// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME`.
 fn opencode_config_path(home: &Path) -> std::path::PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        let xdg_path = std::path::PathBuf::from(&xdg);
-        if xdg_path.starts_with(home) {
-            return xdg_path.join("opencode/opencode.json");
-        }
-    }
-    home.join(".config/opencode/opencode.json")
+    opencode_config_path_for(home, std::env::var_os("XDG_CONFIG_HOME").as_deref())
+}
+
+fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
+    xdg.map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".config"))
+        .join("opencode/opencode.json")
 }
 
 /// Returns the path to the global AGENTS.md prompt file.
 fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return xdg.join("opencode/AGENTS.md");
+    }
     let modern = home.join(".config/opencode/AGENTS.md");
     if modern.exists() || home.join(".config/opencode").exists() {
-        return modern;
+        modern
+    } else {
+        home.join("AGENTS.md")
     }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        let xdg_path = std::path::PathBuf::from(&xdg);
-        if xdg_path.starts_with(home) {
-            let xdg_dir = xdg_path.join("opencode");
-            if xdg_dir.exists() {
-                return xdg_dir.join("AGENTS.md");
+}
+
+fn opencode_asset_relative_paths(
+    components: &[super::host_bundle_v2::HostBundleComponentV1],
+) -> Vec<std::path::PathBuf> {
+    use super::host_bundle_v2::HostBundleComponentV1;
+
+    let mut paths = Vec::new();
+    if components.contains(&HostBundleComponentV1::Core)
+        && let Ok(files) = rendered_plugin_files("tracedecay")
+    {
+        paths.extend(
+            files
+                .into_iter()
+                .map(|(relative, _)| std::path::PathBuf::from(relative)),
+        );
+    }
+    if components.contains(&HostBundleComponentV1::Agent) {
+        paths.extend(
+            super::plugin_bundle::opencode_agent_files()
+                .into_iter()
+                .map(|(relative, _)| std::path::PathBuf::from(relative)),
+        );
+    }
+    if components.contains(&HostBundleComponentV1::ContextMcp) {
+        paths.extend([
+            std::path::PathBuf::from("plugins/tracedecay-mcp.ts"),
+            std::path::PathBuf::from("tracedecay/opencode.registration.json"),
+        ]);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn external_opencode_asset_paths(
+    home: &Path,
+    components: &[super::host_bundle_v2::HostBundleComponentV1],
+) -> Vec<std::path::PathBuf> {
+    let root = opencode_config_path(home)
+        .parent()
+        .unwrap_or(home)
+        .to_path_buf();
+    external_opencode_asset_paths_for(home, &root, components)
+}
+
+fn external_opencode_asset_paths_for(
+    home: &Path,
+    root: &Path,
+    components: &[super::host_bundle_v2::HostBundleComponentV1],
+) -> Vec<std::path::PathBuf> {
+    if root == home.join(".config/opencode") {
+        return Vec::new();
+    }
+    opencode_asset_relative_paths(components)
+        .into_iter()
+        .map(|relative| root.join(relative))
+        .collect()
+}
+
+fn mirror_external_opencode_assets(
+    home: &Path,
+    components: &[super::host_bundle_v2::HostBundleComponentV1],
+) -> Result<()> {
+    let root = opencode_config_path(home)
+        .parent()
+        .unwrap_or(home)
+        .to_path_buf();
+    mirror_external_opencode_assets_to(home, &root, components)
+}
+
+fn mirror_external_opencode_assets_to(
+    home: &Path,
+    root: &Path,
+    components: &[super::host_bundle_v2::HostBundleComponentV1],
+) -> Result<()> {
+    let relative_paths = opencode_asset_relative_paths(components);
+    let destinations = external_opencode_asset_paths_for(home, root, components);
+    for (relative, destination) in relative_paths.iter().zip(destinations) {
+        let source = home.join(".config/opencode").join(relative);
+        let bytes = std::fs::read(&source).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to read deployed OpenCode asset {}: {error}",
+                source.display()
+            ),
+        })?;
+        super::safe_write_bytes_file(&destination, &bytes, None)?;
+    }
+    Ok(())
+}
+
+fn remove_external_opencode_assets(
+    home: &Path,
+    components: &[super::host_bundle_v2::HostBundleComponentV1],
+) -> Result<()> {
+    for path in external_opencode_asset_paths(home, components) {
+        match super::safe_remove_host_file(&path) {
+            Ok(()) => tracedecay_application::sync_parent_directory(
+                &path,
+                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to durably remove {}: {error}", path.display()),
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to remove {}: {error}", path.display()),
+                });
             }
         }
     }
-    home.join("AGENTS.md")
+    Ok(())
 }
 
 fn opencode_plugin_path(home: &Path) -> std::path::PathBuf {
@@ -440,7 +554,7 @@ fn remove_opencode_plugin(path: &Path) -> Result<()> {
             ),
         });
     }
-    std::fs::remove_file(path).map_err(|error| crate::errors::TraceDecayError::Config {
+    super::safe_remove_host_file(path).map_err(|error| crate::errors::TraceDecayError::Config {
         message: format!("failed to remove {}: {error}", path.display()),
     })
 }
@@ -481,6 +595,15 @@ fn install_registration_entries(
             return Err(e);
         }
     };
+    let original_path = opencode_original_config_path(config_path);
+    let has_tracedecay =
+        config.pointer("/mcp/tracedecay").is_some() || config.pointer("/lsp/tracedecay").is_some();
+    if !has_tracedecay && config_path.is_file() && !original_path.exists() {
+        let original = std::fs::read(config_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to snapshot {}: {error}", config_path.display()),
+        })?;
+        super::safe_write_bytes_file(&original_path, &original, None)?;
+    }
 
     let config_object = config
         .as_object_mut()
@@ -644,13 +767,23 @@ fn remove_registration_entries(
         );
         return Ok(());
     }
+    let original_path = opencode_original_config_path(config_path);
+    if let Ok(original) = std::fs::read(&original_path)
+        && serde_json::from_slice::<serde_json::Value>(&original).ok() == Some(config.clone())
+    {
+        super::safe_write_bytes_file(config_path, &original, None)?;
+        super::safe_remove_host_file(&original_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", original_path.display()),
+        })?;
+        return Ok(());
+    }
     let backup = preserve_backup
         .then(|| backup_config_file(config_path))
         .transpose()?
         .flatten();
     let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
-        std::fs::remove_file(config_path).map_err(|error| TraceDecayError::Config {
+        super::safe_remove_host_file(config_path).map_err(|error| TraceDecayError::Config {
             message: format!("failed to remove {}: {error}", config_path.display()),
         })?;
         eprintln!(
@@ -665,6 +798,10 @@ fn remove_registration_entries(
         );
     }
     Ok(())
+}
+
+fn opencode_original_config_path(config_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
 /// Remove tracedecay rules from AGENTS.md.
@@ -814,5 +951,44 @@ mod tests {
             config["lsp"]["rust-analyzer"]["command"],
             json!(["rust-analyzer"])
         );
+    }
+
+    #[test]
+    fn config_path_honors_external_absolute_xdg_root() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            opencode_config_path_for(home.path(), Some(xdg.path().as_os_str())),
+            xdg.path().join("opencode/opencode.json")
+        );
+        assert!(!xdg.path().starts_with(home.path()));
+    }
+
+    #[test]
+    fn external_xdg_assets_are_mirrored_byte_for_byte() {
+        use crate::agents::host_bundle_v2::HostBundleComponentV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let components = [HostBundleComponentV1::ContextMcp];
+        for (index, relative) in opencode_asset_relative_paths(&components)
+            .iter()
+            .enumerate()
+        {
+            let source = home.path().join(".config/opencode").join(relative);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, format!("asset-{index}\n")).unwrap();
+        }
+
+        let external_root = xdg.path().join("opencode");
+        mirror_external_opencode_assets_to(home.path(), &external_root, &components).unwrap();
+
+        for relative in opencode_asset_relative_paths(&components) {
+            assert_eq!(
+                std::fs::read(external_root.join(&relative)).unwrap(),
+                std::fs::read(home.path().join(".config/opencode").join(relative)).unwrap()
+            );
+        }
     }
 }

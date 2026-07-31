@@ -940,12 +940,19 @@ async fn dispatch_agent_command(
                 agent_cmd::handle_uninstall_command(agent).await?;
             }
         }
-        Commands::FeedbackRollback { action } => {
-            if host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes {
+        Commands::FeedbackRollback { mut action } => {
+            if host_bundle.component.is_some() || host_bundle.dry_run {
                 return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "feedback-rollback uses its action-specific --yes/--state flags"
+                    message: "feedback-rollback does not accept host-component selectors"
                         .to_string(),
                 });
+            }
+            match &mut action {
+                crate::cli::FeedbackRollbackAction::Apply { yes, .. }
+                | crate::cli::FeedbackRollbackAction::Restore { yes, .. } => {
+                    *yes |= host_bundle.yes;
+                }
+                crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
             }
             agent_cmd::handle_feedback_rollback_command(action).await?;
         }
