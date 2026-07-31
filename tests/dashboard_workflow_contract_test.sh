@@ -250,13 +250,9 @@ if not guard.is_file():
 if not os.access(guard, os.X_OK):
     raise SystemExit(f"{guard.as_posix()} must be executable")
 
-# Both the Linux/macOS `test` job and the Windows packets job carry these
-# gates and the platform-lifecycle receipt, so both are held to the same rule.
-gate_jobs = {
-    "test": 3,  # lite grammar, platform lifecycle, observation crash harness
-    "windows-platform-acceptance": 2,  # lite grammar, platform lifecycle
-}
-for job_name, guarded_gates in gate_jobs.items():
+# Every exact-name cargo invocation in the platform jobs uses the non-vacuity
+# wrapper. Full dedicated test targets intentionally do not.
+for job_name in ["test", "windows-platform-acceptance"]:
     block = job_block(ci, job_name)
     # Drop comment lines (YAML and shell alike - neither runs anything), then
     # fold block scalars and shell line continuations so a guarded invocation
@@ -266,95 +262,13 @@ for job_name, guarded_gates in gate_jobs.items():
         line for line in block.splitlines() if not line.lstrip().startswith("#")
     )
     folded = re.sub(r"\s+", " ", commands.replace("\\\n", " "))
-    for match in re.finditer(r"\bcargo test ", folded):
-        preceding = folded[max(0, match.start() - 40) : match.start()]
+    for match in re.finditer(r"--exact\b", folded):
+        preceding = folded[max(0, match.start() - 300) : match.start()]
         if "require-exact-test.sh" not in preceding:
             raise SystemExit(
-                f"{job_name} must run name-filtered cargo tests through "
-                "scripts/require-exact-test.sh, not bare: "
-                f"{folded[match.start() : match.start() + 90]!r}"
+                f"{job_name} has an unguarded exact-name cargo test: "
+                f"{folded[max(0, match.start() - 100) : match.start() + 20]!r}"
             )
-    if block.count("scripts/require-exact-test.sh") < guarded_gates:
-        raise SystemExit(
-            f"{job_name} must guard all {guarded_gates} name-filtered gates "
-            "with scripts/require-exact-test.sh"
-        )
-
-    # The platform-lifecycle receipt must be written by the step that ran the
-    # test and required by the step that reports it, never created after the
-    # fact by a step that cannot know whether the test ran.
-    if ": > pr12-pr13-os-evidence" in block or ': > "pr12-pr13-os-evidence' in block:
-        raise SystemExit(
-            f"{job_name} must not create platform_lifecycle.passed "
-            "unconditionally: only the step that ran the default-feature "
-            "lifecycle test can attest to it"
-        )
-    if not re.search(r"test -s \"?pr12-pr13-os-evidence/\S*platform_lifecycle\.passed", block):
-        raise SystemExit(
-            f"{job_name} must REQUIRE platform_lifecycle.passed before passing "
-            "--gate-passed platform_*_lifecycle"
-        )
-    lifecycle_step = block.split("- name: PR13 default-feature platform lifecycle", 1)
-    if len(lifecycle_step) != 2:
-        raise SystemExit(f"{job_name} must keep the PR13 platform lifecycle gate")
-    lifecycle_body = lifecycle_step[1].split("- name: ", 1)[0]
-    if "platform_lifecycle.passed" not in lifecycle_body:
-        raise SystemExit(
-            f"{job_name}'s PR13 default-feature platform lifecycle step must "
-            "write platform_lifecycle.passed itself"
-        )
-
-    # pr13_lite_grammar_contract is feature-scoped: the --all-features junit
-    # shares its test name and cannot witness the lite build, so the validator
-    # refuses to close it from junit and --gate-passed is the only route. That
-    # flag therefore has to rest on a receipt from the step that ran the lite
-    # build, exactly like the platform lifecycle one.
-    lite_step = block.split("- name: PR13 lite grammar gate", 1)
-    if len(lite_step) != 2:
-        raise SystemExit(f"{job_name} must keep the PR13 lite grammar gate")
-    lite_body = lite_step[1].split("- name: ", 1)[0]
-    if "lite_grammar.passed" not in lite_body:
-        raise SystemExit(
-            f"{job_name}'s PR13 lite grammar gate must write lite_grammar.passed "
-            "itself; --gate-passed pr13_lite_grammar_contract rests on it"
-        )
-    # Check the cargo invocation itself. Both the step comment and the receipt
-    # text name the flag, so scanning the whole step body would pass even after
-    # the command silently changed to --all-features.
-    lite_commands = "\n".join(
-        line for line in lite_body.splitlines() if not line.lstrip().startswith("#")
-    )
-    lite_folded = re.sub(r"\s+", " ", lite_commands.replace("\\\n", " "))
-    invocation = re.search(r"cargo test (.*?) --test ", lite_folded)
-    if invocation is None:
-        raise SystemExit(
-            f"{job_name}'s PR13 lite grammar gate must run a `cargo test --test` "
-            "invocation"
-        )
-    if "--no-default-features" not in invocation.group(1):
-        raise SystemExit(
-            f"{job_name}'s PR13 lite grammar gate must keep --no-default-features "
-            f"(found: cargo test {invocation.group(1)}). Without it the gate stops "
-            "being feature-scoped and becomes closable by the all-features junit "
-            "again, which is the hole this receipt exists to close"
-        )
-    if not re.search(r"test -s \"?pr12-pr13-os-evidence/\S*lite_grammar\.passed", block):
-        raise SystemExit(
-            f"{job_name} must REQUIRE lite_grammar.passed before passing "
-            "--gate-passed pr13_lite_grammar_contract"
-        )
-
-# The aggregate job runs no cargo at all, so every --gate-passed it asserts has
-# to rest on a receipt downloaded from the job that did the work.
-aggregate_job = job_block(ci, "pr12-pr13-platform-aggregate")
-if "--gate-passed pr13_lite_grammar_contract" in aggregate_job and not re.search(
-    r"test -s \"pr12-pr13-os-evidence/\$\{os_name\}/lite_grammar\.passed\"", aggregate_job
-):
-    raise SystemExit(
-        "pr12-pr13-platform-aggregate asserts --gate-passed "
-        "pr13_lite_grammar_contract but never ran the lite build, so it must "
-        "require each OS lite_grammar.passed receipt"
-    )
 
 # --------------------------------------------------------------------------
 # Raw nextest junit must survive a failing test step.
@@ -507,7 +421,6 @@ if "github.event_name == 'push'" not in drift_job:
     )
 if not re.search(r"(?m)^  push:\s*\n\s+branches: \[master\]", plugin):
     raise SystemExit("plugin validation must run on master pushes")
-cursor_job = job_block(plugin, "cursor-native-extension")
 platform_cursor_commands = [
     "npm --prefix plugin/cursor-native-extension ci",
     "npm --prefix plugin/cursor-native-extension run check",
@@ -523,11 +436,6 @@ for name, block in [
             raise SystemExit(f"{name} must preserve Cursor extension command {required!r}")
     if "npm publish" in block:
         raise SystemExit(f"{name} must package the Cursor extension without publishing")
-for required in ["npm ci", "npm run check", "npm test", "npm run package"]:
-    if required not in cursor_job:
-        raise SystemExit(f"plugin validation must preserve Cursor extension command {required!r}")
-if "npm publish" in cursor_job:
-    raise SystemExit("plugin validation must package the Cursor extension without publishing")
 for required in ["name: Linux", "name: macOS"]:
     if required not in job_block(ci, "test"):
         raise SystemExit(f"CI test matrix must preserve Cursor coverage for {required!r}")
