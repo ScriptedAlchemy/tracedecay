@@ -547,7 +547,10 @@ mod tests {
         })
         .to_string();
 
-        let error = initialize_binding(&frame).unwrap_err();
+        let error = match initialize_binding(&frame) {
+            Ok(_) => panic!("duplicate canonical roots must be rejected"),
+            Err(error) => error,
+        };
         assert!(
             error.to_string().contains("duplicate canonical root"),
             "{error}"

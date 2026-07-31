@@ -27,7 +27,7 @@ impl RustAst {
         let mut parser = Parser::new();
         parser
             .set_language(
-                &tracedecay::extraction::ts_provider::language("rust")
+                &tracedecay_code_extraction::ts_provider::language("rust")
                     .expect("bundled Rust grammar"),
             )
             .expect("configure Rust parser");

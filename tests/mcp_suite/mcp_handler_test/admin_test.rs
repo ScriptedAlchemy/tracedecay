@@ -292,8 +292,7 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
         "tracedecay_project_context",
         json!({"path": "registered-alias", "format": "json"}),
     )
-    .await
-    .expect("registered test server");
+    .await;
 
     let message = response["error"]["message"]
         .as_str()
@@ -349,8 +348,7 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
         "tracedecay_project_search",
         json!({"query": "broken", "format": "json"}),
     )
-    .await
-    .expect("registered test server");
+    .await;
 
     let message = response["error"]["message"].as_str().unwrap_or_else(|| {
         panic!("registry read failure must not become a successful empty search: {response}")

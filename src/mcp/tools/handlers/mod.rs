@@ -580,6 +580,15 @@ impl Default for ToolCallRegistryOptions<'_> {
     }
 }
 
+impl<'a> ToolCallRegistryOptions<'a> {
+    pub fn with_session_authorities(session_authorities: SessionAuthorities<'a>) -> Self {
+        Self {
+            session_authorities,
+            ..Self::default()
+        }
+    }
+}
+
 pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,

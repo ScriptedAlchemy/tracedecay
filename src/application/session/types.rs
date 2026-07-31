@@ -48,7 +48,7 @@ pub struct SessionRequestBinding {
 }
 
 impl SessionRequestBinding {
-    pub(crate) fn new(
+    pub fn new(
         identity: ResolvedSessionIdentity,
         capability_digest: CapabilityDigest,
         policy_digest: PolicyDigest,

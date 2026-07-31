@@ -100,10 +100,9 @@ async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
         json!({}),
         None,
         None,
-        tracedecay::mcp::tools::ToolCallRegistryOptions {
-            session_authorities: runtime.mcp_session_authorities(),
-            ..Default::default()
-        },
+        tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
+            runtime.mcp_session_authorities(),
+        ),
     )
     .await
     .unwrap();
@@ -159,10 +158,9 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         json!({ "format": "json", "session_ingest_health": true }),
         None,
         None,
-        tracedecay::mcp::tools::ToolCallRegistryOptions {
-            session_authorities: runtime.mcp_session_authorities(),
-            ..Default::default()
-        },
+        tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
+            runtime.mcp_session_authorities(),
+        ),
     )
     .await
     .unwrap();

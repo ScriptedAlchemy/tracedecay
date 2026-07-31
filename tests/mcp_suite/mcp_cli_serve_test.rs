@@ -416,6 +416,8 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
             error: None,
             error_classification: None,
             error_retryable: None,
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
             fallback_status: None,
             report_ref: None,
             artifacts: vec![artifact],

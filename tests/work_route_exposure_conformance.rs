@@ -50,7 +50,7 @@ use tracedecay::application_surface::http_application_router;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
-use tracedecay_application::application_executable_binding_registry;
+use tracedecay_application::work_executable_binding_registry;
 use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -337,7 +337,7 @@ fn public_executable_routes_are_served_by_the_production_daemon() {
     assert_external_surface_is_authenticated_and_resolving(&agent, &fixture);
 
     let registry =
-        application_executable_binding_registry().expect("canonical application binding registry");
+        work_executable_binding_registry().expect("canonical application binding registry");
     let mut declared_routes = BTreeMap::new();
     let mut withheld = Vec::new();
     for availability in registry.iter() {
