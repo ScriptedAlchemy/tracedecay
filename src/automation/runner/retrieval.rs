@@ -597,6 +597,53 @@ fn project_automation_identity(
     ))
 }
 
+fn profile_automation_identity(
+    shard: &StoreShardIdV1,
+    profile_identity: &LocalProfileIdentityAuthorityV1,
+) -> Option<ResolvedSessionIdentity> {
+    Some(ResolvedSessionIdentity::for_profile(
+        profile_id(profile_identity)?,
+        session_store_id(shard)?,
+        SessionRootId::new(format!(
+            "root.sessions.profile.{}",
+            profile_identity.profile_id().as_str()
+        ))
+        .ok()?,
+    ))
+}
+
+pub(crate) async fn registered_profile_automation_retrieval(
+    database: Arc<RegisteredGlobalDb>,
+    profile_identity: &LocalProfileIdentityAuthorityV1,
+) -> Result<Box<dyn AutomationSessionRetrieval>> {
+    let shard = &database.binding().shard_id;
+    if !registered_scope_matches(
+        shard,
+        profile_identity.brain_id(),
+        profile_identity.profile_id(),
+        None,
+    ) {
+        return Err(TraceDecayError::Config {
+            message: "registered profile session runtime authority mismatch".to_string(),
+        });
+    }
+    let Some(identity) = profile_automation_identity(shard, profile_identity) else {
+        return Err(TraceDecayError::Config {
+            message: "invalid registered profile session retrieval identity".to_string(),
+        });
+    };
+    let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
+        return Ok(unavailable_automation_retrieval(
+            "session_evidence_retrieval_unavailable",
+        ));
+    };
+    Ok(Box::new(ProductionAutomationSessionRetrieval {
+        database,
+        identity,
+        anchor_session_id,
+    }))
+}
+
 pub(crate) async fn registered_project_automation_retrieval(
     database: Arc<RegisteredGlobalDb>,
     profile_identity: &LocalProfileIdentityAuthorityV1,
@@ -756,20 +803,17 @@ mod authority_tests {
     async fn project_retrieval_rejects_profile_scope_without_fallback() {
         let directory = tempdir().expect("temporary profile");
         let identity = load_or_create(directory.path()).expect("profile identity");
-        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
             .await
             .expect("session registry");
         let profile_sessions = registry.profile_sessions().await.expect("profile sessions");
         let project_id = ProjectId::new("project.automation.wrong-scope").expect("project id");
 
-        let error = registered_project_automation_retrieval(
-            profile_sessions,
-            registry.profile_identity(),
-            &project_id,
-        )
-        .await
-        .err()
-        .expect("profile authority must not become project retrieval");
+        let error =
+            registered_project_automation_retrieval(profile_sessions, &identity, &project_id)
+                .await
+                .err()
+                .expect("profile authority must not become project retrieval");
 
         assert!(
             error
@@ -824,7 +868,7 @@ mod authority_tests {
 
         let profile_sessions = registry.profile_sessions().await.expect("profile sessions");
         let profile_retrieval =
-            registered_profile_automation_retrieval(profile_sessions, registry.profile_identity())
+            registered_profile_automation_retrieval(profile_sessions, &identity)
                 .await
                 .expect("profile retrieval");
         assert_eq!(
@@ -837,13 +881,10 @@ mod authority_tests {
             .project_sessions(project_id.clone(), [directory.path().join("project")])
             .await
             .expect("project sessions");
-        let project_retrieval = registered_project_automation_retrieval(
-            project_sessions,
-            registry.profile_identity(),
-            &project_id,
-        )
-        .await
-        .expect("project retrieval");
+        let project_retrieval =
+            registered_project_automation_retrieval(project_sessions, &identity, &project_id)
+                .await
+                .expect("project retrieval");
         assert_eq!(
             typed_reject_reason(project_retrieval.as_ref()).await,
             "session_evidence_retrieval_unavailable"
