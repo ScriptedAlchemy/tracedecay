@@ -425,7 +425,6 @@ pub(crate) async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Opti
     rows.next().await.ok()??.get(0).ok()
 }
 
-#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
 pub(crate) async fn get_gc_meta(
     conn: &(impl QueryExecutor + ?Sized),
     key: &str,
@@ -439,7 +438,6 @@ pub(crate) async fn get_gc_meta(
     }
 }
 
-#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
 pub(crate) async fn set_gc_meta(
     conn: &(impl Executor + ?Sized),
     key: &str,
@@ -453,7 +451,6 @@ pub(crate) async fn set_gc_meta(
     Ok(())
 }
 
-#[allow(dead_code)] // Foundation slice: consumed by follow-up GC/reporting cards.
 pub(crate) async fn clear_gc_meta(
     conn: &(impl Executor + ?Sized),
     key: &str,
