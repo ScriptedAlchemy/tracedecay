@@ -26,7 +26,7 @@ use tracedecay_application::{
     ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, PolicyDecisionRef, PolicyEvaluationContextV1,
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1, RequestContext,
-    ResolvedScope,
+    ResolvedScope, now_micros,
 };
 use tracedecay_domain::configuration::{
     AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerLanguageId,
@@ -1016,18 +1016,6 @@ fn authorized_daemon_request_context(
         expected_requester,
         access.grant_expires_at,
         observed_at,
-    )
-}
-
-fn now_micros() -> UtcMicros {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    UtcMicros(
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_micros()),
-        )
-        .unwrap_or(i64::MAX),
     )
 }
 

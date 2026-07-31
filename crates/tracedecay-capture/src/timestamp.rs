@@ -1,4 +1,17 @@
-/// Parses a timezone-aware RFC3339 timestamp into non-negative Unix seconds.
+//! Zero-dependency civil-date and timestamp primitives.
+//!
+//! Shared by transcript ingest, the accounting parser, and the MCP session
+//! handlers so that "what counts as a valid timestamp" is decided once. The
+//! RFC3339 parser is deliberately the strict one: it requires an explicit
+//! timezone (`Z` or `±HH:MM`), validates calendar ranges including leap
+//! years, and rejects trailing garbage, while still accepting fractional
+//! seconds (which are truncated).
+
+/// Parses a timezone-aware RFC3339 timestamp (e.g. `2026-06-10T01:02:03Z`,
+/// `2026-06-10 01:02:03.123+02:00`) into non-negative Unix epoch seconds.
+///
+/// Returns `None` for missing or invalid timezone suffixes, out-of-range
+/// calendar or clock fields, and timestamps before the epoch.
 pub fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() < 20
@@ -72,6 +85,15 @@ pub fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
     (timestamp >= 0).then_some(timestamp)
 }
 
+/// Parses the human-readable timestamp Cursor injects into user prompts as
+/// `<timestamp>…</timestamp>` (e.g. `Wednesday, Jun 10, 2026, 9:11 AM (UTC+2)`)
+/// into Unix epoch seconds.
+///
+/// Cursor transcript JSONL carries no structured per-message timestamps, so
+/// this tag is the only per-message time signal ingest has. The parser is
+/// therefore tolerant: the weekday is optional, the clock accepts 12-hour
+/// (`AM`/`PM`) or 24-hour form, and the offset accepts `(UTC)`, `(UTC±H)`,
+/// and `(UTC±H:MM)`.
 pub fn parse_cursor_human_timestamp(value: &str) -> Option<i64> {
     let parts: Vec<&str> = value.split(',').map(str::trim).collect();
     let (month_day, year_part, time_part) = match parts.as_slice() {
@@ -119,6 +141,25 @@ pub fn parse_cursor_human_timestamp(value: &str) -> Option<i64> {
         + i64::from(hour) * 3_600
         + i64::from(minute) * 60;
     let timestamp = local_seconds - offset_seconds;
+    (timestamp >= 0).then_some(timestamp)
+}
+
+/// Parses a bare `YYYY-MM-DD` UTC calendar date into the Unix seconds of that
+/// day's start. Returns `None` for malformed input, invalid calendar fields,
+/// and dates before the epoch.
+pub fn parse_yyyy_mm_dd_utc_start(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let year = parse_fixed_i32(value, 0, 4)?;
+    let month = parse_fixed_u32(value, 5, 7)?;
+    let day = parse_fixed_u32(value, 8, 10)?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let timestamp = days.checked_mul(86_400)?;
     (timestamp >= 0).then_some(timestamp)
 }
 
@@ -181,7 +222,9 @@ fn is_leap_year(year: i32) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+/// Howard Hinnant's `days_from_civil`: days since 1970-01-01 for a civil date.
+#[must_use]
+pub fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let year = i64::from(year) - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
@@ -190,4 +233,21 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
+}
+
+/// Howard Hinnant's `civil_from_days`, the inverse of [`days_from_civil`]:
+/// a civil `(year, month, day)` for a count of days since 1970-01-01.
+#[must_use]
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = i64::from(yoe) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }

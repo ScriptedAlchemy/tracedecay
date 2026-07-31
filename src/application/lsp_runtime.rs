@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File};
@@ -25,7 +25,7 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::{
     AnchorExpandRequest, ApplicationOutcome, ApplicationResult, OperationTermination, PageRequest,
-    ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+    ResultProjection, RetrievalOrder, RetrievalRequestMeta, now_micros,
 };
 use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackCycleResultV1, FeedbackFindingLifecycleV1,
@@ -50,7 +50,7 @@ use tracedecay_lsp::{
     LspRange, LspRequestId, LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
     MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES, ManagedDiagnosticSnapshot,
     ManagedDiagnosticSnapshotPort, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
-    UpstreamCapabilities, byte_offset_to_utf16_position,
+    UpstreamCapabilities, byte_offset_to_utf16_position, percent_hex_nibble,
 };
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
 use tracedecay_store::DiagnosticStore as _;
@@ -2661,26 +2661,17 @@ fn decode_uri_segment(segment: &str) -> Result<Vec<u8>, LspRuntimeFailure> {
         let high = source
             .get(index + 1)
             .copied()
-            .and_then(hex_value)
+            .and_then(percent_hex_nibble)
             .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
         let low = source
             .get(index + 2)
             .copied()
-            .and_then(hex_value)
+            .and_then(percent_hex_nibble)
             .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
         decoded.push((high << 4) | low);
         index += 3;
     }
     Ok(decoded)
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn validated_document_path(
@@ -2789,13 +2780,6 @@ fn open_project_file(
 
 fn generation_sequence(generation: &CodeGenerationId) -> Option<u64> {
     generation.as_str().split('.').nth(3)?.parse().ok()
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_micros() as i64);
-    UtcMicros(micros)
 }
 
 fn micros_to_seconds(value: UtcMicros) -> i64 {

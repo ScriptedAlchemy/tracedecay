@@ -7,6 +7,7 @@ use super::config_error;
 use crate::errors::Result;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use tracedecay_application::DirectorySyncPolicy;
 
 use super::managed_skill_model::current_metadata_timestamp;
 pub use super::managed_skill_model::{
@@ -122,25 +123,9 @@ fn clean_staged_entries(entries: &[SkillTransactionEntry]) {
     }
 }
 
-#[cfg_attr(
-    not(unix),
-    allow(
-        clippy::unnecessary_wraps,
-        reason = "directory fsync is unavailable here, but transaction callers share one contract"
-    )
-)]
 fn sync_directory(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(path)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|error| config_error(format!("failed to sync '{}': {error}", path.display())))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
+        .map_err(|error| config_error(format!("failed to sync '{}': {error}", path.display())))
 }
 
 fn validate_transaction_entry(root: &Path, entry: &SkillTransactionEntry) -> Result<()> {

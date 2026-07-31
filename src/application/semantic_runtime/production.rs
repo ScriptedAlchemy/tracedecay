@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_application::now_micros;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkV1,
     CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore, LogicalEvidenceId,
@@ -2469,13 +2469,6 @@ fn provisional_vector_generation(source: &CodeGenerationId) -> VectorGenerationI
             .unwrap_or_else(|_| panic!("digest"))
     });
     VectorGenerationIdV1::new(digest)
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_micros() as i64);
-    UtcMicros(micros)
 }
 
 /// Process-local registry so Doctor/`tracedecay_runtime` can observe the

@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,7 +12,7 @@ use tracedecay_application::{
     OperationReceipt, OperationTermination, ReconciliationState, SourceEditAuthorizationPort,
     SourceEditDiagnosticV1, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
     SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditVerificationStateV1,
-    SourceEditVerificationV1, read_bounded, source_edit_operation,
+    SourceEditVerificationV1, now_micros, read_bounded, source_edit_operation,
     source_edit_reconciliation_operation, sync_parent_directory, with_owned_temp_publish,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
@@ -2379,15 +2378,6 @@ where
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|error| config_error(format!("{kind} is malformed: {error}")))
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros()
-        .min(i64::MAX as u128) as i64;
-    UtcMicros(micros)
 }
 
 async fn run_edit_verification(graph: &TraceDecay, file_path: &str) -> SourceEditVerificationV1 {

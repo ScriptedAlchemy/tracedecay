@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracedecay_application::feedback::FeedbackPortFuture;
 #[cfg(test)]
 use tracedecay_application::feedback::GitHubReviewReadRequestV1;
-use tracedecay_application::{RequestAdmission, RequestContext};
+use tracedecay_application::{RequestAdmission, RequestContext, now_micros};
 use tracedecay_domain::feedback::{
     GitHubReviewCursorV1, GitHubReviewEtagV1, GitHubReviewRateLimitCheckpointV1,
     GitHubReviewReadOperationV1,
@@ -1810,14 +1810,6 @@ fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
 fn valid_path_segment(value: &str) -> bool {

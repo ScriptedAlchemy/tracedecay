@@ -3,10 +3,7 @@
 //! These adapters own no daemon trigger, host transport, GitHub write client,
 //! CI runner, scheduler, lock, or agent continuation.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use tracedecay_application::{RequestAdmission, RequestContext};
-use tracedecay_domain::UtcMicros;
+use tracedecay_application::{RequestAdmission, RequestContext, now_micros};
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -142,12 +139,4 @@ pub(crate) fn context_allows_feedback_operation(
     context_matches_scope(context, scope)
         && context.admission_at(now_micros()) == RequestAdmission::Admitted
         && context.allows(&capability, &use_case)
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
