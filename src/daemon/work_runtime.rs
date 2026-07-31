@@ -31,6 +31,7 @@ mod native_cli;
 #[cfg(all(test, unix))]
 mod tests;
 
+#[cfg(test)]
 pub(crate) use codex_provider::CODEX_PROVIDER_ID;
 use codex_provider::{NativeWorkProviderConfigV1, NativeWorkProviderV1};
 

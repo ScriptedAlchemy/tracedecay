@@ -159,10 +159,10 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
 }
 
 fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
-    Ok(SchemaRef::new(
+    SchemaRef::new(
         SchemaId::new(id).expect("static Workflow schema ID is valid"),
         1,
-    )?)
+    )
 }
 
 #[cfg(test)]

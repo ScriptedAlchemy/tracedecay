@@ -166,7 +166,7 @@ impl MaintenanceCoordinator {
         interval: Duration,
     ) {
         let mut cadence = MaintenanceCadence::new(interval);
-        let retry_delay = interval.min(Duration::from_secs(60));
+        let retry_delay = interval.min(Duration::from_mins(1));
         let mut next_delay = retry_delay;
         loop {
             tokio::select! {
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn cadence_retries_failures_without_waiting_and_bounds_successes() {
         let started = Instant::now();
-        let mut cadence = MaintenanceCadence::new(Duration::from_secs(60));
+        let mut cadence = MaintenanceCadence::new(Duration::from_mins(1));
 
         assert!(cadence.reserve(started));
         assert!(!cadence.reserve(started));
@@ -484,7 +484,7 @@ mod tests {
         assert!(cadence.reserve(started));
         cadence.finish(started, true);
         assert!(!cadence.reserve(started + Duration::from_secs(59)));
-        assert!(cadence.reserve(started + Duration::from_secs(60)));
+        assert!(cadence.reserve(started + Duration::from_mins(1)));
     }
 
     #[test]

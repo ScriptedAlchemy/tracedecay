@@ -365,8 +365,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tracedecay_domain::{
-        ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId,
-        ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, WorkAttemptProjectionBindingV1,
+        AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
+        ProviderId, RefId, RepositoryId, RunId, TaskId, WorkAttemptProjectionBindingV1,
         WorkCancellationStateV1, WorkEffectStateV1, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1,
         WorkFenceEpochV1, WorkLeaseId, WorkProjectionSequenceV1, WorkProviderBackendV1,
         WorkProviderRouteId, WorkRecoveryStateV1, WorkVersion, WorkflowOperationRef, WorktreeId,

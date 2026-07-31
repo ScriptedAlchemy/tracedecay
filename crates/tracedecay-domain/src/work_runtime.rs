@@ -10,9 +10,8 @@ use thiserror::Error;
 use crate::{
     AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
     RefId, RepositoryId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkArtifactId,
-    WorkAuthority, WorkCancellationRequestId, WorkLeaseId, WorkProjection,
-    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderRouteId, WorkVersion,
-    WorkflowOperationRef, WorktreeId,
+    WorkCancellationRequestId, WorkLeaseId, WorkProjection, WorkProjectionSequenceV1,
+    WorkProjectionSnapshotV1, WorkProviderRouteId, WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 
 pub const MAX_WORK_ATTEMPT_ARTIFACTS: usize = 256;

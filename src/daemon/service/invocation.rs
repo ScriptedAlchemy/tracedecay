@@ -11586,10 +11586,10 @@ mod tests {
             grant_digest,
         )
         .expect("Work authority");
-        let registration_grant = grant.clone();
-        let policy_digest =
+        let _registration_grant = grant.clone();
+        let _policy_digest =
             ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest");
-        let configuration_digest = ManifestDigest::new(format!("sha256:{}", "f".repeat(64)))
+        let _configuration_digest = ManifestDigest::new(format!("sha256:{}", "f".repeat(64)))
             .expect("configuration digest");
         let service = DaemonInvocationService::default();
         DaemonWorkRuntimeRegistrar::new(&service)
@@ -12379,7 +12379,9 @@ for line in sys.stdin:
             ..
         } = cancelled_replay
         else {
-            panic!("pre-cancelled workflow replay must return canonical truth: {cancelled_replay:?}");
+            panic!(
+                "pre-cancelled workflow replay must return canonical truth: {cancelled_replay:?}"
+            );
         };
         assert_eq!(
             cancelled_replay.payload.as_ref(),
@@ -12476,9 +12478,7 @@ for line in sys.stdin:
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome:
-                WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(
-                    failed_replay,
-                )),
+                WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(failed_replay)),
             ..
         } = failed_replay
         else {
@@ -12938,10 +12938,8 @@ for line in sys.stdin:
             tracedecay_domain::WorkflowOperationRef::new("operation.work.attempt_start")
                 .expect("operation"),
             tracedecay_domain::WorkProviderRouteV1::new(
-                tracedecay_domain::ProviderId::new(
-                    crate::daemon::work_runtime::CODEX_PROVIDER_ID,
-                )
-                .expect("provider id"),
+                tracedecay_domain::ProviderId::new(crate::daemon::work_runtime::CODEX_PROVIDER_ID)
+                    .expect("provider id"),
                 tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
                     .expect("route id"),
             )

@@ -680,7 +680,7 @@ fn database_family_bytes(database_path: &Path) -> u64 {
     total_bytes
 }
 
-/// Copies a SQLite main/WAL/SHM family without opening the source path. The
+/// Copies a `SQLite` main/WAL/SHM family without opening the source path. The
 /// caller opens only `destination`, which prevents reporting from creating
 /// sidecars under the profile it is inspecting.
 fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> {

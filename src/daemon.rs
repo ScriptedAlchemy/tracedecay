@@ -1234,8 +1234,8 @@ mod scheduler;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
-pub(crate) mod workflow_runtime;
 pub(crate) mod work_runtime;
+pub(crate) mod workflow_runtime;
 
 /// Enables background maintenance only for long-lived daemon/MCP processes.
 ///
