@@ -200,7 +200,10 @@ impl PreparedQueryV1 {
                     &cursor_authentication_payload_bytes(&payload)?,
                 )
                 .map_err(map_authority_error)?;
-            (Some(encode_cursor(payload, authentication)?), Some(expires_at))
+            (
+                Some(encode_cursor(payload, authentication)?),
+                Some(expires_at),
+            )
         } else {
             (None, None)
         };
