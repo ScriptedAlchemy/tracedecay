@@ -4,17 +4,17 @@
 //! Exact-address authorization and durable mutation remain daemon authorities.
 
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UseCaseId,
+    AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
+    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
+    PaginationContract, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
+use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -76,31 +76,9 @@ pub fn context_scout_surface_catalog_contribution()
     for spec in &CONTEXT_SCOUT_SPECS {
         let is_effect = spec.effect.is_effect();
         let capability_id = capability_id(spec)?;
-        let mut binding_ids = Vec::with_capacity(SCOUT_SURFACES.len());
-        for surface in SCOUT_SURFACES {
-            let binding_id = BindingId::new(format!(
-                "binding.{}.{}.v1",
-                match surface {
-                    BindingSurface::Cli => "cli",
-                    BindingSurface::Mcp => "mcp",
-                    BindingSurface::Http => "http",
-                    BindingSurface::Lsp => "lsp",
-                    BindingSurface::Dashboard => "dashboard",
-                },
-                spec.operation
-            ))?;
-            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-                binding_id: binding_id.clone(),
-                capability_id: capability_id.clone(),
-                surface,
-                operation: SurfaceOperationName::new(spec.operation)?,
-                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-                required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
-            })?);
-            binding_ids.push(binding_id);
-        }
+        let (spec_bindings, binding_ids) =
+            current_bindings(&capability_id, spec.operation, SCOUT_SURFACES)?;
+        bindings.extend(spec_bindings);
         capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
             capability_id,
             use_case_id: use_case_id(spec)?,

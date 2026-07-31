@@ -375,15 +375,6 @@ impl SessionDerivedEvidenceRecordV1 {
         }
         EvidenceSpanIdV1::new(self.evidence_id.as_str())
     }
-
-    pub fn burst_id(&self) -> Result<EvidenceBurstIdV1, SessionContractError> {
-        if self.evidence_kind != DerivedEvidenceKindV1::Burst {
-            return Err(SessionContractError::InvalidIdentity {
-                field: "EvidenceBurstIdV1",
-            });
-        }
-        EvidenceBurstIdV1::new(self.evidence_id.as_str())
-    }
 }
 
 impl<'de> Deserialize<'de> for SessionDerivedEvidenceRecordV1 {

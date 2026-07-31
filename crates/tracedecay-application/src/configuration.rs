@@ -9,16 +9,17 @@ use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
 };
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange, ReceiptContract,
-    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1,
-    SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
+    AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
+    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
+    PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
+use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -191,25 +192,9 @@ pub fn configuration_surface_catalog_contribution()
 
     for spec in &CONFIGURATION_SPECS {
         let capability_id = CapabilityId::new(capability_id(spec.name))?;
-        let mut binding_ids = Vec::with_capacity(CONFIGURATION_SURFACES.len());
-        for surface in CONFIGURATION_SURFACES {
-            let binding_id = BindingId::new(format!(
-                "binding.{}.{}.v1",
-                surface_name(surface),
-                spec.name
-            ))?;
-            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-                binding_id: binding_id.clone(),
-                capability_id: capability_id.clone(),
-                surface,
-                operation: SurfaceOperationName::new(spec.name)?,
-                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-                required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
-            })?);
-            binding_ids.push(binding_id);
-        }
+        let (spec_bindings, binding_ids) =
+            current_bindings(&capability_id, spec.name, CONFIGURATION_SURFACES)?;
+        bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
 
@@ -405,16 +390,6 @@ fn operation_suffix(operation: &str) -> &str {
     operation
         .strip_prefix("configuration_")
         .unwrap_or(operation)
-}
-
-const fn surface_name(surface: BindingSurface) -> &'static str {
-    match surface {
-        BindingSurface::Cli => "cli",
-        BindingSurface::Mcp => "mcp",
-        BindingSurface::Http => "http",
-        BindingSurface::Lsp => "lsp",
-        BindingSurface::Dashboard => "dashboard",
-    }
 }
 
 #[cfg(test)]

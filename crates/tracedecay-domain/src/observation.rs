@@ -1617,9 +1617,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     }
 }
 
-pub type CanonicalObservationSanitizationReceiptMaterialV1 =
-    CanonicalClaudeSanitizationReceiptMaterialV1;
-
 fn validate_receipt_sensitivity(
     disposition: SanitizerDispositionV1,
     sensitivity: SensitivityV1,
@@ -1915,30 +1912,16 @@ fn domain_digest(
 }
 
 /// Every digest this identity material has legitimately produced, newest
-/// first. Element zero is the only one ever written.
+/// first. Element zero is the only one ever written; the rest exist so rows
+/// committed under an earlier derivation stay decodable.
 ///
 /// A stored row carries this digest under two names — `observation_id` and its
 /// `idempotency_key` alias, see [`DurableObservationV1::idempotency_key`] — so
-/// the two fields have to accept the same set. They did not, and that is how
-/// the same defect shipped twice: `observation_id` accepted the current and
-/// pre-native forms while `idempotency_key` accepted the current and pre-alias
-/// forms, so a row written between those two changes decoded for one field and
-/// was rejected by the other.
-///
-/// Three derivations have existed:
-///
-/// 1. Current, from `fix(ingest): preserve native observation identity`, which
-///    folds a native record id into the digest.
-/// 2. From `refactor(domain): canonicalize receipt identity`, which aliased
-///    `idempotency_key` onto `observation_id`. Rows written between it and (1)
-///    carry the whole material under the provider's domain.
-/// 3. The original `idempotency_key`, under its own domain separator, from
-///    before the two fields were one value.
-///
-/// Accepting an older entry grants nothing: every one digests the same identity
-/// material under a domain separator, so a row still binds to its own evidence.
-/// Rejecting them instead makes committed rows permanently undecodable, and
-/// nothing downstream can quarantine a row that will not decode.
+/// the two fields must accept exactly the same set. Accepting an older entry
+/// grants nothing: every one digests the same identity material under a domain
+/// separator, so a row still binds to its own evidence. Rejecting them makes
+/// committed rows permanently undecodable, and nothing downstream can
+/// quarantine a row that will not decode.
 ///
 /// A new derivation goes at the front of this list and nowhere else.
 ///

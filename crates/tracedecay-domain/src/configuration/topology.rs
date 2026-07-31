@@ -32,7 +32,7 @@ impl WorktreePlacementRootId {
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
-        Self::new(self.0.clone()).map(|_| ())
+        validate_ref_fragment(&self.0, "worktree placement root id")
     }
 }
 
@@ -71,6 +71,29 @@ fn validate_ref_fragment(value: &str, field: &'static str) -> Result<(), DomainE
     Ok(())
 }
 
+/// A canonical ref name is a ref fragment rooted at `refs/` that does not end
+/// in a path separator.
+fn validate_canonical_ref_name(value: &str) -> Result<(), DomainError> {
+    const FIELD: &str = "canonical Git ref name";
+
+    validate_ref_fragment(value, FIELD)?;
+    if !value.starts_with("refs/") || value.ends_with('/') {
+        return Err(DomainError::NonCanonical { field: FIELD });
+    }
+    Ok(())
+}
+
+/// A canonical ref prefix is a ref fragment that ends in a path separator.
+fn validate_canonical_ref_prefix(value: &str) -> Result<(), DomainError> {
+    const FIELD: &str = "canonical Git ref prefix";
+
+    validate_ref_fragment(value, FIELD)?;
+    if !value.ends_with('/') {
+        return Err(DomainError::NonCanonical { field: FIELD });
+    }
+    Ok(())
+}
+
 /// A validated full native Git ref name, such as `refs/heads/main`.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -79,12 +102,7 @@ pub struct CanonicalGitRefNameV1(String);
 impl CanonicalGitRefNameV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
         let value = value.into();
-        validate_ref_fragment(&value, "canonical Git ref name")?;
-        if !value.starts_with("refs/") || value.ends_with('/') {
-            return Err(DomainError::NonCanonical {
-                field: "canonical Git ref name",
-            });
-        }
+        validate_canonical_ref_name(&value)?;
         Ok(Self(value))
     }
 
@@ -93,7 +111,7 @@ impl CanonicalGitRefNameV1 {
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
-        Self::new(self.0.clone()).map(|_| ())
+        validate_canonical_ref_name(&self.0)
     }
 }
 
@@ -130,12 +148,7 @@ pub struct CanonicalGitRefPrefix(String);
 impl CanonicalGitRefPrefix {
     pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
         let value = value.into();
-        validate_ref_fragment(&value, "canonical Git ref prefix")?;
-        if !value.ends_with('/') {
-            return Err(DomainError::NonCanonical {
-                field: "canonical Git ref prefix",
-            });
-        }
+        validate_canonical_ref_prefix(&value)?;
         Ok(Self(value))
     }
 
@@ -144,7 +157,7 @@ impl CanonicalGitRefPrefix {
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
-        Self::new(self.0.clone()).map(|_| ())
+        validate_canonical_ref_prefix(&self.0)
     }
 }
 

@@ -19,18 +19,23 @@ const REPOSITORY_STATE_ID_DOMAIN: &str = "tracedecay.repository-state.v1";
 #[serde(transparent)]
 pub struct RepositoryStateSnapshotId(String);
 
+fn validate_repository_state_snapshot_id(value: &str) -> Result<(), DomainError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(DomainError::NonCanonical {
+            field: "repository state snapshot id",
+        });
+    }
+    Ok(())
+}
+
 impl RepositoryStateSnapshotId {
     pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
         let value = value.into();
-        if value.is_empty()
-            || value.trim() != value
-            || value.len() > 512
-            || value.chars().any(char::is_control)
-        {
-            return Err(DomainError::NonCanonical {
-                field: "repository state snapshot id",
-            });
-        }
+        validate_repository_state_snapshot_id(&value)?;
         Ok(Self(value))
     }
 
@@ -39,7 +44,7 @@ impl RepositoryStateSnapshotId {
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
-        Self::new(self.0.clone()).map(|_| ())
+        validate_repository_state_snapshot_id(&self.0)
     }
 }
 
