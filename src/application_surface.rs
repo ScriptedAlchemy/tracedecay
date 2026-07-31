@@ -921,7 +921,7 @@ pub enum ContextScoutSurfaceRequest {
     Resume(ContextScoutControlSurfaceRequest),
     Cancel(ContextScoutCancelSurfaceRequest),
     Claim(ContextScoutClaimSurfaceRequest),
-    Delivery(ContextScoutDeliverySurfaceRequest),
+    Delivery(Box<ContextScoutDeliverySurfaceRequest>),
     Feedback(ContextScoutFeedbackSurfaceRequest),
 }
 
@@ -987,18 +987,13 @@ pub struct GitPreviewSurfaceRequest {
     pub operation: GitIndexTransactionOperationV1,
     /// Compatibility input only. The daemon always replaces this value with a
     /// freshly minted preview identity before application admission.
-    #[serde(default = "pending_git_preview_id")]
+    #[serde(default)]
     pub preview_id: GitIndexPreviewId,
     pub repository_snapshot: RepositoryStateSnapshotV1,
     #[serde(default)]
     pub selected_hunks: Vec<HunkRefV1>,
     #[serde(default)]
     pub commit_intent: Option<GitIndexCommitIntentV1>,
-}
-
-fn pending_git_preview_id() -> GitIndexPreviewId {
-    GitIndexPreviewId::new("preview.pending")
-        .unwrap_or_else(|_| panic!("the compatibility preview identifier is static"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1508,12 +1503,10 @@ async fn invoke_work_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon::DaemonInvocationOutcome::WorkApplication { scope, outcome } => {
-                        match outcome {
-                            WorkApplicationOutcomeV1::$variant(outcome) => Some((scope, outcome)),
-                            _ => None,
-                        }
-                    }
+                    crate::daemon::DaemonInvocationOutcome::WorkApplication {
+                        scope,
+                        outcome: WorkApplicationOutcomeV1::$variant(outcome),
+                    } => Some((scope, outcome)),
                     _ => None,
                 },
             )
@@ -1607,12 +1600,12 @@ async fn invoke_work_operation(
 /// failures are reported as the same `ApplicationProblemEnvelope` the dispatched
 /// path returns, owned by the adapter layer rather than the runtime.
 fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) -> Response {
-    let contract = ResultContractRef::new(
-        SchemaId::new("schema.tracedecay.http.adapter-problem.v1")
-            .expect("the HTTP adapter problem schema id is static"),
-        1,
-    )
-    .expect("the HTTP adapter problem contract is static");
+    let Ok(schema_id) = SchemaId::new("schema.tracedecay.http.adapter-problem.v1") else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(contract) = ResultContractRef::new(schema_id, 1) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     tracedecay_api::application_problem_response(
         ApplicationProblemEnvelope::new(
             contract,
@@ -2710,18 +2703,19 @@ fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -
             })
         }
     };
-    let contract = ResultContractRef::new(
-        SchemaId::new("schema.tracedecay.operation-event.problem.v1")
-            .unwrap_or_else(|_| panic!("the operation-event problem schema id is static")),
-        1,
-    )
-    .unwrap_or_else(|_| panic!("the operation-event problem contract is static"));
+    let Ok(schema_id) = SchemaId::new("schema.tracedecay.operation-event.problem.v1") else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(contract) = ResultContractRef::new(schema_id, 1) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let envelope = ApplicationProblemEnvelope::new(contract, request_id.clone(), problem)
         .with_owning_layer(ProblemOwningLayer::Runtime);
     let envelope = if envelope.problem.kind() == ApplicationProblemKind::Saturated {
+        let Ok(envelope) = envelope.with_retry_after_millis(Some(250)) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
         envelope
-            .with_retry_after_millis(Some(250))
-            .unwrap_or_else(|_| panic!("the operation-event retry delay is bounded"))
     } else {
         envelope
     };
@@ -3463,7 +3457,7 @@ pub fn parse_application_surface_request(
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutDelivery => serde_json::from_value(value)
-            .map(ContextScoutSurfaceRequest::Delivery)
+            .map(|request| ContextScoutSurfaceRequest::Delivery(Box::new(request)))
             .map(ApplicationSurfaceRequest::ContextScout)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutFeedback => serde_json::from_value(value)
@@ -3567,13 +3561,10 @@ pub async fn execute_application_surface(
                 ApplicationProblemEnvelope::new(
                     result_contract.clone(),
                     request_id.clone(),
-                    ApplicationProblem::unavailable(
-                        SafeDiagnostic::new(
-                            "application.surface.invalid_response",
-                            "The daemon returned an invalid application response",
-                        )
-                        .expect("static invocation diagnostic is valid"),
-                    ),
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "application.surface.invalid_response".to_owned(),
+                        message: "The daemon returned an invalid application response".to_owned(),
+                    }),
                 )
             }),
             Err(error) => Err(ApplicationProblemEnvelope::new(
