@@ -823,12 +823,10 @@ mod authority_tests {
         );
 
         let profile_sessions = registry.profile_sessions().await.expect("profile sessions");
-        let profile_retrieval = registered_profile_automation_retrieval(
-            profile_sessions,
-            registry.profile_identity(),
-        )
-        .await
-        .expect("profile retrieval");
+        let profile_retrieval =
+            registered_profile_automation_retrieval(profile_sessions, registry.profile_identity())
+                .await
+                .expect("profile retrieval");
         assert_eq!(
             typed_reject_reason(profile_retrieval.as_ref()).await,
             "session_evidence_retrieval_unavailable"
