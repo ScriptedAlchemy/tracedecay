@@ -1,8 +1,23 @@
-//! Pre-cutover native adapters for branch- and snapshot-scoped code graphs.
+//! Native adapters for branch- and snapshot-scoped code graphs.
 //!
-//! This module is deliberately self-contained. It consumes the canonical shard
-//! and graph read contracts from `tracedecay-store`, but does not publish a root
-//! dependency, register a runtime, or make the native path authoritative.
+//! These adapters are registered in production: the daemon's store-runtime
+//! registry attaches every [`StoreShardScopeV1::Code`] shard through
+//! [`GraphPhysicalAttachmentFactory`], which builds a [`GraphReaderExecutor`]
+//! and, for mutable shards, a [`GraphMutationExecutor`]; see
+//! `src/daemon/store_runtime/registry/ports.rs`.
+//!
+//! The module stays self-contained in the sense that matters: it consumes the
+//! canonical shard and graph contracts from `tracedecay-store` and depends on
+//! nothing in the root crate.
+//!
+//! Read-operation coverage is uneven. Node, edge, file, and search reads are
+//! constructed by production callers. `RuntimeReadOperationV1::GraphStats` is
+//! implemented and covered by this crate's tests, but no production caller
+//! constructs it yet — the live statistics path is still `src/db/stats.rs`, and
+//! the two share a `display_language_for_path` mapping that must be kept in
+//! sync until one of them wins.
+//!
+//! [`StoreShardScopeV1::Code`]: tracedecay_store::StoreShardScopeV1
 
 mod attachment;
 pub mod fixtures;

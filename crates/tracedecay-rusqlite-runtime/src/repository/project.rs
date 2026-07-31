@@ -1,6 +1,7 @@
 use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::{
-    AnchoredObservationWrite, EvidenceAssemblyWriteV1, FactWriteBatch, ObservationCursorAdvance,
+    AnchoredObservationWrite, DiagnosticGenerationSupersessionV1, EvidenceAssemblyWriteV1,
+    FactWriteBatch, ObservationCursorAdvance,
     ProjectReadOperationV1, ProjectReadResultV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1, SourceCommitV1,
 };
@@ -63,6 +64,20 @@ impl ProjectExecutor {
         snapshot: &SanitizedCleanDiagnosticSnapshotV1,
     ) -> rusqlite::Result<()> {
         self.diagnostics.execute_write(savepoint, snapshot)
+    }
+
+    /// Supersedes one prior diagnostic generation. The transitioned row count
+    /// is intentionally dropped here: the repository write dispatch is
+    /// uniformly `Result<()>`, and the count is recoverable by reading the
+    /// stale lane for the prior generation.
+    pub fn execute_diagnostic_supersession(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        request: &DiagnosticGenerationSupersessionV1,
+    ) -> rusqlite::Result<()> {
+        self.diagnostics
+            .execute_supersession(savepoint, request)
+            .map(|_| ())
     }
 
     pub fn execute_evidence_assembly_write(

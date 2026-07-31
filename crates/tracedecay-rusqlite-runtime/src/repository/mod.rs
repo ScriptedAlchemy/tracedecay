@@ -1,9 +1,34 @@
-//! Concrete pre-cutover adapters over already-open canonical SQLite shards.
+//! Concrete adapters over already-open canonical SQLite shards.
 //!
-//! The executors contain no locator, opener, migration installer, registry
-//! binding, cutover selector, or generic SQL surface. The daemon may mount the
-//! exported bundle only after a later cutover stage supplies an authorized
-//! runtime attachment.
+//! These executors are mounted in production. The daemon's store-runtime
+//! registry attaches every non-code shard through
+//! [`RepositoryPhysicalAttachmentFactory`], which builds a
+//! [`ConcreteRepositoryWriteExecutor`] and a
+//! [`ConcreteRepositoryReadExecutor`]; see
+//! `src/daemon/store_runtime/registry/ports.rs`. The executors still contain no
+//! locator, opener, migration installer, registry binding, cutover selector, or
+//! generic SQL surface — the attachment supplies all of those.
+//!
+//! Which operations are live is a separate question from whether the executors
+//! are mounted. Every payload and read operation an application actually
+//! constructs today routes through here: facts, observations and cursor
+//! advances, diagnostics, evidence assembly, external sources, retrieval-anchor
+//! dispositions and derivatives, and session projections and summaries. Three
+//! surfaces are wired and tested but not yet constructed by any production
+//! caller, and are retained as the landing zone for their migration:
+//!
+//! - the profile/configuration family
+//!   ([`RepositoryWritePayloadV1::Configuration`] and every
+//!   [`RepositoryReadOperationV1::Profile`] operation), whose live writer is
+//!   still `src/global_db/configuration/store.rs`;
+//! - [`RepositoryWritePayloadV1::DiagnosticSupersession`] and the
+//!   `Stale`/`SupersessionChain` diagnostic reads, whose live engine is still
+//!   `src/diagnostics_store.rs`;
+//! - `PreCutoverRepositoryAttachmentBundle`, an inert bundle used only by the
+//!   cutover acceptance suite.
+//!
+//! `Code` and `Effects` operations are owned by the graph shard and the writer
+//! ledger; both dispatch arms here reject them explicitly.
 
 mod attachment;
 mod configuration;
@@ -87,6 +112,9 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::Diagnostics(snapshot) => {
                 self.project.execute_diagnostic_write(savepoint, snapshot)
             }
+            RepositoryWritePayloadV1::DiagnosticSupersession(request) => self
+                .project
+                .execute_diagnostic_supersession(savepoint, request),
             RepositoryWritePayloadV1::EvidenceAssembly(write) => self
                 .project
                 .execute_evidence_assembly_write(savepoint, write),

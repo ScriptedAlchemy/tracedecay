@@ -17,9 +17,12 @@ use tracedecay_domain::{
     RetrievalAnchorId, SourceSpan, UtcMicros,
 };
 use tracedecay_store::{
+    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DIAGNOSTIC_STATE_SUPERSEDED,
     DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1,
-    DiagnosticStore as DiagnosticStorePort, DiagnosticStoreError, DiagnosticStoreResult,
-    SanitizedCleanDiagnosticSnapshotV1,
+    DiagnosticRecordStateKindV1, DiagnosticStore as DiagnosticStorePort, DiagnosticStoreError,
+    DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1, diagnostic_evidence_class_name,
+    diagnostic_producer_kind_name, diagnostic_severity_name, diagnostic_state_columns,
+    parse_diagnostic_evidence_class, parse_diagnostic_producer_kind, parse_diagnostic_severity,
 };
 
 use crate::db::MemoryConnection;
@@ -81,9 +84,12 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS generation_diagnosti
         ON diagnostic_generation_publications (record_state)
         WHERE record_state = 'current';";
 
-const STATE_CURRENT: &str = "current";
-const STATE_SUPERSEDED: &str = "superseded";
-const STATE_CLEARED: &str = "cleared";
+// The stored column text is owned by `tracedecay_store::diagnostics::codec` so
+// this engine and the rusqlite-runtime `DiagnosticExecutor` cannot drift apart
+// across a cutover. These aliases keep the SQL below readable.
+const STATE_CURRENT: &str = DIAGNOSTIC_STATE_CURRENT;
+const STATE_SUPERSEDED: &str = DIAGNOSTIC_STATE_SUPERSEDED;
+const STATE_CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
 
 /// SQLite-backed store for durable generation-bound diagnostics.
 ///
@@ -1096,33 +1102,34 @@ fn record_from_row(row: &Row, operation: &str) -> Result<GenerationDiagnosticV1>
             .map_err(|e| db_error(operation, e))
     };
 
-    let state = match text(22)?.as_str() {
-        STATE_CURRENT => DiagnosticRecordStateV1::Current,
-        STATE_SUPERSEDED => DiagnosticRecordStateV1::Superseded {
-            successor_generation: stored_id(
-                optional_text(23)?.ok_or_else(|| {
-                    db_message(operation, "superseded record missing state_generation")
-                })?,
-                operation,
-                "successor_generation",
-            )?,
-        },
-        STATE_CLEARED => DiagnosticRecordStateV1::Cleared {
-            cleared_in_generation: stored_id(
-                optional_text(23)?.ok_or_else(|| {
-                    db_message(operation, "cleared record missing state_generation")
-                })?,
-                operation,
-                "cleared_in_generation",
-            )?,
-        },
-        other => {
-            return Err(db_message(
-                operation,
-                format!("unknown diagnostic record state: {other}"),
-            ));
-        }
+    let stored_state = text(22)?;
+    let kind = DiagnosticRecordStateKindV1::parse(&stored_state).ok_or_else(|| {
+        db_message(
+            operation,
+            format!("unknown diagnostic record state: {stored_state}"),
+        )
+    })?;
+    let state_generation = match kind.state_generation_field() {
+        Some(field) => Some(stored_id(
+            optional_text(23)?.ok_or_else(|| {
+                db_message(
+                    operation,
+                    match kind {
+                        DiagnosticRecordStateKindV1::Cleared => {
+                            "cleared record missing state_generation"
+                        }
+                        _ => "superseded record missing state_generation",
+                    },
+                )
+            })?,
+            operation,
+            field,
+        )?),
+        None => None,
     };
+    let state = kind.into_state(state_generation).ok_or_else(|| {
+        db_message(operation, "current record carries a state_generation")
+    })?;
 
     Ok(GenerationDiagnosticV1 {
         diagnostic_anchor: stored_id(text(0)?, operation, "diagnostic_anchor")?,
@@ -1173,96 +1180,51 @@ where
     T::try_from(value).map_err(|error| db_message(operation, format!("{field}: {error}")))
 }
 
+// The mappings below delegate to the shared store codec; only the failure
+// wording stays local, because it is observable in this engine's errors.
+
 fn state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<String>) {
-    match state {
-        DiagnosticRecordStateV1::Current => (STATE_CURRENT, None),
-        DiagnosticRecordStateV1::Superseded {
-            successor_generation,
-        } => (
-            STATE_SUPERSEDED,
-            Some(successor_generation.as_str().to_owned()),
-        ),
-        DiagnosticRecordStateV1::Cleared {
-            cleared_in_generation,
-        } => (
-            STATE_CLEARED,
-            Some(cleared_in_generation.as_str().to_owned()),
-        ),
-    }
+    let (column, state_generation) = diagnostic_state_columns(state);
+    (column, state_generation.map(str::to_owned))
 }
 
 fn severity_str(severity: DiagnosticSeverityV1) -> &'static str {
-    match severity {
-        DiagnosticSeverityV1::Error => "error",
-        DiagnosticSeverityV1::Warning => "warning",
-        DiagnosticSeverityV1::Information => "information",
-        DiagnosticSeverityV1::Hint => "hint",
-    }
+    diagnostic_severity_name(severity)
 }
 
 fn parse_severity(value: &str, operation: &str) -> Result<DiagnosticSeverityV1> {
-    match value {
-        "error" => Ok(DiagnosticSeverityV1::Error),
-        "warning" => Ok(DiagnosticSeverityV1::Warning),
-        "information" => Ok(DiagnosticSeverityV1::Information),
-        "hint" => Ok(DiagnosticSeverityV1::Hint),
-        other => Err(db_message(
+    parse_diagnostic_severity(value).ok_or_else(|| {
+        db_message(
             operation,
-            format!("failed to parse diagnostic severity: {other}"),
-        )),
-    }
+            format!("failed to parse diagnostic severity: {value}"),
+        )
+    })
 }
 
 fn producer_kind_str(kind: DiagnosticProducerKindV1) -> &'static str {
-    match kind {
-        DiagnosticProducerKindV1::UpstreamCompiler => "upstream_compiler",
-        DiagnosticProducerKindV1::LanguageServer => "language_server",
-        DiagnosticProducerKindV1::TracedecayStructural => "tracedecay_structural",
-        DiagnosticProducerKindV1::TracedecayGraphIntegrity => "tracedecay_graph_integrity",
-        DiagnosticProducerKindV1::TracedecayPolicy => "tracedecay_policy",
-        DiagnosticProducerKindV1::TracedecayCodeHealth => "tracedecay_code_health",
-        DiagnosticProducerKindV1::GenerationConsistency => "generation_consistency",
-        DiagnosticProducerKindV1::AuthorizedExternalAnalyzer => "authorized_external_analyzer",
-    }
+    diagnostic_producer_kind_name(kind)
 }
 
 fn parse_producer_kind(value: &str, operation: &str) -> Result<DiagnosticProducerKindV1> {
-    match value {
-        "upstream_compiler" => Ok(DiagnosticProducerKindV1::UpstreamCompiler),
-        "language_server" => Ok(DiagnosticProducerKindV1::LanguageServer),
-        "tracedecay_structural" => Ok(DiagnosticProducerKindV1::TracedecayStructural),
-        "tracedecay_graph_integrity" => Ok(DiagnosticProducerKindV1::TracedecayGraphIntegrity),
-        "tracedecay_policy" => Ok(DiagnosticProducerKindV1::TracedecayPolicy),
-        "tracedecay_code_health" => Ok(DiagnosticProducerKindV1::TracedecayCodeHealth),
-        "generation_consistency" => Ok(DiagnosticProducerKindV1::GenerationConsistency),
-        "authorized_external_analyzer" => Ok(DiagnosticProducerKindV1::AuthorizedExternalAnalyzer),
-        other => Err(db_message(
+    parse_diagnostic_producer_kind(value).ok_or_else(|| {
+        db_message(
             operation,
-            format!("failed to parse diagnostic producer kind: {other}"),
-        )),
-    }
+            format!("failed to parse diagnostic producer kind: {value}"),
+        )
+    })
 }
 
 fn evidence_class_str(class: DiagnosticEvidenceClassV1) -> &'static str {
-    match class {
-        DiagnosticEvidenceClassV1::ObservedCurrent => "observed_current",
-        DiagnosticEvidenceClassV1::ProducerReported => "producer_reported",
-        DiagnosticEvidenceClassV1::DerivedStructural => "derived_structural",
-        DiagnosticEvidenceClassV1::UnknownUnsupported => "unknown_unsupported",
-    }
+    diagnostic_evidence_class_name(class)
 }
 
 fn parse_evidence_class(value: &str, operation: &str) -> Result<DiagnosticEvidenceClassV1> {
-    match value {
-        "observed_current" => Ok(DiagnosticEvidenceClassV1::ObservedCurrent),
-        "producer_reported" => Ok(DiagnosticEvidenceClassV1::ProducerReported),
-        "derived_structural" => Ok(DiagnosticEvidenceClassV1::DerivedStructural),
-        "unknown_unsupported" => Ok(DiagnosticEvidenceClassV1::UnknownUnsupported),
-        other => Err(db_message(
+    parse_diagnostic_evidence_class(value).ok_or_else(|| {
+        db_message(
             operation,
-            format!("failed to parse diagnostic evidence class: {other}"),
-        )),
-    }
+            format!("failed to parse diagnostic evidence class: {value}"),
+        )
+    })
 }
 
 fn port_error(operation: &'static str, source: TraceDecayError) -> DiagnosticStoreError {
