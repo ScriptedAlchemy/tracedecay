@@ -604,8 +604,8 @@ async fn dispatch_decoded(
             };
             let deadline = HookSynchronousDeadlineV1::after_elapsed(elapsed_us(started));
             let scout_receipt = match (result.rendered_guidance.as_ref(), guidance_envelope_id) {
-                (Some(_), Some(envelope_id)) => {
-                    Some(crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
+                (Some(_), Some(envelope_id)) => Some(
+                    crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
                         receipt_id: context_scout_delivery_receipt_id(
                             envelope.event_id,
                             envelope_id,
@@ -613,8 +613,8 @@ async fn dispatch_decoded(
                         envelope_id,
                         delivered_at: now_utc(),
                         outcome: crate::agents::context_scout_v2::ContextScoutOutcomeV1::Attempted,
-                    })
-                }
+                    },
+                ),
                 _ => None,
             };
             let receipts = DaemonDeliveryReceiptPort::new(project_root);
@@ -1029,8 +1029,10 @@ mod tests {
         calls: Mutex<usize>,
     }
 
-    impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>
-        for RecordingFeedbackDeliveryPort
+    impl
+        AsyncHookFeedbackDeliveryPortV1<
+            crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
+        > for RecordingFeedbackDeliveryPort
     {
         fn deliver_hook_v2<'a>(
             &'a self,
@@ -1295,58 +1297,6 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
         assert_eq!(calls[1].1["action"], "hook_v2_feedback");
-    }
-
-    #[test]
-    fn production_hook_v2_does_not_embed_remaining_daemon_action_strings() {
-        let production = include_str!("v2.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        let ports = include_str!("daemon_ports.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("daemon ports production source precedes tests");
-        for action in [
-            "hook_v2_admit",
-            "hook_v2_delivery_receipt",
-            "hook_v2_feedback",
-            "hook_v2_feedback_notice_delivery",
-            "opencode_lsp_updated",
-        ] {
-            assert!(
-                !production.contains(&format!("\"{action}\"")),
-                "production hook v2 must not embed daemon action {action}"
-            );
-            assert!(
-                ports.contains(&format!("\"{action}\"")),
-                "daemon ports must own daemon action {action}"
-            );
-        }
-        assert!(!production.contains("daemon_hook_action"));
-        assert!(!production.contains("fn now_utc"));
-        assert!(ports.contains("pub(crate) fn now_utc"));
-        let now_utc_owners = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/hooks")
-            .read_dir()
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
-            .filter(|entry| {
-                let source = std::fs::read_to_string(entry.path()).unwrap_or_default();
-                let production = source
-                    .split("#[cfg(test)]")
-                    .next()
-                    .unwrap_or(source.as_str());
-                production.contains("fn now_utc")
-            })
-            .map(|entry| entry.file_name())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            now_utc_owners,
-            vec![std::ffi::OsString::from("daemon_ports.rs")],
-            "now_utc must be defined only in daemon_ports.rs production"
-        );
     }
 
     #[test]

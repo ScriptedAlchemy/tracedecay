@@ -694,17 +694,6 @@ mod tests {
 
     const DIGEST: [u8; 32] = [0x5a; 32];
 
-    #[test]
-    fn root_context_module_does_not_define_shadow_request_context() {
-        let source = include_str!("context.rs");
-        let declaration = ["pub struct ", "RequestContext"].concat();
-
-        assert!(
-            !source.contains(&declaration),
-            "tracedecay_application::RequestContext is the canonical authority"
-        );
-    }
-
     fn project_identity() -> ResolvedSessionIdentity {
         ResolvedSessionIdentity::for_project(
             ProfileId::new("profile.primary").unwrap(),

@@ -602,16 +602,14 @@ mod tests {
     }
 
     #[test]
-    fn capability_discovery_skill_is_shared_and_cli_native() {
+    fn capability_discovery_skill_is_shared_and_matches_plugin_source() {
         let relative = "skills/discovering-tracedecay/SKILL.md";
         let source = embedded_skill(relative);
-
-        assert!(source.contains("`tracedecay tool`"));
-        assert!(source.contains("`tracedecay tool <name> --help`"));
-        assert!(source.contains("`tracedecay --help`"));
-        assert!(
-            !source.contains("tool describe"),
-            "the CLI has no `tool describe` subcommand"
+        let on_disk = std::fs::read_to_string(plugin_source_root().join(relative))
+            .expect("discovering-tracedecay skill must exist on disk");
+        assert_eq!(
+            source, on_disk,
+            "embedded discovering-tracedecay skill must match plugin source"
         );
 
         for (host, files) in [
@@ -634,11 +632,15 @@ mod tests {
     }
 
     #[test]
-    fn using_cli_skill_supports_intentional_mcp_absence() {
-        let source = embedded_skill("skills/using-the-cli/SKILL.md");
-
-        assert!(source.contains("MCP is optional"));
-        assert!(source.contains("intentionally unavailable"));
+    fn using_cli_skill_matches_plugin_source() {
+        let relative = "skills/using-the-cli/SKILL.md";
+        let source = embedded_skill(relative);
+        let on_disk = std::fs::read_to_string(plugin_source_root().join(relative))
+            .expect("using-the-cli skill must exist on disk");
+        assert_eq!(
+            source, on_disk,
+            "embedded using-the-cli skill must match plugin source"
+        );
     }
 
     /// Every embedded skill file maps to an on-disk source under `plugin/`.

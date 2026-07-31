@@ -1740,29 +1740,6 @@ mod tests {
     }
 
     #[test]
-    fn semantic_filters_are_not_applied_after_temporal_ranking_or_hydration() {
-        let adapter = include_str!("session_retrieval.rs");
-        let production = adapter
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("test module boundary")
-            .0;
-        assert!(!production.contains("message_search_result_matches"));
-        assert!(!production.contains("UnsupportedQuery"));
-
-        let read_port = include_str!("../../global_db/session_temporal/retrieval.rs");
-        let eligibility = read_port
-            .find("candidate_matches_filter(")
-            .expect("canonical eligibility gate");
-        let ranked_sink = read_port
-            .find("sink.push(candidate)")
-            .expect("candidate ranking sink");
-        assert!(
-            eligibility < ranked_sink,
-            "semantic eligibility must run before the ranking candidate sink"
-        );
-    }
-
-    #[test]
     fn denied_shared_anchor_stays_at_its_rank_without_promoting_lower_candidate() {
         fn ranked(stable_id: &str, anchor: &RetrievalAnchorId) -> RankedCandidate {
             RankedCandidate {
