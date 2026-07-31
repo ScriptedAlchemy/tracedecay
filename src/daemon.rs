@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use rmcp::ServiceExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
@@ -23,7 +24,10 @@ use crate::application_surface::ApplicationSurfaceOperation;
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
-use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
+use crate::mcp::server::{
+    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
+    classify_mcp_method, initialize_result,
+};
 use crate::mcp::tools::{
     ToolRegistryMode, default_catalog_discovery_authority, explore_call_budget,
     get_catalog_filtered_tool_definitions_with_budget,
@@ -7034,27 +7038,56 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     drop(resources);
 }
 
-async fn write_routed_initialize_response(
-    server: &crate::mcp::McpServer,
-    transport: &mut impl McpTransport,
-    first_request_line: &str,
-    route: Option<&InitializeRouteMetadata>,
-) -> Result<bool> {
-    let Some(route) = route else {
-        return Ok(false);
-    };
-    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) else {
-        return Ok(false);
-    };
-    if request.method != "initialize" {
-        return Ok(false);
+async fn serve_routed_rmcp_connection(
+    server: Arc<crate::mcp::McpServer>,
+    transport: BrokerStreamTransport,
+    first_request_line: String,
+    pending_lines: impl IntoIterator<Item = String>,
+    initialize_route: Option<InitializeRouteMetadata>,
+    timings_enabled: bool,
+    lifecycle: &DaemonLifecycle,
+) -> Result<()> {
+    let initialize_response_decorator = initialize_route.map(|route| {
+        Arc::new(move |response: &mut JsonRpcResponse| {
+            attach_initialize_route_metadata(response, &route);
+        }) as RmcpInitializeResponseDecorator
+    });
+    let mut transport =
+        transport.with_project_response_lifecycle(server.project_server_response_lifecycle());
+    transport.push_replay(first_request_line)?;
+    for line in pending_lines {
+        transport.push_replay(line)?;
     }
-    let Some(mut response) = server.handle_request(&request).await else {
-        return Ok(false);
+    let adapter =
+        RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("MCP connection identity unavailable: {error}"),
+            })?;
+    let running = adapter
+        .serve(transport)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("rmcp server initialization failed: {error}"),
+        })?;
+    let cancellation = running.cancellation_token();
+    let waiting = running.waiting();
+    tokio::pin!(waiting);
+    let result = tokio::select! {
+        result = &mut waiting => result,
+        () = lifecycle.wait_for_draining() => {
+            cancellation.cancel();
+            waiting.await
+        }
     };
-    attach_initialize_route_metadata(&mut response, route);
-    write_json_rpc_response(transport, &response).await?;
-    Ok(true)
+    result.map_err(|error| TraceDecayError::Config {
+        message: format!("rmcp server task failed: {error}"),
+    })?;
+    Ok(())
+}
+
+fn is_mcp_initialize_request(line: &str) -> bool {
+    serde_json::from_str::<JsonRpcRequest>(line.trim())
+        .is_ok_and(|request| request.method == "initialize")
 }
 
 const MAX_PENDING_PROJECT_OPEN_LINES: usize = 64;
@@ -7256,6 +7289,10 @@ async fn serve_broker_socket_client(
         return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+        let initialized_project_server_ready =
+            matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                && handshake.project_path.is_some()
+                && engine.cached_project_server(&handshake).await?.is_some();
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
                 if handshake.project_path.is_some() {
@@ -7266,8 +7303,9 @@ async fn serve_broker_socket_client(
             } else {
                 None
             };
-        if let Some(mut response) =
-            daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
+        if !initialized_project_server_ready
+            && let Some(mut response) =
+                daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
         {
             let project_open_error = if handshake.project_path.is_some()
                 && matches!(
@@ -7362,34 +7400,37 @@ async fn serve_broker_socket_client(
         engine.release_catalog_refresh(key).await;
         return Err(error);
     }
-    let initialize_handled = match server.as_deref() {
-        Some(server) => {
-            write_routed_initialize_response(
-                server,
-                &mut transport,
-                &first_request_line,
-                initialize_route.as_ref(),
-            )
-            .await?
-        }
-        None => false,
-    };
-    let mut transport = ReplayTransport::new(transport);
-    if !initialize_handled {
-        transport.push_replay(first_request_line)?;
-    }
-    for line in pending_project_open_lines {
-        transport.push_replay(line)?;
-    }
-
     if let Some(server) = server {
-        Box::pin(server.run_daemon_connection_with_timings(
-            &mut transport,
-            handshake.timings,
-            &engine.lifecycle,
-        ))
-        .await?;
+        if is_mcp_initialize_request(&first_request_line) {
+            serve_routed_rmcp_connection(
+                server,
+                transport,
+                first_request_line,
+                pending_project_open_lines,
+                initialize_route,
+                handshake.timings,
+                &engine.lifecycle,
+            )
+            .await?;
+        } else {
+            let mut transport = ReplayTransport::new(transport);
+            transport.push_replay(first_request_line)?;
+            for line in pending_project_open_lines {
+                transport.push_replay(line)?;
+            }
+            Box::pin(server.run_daemon_connection_with_timings(
+                &mut transport,
+                handshake.timings,
+                &engine.lifecycle,
+            ))
+            .await?;
+        }
     } else {
+        let mut transport = ReplayTransport::new(transport);
+        transport.push_replay(first_request_line)?;
+        for line in pending_project_open_lines {
+            transport.push_replay(line)?;
+        }
         serve_projectless_client(
             &mut transport,
             &handshake.client_identity,
@@ -7638,6 +7679,22 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
+        let initialized_project_server_ready =
+            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                && handshake.project_path.is_some()
+            {
+                let (project_path, _) = project_route_for_handshake(&handshake)?;
+                portable_cached_project_server(
+                    &store_administration,
+                    &project_path,
+                    &handshake,
+                    ProjectServerRequirement::Core,
+                )
+                .await?
+                .is_some()
+            } else {
+                false
+            };
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
                 if handshake.project_path.is_some() {
@@ -7648,8 +7705,9 @@ async fn serve_windows_broker_client_with_class_and_invocation(
             } else {
                 None
             };
-        if let Some(mut response) =
-            daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
+        if !initialized_project_server_ready
+            && let Some(mut response) =
+                daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
         {
             let project_open_error = if handshake.project_path.is_some()
                 && matches!(
@@ -7729,26 +7787,31 @@ async fn serve_windows_broker_client_with_class_and_invocation(
             }
         };
         drop(setup_activity);
-        let initialize_handled = write_routed_initialize_response(
-            &server.0,
-            &mut transport,
-            &first_request_line,
-            initialize_route.as_ref(),
-        )
-        .await?;
-        let mut transport = ReplayTransport::new(transport);
-        if !initialize_handled {
+        let (server, pending_lines) = server;
+        if is_mcp_initialize_request(&first_request_line) {
+            serve_routed_rmcp_connection(
+                server,
+                transport,
+                first_request_line,
+                pending_lines,
+                initialize_route,
+                handshake.timings,
+                lifecycle,
+            )
+            .await?;
+        } else {
+            let mut transport = ReplayTransport::new(transport);
             transport.push_replay(first_request_line)?;
+            for line in pending_lines {
+                transport.push_replay(line)?;
+            }
+            Box::pin(server.run_daemon_connection_with_timings(
+                &mut transport,
+                handshake.timings,
+                lifecycle,
+            ))
+            .await?;
         }
-        for line in server.1 {
-            transport.push_replay(line)?;
-        }
-        Box::pin(server.0.run_daemon_connection_with_timings(
-            &mut transport,
-            handshake.timings,
-            lifecycle,
-        ))
-        .await?;
     } else {
         drop(setup_activity);
         let mut transport = ReplayTransport::new(transport);
@@ -8765,7 +8828,9 @@ fn projectless_user_session_request(request_line: &str) -> bool {
 
 struct BrokerStreamTransport {
     reader: tokio::io::BufReader<tokio::io::ReadHalf<BrokerStream>>,
-    writer: tokio::io::WriteHalf<BrokerStream>,
+    writer: Arc<tokio::sync::Mutex<Option<tokio::io::WriteHalf<BrokerStream>>>>,
+    replay: VecDeque<String>,
+    response_lifecycle: Option<crate::mcp::server::ProjectServerResponseLifecycle>,
 }
 
 impl BrokerStreamTransport {
@@ -8773,22 +8838,152 @@ impl BrokerStreamTransport {
         let (reader, writer) = stream.into_split();
         Self {
             reader: tokio::io::BufReader::new(reader),
-            writer,
+            writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
+            replay: VecDeque::new(),
+            response_lifecycle: None,
         }
+    }
+
+    fn push_replay(&mut self, line: String) -> std::io::Result<()> {
+        if line.len() > crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
+            let prefix = line.as_bytes()[..line
+                .len()
+                .min(crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
+                .to_vec();
+            return Err(
+                crate::application::host_admission::wire_oversized_io_error_with_prefix(prefix),
+            );
+        }
+        self.replay.push_back(line);
+        Ok(())
+    }
+
+    fn with_project_response_lifecycle(
+        mut self,
+        lifecycle: crate::mcp::server::ProjectServerResponseLifecycle,
+    ) -> Self {
+        self.response_lifecycle = Some(lifecycle);
+        self
+    }
+
+    async fn write_all_and_flush(
+        writer: Arc<tokio::sync::Mutex<Option<tokio::io::WriteHalf<BrokerStream>>>>,
+        bytes: Vec<u8>,
+    ) -> std::io::Result<()> {
+        let mut writer = writer.lock().await;
+        let writer = writer.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "daemon broker transport closed",
+            )
+        })?;
+        writer.write_all(&bytes).await?;
+        writer.flush().await
     }
 }
 
 impl crate::mcp::McpTransport for BrokerStreamTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        if let Some(line) = self.replay.pop_front() {
+            return Ok(Some(line));
+        }
         crate::application::host_admission::read_bounded_mcp_line(&mut self.reader).await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        self.writer.write_all(line.as_bytes()).await
+        let mut writer = self.writer.lock().await;
+        let writer = writer.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "daemon broker transport closed",
+            )
+        })?;
+        writer.write_all(line.as_bytes()).await
     }
 
     async fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush().await
+        let mut writer = self.writer.lock().await;
+        let writer = writer.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "daemon broker transport closed",
+            )
+        })?;
+        writer.flush().await
+    }
+}
+
+impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
+    type Error = std::io::Error;
+
+    fn send(
+        &mut self,
+        item: rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send + 'static
+    {
+        let writer = Arc::clone(&self.writer);
+        let response_lifecycle = self.response_lifecycle.clone();
+        async move {
+            let mut bytes = serde_json::to_vec(&item)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            bytes.push(b'\n');
+            let write = Self::write_all_and_flush(writer, bytes);
+            let Some(lifecycle) = response_lifecycle else {
+                return write.await;
+            };
+            if lifecycle.response_revoked().is_cancelled() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "project server response was revoked",
+                ));
+            }
+            let _response_write = lifecycle.response_gate().read().await;
+            tokio::select! {
+                biased;
+                () = lifecycle.response_revoked().cancelled() => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "project server response was revoked",
+                )),
+                result = write => result,
+            }
+        }
+    }
+
+    async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<rmcp::RoleServer>> {
+        let line = match self.read_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => return None,
+            Err(error)
+                if crate::application::host_admission::is_wire_oversized_io_error(&error) =>
+            {
+                let _ = crate::mcp::transport::write_wire_oversized_rejection(self, &error).await;
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "daemon broker MCP transport read failed");
+                return None;
+            }
+        };
+        match serde_json::from_str(&line) {
+            Ok(message) => Some(message),
+            Err(error) => {
+                let response = JsonRpcResponse::error(
+                    serde_json::Value::Null,
+                    ErrorCode::ParseError,
+                    format!("failed to parse JSON-RPC request: {error}"),
+                );
+                if let Ok(line) = serde_json::to_string(&response) {
+                    let _ = self.write_line(&format!("{line}\n")).await;
+                    let _ = self.flush().await;
+                }
+                None
+            }
+        }
+    }
+
+    async fn close(&mut self) -> std::result::Result<(), Self::Error> {
+        self.writer.lock().await.take();
+        Ok(())
     }
 }
 
@@ -8803,10 +8998,16 @@ mod http_application_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod wire_bound_tests {
-    use super::{BrokerStreamTransport, read_line_handling_wire_oversized};
+    use std::sync::Arc;
+
+    use super::{
+        BrokerStreamTransport, DaemonLifecycle, read_line_handling_wire_oversized,
+        serve_routed_rmcp_connection,
+    };
     use crate::application::host_admission::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
     use crate::mcp::McpTransport;
-    use tokio::io::AsyncWriteExt;
+    use rmcp::transport::Transport;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     use super::transport::{BrokerListener, BrokerStream, default_loopback_endpoint};
 
@@ -8843,6 +9044,136 @@ mod wire_bound_tests {
         // hostile fill pattern itself is not echoed.
         assert!(!err.to_string().contains("wwww"));
         writer.await.expect("writer");
+    }
+
+    #[tokio::test]
+    async fn rmcp_broker_transport_keeps_the_tracedecay_frame_limit() {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let mut transport = BrokerStreamTransport::new(server);
+
+        client
+            .write_all(&vec![
+                b'x';
+                crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
+                    + 1
+            ])
+            .await
+            .expect("write oversized frame");
+        client.write_all(b"\n").await.expect("newline");
+        client.flush().await.expect("flush");
+
+        assert!(
+            Transport::<rmcp::RoleServer>::receive(&mut transport)
+                .await
+                .is_none(),
+            "rmcp must receive the same bounded rejection as the daemon transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_routed_rmcp_serves_initialize_tools_unknown_and_cancel() {
+        let (cg, _dir, _pin) = crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let mcp = crate::mcp::McpServer::new(cg, None).await;
+        let lifecycle = DaemonLifecycle::default();
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "rmcp-production-route-test", "version": "1"}
+            }
+        })
+        .to_string();
+        let pending = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tracedecay/unknown"
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 999, "reason": "test cancellation"}
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/list"
+            })
+            .to_string(),
+        ];
+        let task = tokio::spawn({
+            let mcp = Arc::clone(&mcp);
+            let lifecycle = lifecycle.clone();
+            async move {
+                serve_routed_rmcp_connection(
+                    mcp,
+                    BrokerStreamTransport::new(server),
+                    initialize,
+                    pending,
+                    None,
+                    false,
+                    &lifecycle,
+                )
+                .await
+            }
+        });
+        let mut client = tokio::io::BufReader::new(client);
+        let mut line = String::new();
+
+        client
+            .read_line(&mut line)
+            .await
+            .expect("initialize response");
+        let initialized: serde_json::Value =
+            serde_json::from_str(&line).expect("initialize JSON response");
+        assert_eq!(initialized["id"], serde_json::json!(1));
+        assert_eq!(
+            initialized["result"]["serverInfo"]["name"],
+            serde_json::json!("tracedecay")
+        );
+
+        line.clear();
+        client.read_line(&mut line).await.expect("unknown response");
+        let unknown: serde_json::Value =
+            serde_json::from_str(&line).expect("unknown method JSON response");
+        assert_eq!(unknown["id"], serde_json::json!(2));
+        assert_eq!(unknown["error"]["code"], serde_json::json!(-32601));
+
+        line.clear();
+        client.read_line(&mut line).await.expect("tools response");
+        let tools: serde_json::Value = serde_json::from_str(&line).expect("tools JSON response");
+        assert_eq!(tools["id"], serde_json::json!(3));
+        assert!(
+            tools["result"]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "the production rmcp route must advertise the mounted tool surface"
+        );
+
+        lifecycle.begin_draining();
+        task.await
+            .expect("rmcp route task")
+            .expect("rmcp route completion");
+        mcp.shutdown_background_tasks().await;
     }
 
     #[tokio::test]
