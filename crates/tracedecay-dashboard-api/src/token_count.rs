@@ -211,9 +211,7 @@ fn row_str(row: &Value, key: &str) -> String {
 /// `(COUNT(*), MAX(rowid))` fingerprint of `session_messages`; the cache
 /// lock is held across a rebuild so the three savings endpoints firing
 /// concurrently share one scan instead of racing three.
-pub async fn non_usage_message_tokens(
-    state: &DashboardState,
-) -> Option<Arc<Vec<MessageTokens>>> {
+pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<MessageTokens>>> {
     let db = state.lcm_db.as_deref()?;
     let conn = db.read_connection();
 

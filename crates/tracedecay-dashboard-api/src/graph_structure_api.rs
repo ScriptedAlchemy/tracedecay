@@ -28,7 +28,7 @@ use crate::db::engine::params;
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
 use crate::memory::entities::normalize_entity;
-use crate::types::{Edge, Node};
+use tracedecay_domain::code_intelligence::{Edge, Node};
 
 const MAX_CALL_CHAIN_DEPTH: usize = 20;
 const TEST_CALLER_DEPTH: usize = 3;

@@ -94,10 +94,7 @@ pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     Ok(Json(json!({ "jobs": jobs, "count": jobs.len() })))
 }
 
-pub async fn create(
-    State(state): State<DashboardState>,
-    Json(body): Json<Value>,
-) -> ApiResult {
+pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
     let body = serde_json::from_value::<CreateJobBody>(body)
         .map_err(|err| bad_request(&format!("invalid job: {err}")))?;
     let now = current_timestamp();

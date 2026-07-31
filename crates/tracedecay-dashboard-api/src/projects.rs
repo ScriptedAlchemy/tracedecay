@@ -52,10 +52,7 @@ impl DashboardRuntime {
         self.active.project_root.display().to_string()
     }
 
-    pub async fn selected_project_state(
-        &self,
-        project_id: &str,
-    ) -> Result<SelectedProjectState> {
+    pub async fn selected_project_state(&self, project_id: &str) -> Result<SelectedProjectState> {
         if self.active.project_id.as_deref() == Some(project_id) {
             return Ok(SelectedProjectState {
                 state: self.active.clone(),

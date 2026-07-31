@@ -226,9 +226,7 @@ mod tests {
         )
         .await
         .expect("project init");
-        let state = crate::build_state(&cg)
-            .await
-            .expect("dashboard state");
+        let state = crate::build_state(&cg).await.expect("dashboard state");
         (project, runtime, state)
     }
 
