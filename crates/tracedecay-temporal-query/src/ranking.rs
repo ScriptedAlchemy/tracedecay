@@ -100,16 +100,6 @@ pub fn rank_candidates(candidates: &[RankingCandidate], limits: DiversityLimits)
     rank_validated_candidates(candidates, limits)
 }
 
-#[deprecated(
-    note = "compatibility alias; delete after callers migrate to the fallible rank_candidates API"
-)]
-pub fn try_rank_candidates(
-    candidates: &[RankingCandidate],
-    limits: DiversityLimits,
-) -> RankedResult {
-    rank_candidates(candidates, limits)
-}
-
 /// Partition key for raw-score normalization. Absent sources stay singleton
 /// partitions without colliding with a concrete `source` string value.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -676,20 +666,15 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn duplicate_stable_id_with_source_only_conflict_errors_without_compatibility_selection() {
+    fn duplicate_stable_id_with_source_only_conflict_returns_typed_error() {
         let mut left = candidate("dup", CandidateChannel::ExactMessage, 10, Some("msg"));
         left.evidence_role = Some("producer".to_string());
         left.source = Some("source-a".to_string());
         let mut right = left.clone();
         right.source = Some("source-b".to_string());
 
-        let rank_err =
-            rank_candidates(&[left.clone(), right.clone()], DiversityLimits::unbounded())
-                .expect_err("the canonical API must propagate source conflicts");
-        let compatibility_err = try_rank_candidates(&[right, left], DiversityLimits::unbounded())
-            .expect_err("the compatibility API must propagate source conflicts");
-        assert_eq!(rank_err, compatibility_err);
+        let rank_err = rank_candidates(&[left, right], DiversityLimits::unbounded())
+            .expect_err("source conflicts must be rejected");
         assert_eq!(
             rank_err,
             RankingError::ConflictingDuplicateMetadata {
@@ -858,21 +843,19 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn conflicting_duplicate_metadata_propagates_through_every_public_api() {
+    fn conflicting_duplicate_metadata_is_order_independent() {
         let mut left = candidate("dup", CandidateChannel::Lexical, 10, Some("zzz"));
         left.source = Some("source-z".to_string());
         let mut right = candidate("dup", CandidateChannel::Lexical, 9, Some("aaa"));
         right.source = Some("source-a".to_string());
 
-        let canonical =
-            rank_candidates(&[left.clone(), right.clone()], DiversityLimits::unbounded())
-                .expect_err("canonical API must reject conflicting metadata");
-        let compatibility = try_rank_candidates(&[right, left], DiversityLimits::unbounded())
-            .expect_err("compatibility API must reject conflicting metadata");
-        assert_eq!(canonical, compatibility);
+        let forward = rank_candidates(&[left.clone(), right.clone()], DiversityLimits::unbounded())
+            .expect_err("conflicting metadata must be rejected");
+        let reverse = rank_candidates(&[right, left], DiversityLimits::unbounded())
+            .expect_err("conflicting metadata must be rejected");
+        assert_eq!(forward, reverse);
         assert_eq!(
-            canonical,
+            forward,
             RankingError::ConflictingDuplicateMetadata {
                 stable_id: "dup".to_string(),
             }
