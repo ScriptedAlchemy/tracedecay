@@ -311,7 +311,7 @@ fn parse_codex_terminal(stdout: &[u8]) -> WorkProviderSettlementV1 {
                 }
             }
             Some("turn.completed") => terminal = true,
-            Some("turn.failed") | Some("error") => {
+            Some("turn.failed" | "error") => {
                 return WorkProviderSettlementV1::Failed {
                     message: "Codex reported a terminal protocol failure".to_owned(),
                 };

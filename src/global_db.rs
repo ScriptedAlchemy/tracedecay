@@ -42,10 +42,7 @@ pub(crate) use git_index_transactions::{
 };
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 use project_registry::project_path_alias_key;
-pub(crate) use registered::{
-    RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
-    RegisteredWorkflowApplicationServicesV1,
-};
+pub(crate) use registered::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 pub(crate) use session_temporal::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };

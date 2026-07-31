@@ -322,7 +322,7 @@ fn run_codex_protocol(
             }
         }),
     )?;
-    wait_for_response(&line_rx, deadline, 0)?;
+    wait_for_response(line_rx, deadline, 0)?;
     send_json(&mut stdin, &json!({"method": "initialized", "params": {}}))?;
 
     let thread_params = build_ephemeral_thread_start_params(model, thread_source);
@@ -330,7 +330,7 @@ fn run_codex_protocol(
         &mut stdin,
         &json!({"method": "thread/start", "id": 1, "params": thread_params}),
     )?;
-    let thread_response = wait_for_response(&line_rx, deadline, 1)?;
+    let thread_response = wait_for_response(line_rx, deadline, 1)?;
     let thread_model = find_model_id(&thread_response);
     let thread_id = thread_response
         .pointer("/result/thread/id")
@@ -360,7 +360,7 @@ fn run_codex_protocol(
     )?;
     drop(stdin);
 
-    let mut summary = wait_for_turn_summary(&line_rx, deadline)?;
+    let mut summary = wait_for_turn_summary(line_rx, deadline)?;
     if summary.model.is_none() {
         summary.model = thread_model;
     }

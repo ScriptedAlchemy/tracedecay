@@ -16,11 +16,10 @@ use tracedecay_application::{
     prepare_workflow_fan_out, validate_workflow_checkpoint, workflow_checkpoint, workflow_truth,
 };
 use tracedecay_domain::{
-    ManifestDigest, ProposalId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkCancellationRequestId,
-    WorkCancellationRequestV1, WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseFenceV1,
-    WorkLeaseId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkTerminalEvidenceV1, WorkVersion,
-    WorkflowOperationRef, canonical_sha256,
+    ManifestDigest, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
+    WorkAttemptStateV1, WorkAttemptV1, WorkCancellationRequestId, WorkCancellationRequestV1,
+    WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkRecoveryStateV1,
+    WorkTerminalEvidenceV1, WorkflowOperationRef, canonical_sha256,
 };
 
 use super::work_runtime::DaemonWorkRuntimeV1;
