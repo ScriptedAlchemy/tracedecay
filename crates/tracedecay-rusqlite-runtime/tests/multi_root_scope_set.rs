@@ -29,10 +29,6 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
 }
 
-fn context(worktree: &str, suffix: &str) -> RequestContext {
-    context_for_actor(worktree, suffix, "actor.requester")
-}
-
 fn context_for_actor(worktree: &str, suffix: &str, actor: &str) -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>("project.fixture"),
@@ -164,5 +160,69 @@ fn scope_set_cas_rejects_cross_actor_update_without_changing_stored_bytes() {
             .unwrap()
             .unwrap(),
         first
+    );
+}
+
+#[test]
+fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
+    let canonical = scope_set(1);
+    let payload = serde_json::to_vec(&canonical).unwrap();
+
+    for revision in [0_i64, -1_i64] {
+        let connection = Connection::open_in_memory().unwrap();
+        AuthorizedScopeSetExecutor::install_schema(&connection).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO authorized_scope_sets_v1
+                     (scope_set_id, revision, digest, canonical_payload)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    canonical.scope_set_id().as_str(),
+                    revision,
+                    canonical.digest().as_str(),
+                    payload,
+                ],
+            )
+            .unwrap();
+
+        assert!(
+            AuthorizedScopeSetExecutor::read(&connection, canonical.scope_set_id()).is_err(),
+            "revision {revision} must fail through the public store read"
+        );
+    }
+
+    let mut overflow_connection = Connection::open_in_memory().unwrap();
+    AuthorizedScopeSetExecutor::install_schema(&overflow_connection).unwrap();
+    let overflow = scope_set(u64::try_from(i64::MAX).unwrap() + 1);
+    assert!(
+        AuthorizedScopeSetExecutor::compare_and_swap(&mut overflow_connection, None, &overflow,)
+            .is_err()
+    );
+    let count: i64 = overflow_connection
+        .query_row("SELECT COUNT(*) FROM authorized_scope_sets_v1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+
+    let corrupt_connection = Connection::open_in_memory().unwrap();
+    AuthorizedScopeSetExecutor::install_schema(&corrupt_connection).unwrap();
+    corrupt_connection
+        .execute(
+            "INSERT INTO authorized_scope_sets_v1
+                 (scope_set_id, revision, digest, canonical_payload)
+             VALUES (?1, 1, ?2, ?3)",
+            rusqlite::params![
+                canonical.scope_set_id().as_str(),
+                canonical.digest().as_str(),
+                b"{".as_slice(),
+            ],
+        )
+        .unwrap();
+    assert!(
+        AuthorizedScopeSetExecutor::read(&corrupt_connection, canonical.scope_set_id()).is_err()
     );
 }

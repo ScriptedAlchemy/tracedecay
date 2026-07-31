@@ -1,26 +1,36 @@
+use std::sync::Arc;
+
+use super::auth::{
+    OpaqueRemoteCredential, RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentCommitReceiptV1,
+    RemoteEnrollmentCredentialLookupPortV1,
+};
 use super::composition::{
     AuthenticityClaimV1, AuthorizationClaimV1, ExpectedRemoteShardV1, IntegrityClaimV1,
     PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1,
     RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
-use super::protocol::RemoteProtocolRequestV1;
+use super::protocol::{RemoteProtocolPortV1, RemoteProtocolRequestV1};
 use super::query::{
     MAX_REMOTE_QUERY_CURSOR_BYTES_V1, REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1,
     REMOTE_QUERY_SCHEMA_REVISION_V1, RemoteExactObservationQueryErrorV1,
-    RemoteExactObservationResultV1, RemoteQueryCompleteValueV1, RemoteQueryOperationV1,
-    RemoteQueryPageBoundsV1, RemoteQueryRequestV1, RemoteQueryResultV1, query_protocol_failure,
-    remote_exact_observation_query_result_contract_v1, validate_composition,
-    validate_protocol_authority_binding, validate_result_identity, validate_returned_authority,
-    validate_returned_observation_identity, validate_returned_provenance,
+    RemoteExactObservationQueryCommandV1, RemoteExactObservationQueryErrorV1,
+    RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryProtocolAdapterV1,
+    RemoteExactObservationQueryReadPortV1, RemoteExactObservationQueryServiceV1,
+    RemoteExactObservationResultV1, RemoteQueryClockPortV1, RemoteQueryCompleteValueV1,
+    RemoteQueryOperationV1, RemoteQueryPageBoundsV1, RemoteQueryRequestV1, RemoteQueryResultV1,
+    query_protocol_failure, remote_exact_observation_query_result_contract_v1,
+    validate_composition, validate_protocol_authority_binding, validate_result_identity,
+    validate_returned_authority, validate_returned_observation_identity,
+    validate_returned_provenance,
 };
-use crate::{RequestId, ResolvedScope};
+use crate::{CancellationSignal, RequestId, ResolvedScope};
 use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1,
     CurrentRemoteAuthorityV1, EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1,
     ObservationScopeV1, PrivacyDomainBoundLocatorDigest, ProjectId, ProjectionGenerationId, RefId,
     RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, RepositoryEvidenceV1,
-    RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, RepositoryStateSnapshotId,
-    ShardId, UtcMicros, WorktreeId,
+    EnrollmentCredentialRecordV1, EntityId, RepositoryId, RepositoryProvenanceV1,
+    RepositoryRemoteIdentityV1, RepositoryStateSnapshotId, ShardId, UtcMicros, WorktreeId,
 };
 
 fn scope() -> RemoteRepositoryScopeV1 {
@@ -115,6 +125,16 @@ fn remote_complete_value_is_wire_distinct_from_null() {
     let round_trip: RemoteQueryCompleteValueV1 =
         serde_json::from_str(&json).expect("deserialize complete value");
     round_trip.validate().expect("validate complete value");
+}
+
+#[test]
+fn exact_observation_absence_round_trips_as_explicit_state() {
+    let json = serde_json::to_string(&RemoteExactObservationResultV1::NotFound).unwrap();
+    assert_eq!(json, r#"{"state":"not_found"}"#);
+    assert_eq!(
+        serde_json::from_str::<RemoteExactObservationResultV1>(&json).unwrap(),
+        RemoteExactObservationResultV1::NotFound
+    );
 }
 
 #[test]
@@ -494,4 +514,105 @@ fn faulty_adapter_repository_provenance_is_rejected() {
         )
         .is_err()
     );
+}
+
+struct UnavailableCredentials;
+
+impl RemoteEnrollmentCredentialLookupPortV1 for UnavailableCredentials {
+    fn enrollment_by_id(
+        &self,
+        _enrollment_id: &EntityId,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
+        Err(RemoteEnrollmentAuthorityErrorV1::Unavailable)
+    }
+
+    fn authority_enrollment(
+        &self,
+        _brain_id: &BrainId,
+        _node_id: &BrainNodeId,
+        _revision: u64,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
+        Err(RemoteEnrollmentAuthorityErrorV1::Unavailable)
+    }
+
+    fn enrollment_commit_receipt(
+        &self,
+        _enrollment_id: &EntityId,
+    ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1> {
+        Err(RemoteEnrollmentAuthorityErrorV1::Unavailable)
+    }
+}
+
+struct UnreachableRead;
+
+impl RemoteExactObservationQueryReadPortV1 for UnreachableRead {
+    fn read_exact_observation(
+        &self,
+        _command: &RemoteExactObservationQueryCommandV1,
+    ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1> {
+        panic!("credential or cancellation denial must precede storage")
+    }
+}
+
+struct FixedClock(UtcMicros);
+
+impl RemoteQueryClockPortV1 for FixedClock {
+    fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
+        Ok(self.0)
+    }
+}
+
+fn protocol_request(sent_at: UtcMicros) -> RemoteProtocolRequestV1<RemoteQueryRequestV1> {
+    let body = request(vec![shard(1)]);
+    RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-query-runtime").unwrap(),
+        body.expected_authority.brain_id.clone(),
+        BrainNodeId::new("node.remote-query").unwrap(),
+        1,
+        Some(body.expected_authority.clone()),
+        sent_at,
+        body,
+    )
+    .unwrap()
+}
+
+fn unavailable_service() -> RemoteExactObservationQueryServiceV1 {
+    RemoteExactObservationQueryServiceV1::new_with_clock(
+        Arc::new(UnavailableCredentials),
+        Arc::new(UnreachableRead),
+        Arc::new(FixedClock(UtcMicros(77))),
+    )
+}
+
+#[test]
+fn protocol_failure_uses_server_clock_and_never_returns_partial_success() {
+    let adapter = RemoteExactObservationQueryProtocolAdapterV1::new(unavailable_service());
+    let response = adapter.execute(
+        protocol_request(UtcMicros(10)),
+        OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
+    );
+
+    assert!(response.result.is_err());
+    assert!(matches!(
+        response.authority,
+        CurrentRemoteAuthorityStateV1::Partial {
+            observed_at: UtcMicros(77),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cancelled_query_stops_before_credentials_or_storage() {
+    let cancellation =
+        CancellationSignal::active("cancel.remote-query-runtime-test").expect("cancellation");
+    cancellation.cancel(UtcMicros(76));
+    let error = unavailable_service()
+        .query_with_cancellation(
+            &protocol_request(UtcMicros(10)),
+            &OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
+            cancellation,
+        )
+        .unwrap_err();
+    assert_eq!(error, RemoteExactObservationQueryErrorV1::Cancelled);
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_application::remote::capture::RemoteWriterAuthorityV1;
@@ -205,20 +207,124 @@ fn exact_query_snapshot_is_atomic_and_publication_gated() {
     store
         .publish_and_enable_serving(&binding, &writer, 11, &frontier, &["writer"])
         .unwrap();
+    let observed_at = UtcMicros(99);
     let snapshot = store
         .query_authority_snapshot(
             &writer.project_id,
             &writer.scope,
             &writer.authority.fence,
-            writer.authority.observed_at,
+            observed_at,
         )
         .unwrap();
+    let mut expected_authority = writer.authority.clone();
+    expected_authority.observed_at = observed_at;
     assert_eq!(
         snapshot.authority,
-        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone())
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(expected_authority)
     );
+    assert_eq!(snapshot.project_id, writer.project_id);
+    assert_eq!(snapshot.scope, writer.scope);
+    assert_eq!(snapshot.placement_revision, 11);
     assert_eq!(snapshot.binding, binding);
     assert_eq!(snapshot.frontier, Some(frontier));
+    assert_eq!(snapshot.observed_at, observed_at);
+
+    let mut stale_generation = writer.authority.fence.clone();
+    stale_generation.generation_id = id::<ProjectionGenerationId>("generation.stale");
+    let stale = store
+        .query_authority_snapshot(
+            &writer.project_id,
+            &writer.scope,
+            &stale_generation,
+            observed_at,
+        )
+        .unwrap();
+    assert!(matches!(
+        stale.authority,
+        tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(_)
+    ));
+
+    let other_project = id::<ProjectId>("project.other");
+    assert!(store
+        .query_authority_snapshot(
+            &other_project,
+            &writer.scope,
+            &writer.authority.fence,
+            observed_at,
+        )
+        .is_err());
+}
+
+#[test]
+fn exact_query_snapshots_never_mix_authority_rotation_fields() {
+    let store = Arc::new(RusqliteRemoteAuthorityStoreV1::open_in_memory().unwrap());
+    let initial_binding = binding(4);
+    let replacement_binding = binding(5);
+    let initial_writer = writer(4, 11);
+    let replacement_writer = writer(5, 12);
+    store
+        .initialize_authority(
+            &initial_writer,
+            &initial_binding,
+            11,
+            &watermark(&initial_binding, 9),
+        )
+        .unwrap();
+    let reader_store = Arc::clone(&store);
+    let requested_project = initial_writer.project_id.clone();
+    let requested_scope = initial_writer.scope.clone();
+    let requested_fence = initial_writer.authority.fence.clone();
+    let reader = std::thread::spawn(move || {
+        let mut snapshots = Vec::new();
+        for observed in 20..2_020 {
+            if let Ok(snapshot) = reader_store.query_authority_snapshot(
+                &requested_project,
+                &requested_scope,
+                &requested_fence,
+                UtcMicros(observed),
+            ) {
+                snapshots.push(snapshot);
+            }
+            std::thread::yield_now();
+        }
+        snapshots
+    });
+    store
+        .compare_and_swap(
+            &AuthorityCasV1 {
+                shard_id: initial_binding.shard_id.clone(),
+                expected_binding: initial_binding.clone(),
+                replacement_binding: replacement_binding.clone(),
+                expected_placement_revision: 11,
+                replacement_placement_revision: 12,
+            },
+            &initial_writer,
+            &replacement_writer,
+        )
+        .unwrap();
+
+    let snapshots = reader.join().unwrap();
+    assert!(!snapshots.is_empty());
+    for snapshot in snapshots {
+        let fence = match snapshot.authority {
+            tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(authority) => {
+                authority.fence
+            }
+            tracedecay_domain::CurrentRemoteAuthorityStateV1::Partial {
+                known_fence: Some(fence),
+                ..
+            } => fence,
+            other => panic!("unexpected query authority state: {other:?}"),
+        };
+        assert!(
+            (fence == initial_writer.authority.fence
+                && snapshot.binding == initial_binding
+                && snapshot.placement_revision == 11)
+                || (fence == replacement_writer.authority.fence
+                    && snapshot.binding == replacement_binding
+                    && snapshot.placement_revision == 12)
+        );
+    }
 }
 
 #[test]

@@ -3,17 +3,18 @@ use std::sync::{Arc, Mutex};
 
 use schemars::schema_for;
 use tracedecay_application::{
-    TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffError, TaskHandoffGrantV1, TaskHandoffScopeV1, TaskHandoffService, TaskHandoffToken,
-    WorkflowActivationV1, WorkflowCoordinationError, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowDefinitionService, WorkflowPlacementCandidateV1,
-    WorkflowPlacementError, WorkflowPlacementPort, WorkflowPlacementRequestV1,
-    WorkflowPlacementService,
+    MAX_CALIBRATED_SCORE_MICROS, MAX_TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError,
+    TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrantV1,
+    TaskHandoffScopeV1, TaskHandoffService, TaskHandoffToken, WorkflowActivationV1,
+    WorkflowCoordinationError, WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
+    WorkflowDefinitionService, WorkflowPlacementCandidateV1, WorkflowPlacementError,
+    WorkflowPlacementPort, WorkflowPlacementRequestV1, WorkflowPlacementService,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, UtcMicros,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1,
-    WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStepV1, WorktreeId,
+    ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, ThreadId,
+    UtcMicros, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId,
+    WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStepV1,
+    WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -202,7 +203,12 @@ fn placement_request() -> WorkflowPlacementRequestV1 {
     }
 }
 
-fn matching_candidate(provider: &str, route_id: &str, priority: u32, score: u64) -> WorkflowPlacementCandidateV1 {
+fn matching_candidate(
+    provider: &str,
+    route_id: &str,
+    priority: u32,
+    score: u32,
+) -> WorkflowPlacementCandidateV1 {
     WorkflowPlacementCandidateV1 {
         route: route(provider, route_id),
         priority,
@@ -214,6 +220,7 @@ fn matching_candidate(provider: &str, route_id: &str, priority: u32, score: u64)
 
 #[test]
 fn placement_is_deterministic_and_unavailability_is_typed() {
+    assert_eq!(MAX_CALIBRATED_SCORE_MICROS, 1_000_000u32);
     let later = matching_candidate("provider.z", "route.z", 7, 900_000);
     let chosen = matching_candidate("provider.a", "route.a", 7, 900_000);
     let service = WorkflowPlacementService::new(FakePlacement {
@@ -258,7 +265,10 @@ fn placement_filters_invalid_evidence_and_rejects_invalid_requests() {
             eligible_chosen.clone(),
         ],
     });
-    assert_eq!(service.place(&placement_request()).unwrap(), eligible_chosen.route);
+    assert_eq!(
+        service.place(&placement_request()).unwrap(),
+        eligible_chosen.route
+    );
 
     let only_invalid = WorkflowPlacementService::new(FakePlacement {
         candidates: vec![matching_candidate("provider.a", "route.a", 1, 100)],
@@ -295,13 +305,14 @@ fn placement_filters_invalid_evidence_and_rejects_invalid_requests() {
     );
 
     let schema = serde_json::to_value(schema_for!(WorkflowPlacementRequestV1)).unwrap();
-    assert_eq!(
-        schema["properties"]["definition_version"]["minimum"],
-        1
-    );
+    assert_eq!(schema["properties"]["definition_version"]["minimum"], 1);
     assert_eq!(
         schema["properties"]["minimum_calibrated_score_micros"]["maximum"],
         1_000_000
+    );
+    assert_eq!(
+        schema["properties"]["minimum_calibrated_score_micros"]["type"],
+        "integer"
     );
 }
 
@@ -330,10 +341,11 @@ impl TaskHandoffAuthorityPort for FakeHandoffAuthority {
         let Some((grant, consumed)) = grants.get_mut(token_digest) else {
             return Ok(TaskHandoffConsumeOutcome::Missing);
         };
-        if &grant.scope != expected_scope {
+        if grant.scope() != expected_scope {
             return Ok(TaskHandoffConsumeOutcome::ScopeMismatch);
         }
-        if consumed_at > grant.expires_at {
+        // Half-open: consumed_at >= expires_at is expired.
+        if consumed_at >= *grant.expires_at() {
             return Ok(TaskHandoffConsumeOutcome::Expired);
         }
         if *consumed {
@@ -353,6 +365,7 @@ fn handoff_scope() -> TaskHandoffScopeV1 {
         1,
         id::<WorkflowStepId>("prepare"),
         id::<TaskId>("task.workflow.coordination.prepare"),
+        id::<ThreadId>("thread.workflow.coordination"),
         id::<RunId>("run.workflow.coordination"),
         id::<ActorId>("actor.workflow.source"),
         id::<ActorId>("actor.workflow.target"),
@@ -366,6 +379,7 @@ fn token(value: char) -> TaskHandoffToken {
 
 #[test]
 fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_leakage() {
+    assert_eq!(MAX_TASK_HANDOFF_LIFETIME_MICROS, UtcMicros(60_000_000));
     let authority = FakeHandoffAuthority::default();
     let service = TaskHandoffService::new(authority);
     let scope = handoff_scope();
@@ -395,16 +409,17 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
 
     assert_eq!(
         TaskHandoffScopeV1::new(
-            scope.project_id.clone(),
-            scope.repository_id.clone(),
-            scope.worktree_id.clone(),
-            scope.definition_id.clone(),
+            scope.project_id().clone(),
+            scope.repository_id().clone(),
+            scope.worktree_id().clone(),
+            scope.definition_id().clone(),
             0,
-            scope.step_id.clone(),
-            scope.task_id.clone(),
-            scope.run_id.clone(),
-            scope.from_actor_id.clone(),
-            scope.to_actor_id.clone(),
+            scope.step_id().clone(),
+            scope.task_id().clone(),
+            scope.thread_id().clone(),
+            scope.run_id().clone(),
+            scope.from_actor_id().clone(),
+            scope.to_actor_id().clone(),
         )
         .unwrap_err(),
         TaskHandoffError::InvalidScope
@@ -412,7 +427,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
 
     service
         .issue(
-            &scope.from_actor_id,
+            scope.from_actor_id(),
             scope.clone(),
             &handoff,
             UtcMicros(20),
@@ -432,36 +447,87 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
         TaskHandoffError::Unauthorized
     );
 
-    let mut wrong_scope = scope.clone();
-    wrong_scope.task_id = id("task.workflow.coordination.other");
+    let wrong_task = TaskHandoffScopeV1::new(
+        scope.project_id().clone(),
+        scope.repository_id().clone(),
+        scope.worktree_id().clone(),
+        scope.definition_id().clone(),
+        scope.definition_version(),
+        scope.step_id().clone(),
+        id("task.workflow.coordination.other"),
+        scope.thread_id().clone(),
+        scope.run_id().clone(),
+        scope.from_actor_id().clone(),
+        scope.to_actor_id().clone(),
+    )
+    .unwrap();
     assert_eq!(
         service
-            .redeem(&handoff, &wrong_scope, &scope.to_actor_id, UtcMicros(11),)
+            .redeem(&handoff, &wrong_task, scope.to_actor_id(), UtcMicros(11),)
             .unwrap_err(),
         TaskHandoffError::ScopeMismatch
     );
 
-    let mut wrong_definition = scope.clone();
-    wrong_definition.definition_version = 2;
+    let wrong_thread = TaskHandoffScopeV1::new(
+        scope.project_id().clone(),
+        scope.repository_id().clone(),
+        scope.worktree_id().clone(),
+        scope.definition_id().clone(),
+        scope.definition_version(),
+        scope.step_id().clone(),
+        scope.task_id().clone(),
+        id("thread.workflow.other"),
+        scope.run_id().clone(),
+        scope.from_actor_id().clone(),
+        scope.to_actor_id().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .redeem(&handoff, &wrong_thread, scope.to_actor_id(), UtcMicros(11),)
+            .unwrap_err(),
+        TaskHandoffError::ScopeMismatch
+    );
+
+    let wrong_definition = TaskHandoffScopeV1::new(
+        scope.project_id().clone(),
+        scope.repository_id().clone(),
+        scope.worktree_id().clone(),
+        scope.definition_id().clone(),
+        2,
+        scope.step_id().clone(),
+        scope.task_id().clone(),
+        scope.thread_id().clone(),
+        scope.run_id().clone(),
+        scope.from_actor_id().clone(),
+        scope.to_actor_id().clone(),
+    )
+    .unwrap();
     assert_eq!(
         service
             .redeem(
                 &handoff,
                 &wrong_definition,
-                &scope.to_actor_id,
+                scope.to_actor_id(),
                 UtcMicros(11),
             )
             .unwrap_err(),
         TaskHandoffError::ScopeMismatch
     );
 
-    // Expiry boundary: consumed_at == expires_at remains valid.
+    // Half-open expiry: consumed_at == expires_at is Expired.
+    assert_eq!(
+        service
+            .redeem(&handoff, &scope, scope.to_actor_id(), UtcMicros(20))
+            .unwrap_err(),
+        TaskHandoffError::Expired
+    );
     service
-        .redeem(&handoff, &scope, &scope.to_actor_id, UtcMicros(20))
+        .redeem(&handoff, &scope, scope.to_actor_id(), UtcMicros(19))
         .unwrap();
     assert_eq!(
         service
-            .redeem(&handoff, &scope, &scope.to_actor_id, UtcMicros(20))
+            .redeem(&handoff, &scope, scope.to_actor_id(), UtcMicros(19))
             .unwrap_err(),
         TaskHandoffError::Replay
     );
@@ -469,7 +535,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
     let expired = token('e');
     service
         .issue(
-            &scope.from_actor_id,
+            scope.from_actor_id(),
             scope.clone(),
             &expired,
             UtcMicros(20),
@@ -478,7 +544,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
         .unwrap();
     assert_eq!(
         service
-            .redeem(&expired, &scope, &scope.to_actor_id, UtcMicros(21))
+            .redeem(&expired, &scope, scope.to_actor_id(), UtcMicros(21))
             .unwrap_err(),
         TaskHandoffError::Expired
     );
@@ -486,7 +552,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
     assert_eq!(
         service
             .issue(
-                &scope.from_actor_id,
+                scope.from_actor_id(),
                 scope.clone(),
                 &token('x'),
                 UtcMicros(10),
@@ -495,19 +561,41 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
             .unwrap_err(),
         TaskHandoffError::InvalidExpiry
     );
+
+    // Maximum lifetime is 60 seconds (60_000_000 micros).
+    assert_eq!(
+        service
+            .issue(
+                scope.from_actor_id(),
+                scope.clone(),
+                &token('l'),
+                UtcMicros(10 + 60_000_001),
+                UtcMicros(10),
+            )
+            .unwrap_err(),
+        TaskHandoffError::InvalidExpiry
+    );
+    service
+        .issue(
+            scope.from_actor_id(),
+            scope.clone(),
+            &token('m'),
+            UtcMicros(10 + 60_000_000),
+            UtcMicros(10),
+        )
+        .unwrap();
 }
 
 #[test]
 fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
     let scope = handoff_scope();
-    let grant = TaskHandoffGrantV1::new(
-        scope.clone(),
-        digest('f'),
-        UtcMicros(10),
-        UtcMicros(20),
-    )
-    .unwrap();
+    let grant =
+        TaskHandoffGrantV1::new(scope.clone(), digest('f'), UtcMicros(10), UtcMicros(20)).unwrap();
+    assert_eq!(grant.scope(), &scope);
+    assert_eq!(*grant.issued_at(), UtcMicros(10));
+    assert_eq!(*grant.expires_at(), UtcMicros(20));
     let json = serde_json::to_value(&grant).unwrap();
+    assert_eq!(json["scope"]["thread_id"], "thread.workflow.coordination");
     assert_eq!(
         serde_json::from_value::<TaskHandoffGrantV1>(json.clone()).unwrap(),
         grant
@@ -523,22 +611,30 @@ fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
     inverted["expires_at"] = serde_json::json!(20);
     assert!(serde_json::from_value::<TaskHandoffGrantV1>(inverted).is_err());
 
+    let mut too_long = json.clone();
+    too_long["issued_at"] = serde_json::json!(10);
+    too_long["expires_at"] = serde_json::json!(10 + 60_000_001);
+    assert!(serde_json::from_value::<TaskHandoffGrantV1>(too_long).is_err());
+
     let mut zero_version = json;
     zero_version["scope"]["definition_version"] = serde_json::json!(0);
     assert!(serde_json::from_value::<TaskHandoffGrantV1>(zero_version).is_err());
-    assert!(serde_json::from_value::<TaskHandoffScopeV1>(serde_json::json!({
-        "project_id": "project.workflow.coordination",
-        "repository_id": "repository.workflow.coordination",
-        "worktree_id": "worktree.workflow.coordination",
-        "definition_id": "workflow.definition.coordination",
-        "definition_version": 0,
-        "step_id": "prepare",
-        "task_id": "task.workflow.coordination.prepare",
-        "run_id": "run.workflow.coordination",
-        "from_actor_id": "actor.workflow.source",
-        "to_actor_id": "actor.workflow.target",
-    }))
-    .is_err());
+    assert!(
+        serde_json::from_value::<TaskHandoffScopeV1>(serde_json::json!({
+            "project_id": "project.workflow.coordination",
+            "repository_id": "repository.workflow.coordination",
+            "worktree_id": "worktree.workflow.coordination",
+            "definition_id": "workflow.definition.coordination",
+            "definition_version": 0,
+            "step_id": "prepare",
+            "task_id": "task.workflow.coordination.prepare",
+            "thread_id": "thread.workflow.coordination",
+            "run_id": "run.workflow.coordination",
+            "from_actor_id": "actor.workflow.source",
+            "to_actor_id": "actor.workflow.target",
+        }))
+        .is_err()
+    );
 
     let schema = serde_json::to_value(schema_for!(TaskHandoffGrantV1)).unwrap();
     let scope_schema = serde_json::to_value(schema_for!(TaskHandoffScopeV1)).unwrap();
@@ -546,6 +642,7 @@ fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
         scope_schema["properties"]["definition_version"]["minimum"],
         1
     );
+    assert!(scope_schema["properties"].get("thread_id").is_some());
     assert!(schema["properties"].get("token").is_none());
     assert!(schema["properties"].get("secret").is_none());
     assert!(schema["properties"].get("token_digest").is_some());
