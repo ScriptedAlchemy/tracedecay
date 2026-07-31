@@ -418,6 +418,16 @@ struct FactResponseMetadata {
     contradiction: FactContradictionStateV1,
 }
 
+/// Renders an optional `as_of` bound as an always-bindable upper cutoff.
+///
+/// `memory_v2_lineage_events.occurred_at` is `INTEGER NOT NULL`, so an
+/// unbounded read is exactly `occurred_at <= i64::MAX`. Binding the sentinel
+/// lets every lineage helper carry a single SQL literal instead of forking the
+/// whole statement on `Option`.
+fn as_of_cutoff(as_of: Option<UtcMicros>) -> i64 {
+    as_of.map_or(i64::MAX, |cutoff| cutoff.0)
+}
+
 async fn query_fact_response_metadata_tx(
     snapshot: &Transaction<'_>,
     typed_owner: &FactOwnerV1,
@@ -426,12 +436,24 @@ async fn query_fact_response_metadata_tx(
     fact: Option<&StoredFactV1>,
 ) -> FactStoreResult<FactResponseMetadata> {
     let owner = OwnerKey::new(typed_owner)?;
-    let observed_event = fact_lineage_event_exists_tx(snapshot, &owner, fact_id, as_of).await?;
-    let latest_assertion_id = latest_fact_assertion_id_tx(snapshot, &owner, fact_id, as_of).await?;
+    let probe = probe_fact_lineage_tx(snapshot, &owner, fact_id, as_of).await?;
+    let observed_event = probe.observed_event;
+    let latest_assertion_id = probe
+        .latest_assertion
+        .require("lineage assertion event is missing an assertion identifier")?
+        .map(FactAssertionId::new)
+        .transpose()?;
+    // Only read back the stored access state when the caller has no fact to
+    // take it from; a malformed access event must not fail reads that never
+    // needed it.
     let effective_access = match fact {
         Some(fact) => fact.payload_access(),
-        None => latest_fact_payload_access_tx(snapshot, &owner, fact_id, as_of)
-            .await?
+        None => probe
+            .latest_payload_access
+            .require("lineage payload access event is missing its current state")?
+            .as_deref()
+            .map(parse_payload_access)
+            .transpose()?
             .unwrap_or(PayloadAccessState::Eligible),
     };
     let legacy_unknown = fact
@@ -463,164 +485,115 @@ async fn query_fact_response_metadata_tx(
     })
 }
 
-async fn fact_lineage_event_exists_tx(
-    snapshot: &Transaction<'_>,
-    owner: &OwnerKey,
-    fact_id: &FactId,
-    as_of: Option<UtcMicros>,
-) -> FactStoreResult<bool> {
-    let mut rows = match as_of {
-        Some(cutoff) => {
-            snapshot
-                .query(
-                    "SELECT 1 FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                       AND occurred_at <= ?4
-                     LIMIT 1",
-                    params![
-                        fact_id.as_str(),
-                        owner.kind,
-                        owner.project_id.as_str(),
-                        cutoff.0,
-                    ],
-                )
-                .await
-        }
-        None => {
-            snapshot
-                .query(
-                    "SELECT 1 FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                     LIMIT 1",
-                    params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
-                )
-                .await
-        }
-    }
-    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let exists = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-        .is_some();
-    drop(rows);
-    Ok(exists)
+/// The newest matching lineage event's projected JSON field.
+///
+/// Distinguishes "no such event" (a normal empty history) from "the event
+/// exists but its payload is malformed", which the callers treat as a store
+/// integrity failure.
+enum LatestLineageField {
+    Absent,
+    Present(Option<String>),
 }
 
-async fn latest_fact_assertion_id_tx(
-    snapshot: &Transaction<'_>,
-    owner: &OwnerKey,
-    fact_id: &FactId,
-    as_of: Option<UtcMicros>,
-) -> FactStoreResult<Option<FactAssertionId>> {
-    let mut rows = match as_of {
-        Some(cutoff) => {
-            snapshot
-                .query(
-                    "SELECT json_extract(event_json, '$.kind.assertion_id')
-                     FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                       AND occurred_at <= ?4
-                       AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
-                     ORDER BY occurred_at DESC, event_id DESC
-                     LIMIT 1",
-                    params![
-                        fact_id.as_str(),
-                        owner.kind,
-                        owner.project_id.as_str(),
-                        cutoff.0,
-                    ],
-                )
-                .await
+impl LatestLineageField {
+    fn read(row: &crate::db::engine::Row, present: i32, value: i32) -> FactStoreResult<Self> {
+        if row_i64(row, present, QUERY_OPERATION)? == 0 {
+            return Ok(Self::Absent);
         }
-        None => {
-            snapshot
-                .query(
-                    "SELECT json_extract(event_json, '$.kind.assertion_id')
-                     FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                       AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
-                     ORDER BY occurred_at DESC, event_id DESC
-                     LIMIT 1",
-                    params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
-                )
-                .await
+        Ok(Self::Present(row_optional_string(
+            row,
+            value,
+            QUERY_OPERATION,
+        )?))
+    }
+
+    /// Yields the field, rejecting an event that exists without one.
+    fn require(self, malformed: &'static str) -> FactStoreResult<Option<String>> {
+        match self {
+            Self::Absent => Ok(None),
+            Self::Present(Some(value)) => Ok(Some(value)),
+            Self::Present(None) => Err(storage_message(QUERY_OPERATION, malformed)),
         }
     }
-    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    let assertion_id = row_optional_string(&row, 0, QUERY_OPERATION)?.ok_or_else(|| {
-        storage_message(
-            QUERY_OPERATION,
-            "lineage assertion event is missing an assertion identifier",
-        )
-    })?;
-    drop(rows);
-    Ok(FactAssertionId::new(assertion_id).map(Some)?)
 }
 
-async fn latest_fact_payload_access_tx(
+/// Everything the fact-response metadata needs from the lineage log.
+struct FactLineageProbe {
+    observed_event: bool,
+    latest_assertion: LatestLineageField,
+    latest_payload_access: LatestLineageField,
+}
+
+/// Reads the lineage log once for all three metadata projections.
+///
+/// Every projection filters the same `(fact_id, owner, occurred_at <= cutoff)`
+/// key, so they ride one statement as correlated subqueries rather than three
+/// sequential round trips.
+async fn probe_fact_lineage_tx(
     snapshot: &Transaction<'_>,
     owner: &OwnerKey,
     fact_id: &FactId,
     as_of: Option<UtcMicros>,
-) -> FactStoreResult<Option<PayloadAccessState>> {
-    let mut rows = match as_of {
-        Some(cutoff) => {
-            snapshot
-                .query(
-                    "SELECT json_extract(event_json, '$.kind.current')
-                     FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                       AND occurred_at <= ?4
-                       AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
-                     ORDER BY occurred_at DESC, event_id DESC
-                     LIMIT 1",
-                    params![
-                        fact_id.as_str(),
-                        owner.kind,
-                        owner.project_id.as_str(),
-                        cutoff.0,
-                    ],
-                )
-                .await
-        }
-        None => {
-            snapshot
-                .query(
-                    "SELECT json_extract(event_json, '$.kind.current')
-                     FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                       AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
-                     ORDER BY occurred_at DESC, event_id DESC
-                     LIMIT 1",
-                    params![fact_id.as_str(), owner.kind, owner.project_id.as_str()],
-                )
-                .await
-        }
-    }
-    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = rows
+) -> FactStoreResult<FactLineageProbe> {
+    let mut rows = snapshot
+        .query(
+            "SELECT
+               EXISTS (
+                 SELECT 1 FROM memory_v2_lineage_events
+                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                   AND occurred_at <= ?4
+               ),
+               EXISTS (
+                 SELECT 1 FROM memory_v2_lineage_events
+                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                   AND occurred_at <= ?4
+                   AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
+               ),
+               (
+                 SELECT json_extract(event_json, '$.kind.assertion_id')
+                 FROM memory_v2_lineage_events
+                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                   AND occurred_at <= ?4
+                   AND json_extract(event_json, '$.kind.kind') = 'assertion_recorded'
+                 ORDER BY occurred_at DESC, event_id DESC
+                 LIMIT 1
+               ),
+               EXISTS (
+                 SELECT 1 FROM memory_v2_lineage_events
+                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                   AND occurred_at <= ?4
+                   AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
+               ),
+               (
+                 SELECT json_extract(event_json, '$.kind.current')
+                 FROM memory_v2_lineage_events
+                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+                   AND occurred_at <= ?4
+                   AND json_extract(event_json, '$.kind.kind') = 'payload_access_changed'
+                 ORDER BY occurred_at DESC, event_id DESC
+                 LIMIT 1
+               )",
+            params![
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+                as_of_cutoff(as_of),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let row = rows
         .next()
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(None);
+        .ok_or_else(|| storage_message(QUERY_OPERATION, "lineage probe returned no rows"))?;
+    let probe = FactLineageProbe {
+        observed_event: row_i64(&row, 0, QUERY_OPERATION)? != 0,
+        latest_assertion: LatestLineageField::read(&row, 1, 2)?,
+        latest_payload_access: LatestLineageField::read(&row, 3, 4)?,
     };
-    let payload_access = row_optional_string(&row, 0, QUERY_OPERATION)?.ok_or_else(|| {
-        storage_message(
-            QUERY_OPERATION,
-            "lineage payload access event is missing its current state",
-        )
-    })?;
     drop(rows);
-    parse_payload_access(&payload_access).map(Some)
+    Ok(probe)
 }
 
 async fn fact_contradiction_ids_tx(
@@ -630,49 +603,26 @@ async fn fact_contradiction_ids_tx(
     fact_id: &FactId,
     as_of: Option<UtcMicros>,
 ) -> FactStoreResult<Vec<FactId>> {
-    let mut rows = match as_of {
-        Some(cutoff) => {
-            snapshot
-                .query(
-                    "SELECT DISTINCT json_extract(event_json, '$.kind.action.fact_id')
-                     FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                       AND occurred_at <= ?4
-                       AND json_extract(event_json, '$.kind.kind') = 'curated'
-                       AND json_extract(event_json, '$.kind.action.kind') = 'contradicted_by'
-                     ORDER BY 1 ASC
-                     LIMIT ?5",
-                    params![
-                        fact_id.as_str(),
-                        owner.kind,
-                        owner.project_id.as_str(),
-                        cutoff.0,
-                        MAX_FACT_QUERY_CONTRADICTIONS as i64,
-                    ],
-                )
-                .await
-        }
-        None => {
-            snapshot
-                .query(
-                    "SELECT DISTINCT json_extract(event_json, '$.kind.action.fact_id')
-                     FROM memory_v2_lineage_events
-                     WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-                       AND json_extract(event_json, '$.kind.kind') = 'curated'
-                       AND json_extract(event_json, '$.kind.action.kind') = 'contradicted_by'
-                     ORDER BY 1 ASC
-                     LIMIT ?4",
-                    params![
-                        fact_id.as_str(),
-                        owner.kind,
-                        owner.project_id.as_str(),
-                        MAX_FACT_QUERY_CONTRADICTIONS as i64,
-                    ],
-                )
-                .await
-        }
-    }
-    .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+    let mut rows = snapshot
+        .query(
+            "SELECT DISTINCT json_extract(event_json, '$.kind.action.fact_id')
+             FROM memory_v2_lineage_events
+             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+               AND occurred_at <= ?4
+               AND json_extract(event_json, '$.kind.kind') = 'curated'
+               AND json_extract(event_json, '$.kind.action.kind') = 'contradicted_by'
+             ORDER BY 1 ASC
+             LIMIT ?5",
+            params![
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+                as_of_cutoff(as_of),
+                MAX_FACT_QUERY_CONTRADICTIONS as i64,
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
     let mut contradicted_by = Vec::new();
     while let Some(row) = rows
         .next()

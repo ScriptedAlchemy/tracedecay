@@ -3123,13 +3123,26 @@ impl OwnedGlobalDbConfigurationControlStore {
     }
 }
 
+/// Forwards one owned-store method to a freshly registered borrowed store.
+///
+/// Every method below is the same shape: clone the borrowed arguments so the
+/// returned future owns them, retain the database handle, then open the
+/// registered store inside the future and delegate. Only the argument list and
+/// the delegated call differ, so they are all the macro takes.
+macro_rules! forward_to_registered {
+    ($self:ident, [$($owned:ident),* $(,)?], |$store:ident| $call:expr) => {{
+        let db = $self.database();
+        $(let $owned = $owned.clone();)*
+        Box::pin(async move {
+            let $store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
+            $call.await
+        })
+    }};
+}
+
 impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
     fn current(&self) -> ConfigurationOperationFuture<'_, ConfigurationCurrentStateV1> {
-        let db = self.database();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store.current().await
-        })
+        forward_to_registered!(self, [], |store| store.current())
     }
 
     fn save_plan(
@@ -3137,25 +3150,15 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         operation: &ProtectedChange,
     ) -> ConfigurationOperationFuture<'_, ()> {
-        let db = self.database();
-        let plan = plan.clone();
-        let operation = operation.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store.save_plan(&plan, &operation).await
-        })
+        forward_to_registered!(self, [plan, operation], |store| store
+            .save_plan(&plan, &operation))
     }
 
     fn load_plan(
         &self,
         plan_id: &ChangePlanId,
     ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
-        let db = self.database();
-        let plan_id = plan_id.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store.load_plan(&plan_id).await
-        })
+        forward_to_registered!(self, [plan_id], |store| store.load_plan(&plan_id))
     }
 
     fn commit_direct(
@@ -3164,16 +3167,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         mutation: &DirectConfigurationMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = self.database();
-        let authority = authority.clone();
-        let mutation = mutation.clone();
-        let expected_revision = expected_revision.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store
-                .commit_direct(&authority, &mutation, &expected_revision)
-                .await
-        })
+        forward_to_registered!(
+            self,
+            [authority, mutation, expected_revision],
+            |store| store.commit_direct(&authority, &mutation, &expected_revision)
+        )
     }
 
     fn commit_protected(
@@ -3183,17 +3181,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = self.database();
-        let authority = authority.clone();
-        let request = request.clone();
-        let plan = plan.clone();
-        let evidence = evidence.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store
-                .commit_protected(&authority, &request, &plan, &evidence)
-                .await
-        })
+        forward_to_registered!(
+            self,
+            [authority, request, plan, evidence],
+            |store| store.commit_protected(&authority, &request, &plan, &evidence)
+        )
     }
 
     fn dry_run_rollback(
@@ -3202,13 +3194,8 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         rollback: &ConfigurationRollbackRequest,
         now: UtcMicros,
     ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        let db = self.database();
-        let authority = authority.clone();
-        let rollback = rollback.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store.dry_run_rollback(&authority, &rollback, now).await
-        })
+        forward_to_registered!(self, [authority, rollback], |store| store
+            .dry_run_rollback(&authority, &rollback, now))
     }
 
     fn apply_rollback(
@@ -3218,17 +3205,11 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        let db = self.database();
-        let authority = authority.clone();
-        let request = request.clone();
-        let plan = plan.clone();
-        let evidence = evidence.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store
-                .apply_rollback(&authority, &request, &plan, &evidence)
-                .await
-        })
+        forward_to_registered!(
+            self,
+            [authority, request, plan, evidence],
+            |store| store.apply_rollback(&authority, &request, &plan, &evidence)
+        )
     }
 
     fn audit(
@@ -3236,25 +3217,17 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         actor: &AuthorizedActor,
         query: &ConfigurationAuditQuery,
     ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage> {
-        let db = self.database();
-        let actor = actor.clone();
-        let query = query.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            ConfigurationControlStore::audit(&store, &actor, &query).await
-        })
+        // Disambiguated: the registered store also has an inherent `audit`.
+        forward_to_registered!(self, [actor, query], |store| ConfigurationControlStore::audit(
+            &store, &actor, &query
+        ))
     }
 
     fn observed_state(
         &self,
         actor: &AuthorizedActor,
     ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
-        let db = self.database();
-        let actor = actor.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store.observed_state(&actor).await
-        })
+        forward_to_registered!(self, [actor], |store| store.observed_state(&actor))
     }
 }
 
@@ -3265,16 +3238,11 @@ impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
         write: &WriteOnlyCredentialMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        let db = self.database();
-        let authority = authority.clone();
-        let write = write.clone();
-        let expected_revision = expected_revision.clone();
-        Box::pin(async move {
-            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
-            store
-                .write_reference(&authority, &write, &expected_revision)
-                .await
-        })
+        forward_to_registered!(
+            self,
+            [authority, write, expected_revision],
+            |store| store.write_reference(&authority, &write, &expected_revision)
+        )
     }
 }
 

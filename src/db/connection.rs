@@ -986,13 +986,17 @@ impl Database {
         &self.inner.conn
     }
 
-    /// Runs a bounded scalar integer inspection on the retained runtime.
-    #[doc(hidden)]
-    pub async fn query_scalar_i64(&self, operation: &str, sql: &str) -> Result<i64> {
+    /// Runs a bounded scalar inspection on the retained runtime, projecting the
+    /// first column of the first row.
+    async fn query_scalar<T, P>(&self, operation: &str, sql: &str, params: P) -> Result<T>
+    where
+        T: crate::db::engine::FromValue,
+        P: crate::db::engine::IntoParams,
+    {
         let mut rows = self
             .inner
             .conn
-            .query(sql, ())
+            .query(sql, params)
             .await
             .map_err(|error| database_query_error(operation, error))?;
         let row = rows
@@ -1005,48 +1009,24 @@ impl Database {
             })?;
         row.get(0)
             .map_err(|error| database_query_error(operation, error))
+    }
+
+    /// Runs a bounded scalar integer inspection on the retained runtime.
+    #[doc(hidden)]
+    pub async fn query_scalar_i64(&self, operation: &str, sql: &str) -> Result<i64> {
+        self.query_scalar(operation, sql, ()).await
     }
 
     /// Runs a bounded scalar blob inspection on the retained runtime.
     #[doc(hidden)]
     pub async fn query_scalar_blob(&self, operation: &str, sql: &str) -> Result<Vec<u8>> {
-        let mut rows = self
-            .inner
-            .conn
-            .query(sql, ())
-            .await
-            .map_err(|error| database_query_error(operation, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| database_query_error(operation, error))?
-            .ok_or_else(|| TraceDecayError::Database {
-                message: "scalar query returned no rows".to_owned(),
-                operation: operation.to_owned(),
-            })?;
-        row.get(0)
-            .map_err(|error| database_query_error(operation, error))
+        self.query_scalar(operation, sql, ()).await
     }
 
     /// Runs a bounded scalar text inspection on the retained runtime.
     #[doc(hidden)]
     pub async fn query_scalar_text(&self, operation: &str, sql: &str) -> Result<String> {
-        let mut rows = self
-            .inner
-            .conn
-            .query(sql, ())
-            .await
-            .map_err(|error| database_query_error(operation, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| database_query_error(operation, error))?
-            .ok_or_else(|| TraceDecayError::Database {
-                message: "scalar query returned no rows".to_owned(),
-                operation: operation.to_owned(),
-            })?;
-        row.get(0)
-            .map_err(|error| database_query_error(operation, error))
+        self.query_scalar(operation, sql, ()).await
     }
 
     /// Runs a bounded scalar integer inspection with one text identity bound.
@@ -1057,22 +1037,7 @@ impl Database {
         sql: &str,
         value: &str,
     ) -> Result<i64> {
-        let mut rows = self
-            .inner
-            .conn
-            .query(sql, (value,))
-            .await
-            .map_err(|error| database_query_error(operation, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| database_query_error(operation, error))?
-            .ok_or_else(|| TraceDecayError::Database {
-                message: "scalar query returned no rows".to_owned(),
-                operation: operation.to_owned(),
-            })?;
-        row.get(0)
-            .map_err(|error| database_query_error(operation, error))
+        self.query_scalar(operation, sql, (value,)).await
     }
 
     pub(crate) fn engine_conn(&self) -> DatabaseEngineConnection {
@@ -1091,16 +1056,7 @@ impl Database {
     where
         P: crate::db::engine::IntoParams,
     {
-        let transaction = self.begin_write_transaction(operation).await?;
-        let changed = transaction
-            .execute_engine(sql, params)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to execute brokered write: {error}"),
-                operation: operation.to_string(),
-            })?;
-        transaction.commit().await?;
-        Ok(changed)
+        self.execute_write_engine(operation, sql, params).await
     }
 
     pub(crate) async fn execute_write_engine<P>(
