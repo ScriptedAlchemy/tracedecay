@@ -17,9 +17,10 @@ The `TraceDecay V2` roadmap name is independent of contract/schema versioning.
 A predecessor proven on `origin/master`, in a published package/release, an
 independently deployed client, a live host installation, or a live persisted
 format requires the applicable compatibility, deprecation, reader/writer,
-contract-version, or migration path. Pure transient wire/request DTOs and
-source-only contracts change in place; PR sequence, branch history, tests,
-historical plans, and a `V1` suffix alone do not establish publication.
+contract-version, or migration path. Pure source-only/internal contracts change
+in place; PR sequence, branch history, tests, historical plans, and a `V1`
+suffix alone do not establish publication. Wire-visible revisions remain
+negotiated until an authorized installed-client/host census proves absence.
 Anything potentially installed or written to a store, spool, file, or
 persisted projection fail-closes as live and keeps compatibility,
 backward-read, and migration/recovery until a separately authorized census

@@ -8,8 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
-> Historical compatibility/migration language applies only to evidenced
-> released callers; branch-local operations change in place.
+> Pure source-only/internal operations change in place. Potentially deployed
+> branch-era callable operations remain compatible until an authorized
+> installed-client/host census proves absence.
 
 **Goal:** Move session, memory, feedback, and configuration use-case sequencing
 behind application ports while retaining root SQL/store adapters.

@@ -9,12 +9,13 @@ owns how those semantics look, move, and connect. Normative like 11a/11b: every
 channel encodes a stated measurement, absence is drawn, degenerate
 distributions are said rather than drawn, caps are captioned.
 
-Plan 24's contract rule applies here: pure transient Work DTOs change in place.
-Branch-era routes may survive in dogfood navigation, saved views, bookmarks, or
-installed host surfaces and retain aliases/migration until an authorized
-live-profile/installed-host census proves absence. Product graph/item versions
-remain UI-visible history/CAS identities rather than by themselves evidence
-for another wire version.
+Plan 24's contract rule applies here: pure source-only/internal Work view
+helpers change in place. Wire-visible DTO revisions and branch-era routes may
+survive in dogfood clients, navigation, saved views, bookmarks, or installed
+host surfaces and retain negotiation/aliases/migration until an authorized
+installed-client/live-profile/host census proves absence. Product graph/item
+versions remain UI-visible history/CAS identities rather than by themselves
+evidence for another wire version.
 
 The user explicitly requires a first-class TraceDecay task graph/Kanban
 inspired by Hermes but more powerful; it is a product feature, not roadmap

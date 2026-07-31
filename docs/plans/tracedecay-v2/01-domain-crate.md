@@ -57,12 +57,13 @@ consumer.
 - PR5 source positions and cursors are provider-safe opaque values; numeric and
   content-hash cursors cannot be compared under the wrong ordering rule.
 - Each later vertical PR adds the smallest final contract it consumes.
-  Pure branch-local request DTOs change in place. Once a domain value can be
+  Pure source-only/internal request helpers change in place. Wire-visible
+  request revisions retain negotiation until an authorized
+  installed-client/host census proves absence. Once a domain value can be
   written to a store, spool, file, journal, checkpoint, receipt, or persisted
   projection, its old version remains readable or receives an explicit
-  migration until a separately authorized registered-store/profile census
-  proves absence; a version suffix or test fixture alone is not release
-  evidence.
+  migration until the registered-store/profile census proves absence; a
+  version suffix or test fixture alone is not publication evidence.
 - Provider-exposed reasoning may be represented with visibility and retention;
   hidden reasoning is never inferred or reconstructed.
 
@@ -143,11 +144,12 @@ migration seeds the first shipped source definition and maps those
 profile/project observations to bindings without changing observation or
 anchor identity. It hashes legacy native identity in the existing privacy
 domain, records `Unknown` coverage when an exact predecessor frontier cannot be
-proven, and returns the same receipt on rerun. Unreleased source-definition
-request DTOs are finalized in place. Any source definition, binding, cursor,
-frontier, journal, checkpoint, or receipt written by dogfood remains in this
-migration until a separately authorized registered-store/profile census proves
-absence.
+proven, and returns the same receipt on rerun. Unreleased source-only/internal
+source-definition request helpers are finalized in place; wire-visible
+revisions remain negotiated until the authorized installed-client/host census.
+Any source definition, binding, cursor, frontier, journal, checkpoint, or
+receipt written by dogfood remains in this migration until the
+registered-store/profile census proves absence.
 
 Direct regression evidence must prove canonical encoding and unknown-field
 handling; digest tamper, raw-identifier, ambiguous-scope, and invalid-capability

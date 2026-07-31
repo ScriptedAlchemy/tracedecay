@@ -17,13 +17,14 @@ by the direct offline capture, fenced replay, query, backup/restore, failover,
 platform, and regression behavior below.
 
 No remote enrollment/spool/replica/backup format is established on
-`origin/master` or in a published package/release. Pure transient enrollment
-requests may take their final shape in place. Spool files, replica journals,
-backup manifests, checkpoints, and receipts may nevertheless exist through
-dogfood; old readers and migration/recovery remain fail-closed until a
-separately authorized machine/profile census proves absence. Authenticated
-protocol negotiation remains mandatory because independently deployed nodes
-can differ.
+`origin/master` or in a published package/release. Pure source-only/internal
+enrollment helpers may take their final shape in place. Wire-visible enrollment
+revisions retain negotiation until an authorized installed-node/client census
+proves absence. Spool files, replica journals, backup manifests, checkpoints,
+and receipts may exist through dogfood; old readers and migration/recovery
+remain fail-closed until the machine/profile census proves absence.
+Authenticated protocol negotiation remains mandatory because independently
+deployed nodes can differ.
 
 ## User outcome
 
@@ -200,10 +201,11 @@ finding and remediation identities.
    identity, retention/deletion, diagnostics, and health contracts remain
    supported through the remote application model where `origin/master`,
    published releases, or live persistence prove the predecessor. Pure
-   transient enrollment requests change in place. Potentially persisted spool,
-   cache/replica, backup, and restore records retain readers and
-   migration/recovery until the authorized machine/profile census proves
-   absence; they never silently reinterpret authority, identity,
+   source-only/internal enrollment helpers change in place; wire-visible
+   revisions retain negotiation until the installed-node/client census.
+   Potentially persisted spool, cache/replica, backup, and restore records
+   retain readers and migration/recovery until the authorized machine/profile
+   census proves absence; they never silently reinterpret authority, identity,
    epoch, watermark, or deletion lineage. PR18 adds SDK bindings without
    replacing these PR16 APIs.
 

@@ -14,11 +14,14 @@ persisted formats remain compatibility contracts until their declared
 migration or retirement; all other convergence is judged by the direct
 behavior and architecture boundaries below.
 
-This cutover inventories only V1 APIs/data proven on `origin/master`, in a
-published package/release, or in live persisted storage. `TraceDecay V2` is
-the product destination, not evidence for contract-version siblings.
-Unreleased source aliases, adapters, and transient DTOs converge in place and
-do not acquire migration or deprecation windows from PR sequencing or tests.
+This cutover inventories V1 APIs/data proven on `origin/master`, in a published
+package/release, or in live persisted storage, plus potentially deployed
+branch-era callable names/shapes and potentially persisted branch formats until
+the applicable authorized census proves absence. `TraceDecay V2` is the
+product destination, not evidence for contract-version siblings.
+Unreleased source-only aliases, internal adapters, and internal DTO helpers
+converge in place and do not acquire migration or deprecation windows from PR
+sequencing or tests.
 Any branch-written schema, store, spool, file, journal, checkpoint, receipt, or
 projection stays in the cutover inventory until a separately authorized
 registered-store/profile census proves absence.
