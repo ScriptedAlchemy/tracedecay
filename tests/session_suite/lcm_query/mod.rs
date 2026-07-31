@@ -188,7 +188,6 @@ fn summary_draft(
     }
 }
 
-mod architecture;
 mod describe;
 mod expand;
 mod expand_query;
