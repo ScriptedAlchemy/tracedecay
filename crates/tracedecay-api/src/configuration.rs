@@ -124,7 +124,6 @@ pub fn validate_user_settings_patch(
 }
 
 /// Render validation failures using the generated dashboard wire shape.
-#[must_use]
 pub fn settings_validation_error(errors: impl Serialize) -> DashboardConfigurationRouteErrorV1 {
     (
         StatusCode::BAD_REQUEST,
@@ -136,7 +135,6 @@ pub fn settings_validation_error(errors: impl Serialize) -> DashboardConfigurati
 }
 
 /// Render a revision mismatch without losing either CAS revision.
-#[must_use]
 pub fn configuration_revision_conflict_error(
     detail: &str,
     expected: &str,
@@ -154,7 +152,6 @@ pub fn configuration_revision_conflict_error(
 }
 
 /// Render the fail-closed missing-authority response.
-#[must_use]
 pub fn configuration_authority_unavailable_error() -> DashboardConfigurationRouteErrorV1 {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -167,7 +164,6 @@ pub fn configuration_authority_unavailable_error() -> DashboardConfigurationRout
 
 /// Preserve canonical application problem bodies for project configuration
 /// writes while mapping their problem kind to the dashboard's historic status.
-#[must_use]
 pub fn configuration_application_problem_error(
     problem: ApplicationProblemEnvelope,
 ) -> DashboardConfigurationRouteErrorV1 {
