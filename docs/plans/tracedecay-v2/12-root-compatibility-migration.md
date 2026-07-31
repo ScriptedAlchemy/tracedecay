@@ -164,10 +164,11 @@ family corruption remains preserve-and-escalate.
   still authoritative and any comparison remains read-only.
 - Publish one verified V2 epoch atomically, reconnect clients, and reject an
   older or stale client/daemon with an actionable upgrade error.
-- Preserve stable public compatibility names only when `origin/master` or a
-  published package/release proves the name was public, and then only as thin
-  delegates to canonical V2 application operations. They own no storage,
-  policy, lifecycle, or migration logic.
+- Preserve stable public compatibility names proven by `origin/master` or a
+  published package/release, plus branch-era callable names until an authorized
+  installed-client/host census proves absence, as thin delegates to canonical
+  V2 application operations. They own no storage, policy, lifecycle, or
+  migration logic.
 
 ### Recover forward, then delete
 
@@ -189,10 +190,12 @@ family corruption remains preserve-and-escalate.
 PR19 removes duplicate transport/admin handlers, handler-local database and
 query logic, obsolete root-owned product implementation, writable fallbacks,
 external `ast-grep` capability probing, and subprocess outline/rewrite paths.
-Temporary compatibility wrappers are deleted after their named consumer has
-migrated. Stable published aliases remain, but delegate to the same canonical
-operation and preserve equivalent authorization, errors, redaction, effects,
-pagination, streaming, cancellation, and retry behavior.
+Source-only temporary wrappers are deleted after their named internal consumer
+has migrated. Callable branch-era wrappers remain until the authorized
+installed-client/host census proves absence. Stable published aliases remain,
+but delegate to the same canonical operation and preserve equivalent
+authorization, errors, redaction, effects, pagination, streaming, cancellation,
+and retry behavior.
 
 The final root package owns composition, daemon lifecycle, discovery, upgrade
 handoff, and stable compatibility entry points. It is not a catch-all product

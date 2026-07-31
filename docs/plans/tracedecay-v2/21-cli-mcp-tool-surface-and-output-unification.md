@@ -23,13 +23,15 @@ evidence rather than a spine to reconstruct. A missing callable operation or
 lost semantic is a gap; a renamed/deleted scaffold is not. PR17 adds only the
 surface needed to complete the Plan 24/32 user journey.
 
-CLI/MCP/HTTP names and shapes retain compatibility only when `origin/master`,
-a published package/release, or an independently deployed client proves a
-predecessor. Pure PR12/PR17 bindings and transient generated request/response
-contracts change to their final shape in place; tests and operation inventories
-are not release evidence. Persisted cursors, cancellation records,
-idempotency keys, journals, checkpoints, and receipts remain backward-readable
-until a separately authorized registered-store/profile census proves absence.
+CLI/MCP/HTTP names and shapes retain compatibility when `origin/master`, a
+published package/release, an independently deployed client, or a live host
+installation proves a predecessor. Potentially installed branch-era callable
+names remain until an authorized installed-client/host census proves absence.
+Pure source-only PR12/PR17 bindings and transient generated request/response
+contracts change in place; tests and operation inventories are not publication
+evidence. Persisted cursors, cancellation records, idempotency keys, journals,
+checkpoints, and receipts remain backward-readable until a separately
+authorized registered-store/profile census proves absence.
 
 **Cursor-parity correction (2026-07-27).** The cursor half of that parity
 requirement was stated as delivered while no shipped code-read surface could
