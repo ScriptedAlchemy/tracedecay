@@ -537,7 +537,7 @@ impl RemoteExactObservationQueryServiceV1 {
             expected_authority: request.body.expected_authority.clone(),
             expected_shard: request.body.expected_shards[0].clone(),
             caller_admission,
-            query_authorization: query_authorization.clone(),
+            query_authorization,
             effective_deadline,
             budget,
             observed_at,
@@ -550,19 +550,19 @@ impl RemoteExactObservationQueryServiceV1 {
         }
         let publication_authorization = self.authorization.authorize(
             &command.scope,
-            &request.body.scope,
-            request.body.observation_id(),
-            &request.body.expected_authority,
+            &command.repository_scope,
+            &command.observation_id,
+            &command.expected_authority,
             publication_observed_at,
         )?;
         publication_authorization.validate_for(
             &command.scope,
-            &request.body.scope,
-            request.body.observation_id(),
-            &request.body.expected_authority,
+            &command.repository_scope,
+            &command.observation_id,
+            &command.expected_authority,
             publication_observed_at,
         )?;
-        if publication_authorization != query_authorization {
+        if publication_authorization != command.query_authorization {
             return Err(RemoteExactObservationQueryErrorV1::PolicyUnavailable);
         }
         validate_result_identity(
