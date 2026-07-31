@@ -808,14 +808,6 @@ fn symbol_record_by_id(
     symbol_record(latest, symbol, &chunk.anchor.file_occurrence_id)
 }
 
-fn symbol_page(
-    generation: &CodeGenerationId,
-    items: Vec<SymbolPrimitiveRecord>,
-) -> CodeQueryPage<SymbolPrimitiveRecord> {
-    CodeQueryPage::new(generation.clone(), items, None, None, None)
-        .unwrap_or_else(|_| panic!("generation-owned symbols create a valid page"))
-}
-
 struct PreparedCallableQueryV1 {
     latest: LatestCompleteCodeIndexV1,
     query: PreparedQueryV1,
@@ -846,6 +838,27 @@ macro_rules! prepare_callable_query_or_return {
                 );
             }
         }
+    }};
+}
+
+/// Resolves the traversal start symbol a relation query is anchored on.
+///
+/// A node id that is not a symbol occurrence is unavailable outright; one that
+/// no longer exists in the served generation is unavailable *for that
+/// generation*, so the caller learns the anchor was dropped rather than that the
+/// request was malformed.
+macro_rules! resolve_start_symbol {
+    ($prepared:expr, $node_id:expr) => {{
+        let Ok(start) = typed::<SymbolOccurrenceId>($node_id.clone()) else {
+            return unavailable(query_finished_at());
+        };
+        if symbol_record_by_id(&$prepared.latest, &start).is_none() {
+            return unavailable_for_generation(
+                query_finished_at(),
+                $prepared.latest.generation.manifest().generation_id.clone(),
+            );
+        }
+        start
     }};
 }
 
@@ -914,6 +927,41 @@ fn finish_direct_query<T: serde::Serialize>(
             capped: 0,
             unknown: 0,
         },
+    )
+}
+
+/// Pages a fully materialized item list owned by the served generation and hands
+/// it to [`finish_direct_query`].
+///
+/// The whole list is in hand, so every item is eligible and no cursor is needed.
+/// The page cannot fail to build for a generation-owned list; `page_label` names
+/// what was being paged if that invariant is ever broken.
+fn finish_generation_page<T: serde::Serialize>(
+    prepared: &PreparedCallableQueryV1,
+    context: &RetrievalPortContext<'_>,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    items: Vec<T>,
+    requested_page: &tracedecay_application::PageRequest,
+    page_label: &'static str,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let eligible = items.len() as u64;
+    let page = CodeQueryPage::new(
+        prepared.latest.generation.manifest().generation_id.clone(),
+        items,
+        None,
+        None,
+        None,
+    )
+    .unwrap_or_else(|_| panic!("generation-owned {page_label} create a valid page"));
+    finish_direct_query(
+        prepared,
+        context,
+        operation,
+        query_binding_digest,
+        page,
+        requested_page,
+        eligible,
     )
 }
 
@@ -1542,15 +1590,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .into_iter()
                 .map(|(_, record)| record)
                 .collect::<Vec<_>>();
-            let eligible = items.len() as u64;
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_symbol_search",
                 binding,
-                symbol_page(&prepared.latest.generation.manifest().generation_id, items),
+                items,
                 &request.meta.page,
-                eligible,
+                "symbols",
             )
         })
     }
@@ -1585,15 +1632,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .filter(|record| path_is_in_code_query_scope(&record.file, &request.scope))
                 .collect::<Vec<_>>();
             items.sort_by(|left, right| left.node_id.cmp(&right.node_id));
-            let eligible = items.len() as u64;
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_qualified_name",
                 binding,
-                symbol_page(&prepared.latest.generation.manifest().generation_id, items),
+                items,
                 &request.meta.page,
-                eligible,
+                "symbols",
             )
         })
     }
@@ -1646,15 +1692,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .cmp(&right.qualified_name)
                     .then(left.node_id.cmp(&right.node_id))
             });
-            let eligible = items.len() as u64;
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_signature_search",
                 binding,
-                symbol_page(&prepared.latest.generation.manifest().generation_id, items),
+                items,
                 &request.meta.page,
-                eligible,
+                "symbols",
             )
         })
     }
@@ -1711,23 +1756,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             }
             items.sort_by(|left, right| left.symbol.node_id.cmp(&right.symbol.node_id));
             items.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
-            let eligible = items.len() as u64;
-            let page = CodeQueryPage::new(
-                prepared.latest.generation.manifest().generation_id.clone(),
-                items,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("generation-owned implementations create a valid page"));
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_implementations",
                 binding,
-                page,
+                items,
                 &request.meta.page,
-                eligible,
+                "implementations",
             )
         })
     }
@@ -1752,15 +1788,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
-            let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(query_finished_at());
-            };
-            if symbol_record_by_id(&prepared.latest, &start).is_none() {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.latest.generation.manifest().generation_id.clone(),
-                );
-            }
+            let start = resolve_start_symbol!(prepared, request.node_id);
             let relations = relation_records(
                 &prepared.latest,
                 &start,
@@ -1778,23 +1806,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     symbol: relation.symbol,
                 })
                 .collect::<Vec<_>>();
-            let eligible = items.len() as u64;
-            let page = CodeQueryPage::new(
-                prepared.latest.generation.manifest().generation_id.clone(),
-                items,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("generation-owned hierarchy creates a valid page"));
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_type_hierarchy",
                 binding,
-                page,
+                items,
                 &request.meta.page,
-                eligible,
+                "hierarchy entries",
             )
         })
     }
@@ -1820,15 +1839,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
-            let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(query_finished_at());
-            };
-            if symbol_record_by_id(&prepared.latest, &start).is_none() {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.latest.generation.manifest().generation_id.clone(),
-                );
-            }
+            let start = resolve_start_symbol!(prepared, request.node_id);
             let items = relation_records(
                 &prepared.latest,
                 &start,
@@ -1837,23 +1848,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 request.maximum_depth,
                 &request.scope,
             );
-            let eligible = items.len() as u64;
-            let page = CodeQueryPage::new(
-                prepared.latest.generation.manifest().generation_id.clone(),
-                items,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("generation-owned callers create a valid page"));
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_callers",
                 binding,
-                page,
+                items,
                 &request.meta.page,
-                eligible,
+                "callers",
             )
         })
     }
@@ -1878,15 +1880,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
-            let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(query_finished_at());
-            };
-            if symbol_record_by_id(&prepared.latest, &start).is_none() {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.latest.generation.manifest().generation_id.clone(),
-                );
-            }
+            let start = resolve_start_symbol!(prepared, request.node_id);
             let relations = relation_records(
                 &prepared.latest,
                 &start,
@@ -1907,15 +1901,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .into_iter()
                 .map(|relation| relation.symbol)
                 .collect::<Vec<_>>();
-            let eligible = items.len() as u64;
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_impact",
                 binding,
-                symbol_page(&prepared.latest.generation.manifest().generation_id, items),
+                items,
                 &request.meta.page,
-                eligible,
+                "symbols",
             )
         })
     }
@@ -1964,15 +1957,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .then(left.qualified_name.cmp(&right.qualified_name))
                     .then(left.node_id.cmp(&right.node_id))
             });
-            let eligible = items.len() as u64;
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_module_api",
                 binding,
-                symbol_page(&prepared.latest.generation.manifest().generation_id, items),
+                items,
                 &request.meta.page,
-                eligible,
+                "symbols",
             )
         })
     }
@@ -2099,23 +2091,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     count,
                 })
                 .collect::<Vec<_>>();
-            let eligible = items.len() as u64;
-            let page = CodeQueryPage::new(
-                prepared.latest.generation.manifest().generation_id.clone(),
-                items,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("generation-owned facets create a valid page"));
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_facets",
                 binding,
-                page,
+                items,
                 &request.meta.page,
-                eligible,
+                "facets",
             )
         })
     }
@@ -2217,15 +2200,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
-            let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(query_finished_at());
-            };
-            if symbol_record_by_id(&prepared.latest, &start).is_none() {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.latest.generation.manifest().generation_id.clone(),
-                );
-            }
+            let start = resolve_start_symbol!(prepared, request.node_id);
             let items = relation_records(
                 &prepared.latest,
                 &start,
@@ -2239,23 +2214,14 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 1,
                 &request.scope,
             );
-            let eligible = items.len() as u64;
-            let page = CodeQueryPage::new(
-                prepared.latest.generation.manifest().generation_id.clone(),
-                items,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("generation-owned references create a valid page"));
-            finish_direct_query(
+            finish_generation_page(
                 &prepared,
                 &context,
                 "code_references",
                 binding,
-                page,
+                items,
                 &request.meta.page,
-                eligible,
+                "references",
             )
         })
     }
@@ -2282,15 +2248,7 @@ fn navigation_symbol_query<'a>(
                 &request.meta.order,
             )
         );
-        let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-            return unavailable(query_finished_at());
-        };
-        if symbol_record_by_id(&prepared.latest, &start).is_none() {
-            return unavailable_for_generation(
-                query_finished_at(),
-                prepared.latest.generation.manifest().generation_id.clone(),
-            );
-        }
+        let start = resolve_start_symbol!(prepared, request.node_id);
         let mut items = Vec::new();
         if let Some(symbol) = symbol_record_by_id(&prepared.latest, &start) {
             let is_type = ["struct", "enum", "class", "interface", "trait", "type"]
@@ -2315,15 +2273,14 @@ fn navigation_symbol_query<'a>(
             );
         }
         items.retain(|symbol| path_is_in_code_query_scope(&symbol.file, &request.scope));
-        let eligible = items.len() as u64;
-        finish_direct_query(
+        finish_generation_page(
             &prepared,
             &context,
             operation,
             binding,
-            symbol_page(&prepared.latest.generation.manifest().generation_id, items),
+            items,
             &request.meta.page,
-            eligible,
+            "symbols",
         )
     })
 }
