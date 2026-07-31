@@ -247,29 +247,6 @@ impl<Port> Clone for RemoteProtocolRouterStateV1<Port> {
     }
 }
 
-/// Build the production enrollment/query subset without manufacturing
-/// unavailable recovery owners. The daemon mounts this router only for an
-/// explicitly configured query runtime.
-pub fn remote_query_protocol_router<Port, Query>(port: Port) -> Router
-where
-    Port: RemoteEnrollmentProtocolPortV1
-        + RemoteProtocolPortV1<Query>
-        + Send
-        + Sync
-        + 'static,
-    Query: DeserializeOwned + RemoteProtocolBodyV1 + Send + 'static,
-    <Port as RemoteProtocolPortV1<Query>>::Output: Serialize,
-{
-    let state = RemoteProtocolRouterStateV1 {
-        transport: Arc::new(RemoteHttpProtocolTransportV1::new(port)),
-    };
-    Router::new()
-        .route("/enrollment", post(enrollment_route::<Port>))
-        .route("/query", post(protocol_route::<Port, Query>))
-        .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
-        .with_state(state)
-}
-
 /// Build the complete Remote Brain HTTP seam. The query body and result remain
 /// canonical caller-selected types; this router never accepts an untyped JSON
 /// operation fallback.

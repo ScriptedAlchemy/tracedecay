@@ -137,6 +137,30 @@ pub struct PendingLocalObservationsV1 {
     pub has_quarantined: bool,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingLocalUnavailableReasonV1 {
+    RequestingNodeSpoolNotSupplied,
+    AuthorityUnavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "availability", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PendingLocalEvidenceV1 {
+    Available {
+        evidence: PendingLocalObservationsV1,
+    },
+    Unavailable {
+        reason: PendingLocalUnavailableReasonV1,
+    },
+}
+
+impl From<PendingLocalObservationsV1> for PendingLocalEvidenceV1 {
+    fn from(evidence: PendingLocalObservationsV1) -> Self {
+        Self::Available { evidence }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ShardQueryContributionV1<T> {
@@ -194,17 +218,21 @@ impl<T> ShardQueryContributionV1<T> {
 #[serde(deny_unknown_fields)]
 pub struct RemoteQueryCompositionV1<T> {
     pub contributions: Vec<ShardQueryContributionV1<T>>,
-    pub pending_local: PendingLocalObservationsV1,
+    pub pending_local: PendingLocalEvidenceV1,
     pub coverage: ShardCoverageStateV1,
 }
 
 impl<T> RemoteQueryCompositionV1<T> {
-    pub fn compose(
+    pub fn compose<P>(
         expected_shards: BTreeSet<ExpectedRemoteShardV1>,
         contributions: Vec<ShardQueryContributionV1<T>>,
-        pending_local: PendingLocalObservationsV1,
+        pending_local: P,
         maximum_current_cache_age_millis: u64,
-    ) -> Result<Self, ApplicationProblem> {
+    ) -> Result<Self, ApplicationProblem>
+    where
+        P: Into<PendingLocalEvidenceV1>,
+    {
+        let pending_local = pending_local.into();
         if expected_shards.is_empty()
             || contributions.is_empty()
             || maximum_current_cache_age_millis == 0
@@ -259,7 +287,7 @@ impl<T> RemoteQueryCompositionV1<T> {
 
 fn aggregate_coverage<T>(
     contributions: &[ShardQueryContributionV1<T>],
-    pending: &PendingLocalObservationsV1,
+    pending: &PendingLocalEvidenceV1,
 ) -> ShardCoverageStateV1 {
     if contributions
         .iter()
@@ -273,15 +301,18 @@ fn aggregate_coverage<T>(
     {
         return ShardCoverageStateV1::Unknown;
     }
-    if pending.has_sequence_gap
-        || pending.has_quarantined
+    let available_pending = match pending {
+        PendingLocalEvidenceV1::Available { evidence } => Some(evidence),
+        PendingLocalEvidenceV1::Unavailable { .. } => None,
+    };
+    if available_pending.is_some_and(|pending| pending.has_sequence_gap || pending.has_quarantined)
         || contributions
             .iter()
             .any(|item| item.coverage == ShardCoverageStateV1::Partial)
     {
         return ShardCoverageStateV1::Partial;
     }
-    if pending.count > 0
+    if available_pending.is_some_and(|pending| pending.count > 0)
         || contributions
             .iter()
             .any(|item| item.coverage == ShardCoverageStateV1::Stale)
