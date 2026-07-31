@@ -9,6 +9,7 @@ members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
+    "crates/tracedecay-jsonrpc",
     "crates/tracedecay-lsp",
     "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
@@ -236,6 +237,7 @@ tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-host-integration = { path = "crates/tracedecay-host-integration", version = "0.1.0" }
 tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
+tracedecay-jsonrpc = { path = "crates/tracedecay-jsonrpc", version = "0.1.0" }
 tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
