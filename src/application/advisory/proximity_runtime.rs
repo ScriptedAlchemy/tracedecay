@@ -6,7 +6,6 @@
 //! fixture authority, evidence store, lock, task, schedule, or continuation.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_application::feedback::{
@@ -15,7 +14,7 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::{
     AdvisoryFindingContributionBatchV1, AdvisoryFindingContributorV1,
-    AdvisoryFindingValidityWindowV1, ApplicationContractError, RequestContext,
+    AdvisoryFindingValidityWindowV1, ApplicationContractError, RequestContext, now_micros,
 };
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationValueV1, SettingKey};
 use tracedecay_domain::feedback::{
@@ -474,14 +473,6 @@ fn interrupted(context: &RequestContext) -> Option<Pr13ProximityRuntimeOutcomeV1
     } else {
         None
     }
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
 fn build_proximity_contribution(

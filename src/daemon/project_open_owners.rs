@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::feedback::{
@@ -20,7 +20,7 @@ use tracedecay_application::feedback::{
     FEEDBACK_LIST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1, ProximityEvaluationRequestV1,
 };
-use tracedecay_application::{ApplicationContractError, ResolvedScope};
+use tracedecay_application::{ApplicationContractError, ResolvedScope, now_micros};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
     SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
@@ -2854,17 +2854,6 @@ pub(crate) fn resolved_scope_for_project(
             field: "project-open resolved scope",
         }
     })
-}
-
-fn now_micros() -> UtcMicros {
-    UtcMicros(
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_micros()),
-        )
-        .unwrap_or(i64::MAX),
-    )
 }
 
 #[cfg(test)]

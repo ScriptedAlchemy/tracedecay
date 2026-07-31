@@ -1,12 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FeedbackPortFuture,
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, feedback_surface_operation,
 };
-use tracedecay_application::{AuthorizationPhase, AuthorizationRequest, ResolvedScope};
+use tracedecay_application::{AuthorizationPhase, AuthorizationRequest, ResolvedScope, now_micros};
 use tracedecay_domain::configuration::SourceKindV1;
-use tracedecay_domain::{LocatorDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{LocatorDigest, canonical_sha256};
 
 use super::{GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1};
 use crate::application::advisory::ci_runtime::{
@@ -168,12 +166,4 @@ fn github_source_locator(repository_owner: &str, repository_name: &str) -> Optio
     ))
     .ok()?;
     LocatorDigest::new(digest.as_str()).ok()
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }

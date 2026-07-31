@@ -7,7 +7,7 @@ use tracedecay_application::{
 use tracedecay_application::{
     CostsReadModelV1, MetricCohortV1, MetricCoverageV1, MetricEvidenceClassV1, MetricProvenanceV1,
     MetricSourceV1, MetricTemporalV1, MetricUncertaintyV1, MetricValueV1, ObservabilityHorizonV1,
-    ObservatoryReadModelV1,
+    ObservatoryReadModelV1, now_micros,
 };
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
@@ -357,15 +357,6 @@ fn coverage(
     }
 }
 
-fn now_micros() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros()
-        .try_into()
-        .unwrap_or(i64::MAX)
-}
-
 fn horizon(since_seconds: i64, observed_at_micros: i64) -> ObservabilityHorizonV1 {
     ObservabilityHorizonV1 {
         since_micros: since_seconds.saturating_mul(1_000_000),
@@ -434,7 +425,7 @@ pub(crate) fn observatory_unavailable_read_model(
     since_seconds: i64,
     reason: &str,
 ) -> ObservatoryReadModelV1 {
-    let observed_at_micros = now_micros();
+    let observed_at_micros = now_micros().0;
     let read_horizon = horizon(since_seconds, observed_at_micros);
     let watermark = "analytics:unavailable".to_string();
     let metric_coverage = coverage(None, 0, 1, CoverageStateV1::Unknown);
@@ -477,7 +468,7 @@ pub(crate) async fn observatory_read_model(
     scope_ref: Option<&str>,
     since_seconds: i64,
 ) -> ObservatoryReadModelV1 {
-    let observed_at_micros = now_micros();
+    let observed_at_micros = now_micros().0;
     let rows = db
         .query_analytics_events(&AnalyticsEventQuery {
             provider: Some(OBSERVABILITY_PROVIDER.to_string()),
@@ -790,7 +781,7 @@ pub(crate) fn costs_unavailable_read_model(
     since_seconds: i64,
     reason: &str,
 ) -> CostsReadModelV1 {
-    let observed_at_micros = now_micros();
+    let observed_at_micros = now_micros().0;
     let read_horizon = horizon(since_seconds, observed_at_micros);
     let coverage = coverage(None, 0, 1, CoverageStateV1::Unknown);
     let (usage, estimated_cost) = {
@@ -871,7 +862,7 @@ pub(crate) async fn costs_read_model(
         .savings_totals_with_watermark(scope_ref, since_seconds)
         .await
         .ok();
-    let observed_at_micros = now_micros();
+    let observed_at_micros = now_micros().0;
     let read_horizon = horizon(since_seconds, observed_at_micros);
     let accounting_watermark = accounting.map_or_else(
         || "turns:unknown".to_string(),

@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use thiserror::Error;
-use tracedecay_application::ResolvedScope;
+use tracedecay_application::{ResolvedScope, now_micros};
 use tracedecay_domain::{
     AuthorizationRevision, BrainId, CapabilityId, PrincipalId, ProjectId, UserProfileId, UtcMicros,
     canonical_sha256,
@@ -236,17 +236,6 @@ impl QueryMcpReadAdmissionV1 {
     pub(crate) fn revoke(&self) {
         self.route_registered.store(false, Ordering::Release);
     }
-}
-
-fn now_micros() -> UtcMicros {
-    UtcMicros(
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_micros()),
-        )
-        .unwrap_or(i64::MAX),
-    )
 }
 
 #[cfg(test)]

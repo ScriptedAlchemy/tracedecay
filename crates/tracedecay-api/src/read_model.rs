@@ -30,8 +30,6 @@
 //! The executable resolves the exact [`DashboardScopeV1`] from its own live
 //! composition state; this crate never reads scope from a path or a store.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -544,12 +542,13 @@ impl<T> DashboardEnvelopeV1<T> {
 }
 
 /// Current wall-clock time in microseconds since the Unix epoch.
+///
+/// Dashboard read models carry raw `i64` micros, so this unwraps the canonical
+/// [`tracedecay_application::now_micros`] rather than restating its saturating
+/// clamp.
 #[must_use]
 pub fn now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
+    tracedecay_application::now_micros().0
 }
 
 #[cfg(test)]

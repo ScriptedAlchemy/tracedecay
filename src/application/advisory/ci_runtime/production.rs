@@ -1,11 +1,10 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     CiFailureLocalizationRequestV1, FeedbackPortFuture,
 };
-use tracedecay_application::{RequestAdmission, RequestContext};
+use tracedecay_application::{RequestAdmission, RequestContext, now_micros};
 use tracedecay_domain::feedback::{
     CiFailureBranchEvidenceV1, CiFailureCallerEvidenceV1, CiFailureCoverageV1,
     CiFailureGenerationEvidenceV1, CiFailureKindV1, CiFailureLocalizationResultV1,
@@ -1358,14 +1357,6 @@ fn context_admitted_for_ci_discovery(context: &RequestContext, scope: &FeedbackS
         CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
         CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     )
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
 fn validate_provider_record(

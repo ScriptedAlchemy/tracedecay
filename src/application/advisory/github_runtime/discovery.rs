@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+use tracedecay_application::now_micros;
 use tracedecay_domain::feedback::{GitHubPullRequestIdV1, GitHubReviewRateLimitCheckpointV1};
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
@@ -398,14 +398,6 @@ fn valid_path_segment(value: &str) -> bool {
 
 fn valid_full_commit_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

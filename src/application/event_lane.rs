@@ -7,12 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{OnceLock, atomic};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracedecay_application::{
-    ObservabilityApplicationV1, ObservabilityHorizonV1, ObservabilityQueryV1,
+    ObservabilityApplicationV1, ObservabilityHorizonV1, ObservabilityQueryV1, now_micros,
 };
 use tracedecay_domain::{
     ActivityObservedV1, CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
@@ -126,19 +125,12 @@ fn live_bus() -> &'static broadcast::Sender<ActivityRecordV1> {
 
 fn boot_id() -> &'static str {
     static BOOT: OnceLock<String> = OnceLock::new();
-    BOOT.get_or_init(|| format!("activity-{}-{}", std::process::id(), now_micros()))
+    BOOT.get_or_init(|| format!("activity-{}-{}", std::process::id(), now_micros().0))
 }
 
 fn next_local_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
-}
-
-fn now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
 }
 
 fn bounded_detail(detail: Option<&str>) -> Option<String> {
@@ -166,7 +158,7 @@ fn activity_envelope(
     units: u64,
     detail: Option<String>,
 ) -> Option<ObservabilityEnvelopeV1> {
-    let observed_at = now_micros();
+    let observed_at = now_micros().0;
     let producer_sequence = next_local_sequence();
     let event_id = canonical_sha256(&(
         "tracedecay.activity.observed.v1",
