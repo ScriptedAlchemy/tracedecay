@@ -196,10 +196,7 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
         .unwrap();
 
     assert_eq!(
-        client
-            .cancel_operation("request.operation")
-            .unwrap()
-            .status,
+        client.cancel_operation("request.operation").unwrap().status,
         CancellationStatus::Requested
     );
     let events = client
