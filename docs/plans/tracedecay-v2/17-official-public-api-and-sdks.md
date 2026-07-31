@@ -102,7 +102,10 @@ when their syntax is idiomatic to the surface.
 
 Each accepted operation proves semantic and lifecycle parity across CLI, MCP,
 HTTP, Rust, TypeScript, and Python. Compatibility with an older shape is tested
-only after release evidence establishes that shape. Conformance covers supported syntax,
+when release evidence, an independently deployed dogfood client, or a live host
+installation establishes that shape; potentially deployed shapes remain in
+conformance until an authorized installed-client/host census proves absence.
+Conformance covers supported syntax,
 protocol/capability range, required authorization, paging or stream shape,
 retry class, cancellation support, reconnect/resume behavior, stable errors,
 and explicit transport limitations through callable adapters. A generated or
@@ -111,10 +114,12 @@ requirement or acceptance artifact.
 
 After the first evidenced publication, additive changes within a major
 protocol version preserve compatibility and breaking changes negotiate a new
-major version with an actionable error. Before that publication, the
-unreleased transient request/response API changes in place; the potentially
-persisted cursors, keys, journals, checkpoints, and receipts remain governed by
-the census-gated backward-read rule above.
+major version with an actionable error. Before publication, a transient
+request/response API changes in place only when it has not potentially reached
+an independently deployed dogfood client or host installation; otherwise
+negotiation/conformance remains until the installed-client/host census. The
+potentially persisted cursors, keys, journals, checkpoints, and receipts remain
+governed by the registered-store census rule above.
 The policy retains the full required/optional field, default, nullability, open
 object, union/enum, numeric narrowing, identifier, error, stream-event, cursor,
 operation rename/removal, retry-class, and capability-removal behavior.
