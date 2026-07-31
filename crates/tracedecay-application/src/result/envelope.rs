@@ -243,11 +243,6 @@ impl ApplicationProblemEnvelope {
         self
     }
 
-    pub fn with_trace_id(mut self, trace_id: RequestId) -> Self {
-        self.problem.trace_id = trace_id;
-        self
-    }
-
     pub fn with_retry_after_millis(
         mut self,
         retry_after_millis: Option<u64>,
@@ -260,22 +255,6 @@ impl ApplicationProblemEnvelope {
             });
         }
         self.problem.retry_after_millis = retry_after_millis;
-        Ok(self)
-    }
-
-    pub fn with_details(
-        mut self,
-        details: Vec<SafeDiagnostic>,
-    ) -> Result<Self, ApplicationContractError> {
-        if details.len() > MAX_PROBLEM_DETAILS {
-            return Err(ApplicationContractError::InvalidRange {
-                field: "problem details",
-            });
-        }
-        for detail in &details {
-            detail.validate()?;
-        }
-        self.problem.details = details;
         Ok(self)
     }
 

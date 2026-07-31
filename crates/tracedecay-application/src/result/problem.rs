@@ -206,10 +206,6 @@ impl ApplicationProblem {
         }
     }
 
-    pub const fn is_pre_admission(&self) -> bool {
-        matches!(self, Self::Cancelled { .. } | Self::TimedOut { .. })
-    }
-
     pub const fn retry(&self) -> RetryDirective {
         match self {
             Self::InvalidRequest { retry, .. }
