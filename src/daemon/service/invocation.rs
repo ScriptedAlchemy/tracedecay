@@ -7771,6 +7771,10 @@ impl DaemonInvocationService {
         self.project_runtimes.get(project_root?).await
     }
 
+    async fn work_runtime(&self, project_root: Option<&Path>) -> Option<RegisteredWorkRuntime> {
+        self.project_runtimes.get(project_root?).await
+    }
+
     pub(crate) async fn semantic_configuration_operation(
         &self,
         project_root: &Path,
@@ -12065,7 +12069,7 @@ for line in sys.stdin:
             provider: tracedecay_application::WorkflowProviderAdmissionV1 {
                 route: tracedecay_domain::WorkProviderRouteV1::new(
                     tracedecay_domain::ProviderId::new(
-                        crate::daemon::work_runtime::codex_provider::CODEX_PROVIDER_ID,
+                        crate::daemon::work_runtime::CODEX_PROVIDER_ID,
                     )
                     .expect("provider id"),
                     tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
@@ -12935,7 +12939,7 @@ for line in sys.stdin:
                 .expect("operation"),
             tracedecay_domain::WorkProviderRouteV1::new(
                 tracedecay_domain::ProviderId::new(
-                    crate::daemon::work_runtime::codex_provider::CODEX_PROVIDER_ID,
+                    crate::daemon::work_runtime::CODEX_PROVIDER_ID,
                 )
                 .expect("provider id"),
                 tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
