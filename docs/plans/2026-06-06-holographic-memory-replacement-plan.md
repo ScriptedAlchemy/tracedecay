@@ -7,6 +7,10 @@
 > branch/commit/worktree choreography, snapshots, receipts, attestations, PR
 > packets, and gate matrices below are not rebuild instructions. Validate
 > current parser, runtime, and product behavior directly.
+> The recorded v10-to-v11 SQLite migration and legacy memory-tool wrappers are
+> evidence-backed by the then-shipped/live schema and public tools. Other
+> version or compatibility language here creates no requirement; unreleased
+> shapes change in place under the current V2 plans.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

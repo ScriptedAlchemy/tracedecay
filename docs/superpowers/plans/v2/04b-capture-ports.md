@@ -8,6 +8,8 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical compatibility/migration language applies only to evidenced
+> released provider formats; branch-local ports change in place.
 
 **Goal:** Separate provider capture/sanitization from daemon/store adapters
 without weakening one-writer, cursor, replay, or privacy contracts.
@@ -56,8 +58,9 @@ Current direct behavior and acceptance live in the applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-No format cutover occurs until a provider's old and new paths produce identical
-receipts. Revert provider slices independently; never dual-write. Measure
+When a released/live provider format proves an old path exists, cutover waits
+until old and new paths produce identical receipts. Branch-local paths move
+directly to the final port shape. Revert provider slices independently; never dual-write. Measure
 provider-private and root adapter edits. Delete direct provider-to-store writes
 only after all production callers, crash/replay tests, and host audits use the
 ports.
