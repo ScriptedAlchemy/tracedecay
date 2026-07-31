@@ -882,7 +882,24 @@ impl CodeIndexPublishedGenerationV1 {
             file.artifacts
                 .validate()
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
-            if file.extraction.generation_id != self.manifest.generation_id
+            let occurrence = self.snapshot.files.iter().find(|candidate| {
+                candidate.file_occurrence_id == file.artifacts.chunks.document.file_occurrence_id
+            });
+            if file.authority.project_id != self.manifest.project_id {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "published file authority project does not match the generation manifest"
+                        .to_owned(),
+                ));
+            }
+            if file.authority.repository_id != self.snapshot.repository
+                || file.authority.worktree_id != self.snapshot.worktree
+                || file.authority.reference != self.snapshot.reference
+                || occurrence.is_none_or(|occurrence| {
+                    occurrence.logical_path != file.authority.logical_path
+                        || occurrence.content_digest != file.authority.content_digest
+                })
+                || file.extraction.content_digest != file.authority.content_digest
+                || file.extraction.generation_id != self.manifest.generation_id
                 || file.extraction.file_occurrence_id
                     != file.artifacts.chunks.document.file_occurrence_id
             {
