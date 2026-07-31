@@ -63,16 +63,12 @@ use tracedecay_domain::{
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::{
-    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace,
-    CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
-    CanonicalDiagnosticSnapshotAuthority, ContextProjectionOutcome, ContextProjectionRegistration,
-    ContextProjectionRequest, DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger,
-    FeedbackCycleRequest, FeedbackCycleRuntimePort, GatewayCapabilities, GenerationDiagnostics,
-    LSP_SESSION_TTL_MS, LspAnalyzerCancellationAuthority, LspEndpointError, LspRequestId,
-    LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
-    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
-    MAX_LSP_FRAME_BYTES, MAX_LSP_WORKSPACE_ROOTS, SessionLifecycle, UnavailableSemanticProvider,
-    UpstreamCapabilities,
+    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, DaemonLspRuntimeSession,
+    DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
+    GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError, LspRuntimeFailure, LspRuntimeFuture,
+    LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential, LspSessionId,
+    LspSessionOpenRequest, LspSessionRegistry, MAX_LSP_FRAME_BYTES, MAX_LSP_WORKSPACE_ROOTS,
+    SessionLifecycle, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -5515,6 +5511,7 @@ impl DaemonLspOwnerRegistrar {
         self.service.install_lsp_owner(project_root, owner).await;
     }
 
+    #[cfg(test)]
     pub(crate) async fn register_factory(
         &self,
         project_root: PathBuf,
@@ -9113,6 +9110,12 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_lsp::{
+        CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
+        CanonicalDiagnosticSnapshotAuthority, ContextProjectionOutcome,
+        ContextProjectionRegistration, ContextProjectionRequest, GenerationDiagnostics,
+        LspAnalyzerCancellationAuthority, LspRequestId, UnavailableSemanticProvider,
+    };
 
     struct MintedAdvisoryCycleHandle(&'static str, Pr13AdvisoryCycleTerminalV1);
 

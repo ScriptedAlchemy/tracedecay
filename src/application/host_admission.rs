@@ -2515,12 +2515,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn project_observation_database_arc_for_test(
         &self,
     ) -> crate::errors::Result<Arc<RegisteredGlobalDb>> {
-        self.project_registered.as_ref().cloned().ok_or_else(|| {
-            crate::errors::TraceDecayError::Database {
+        self.project_registered
+            .clone()
+            .ok_or_else(|| crate::errors::TraceDecayError::Database {
                 operation: "bind registered project Work test runtime".to_string(),
                 message: "registered ProjectSessions mount is unavailable".to_string(),
-            }
-        })
+            })
     }
 
     fn session_database_for_test(

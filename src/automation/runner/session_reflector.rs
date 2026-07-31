@@ -285,7 +285,7 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
     let ProposedAgentOutput {
         response,
-        retry_report: _,
+        retry_report,
         evidence,
         evidence_hash,
         proposed_ops,
@@ -393,6 +393,8 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
         accepted_count,
         rejected_count,
     );
+    record.backend_attempt_count = retry_report.attempt_count();
+    record.backend_attempts = retry_report.attempts().to_vec();
     record.applied_ops = report
         .pointer("/session_fact_apply_policy/applied_proposal_ids")
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))

@@ -1913,7 +1913,9 @@ fn analyzer_warning(analyzer: &LanguageAnalyzerSpec, languages: &str, problem: &
         analyzer.command
     );
     if let Some(remedy) = &analyzer.remedy {
-        message.push_str(&format!(" Install with `{remedy}`."));
+        message.push_str(" Install with `");
+        message.push_str(remedy);
+        message.push_str("`.");
     } else {
         message.push_str(" No install remedy is configured for this custom adapter.");
     }

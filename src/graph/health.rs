@@ -281,7 +281,13 @@ impl DsmCluster {
 /// Groups the file adjacency by parent directory and orders clusters by
 /// cross-boundary coupling, then cluster size. This is the shared authority for
 /// both the MCP DSM tool and dashboard graph strata.
-pub fn dsm_clusters(adj: &HashMap<String, HashSet<String>>) -> Vec<DsmCluster> {
+pub fn dsm_clusters<AdjHasher, EdgeHasher>(
+    adj: &HashMap<String, HashSet<String, EdgeHasher>, AdjHasher>,
+) -> Vec<DsmCluster>
+where
+    AdjHasher: BuildHasher,
+    EdgeHasher: BuildHasher,
+{
     let mut dir_to_files: HashMap<String, Vec<String>> = HashMap::new();
     for file in adj.keys() {
         let directory = file

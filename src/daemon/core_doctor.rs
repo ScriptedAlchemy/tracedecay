@@ -548,7 +548,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
 /// as a probe. Returns the activity guard when the request falls through to
 /// the broker's regular routing, or `None` once the core response has been
 /// written and the connection is complete.
-pub(crate) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
+pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     transport: &mut T,
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,

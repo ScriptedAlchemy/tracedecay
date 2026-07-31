@@ -43,19 +43,20 @@ pub fn source_inputs() -> impl Iterator<Item = &'static str> {
 
 pub fn source_stamp(repository_root: &Path) -> String {
     let mut hasher = DefaultHasher::new();
-    for root in DASHBOARD_SOURCE_ROOTS {
-        let root_path = repository_root.join(root);
-        for relative in collect_files_relative(&root_path) {
-            relative.hash(&mut hasher);
-            if let Ok(bytes) = fs::read(root_path.join(&relative)) {
+    for input in source_inputs() {
+        let input_path = repository_root.join(input);
+        if input_path.is_dir() {
+            for relative in collect_files_relative(&input_path) {
+                relative.hash(&mut hasher);
+                if let Ok(bytes) = fs::read(input_path.join(&relative)) {
+                    bytes.hash(&mut hasher);
+                }
+            }
+        } else {
+            input.hash(&mut hasher);
+            if let Ok(bytes) = fs::read(input_path) {
                 bytes.hash(&mut hasher);
             }
-        }
-    }
-    for file in DASHBOARD_SOURCE_FILES {
-        file.hash(&mut hasher);
-        if let Ok(bytes) = fs::read(repository_root.join(file)) {
-            bytes.hash(&mut hasher);
         }
     }
     format!("{:016x}", hasher.finish())

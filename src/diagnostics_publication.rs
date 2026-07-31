@@ -32,6 +32,7 @@ use tracedecay_domain::{
     DiagnosticSeverityV1, FileOccurrenceId, GenerationDiagnosticV1, ProviderId, RefId,
     RepositoryId, RetrievalAnchorId, SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
+#[cfg(test)]
 use tracedecay_lsp::DiagnosticSource;
 
 use crate::diagnostics_store::DiagnosticsStore;

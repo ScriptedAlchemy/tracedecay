@@ -6,7 +6,7 @@ use std::sync::{
 };
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tracedecay_domain::{ActorId, ProjectId, RepositoryId, WorktreeId};
+use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
 macro_rules! string_id {
     ($($name:ident),+ $(,)?) => {
@@ -689,7 +689,7 @@ mod tests {
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestAdmission,
     };
-    use tracedecay_domain::{ManifestDigest, UtcMicros};
+    use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     const DIGEST: [u8; 32] = [0x5a; 32];

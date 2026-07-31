@@ -667,9 +667,9 @@ fn block_overlapping_sites(sites: &mut [PendingSite]) {
                 && sites[previous].start == sites[index].start)
         {
             sites[previous].disposition = ApiMigrationSiteDispositionV1::Blocked;
-            sites[previous].reason = "overlapping API migration sites".to_owned();
+            "overlapping API migration sites".clone_into(&mut sites[previous].reason);
             sites[index].disposition = ApiMigrationSiteDispositionV1::Blocked;
-            sites[index].reason = "overlapping API migration sites".to_owned();
+            "overlapping API migration sites".clone_into(&mut sites[index].reason);
         }
         if sites[index].end > sites[previous].end {
             active = Some(index);
@@ -735,7 +735,7 @@ fn block_protected_value_changes(
         if let Some((category, _)) = protected_operations.get(sites[index].operation_id.as_str()) {
             sites[index].reason = format!("protected {category} would change byte identity");
         } else {
-            sites[index].reason = "operation would change protected stable bytes".to_owned();
+            "operation would change protected stable bytes".clone_into(&mut sites[index].reason);
         }
     }
     Ok(())

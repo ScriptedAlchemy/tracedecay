@@ -223,11 +223,8 @@ fn denied_generation_does_not_require_a_current_root_context() {
     let denied_scope = set.roots()[denied_index].scope_digest.clone();
     contexts.retain(|context| context.scope().scope_digest != denied_scope);
     let mut request = request(set, contexts, digest('d'), 0, None);
-    request.root_generations[denied_index] = RootScopeOutcomeV1::new(
-        denied_scope,
-        ScopeOutcome::Denied,
-    )
-    .unwrap();
+    request.root_generations[denied_index] =
+        RootScopeOutcomeV1::new(denied_scope, ScopeOutcome::Denied).unwrap();
 
     let page = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Unavailable))
         .execute(request)
@@ -237,12 +234,9 @@ fn denied_generation_does_not_require_a_current_root_context() {
         page.roots[denied_index].outcome,
         ScopeOutcome::Denied
     ));
-    assert!(page
-        .roots
-        .iter()
-        .enumerate()
-        .any(|(index, root)| index != denied_index
-            && matches!(root.outcome, ScopeOutcome::Exact(_))));
+    assert!(page.roots.iter().enumerate().any(
+        |(index, root)| index != denied_index && matches!(root.outcome, ScopeOutcome::Exact(_))
+    ));
     assert!(matches!(page.aggregate, ScopeOutcome::Partial { .. }));
 }
 

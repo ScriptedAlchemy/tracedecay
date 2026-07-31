@@ -239,7 +239,6 @@ pub struct Pr12FeedbackCycleRuntime {
     publications: ProjectFeedbackStore,
     service: Arc<Pr12FeedbackCycleService>,
     lsp_input: Pr12FeedbackCycleLspInput,
-    providers: Vec<DiagnosticProviderIdentity>,
     provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
@@ -271,10 +270,6 @@ pub fn open_pr12_feedback_cycle_runtime(
 
     let publications = feedback.publication_store();
     let source_observations = feedback.source_observation_port();
-    let providers = provider_admissions
-        .iter()
-        .map(|provider| provider.identity().clone())
-        .collect::<Vec<_>>();
     let diagnostics = GenerationBoundFeedbackDiagnosticsAdapter::new(
         DiagnosticStoreFeedbackProvider::new(DatabaseDiagnosticStore::new(database)),
         provider_admissions.clone(),
@@ -303,7 +298,6 @@ pub fn open_pr12_feedback_cycle_runtime(
         publications,
         service: Arc::new(service),
         lsp_input,
-        providers,
         provider_admissions,
         correlation_policy,
         source_observations,

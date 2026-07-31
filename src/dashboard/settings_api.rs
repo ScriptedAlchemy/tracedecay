@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
     SETTINGS_REFRESH_OPERATION, USER_SETTINGS_APPLY_OPERATION,
@@ -565,10 +565,6 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn validation_error(field: &str, message: &str) -> Value {
-    json!({ "field": field, "message": message })
-}
-
 fn surface_mutation(
     mutation: DirectConfigurationMutation,
 ) -> std::result::Result<
@@ -609,6 +605,7 @@ fn project_preview_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn serialization_schema<T: JsonSchema>() -> Value {
         let generator = schemars::generate::SchemaSettings::default()

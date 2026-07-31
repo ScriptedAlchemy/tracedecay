@@ -230,7 +230,7 @@ impl ProjectRuntimeRegistryV1 {
         let runtime = runtimes.get(project_root);
         let feedback = runtime.and_then(|runtime| runtime.feedback.as_ref());
         ProjectRequestRuntimesV1 {
-            feedback: feedback.map(|registered| registered.runtime()),
+            feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
             advisory_cycle_invoker: runtime
                 .and_then(|runtime| runtime.advisory_cycle_invoker.clone()),

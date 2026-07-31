@@ -4394,9 +4394,10 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
         {
             break;
         }
-        if std::time::Instant::now() > deadline {
-            panic!("busy follow-up wake did not produce a cadence receipt");
-        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "busy follow-up wake did not produce a cadence receipt"
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     registry.shutdown().await;
@@ -4410,9 +4411,10 @@ async fn wait_for_event_to_ready(
         if let Some(receipt) = registry.latest_event_to_ready_receipt() {
             return receipt;
         }
-        if std::time::Instant::now() > deadline {
-            panic!("timed out waiting for event-to-ready receipt");
-        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "timed out waiting for event-to-ready receipt"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

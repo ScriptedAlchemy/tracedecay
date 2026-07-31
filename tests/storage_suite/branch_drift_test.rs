@@ -103,7 +103,11 @@ async fn no_drift_and_sync_allowed_while_on_opened_branch() {
 
     // Still on the branch we opened: no drift, writes proceed normally.
     assert!(!cg.branch_drifted());
-    fs::write(fixture.root().join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+    fs::write(
+        fixture.root().join("src/lib.rs"),
+        "pub fn f() -> u32 { 2 }\n",
+    )
+    .unwrap();
     cg.sync()
         .await
         .expect("sync on the opened branch must not be blocked");
@@ -125,7 +129,11 @@ async fn sync_allowed_in_single_db_mode_without_git() {
     assert_eq!(cg.serving_branch(), None);
     assert!(!cg.branch_drifted());
 
-    fs::write(project.root().join("src/lib.rs"), "pub fn f() -> u32 { 9 }\n").unwrap();
+    fs::write(
+        project.root().join("src/lib.rs"),
+        "pub fn f() -> u32 { 9 }\n",
+    )
+    .unwrap();
     cg.sync()
         .await
         .expect("single-DB mode sync must never be blocked by the drift guard");
@@ -186,7 +194,11 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
     let fixture = BranchDriftProject::indexed_tracking_main().await;
 
     fixture.repo.run(&["checkout", "-b", "feature/tracked"]);
-    fs::write(fixture.root().join("src/lib.rs"), "pub fn f() -> u32 { 2 }\n").unwrap();
+    fs::write(
+        fixture.root().join("src/lib.rs"),
+        "pub fn f() -> u32 { 2 }\n",
+    )
+    .unwrap();
     fs::write(
         fixture.root().join("src/tracked_only.rs"),
         "pub fn tracked_only() {}\n",

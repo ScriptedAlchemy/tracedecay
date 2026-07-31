@@ -100,11 +100,7 @@ async fn open_detached_fallback_project() -> (BranchSafetyProject, TraceDecay) {
     (fixture, fallback)
 }
 
-async fn assert_main_db_missing_symbol(
-    fixture: &BranchSafetyProject,
-    symbol: &str,
-    message: &str,
-) {
+async fn assert_main_db_missing_symbol(fixture: &BranchSafetyProject, symbol: &str, message: &str) {
     fixture.repo.run(&["checkout", "main"]);
     let main = fixture.reopen().await;
     let results = main.search(symbol, 10).await.unwrap();
@@ -356,7 +352,11 @@ async fn detached_linked_worktree_uses_worktree_local_index() {
     let profile = TestProfile::acquire().await;
     let repo = GitFixture::primary(profile.path("project"));
     fs::create_dir_all(repo.root().join("src")).unwrap();
-    fs::write(repo.root().join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
+    fs::write(
+        repo.root().join("src/lib.rs"),
+        "pub fn indexed_on_main() {}\n",
+    )
+    .unwrap();
     repo.commit_all("initial commit");
 
     let project = profile.enroll_indexed(repo.root()).await.close().await;
@@ -482,7 +482,9 @@ async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
     let meta_path = fixture.data_root().join("branch-meta.json");
     fs::write(&meta_path, b"{not valid json").unwrap();
 
-    fixture.repo.run(&["checkout", "-b", "feature/corrupt-meta"]);
+    fixture
+        .repo
+        .run(&["checkout", "-b", "feature/corrupt-meta"]);
     fs::write(
         fixture.root().join("src/feature_only.rs"),
         "pub fn feature_only() {}\n",

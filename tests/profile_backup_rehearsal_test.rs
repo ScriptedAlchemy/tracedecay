@@ -171,7 +171,10 @@ fn released_copy_rehearsal_rejects_missing_store_manifest() {
     let fixture = seed_released_profile(&temp);
     let backup = create_backup(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
-    let manifest_entry = format!("projects/{}/{}", fixture.project_id, STORE_MANIFEST_FILENAME);
+    let manifest_entry = format!(
+        "projects/{}/{}",
+        fixture.project_id, STORE_MANIFEST_FILENAME
+    );
     fs::remove_file(backup.join(&manifest_entry)).unwrap();
     let manifest_path = backup.join("backup-manifest.json");
     let mut manifest: serde_json::Value =
@@ -181,12 +184,13 @@ fn released_copy_rehearsal_rejects_missing_store_manifest() {
         .and_then(|value| value.as_array_mut())
         .unwrap();
     entries.retain(|entry| {
-        entry
-            .get("logical_path")
-            .and_then(|value| value.as_str())
-            != Some(manifest_entry.as_str())
+        entry.get("logical_path").and_then(|value| value.as_str()) != Some(manifest_entry.as_str())
     });
-    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
     assert!(

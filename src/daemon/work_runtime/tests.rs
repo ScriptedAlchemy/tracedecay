@@ -166,12 +166,12 @@ for line in sys.stdin:
 fn install_idle_codex_fixture(path: &Path) {
     fs::write(
         path,
-        r#"#!/usr/bin/env python3
+        r"#!/usr/bin/env python3
 import time
 
 while True:
     time.sleep(1)
-"#,
+",
     )
     .unwrap();
     make_executable(path);

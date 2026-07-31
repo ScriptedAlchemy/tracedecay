@@ -238,6 +238,7 @@ fn constant_time_header_eq(actual: Option<&HeaderValue>, expected: &HeaderValue)
 
 pub(super) struct DaemonHttpApplicationService {
     endpoint: SocketAddr,
+    #[cfg(test)]
     origin: String,
     active: Arc<AtomicBool>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -260,6 +261,7 @@ impl DaemonHttpApplicationService {
                 message: format!("failed to read daemon HTTP loopback address: {error}"),
             })?;
         let admission = LocalHttpAdmission::new(auth_token, endpoint)?;
+        #[cfg(test)]
         let origin = admission
             .origin
             .to_str()
@@ -288,6 +290,7 @@ impl DaemonHttpApplicationService {
         });
         Ok(Self {
             endpoint,
+            #[cfg(test)]
             origin: origin.to_owned(),
             active,
             shutdown: Some(shutdown),
@@ -299,6 +302,7 @@ impl DaemonHttpApplicationService {
         self.endpoint
     }
 
+    #[cfg(test)]
     pub(super) fn origin(&self) -> &str {
         &self.origin
     }

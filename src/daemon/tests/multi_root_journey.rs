@@ -82,8 +82,29 @@ fn wire_round_trip(request: &DaemonInvocationRequest) -> DaemonInvocationRequest
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
+#[test]
+fn authenticated_multi_root_cas_is_quarantined_before_storage() {
+    const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("multi-root-quarantine-journey".to_owned())
+        .stack_size(STACK_SIZE)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("multi-root quarantine runtime")
+                .block_on(run_authenticated_multi_root_quarantine_journey());
+        })
+        .expect("multi-root quarantine thread")
+        .join()
+        .expect("multi-root quarantine thread must not panic");
+}
+
+#[cfg(unix)]
+async fn run_authenticated_multi_root_quarantine_journey() {
     let home = TempDir::new().expect("home");
     let profile_root = home.path().join("profile");
     let first = repository();

@@ -61,9 +61,7 @@ impl<A: FactCompatibilityStore> DerivedMemoryRepairPort for MemoryApplication<A>
             stats.banks_rebuilt(),
             stats.saturated(),
         )
-        .with_feedback_history_repair(feedback_history_repair(
-            stats.feedback_history_repair(),
-        )))
+        .with_feedback_history_repair(feedback_history_repair(stats.feedback_history_repair())))
     }
 }
 
