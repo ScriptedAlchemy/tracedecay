@@ -7,12 +7,14 @@
 > plan. Do not recreate its task checklists, file inventories, branch/worktree/SHA
 > or commit protocol, Gate A/B, timing/JUnit receipts, exact test names/counts,
 > generated-byte/source-shape checks, PR closure gates, or platform gate lattice.
-> Historical version, alias, deprecation, or migration language applies only
-> where `origin/master`, a published package/release, or live persistence
-> proves a predecessor. Pure transient/source contracts otherwise change in
-> place; branch-written stores, spools, files, journals, checkpoints, receipts,
-> and projections keep backward-read/recovery until a separately authorized
-> registered-store/profile census proves absence.
+> Historical version, alias, deprecation, or migration language applies where
+> `origin/master`, a published package/release, an independently deployed
+> client, a live host installation, or live persistence establishes a
+> predecessor. Pure source-only/internal contracts change in place;
+> potentially deployed branch-era APIs remain compatible until the authorized
+> installed-client/host census, and branch-written stores, spools, files,
+> journals, checkpoints, receipts, and projections keep backward-read/recovery
+> until the registered-store/profile census proves absence.
 
 **Outcome contributed:** This plan recorded a leaves-first root-crate breakup,
 measured iteration-cost experiments, and direct, truthful product-journey goals

@@ -9,10 +9,13 @@
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
-> branch-only scaffolding; compatibility begins only after an evidenced package
-> publication for pure APIs. Potentially persisted cursors, idempotency keys,
-> journals, checkpoints, and receipts keep backward-read/recovery until a
-> separately authorized registered-store/profile census proves absence.
+> source-only/internal branch scaffolding. Compatibility begins before package
+> publication when an independently deployed dogfood client or host
+> installation may retain an API/schema revision, and remains until the
+> authorized installed-client/host census proves absence. Potentially persisted
+> cursors, idempotency keys, journals, checkpoints, and receipts keep
+> backward-read/recovery until the registered-store/profile census proves
+> absence.
 
 **Goal:** Publish Rust, TypeScript, and Python SDKs for accepted PR12–PR17
 operations without inventing lifecycle semantics.

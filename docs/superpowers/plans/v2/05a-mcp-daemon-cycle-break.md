@@ -56,9 +56,10 @@ acceptance live in the applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Move handler families independently. Use a compatibility adapter only for an
-evidenced released caller; branch-local callers move in place. Rollback by
-reverting a family; no data migration. The historical Gate B
+Move handler families independently. Use a compatibility adapter for released
+or potentially deployed dogfood/host callers until the authorized
+installed-client/host census proves absence; move only source-only/internal
+callers in place. Rollback by reverting a family; no data migration. The historical Gate B
 experiment used a warm MCP-handler edit comparison or dependency test plus
 timing disposition; it is not current acceptance. Delete concrete cross-imports and
 test-only executors only after every production construction path uses the

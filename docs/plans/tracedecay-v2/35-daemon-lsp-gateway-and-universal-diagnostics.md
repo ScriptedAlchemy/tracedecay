@@ -280,7 +280,8 @@ review, CI, proximity, or evidence data.
 - Remove reserved future fields and predeclared PR17/PR18 variants from PR13
   writer schemas while retained decoders continue to accept potentially
   installed prior revisions. Later callable features revise the current writer
-  shape; the installed-client/host census gates decoder retirement. Persisted
+  shape, while responses emit each client's negotiated retained revision until
+  the installed-client/host census gates reader/writer retirement. Persisted
   diagnostics remain governed by the registered-store census rule above.
 - Remove duplicate architecture/ownership prose, exact source-file and
   fixture inventories, standalone worktree milestone gates, generated protocol

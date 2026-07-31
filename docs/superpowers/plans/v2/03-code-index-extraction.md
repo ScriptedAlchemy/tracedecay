@@ -72,6 +72,8 @@ Rollback each with `git revert`.
 
 The historical Gate A-index experiment used an identical warm private edit,
 focused compile, rebuild-unit, and digest comparison; those thresholds are not
-current acceptance. Delete old root modules,
-build inputs, evidence-backed released feature aliases, and package entries only after callers and
-package/default/all/lite gates pass.
+current acceptance. Delete old root modules, source-only build inputs, and
+package entries only after callers and package/default/all/lite gates pass.
+Evidence-backed released or potentially deployed feature aliases remain
+delegates until their deprecation policy and authorized installed-client/host
+census permit retirement.
