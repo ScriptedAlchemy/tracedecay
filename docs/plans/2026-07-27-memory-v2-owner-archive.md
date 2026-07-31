@@ -6,6 +6,9 @@
 > tests and counts, source-string checks, branch/commit/worktree choreography,
 > snapshots, receipts, attestations, PR packets, and gate matrices below are not
 > rebuild instructions; validate current migration and runtime behavior directly.
+> `MemoryV2OwnerArchiveV1` names the initial final archive wire shape; the
+> suffix and branch history require no V2 sibling. Migration remains required
+> only for live persisted owner stores that branch retirement can reclaim.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

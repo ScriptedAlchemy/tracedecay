@@ -8,6 +8,8 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical compatibility/migration language applies only to evidenced
+> released names or formats; branch-local extraction shapes change in place.
 
 **Goal:** Isolate extraction/index compilation, grammar/WGSL build ownership,
 and focused search tests from unrelated root edits.
@@ -67,5 +69,5 @@ Rollback each with `git revert`.
 The historical Gate A-index experiment used an identical warm private edit,
 focused compile, rebuild-unit, and digest comparison; those thresholds are not
 current acceptance. Delete old root modules,
-build inputs, feature aliases, and package entries only after callers and
+build inputs, evidence-backed released feature aliases, and package entries only after callers and
 package/default/all/lite gates pass.

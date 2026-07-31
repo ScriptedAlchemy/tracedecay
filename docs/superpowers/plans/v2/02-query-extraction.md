@@ -8,6 +8,8 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical compatibility language applies only to names proven published;
+> branch-local crate façades change in place.
 
 **Goal:** Move the query kernel and focused tests out of the root crate while
 preserving every public path and result byte.
@@ -24,7 +26,7 @@ application owned request scope before this extraction.
 - Move query/temporal unit and focused integration coverage to the crate;
   retain root façade contract tests.
 
-Public compatibility:
+Historical handoff (public compatibility only if release evidence requires it):
 
 ```rust
 pub use tracedecay_query as query;
