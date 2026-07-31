@@ -1401,10 +1401,12 @@ async fn migrate_v8(conn: &Transaction) -> Result<()> {
 ///    rows are deleted. After v9, the truth for "who contains node X" is
 ///    `nodes.parent_id`, not the edges table — readers should prefer it.
 ///
-/// Precreated `read_cache` objects and V9 indexes are never accepted via
-/// `IF NOT EXISTS`. Exact column, primary-key, and index SQL contracts must
-/// match before user_version advances to 9.
+/// A V8 database must contain none of the V9 table, column, or index objects.
+/// Admission rejects even exact-looking objects before any V8 data is changed;
+/// the surrounding migration transaction then keeps the schema and
+/// `user_version` at V8 on every rejection.
 async fn migrate_v9(conn: &Transaction) -> Result<()> {
+    reject_precreated_v9_objects(conn).await?;
     ensure_exact_v9_read_cache(conn).await?;
 
     // V9 and its user_version publication execute in one immediate
@@ -1491,6 +1493,85 @@ const V9_READ_CACHE_PRIMARY_KEY: &[&str] = &[
     "mode",
     "args_hash",
 ];
+
+async fn reject_precreated_v9_objects(conn: &Transaction) -> Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, tbl_name
+             FROM sqlite_master
+             WHERE name IN ('read_cache', 'idx_read_cache_session', 'idx_nodes_parent_id')
+                OR tbl_name = 'read_cache'
+             ORDER BY type, name",
+            (),
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to inspect V8 schema objects: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    let mut precreated = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+        message: format!("v9: failed to iterate V8 schema objects: {e}"),
+        operation: "migrate_v9".to_string(),
+    })? {
+        let object_type = row
+            .get::<String>(0)
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v9: failed to read V8 schema object type: {e}"),
+                operation: "migrate_v9".to_string(),
+            })?;
+        let name = row
+            .get::<String>(1)
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v9: failed to read V8 schema object name: {e}"),
+                operation: "migrate_v9".to_string(),
+            })?;
+        let table = row
+            .get::<String>(2)
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v9: failed to read V8 schema object owner: {e}"),
+                operation: "migrate_v9".to_string(),
+            })?;
+        precreated.push(format!("{object_type} '{name}' on '{table}'"));
+    }
+
+    let mut columns = conn
+        .query("PRAGMA table_info(nodes)", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to inspect V8 nodes columns: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    while let Some(row) = columns
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to iterate V8 nodes columns: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?
+    {
+        let name = row
+            .get::<String>(1)
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v9: failed to read V8 nodes column name: {e}"),
+                operation: "migrate_v9".to_string(),
+            })?;
+        if name == "parent_id" {
+            precreated.push("column 'nodes.parent_id'".to_string());
+        }
+    }
+
+    if precreated.is_empty() {
+        return Ok(());
+    }
+    Err(TraceDecayError::Database {
+        message: format!(
+            "v9: V8 admission rejected precreated V9 objects: {}",
+            precreated.join(", ")
+        ),
+        operation: "migrate_v9".to_string(),
+    })
+}
 
 async fn ensure_exact_v9_read_cache(conn: &Transaction) -> Result<()> {
     match schema_object_sql(conn, "table", "read_cache").await? {

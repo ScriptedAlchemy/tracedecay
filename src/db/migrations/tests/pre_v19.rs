@@ -145,7 +145,7 @@ async fn v8_to_v9_rejects_preadded_parent_column_and_rolls_back() {
         .expect_err("malformed v8 schema must fail closed");
 
     assert!(
-        error.to_string().contains("failed to add parent_id column"),
+        error.to_string().contains("parent_id"),
         "unexpected migration error: {error}"
     );
     assert_eq!(
@@ -157,6 +157,89 @@ async fn v8_to_v9_rejects_preadded_parent_column_and_rolls_back() {
         !table_exists(&conn, "read_cache").await,
         "failed v9 migration must roll back earlier schema changes"
     );
+}
+
+#[tokio::test]
+async fn v8_to_v9_rejects_exact_precreated_read_cache_and_preserves_v8() {
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
+        .await
+        .expect("build real v8 schema");
+    conn.execute_batch(
+        "CREATE TABLE read_cache (
+            project_id   TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            file_path    TEXT NOT NULL,
+            mtime_ns     INTEGER NOT NULL,
+            mode         TEXT NOT NULL,
+            args_hash    TEXT NOT NULL,
+            digest       TEXT NOT NULL,
+            body         BLOB NOT NULL,
+            token_count  INTEGER NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
+        );
+        INSERT INTO read_cache VALUES (
+            'project', 'session', 'src/lib.rs', 1, 'lines',
+            'args', 'digest', X'01', 1, 1
+        );",
+    )
+    .await
+    .expect("plant exact-looking v9 table and sentinel row");
+
+    let error = crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
+        .await
+        .expect_err("every precreated v9 table must fail closed");
+
+    assert!(
+        error.to_string().contains("read_cache"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(get_user_version(&conn).await, 8);
+    assert!(!column_exists(&conn, "nodes", "parent_id").await);
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM read_cache").await,
+        1,
+        "failed admission must preserve the original v8 database"
+    );
+}
+
+#[tokio::test]
+async fn v8_to_v9_rejects_unexpected_precreated_read_cache_index() {
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
+        .await
+        .expect("build real v8 schema");
+    conn.execute_batch(
+        "CREATE TABLE read_cache (
+            project_id   TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            file_path    TEXT NOT NULL,
+            mtime_ns     INTEGER NOT NULL,
+            mode         TEXT NOT NULL,
+            args_hash    TEXT NOT NULL,
+            digest       TEXT NOT NULL,
+            body         BLOB NOT NULL,
+            token_count  INTEGER NOT NULL,
+            created_at   INTEGER NOT NULL,
+            PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
+        );
+        CREATE INDEX idx_read_cache_unexpected ON read_cache(file_path);",
+    )
+    .await
+    .expect("plant unexpected index on exact-looking v9 table");
+
+    let error = crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
+        .await
+        .expect_err("unexpected precreated v9 indexes must fail closed");
+
+    assert!(
+        error.to_string().contains("idx_read_cache_unexpected"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(get_user_version(&conn).await, 8);
+    assert!(index_exists(&conn, "idx_read_cache_unexpected").await);
+    assert!(!column_exists(&conn, "nodes", "parent_id").await);
 }
 
 #[tokio::test]

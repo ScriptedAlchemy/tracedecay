@@ -215,6 +215,88 @@ fn released_copy_rehearsal_resumes_after_rename_before_marker_removal() {
 }
 
 #[test]
+fn marked_publication_recovery_rejects_tampered_durable_bytes() {
+    let temp = TempDir::new().unwrap();
+    let fixture = seed_released_profile(&temp);
+    let backup = create_backup(&temp, &fixture);
+    let restore = temp.path().join("rehearsed-profile");
+    let marker = restore.join(".tracedecay-profile-rehearsal.json");
+    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
+    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let expected_marker = fs::read(&marker).unwrap();
+    fs::write(
+        restore.join("user-memory.db"),
+        b"tampered after publication",
+    )
+    .unwrap();
+
+    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+
+    assert!(
+        error.contains("checksum mismatch"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(fs::read(&marker).unwrap(), expected_marker);
+    assert_eq!(
+        fs::read(restore.join("user-memory.db")).unwrap(),
+        b"tampered after publication"
+    );
+}
+
+#[test]
+fn marked_publication_recovery_rejects_partially_durable_restore() {
+    let temp = TempDir::new().unwrap();
+    let fixture = seed_released_profile(&temp);
+    let backup = create_backup(&temp, &fixture);
+    let restore = temp.path().join("rehearsed-profile");
+    let marker = restore.join(".tracedecay-profile-rehearsal.json");
+    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
+    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let expected_marker = fs::read(&marker).unwrap();
+    fs::remove_file(restore.join("user-sessions.db")).unwrap();
+
+    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+
+    assert!(
+        error.contains("user-sessions.db"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(fs::read(&marker).unwrap(), expected_marker);
+    assert!(!restore.join("user-sessions.db").exists());
+}
+
+#[test]
+fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
+    let temp = TempDir::new().unwrap();
+    let fixture = seed_released_profile(&temp);
+    let backup = create_backup(&temp, &fixture);
+    let restore = temp.path().join("rehearsed-profile");
+    let marker = restore.join(".tracedecay-profile-rehearsal.json");
+    set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
+    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let expected_marker = fs::read(&marker).unwrap();
+    let manifest_path = restore
+        .join("projects")
+        .join(fixture.project_id)
+        .join(STORE_MANIFEST_FILENAME);
+    let mut manifest = read_store_manifest(&manifest_path).unwrap();
+    manifest.data_root = temp.path().join("tampered-store-root");
+    write_store_manifest_to_path(&manifest_path, &manifest).unwrap();
+
+    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+
+    assert!(
+        error.contains("rebound backup manifest"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(fs::read(&marker).unwrap(), expected_marker);
+    assert_eq!(
+        read_store_manifest(&manifest_path).unwrap().data_root,
+        temp.path().join("tampered-store-root")
+    );
+}
+
+#[test]
 fn released_copy_rehearsal_rejects_same_id_from_another_backup_root() {
     let original_temp = TempDir::new().unwrap();
     let original_fixture = seed_released_profile(&original_temp);

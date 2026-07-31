@@ -4,6 +4,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -176,11 +178,11 @@ pub fn rehearse_complete_profile_backup(
         schema_version: REHEARSAL_MARKER_SCHEMA_VERSION,
         backup_id: backup.manifest.backup_id.clone(),
         backup_root: backup.root.clone(),
-        manifest_sha256: backup.manifest_sha256,
+        manifest_sha256: backup.manifest_sha256.clone(),
         source_profile_identity_sha256: backup.manifest.source_profile_identity_sha256.clone(),
         restore_root: restore_root.clone(),
     };
-    if recover_interrupted_publication(&restore_root, &marker)? {
+    if recover_interrupted_publication(&restore_root, &marker, &backup)? {
         return Ok(backup.manifest);
     }
     let staging = rehearsal_staging_path(&restore_root)?;
@@ -212,12 +214,14 @@ pub fn rehearse_complete_profile_backup(
             return Err("restored profile inventory differs from backup manifest".to_owned());
         }
         rebind_restored_store_manifests(&staging, &restore_root)?;
+        verify_restored_rehearsal(&staging, &restore_root, &backup)?;
         // Keep the ownership marker through rename and parent sync so a crash
         // never leaves an unowned staging directory or an unmarked published
-        // root that recovery cannot finish.
-        sync_directory(&staging)?;
+        // root that recovery cannot finish. Every nested directory is flushed
+        // after its children so all staged namespace entries precede publish.
+        sync_directory_tree(&staging)?;
         inject_rehearsal_publication_fault(RehearsalPublicationFault::BeforeRename)?;
-        fs::rename(&staging, &restore_root).map_err(|error| {
+        publish_staged_directory(&staging, &restore_root).map_err(|error| {
             format!(
                 "publish rehearsed profile '{}' to '{}': {error}",
                 staging.display(),
@@ -268,6 +272,7 @@ fn rehearsal_staging_path(restore_root: &Path) -> Result<PathBuf, String> {
 fn recover_interrupted_publication(
     restore_root: &Path,
     expected_marker: &ProfileBackupRehearsalMarker,
+    backup: &VerifiedCompleteProfileBackup,
 ) -> Result<bool, String> {
     let metadata = match fs::symlink_metadata(restore_root) {
         Ok(metadata) => metadata,
@@ -307,6 +312,7 @@ fn recover_interrupted_publication(
             restore_root.display()
         ));
     }
+    verify_restored_rehearsal(restore_root, restore_root, backup)?;
     finish_published_rehearsal(restore_root, expected_marker)?;
     Ok(true)
 }
@@ -471,40 +477,18 @@ fn rebind_restored_store_manifests(
                 manifest_path.display()
             ));
         }
-        let mut manifest = crate::storage::read_store_manifest(&manifest_path)
+        let manifest = crate::storage::read_store_manifest(&manifest_path)
             .map_err(|error| error.to_string())?;
         let project_id = store
             .file_name()
             .into_string()
             .map_err(|_| "restored project store id is not Unicode".to_owned())?;
-        if manifest.schema_version != crate::storage::STORE_MANIFEST_SCHEMA_VERSION
-            || manifest.project_id.as_deref() != Some(project_id.as_str())
-            || manifest.store_kind != crate::storage::StoreKind::CodeProject
-            || manifest.storage_mode != crate::storage::StorageMode::ProfileSharded
-        {
-            return Err(format!(
-                "restored store manifest '{}' does not match its enrollment",
-                manifest_path.display()
-            ));
-        }
-        for relative in [
-            &manifest.graph_db_relpath,
-            &manifest.sessions_db_relpath,
-            &manifest.branch_meta_relpath,
-        ] {
-            validate_restored_store_relative_path(relative)?;
-        }
-        let source_data_root = manifest.data_root.clone();
-        if let Some(source_profile_root) = source_data_root
-            .parent()
-            .and_then(Path::parent)
-            .filter(|root| source_data_root == root.join("projects").join(&project_id))
-            && let Ok(relative_project_root) =
-                manifest.project_root.strip_prefix(source_profile_root)
-        {
-            manifest.project_root = published_profile_root.join(relative_project_root);
-        }
-        manifest.data_root = published_profile_root.join("projects").join(&project_id);
+        let manifest = rebound_store_manifest(
+            manifest,
+            &project_id,
+            published_profile_root,
+            &manifest_path,
+        )?;
         crate::storage::write_store_manifest_to_path(&manifest_path, &manifest)
             .map_err(|error| error.to_string())?;
         if crate::storage::read_store_manifest(&manifest_path).map_err(|error| error.to_string())?
@@ -517,6 +501,99 @@ fn rebind_restored_store_manifests(
         }
     }
     Ok(())
+}
+
+fn rebound_store_manifest(
+    mut manifest: crate::storage::StoreManifest,
+    project_id: &str,
+    published_profile_root: &Path,
+    manifest_path: &Path,
+) -> Result<crate::storage::StoreManifest, String> {
+    if manifest.schema_version != crate::storage::STORE_MANIFEST_SCHEMA_VERSION
+        || manifest.project_id.as_deref() != Some(project_id)
+        || manifest.store_kind != crate::storage::StoreKind::CodeProject
+        || manifest.storage_mode != crate::storage::StorageMode::ProfileSharded
+    {
+        return Err(format!(
+            "restored store manifest '{}' does not match its enrollment",
+            manifest_path.display()
+        ));
+    }
+    for relative in [
+        &manifest.graph_db_relpath,
+        &manifest.sessions_db_relpath,
+        &manifest.branch_meta_relpath,
+    ] {
+        validate_restored_store_relative_path(relative)?;
+    }
+    let source_data_root = manifest.data_root.clone();
+    if let Some(source_profile_root) = source_data_root
+        .parent()
+        .and_then(Path::parent)
+        .filter(|root| source_data_root == root.join("projects").join(project_id))
+        && let Ok(relative_project_root) = manifest.project_root.strip_prefix(source_profile_root)
+    {
+        manifest.project_root = published_profile_root.join(relative_project_root);
+    }
+    manifest.data_root = published_profile_root.join("projects").join(project_id);
+    Ok(manifest)
+}
+
+fn verify_restored_rehearsal(
+    restored_profile_root: &Path,
+    published_profile_root: &Path,
+    backup: &VerifiedCompleteProfileBackup,
+) -> Result<(), String> {
+    for entry in backup.manifest.entries.iter().filter(|entry| entry.present) {
+        if restored_store_manifest_project_id(&entry.logical_path).is_none() {
+            verify_file(
+                &checked_join(restored_profile_root, &entry.logical_path)?,
+                entry,
+            )?;
+        }
+    }
+    for entry in backup.manifest.entries.iter().filter(|entry| entry.present) {
+        let Some(project_id) = restored_store_manifest_project_id(&entry.logical_path) else {
+            continue;
+        };
+        let source_path = checked_join(&backup.root, &entry.logical_path)?;
+        let source_manifest =
+            crate::storage::read_store_manifest(&source_path).map_err(|error| error.to_string())?;
+        let expected = rebound_store_manifest(
+            source_manifest,
+            project_id,
+            published_profile_root,
+            &source_path,
+        )?;
+        let restored_path = checked_join(restored_profile_root, &entry.logical_path)?;
+        let restored = crate::storage::read_store_manifest(&restored_path)
+            .map_err(|error| error.to_string())?;
+        if restored != expected {
+            return Err(format!(
+                "restored store manifest '{}' does not match its rebound backup manifest",
+                restored_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn restored_store_manifest_project_id(logical_path: &str) -> Option<&str> {
+    let mut components = logical_path.split('/');
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (
+            Some("projects"),
+            Some(project_id),
+            Some(crate::storage::STORE_MANIFEST_FILENAME),
+            None,
+        ) if !project_id.is_empty() => Some(project_id),
+        _ => None,
+    }
 }
 
 fn validate_restored_store_relative_path(path: &Path) -> Result<(), String> {
@@ -818,6 +895,93 @@ fn sync_file(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("sync '{}': {error}", path.display()))
 }
 
+fn sync_directory_tree(root: &Path) -> Result<(), String> {
+    for directory in directory_tree_postorder(root)? {
+        sync_directory(&directory)?;
+    }
+    Ok(())
+}
+
+fn directory_tree_postorder(root: &Path) -> Result<Vec<PathBuf>, String> {
+    fn collect(path: &Path, directories: &mut Vec<PathBuf>) -> Result<(), String> {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("inspect staged path '{}': {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "staged directory '{}' is not a regular directory",
+                path.display()
+            ));
+        }
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| format!("read staged directory '{}': {error}", path.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read staged directory '{}': {error}", path.display()))?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let entry_path = entry.path();
+            let entry_metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
+                format!("inspect staged entry '{}': {error}", entry_path.display())
+            })?;
+            if entry_metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "staged entry '{}' must not be a symlink",
+                    entry_path.display()
+                ));
+            }
+            if entry_metadata.is_dir() {
+                collect(&entry_path, directories)?;
+            } else if !entry_metadata.is_file() {
+                return Err(format!(
+                    "staged entry '{}' is not a regular file",
+                    entry_path.display()
+                ));
+            }
+        }
+        directories.push(path.to_path_buf());
+        Ok(())
+    }
+
+    let mut directories = Vec::new();
+    collect(root, &mut directories)?;
+    Ok(directories)
+}
+
+#[cfg(not(windows))]
+fn publish_staged_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn publish_staged_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -1116,6 +1280,33 @@ mod tests {
             assert!(!staging.exists());
             assert!(!restore.join(REHEARSAL_MARKER_FILENAME).exists());
         }
+    }
+
+    #[test]
+    fn staged_directory_durability_walks_every_nested_directory_postorder() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("staging");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::create_dir(root.join("c")).unwrap();
+        fs::write(root.join("a/b/data"), b"durable bytes").unwrap();
+        fs::write(root.join("c/data"), b"durable bytes").unwrap();
+
+        let directories = directory_tree_postorder(&root).unwrap();
+        let relative = directories
+            .iter()
+            .map(|path| path.strip_prefix(&root).unwrap().to_path_buf())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            relative,
+            vec![
+                PathBuf::from("a/b"),
+                PathBuf::from("a"),
+                PathBuf::from("c"),
+                PathBuf::new(),
+            ]
+        );
+        sync_directory_tree(&root).unwrap();
     }
 
     #[test]
