@@ -1015,6 +1015,92 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
     );
 }
 
+#[tokio::test]
+async fn existing_path_remount_rejects_foreign_project_identity() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn owned() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            ProjectId::new("project.remount.owner").expect("valid owner project"),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount owning project");
+
+    let error = registry
+        .mount_worktree(
+            ProjectId::new("project.remount.foreign").expect("valid foreign project"),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect_err("same path must reject a foreign project");
+
+    assert!(matches!(
+        error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("different project identity")
+    ));
+    registry.shutdown().await;
+}
+
+#[test]
+fn empty_generation_restart_preserves_project_identity() {
+    let fixture = GitFixture::new(&[("README.md", "# fixture\n")]);
+    let store = TempDir::new().expect("store root");
+    let project_id = ProjectId::new("project.empty-restart").expect("valid project");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        fixture.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    published(scheduler.reconcile_now().expect("publish empty generation"));
+    let generation = scheduler.latest_complete().expect("published generation");
+    assert!(generation.generation().chunks().chunks().is_empty());
+    assert_eq!(generation.generation().manifest().project_id, project_id);
+    drop(generation);
+    drop(scheduler);
+
+    let reopened = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        fixture.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("reopen scheduler");
+    assert_eq!(
+        reopened
+            .latest_complete()
+            .expect("restored generation")
+            .generation()
+            .manifest()
+            .project_id,
+        project_id
+    );
+    drop(reopened);
+
+    let error = match CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.empty-restart.foreign").expect("valid foreign project"),
+        fixture.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    ) {
+        Ok(_) => panic!("persisted generation must reject a foreign project"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        super::CodeIndexSchedulerErrorV1::Identity(message)
+            if message.contains("different project/worktree identity")
+    ));
+}
+
 #[test]
 fn one_symbol_unrelated_work_skip() {
     let fixture = GitFixture::new(&[(
