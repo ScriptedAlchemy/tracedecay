@@ -15,6 +15,13 @@ wire schemas, SDK APIs, and persisted cursors or receipts remain compatibility
 contracts; all other retention is judged by the direct cross-language,
 lifecycle, platform, and regression behavior below.
 
+PR18's first Rust, TypeScript, and Python package shapes are not yet published;
+branch acceptance and generated schemas do not create an older supported SDK
+contract. Those initial APIs change to their final shape in place until a
+package/release, `origin/master`, or live persisted cursor/receipt proves a
+predecessor. Protocol negotiation remains required for independently deployed
+clients, and compatibility starts at the first evidenced publication.
+
 ## User outcome
 
 An external developer can install any supported SDK, connect to a local daemon
@@ -91,16 +98,19 @@ when their syntax is idiomatic to the surface.
 
 ### Compatibility and lifecycle behavior
 
-Each accepted operation proves compatibility across CLI, MCP, HTTP, Rust,
-TypeScript, and Python. Conformance covers supported syntax,
+Each accepted operation proves semantic and lifecycle parity across CLI, MCP,
+HTTP, Rust, TypeScript, and Python. Compatibility with an older shape is tested
+only after release evidence establishes that shape. Conformance covers supported syntax,
 protocol/capability range, required authorization, paging or stream shape,
 retry class, cancellation support, reconnect/resume behavior, stable errors,
 and explicit transport limitations through callable adapters. A generated or
 manually maintained matrix is optional implementation evidence, not a product
 requirement or acceptance artifact.
 
-Within a major protocol version, additive changes preserve compatibility.
-Breaking changes negotiate a new major version and return an actionable error.
+After the first evidenced publication, additive changes within a major
+protocol version preserve compatibility and breaking changes negotiate a new
+major version with an actionable error. Before that publication, the
+unreleased initial contract changes in place.
 The policy retains the full required/optional field, default, nullability, open
 object, union/enum, numeric narrowing, identifier, error, stream-event, cursor,
 operation rename/removal, retry-class, and capability-removal behavior.
@@ -172,10 +182,11 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 - Choose public names and request/response shapes at the daemon application
   boundary for every supported operation, including all PR12 base families and
   the accepted PR17 additions.
-- Preserve stable published names as compatibility aliases that delegate to
-  the canonical operation. A compatibility name may translate syntax but owns
-  no readiness, scoring, routing, scheduling, provider selection, storage, or
-  lifecycle logic.
+- Preserve names proven on `origin/master` or in a published package/release as
+  compatibility aliases that delegate to the canonical operation. Branch-only
+  names are replaced in place. A compatibility name may translate syntax but
+  owns no readiness, scoring, routing, scheduling, provider selection,
+  storage, or lifecycle logic.
 - Define pagination cursors, stream events, cancellation and retry classes,
   structured errors, version negotiation, and unavailable/partial outcomes in
   the operation that uses them. Schema/OpenAPI generation is package input,
@@ -214,8 +225,9 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 
 ## Replacement and deletion
 
-PR18 removes temporary PR17-only public spellings whose compatibility window
-has closed, duplicate surface-specific models, generated-type-only sample
+PR18 removes temporary PR17-only public spellings directly because they were
+never published; no compatibility window is created by branch sequencing.
+It also removes duplicate surface-specific models, generated-type-only sample
 packages, and any SDK-side business or retry decision that competes with the
 daemon. Stable compatibility aliases remain thin delegates.
 
