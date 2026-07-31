@@ -32,6 +32,13 @@ import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
+  type DeliveryCiTimeline,
+  type DeliveryCommitTimeline,
+  type DeliveryFailureLocalizationTimeline,
+  type DeliveryGenerationComparison,
+  type DeliveryGenerationFreshness,
+  type DeliveryGitStatus,
+  type DeliveryHostEvidence,
   type DeliveryOverview,
   DeliveryOverviewSchema,
   type ProjectRepoGroup,
@@ -355,6 +362,325 @@ function ProjectionState({ projection }: { projection: ProjectionStateValue }) {
       return <StateChip kind="unsupported_schema" detail={String(exhaustive)} />;
     }
   }
+}
+
+/**
+ * One stage's state, worst first, and whatever its value-bearing sources did
+ * measure. `Ready` is drawn only when every reading in the stage is ready — a
+ * degradation any one of them reported can never be painted over by its
+ * partner's success.
+ */
+function SourceStates({
+  readings,
+  measured,
+}: {
+  readings: readonly SourceReading[];
+  measured: string | null;
+}) {
+  const degraded = collapseByFinding(readings.filter((reading) => reading.kind !== 'ready')).sort(
+    (a, b) => b.severity - a.severity,
+  );
+  if (degraded.length === 0) {
+    return <StateChip kind="ready" detail={measured ?? 'read complete'} />;
+  }
+  return (
+    <div className="flex flex-col items-start gap-1">
+      {degraded.map((reading) => (
+        <StateChip
+          key={`${reading.source}:${reading.kind}:${reading.detail}`}
+          kind={reading.kind}
+          detail={`${reading.source} · ${reading.detail}`}
+        />
+      ))}
+      {measured ? (
+        <span className="text-3xs leading-relaxed text-text-muted">
+          Retained by this read: {measured}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One chip per distinct finding, not per source.
+ *
+ * The two sources a stage covers routinely share one authority, so they report
+ * the same state for the same reason — and the same sentence twice on one panel
+ * reads as two separate findings. Naming both sources on one chip keeps every
+ * source accounted for while saying the reason once.
+ */
+function collapseByFinding(readings: readonly SourceReading[]): SourceReading[] {
+  const byFinding = new Map<string, SourceReading>();
+  for (const reading of readings) {
+    const finding = `${reading.kind}\u0000${reading.detail}`;
+    const seen = byFinding.get(finding);
+    byFinding.set(
+      finding,
+      seen === undefined ? reading : { ...seen, source: `${seen.source} and ${reading.source}` },
+    );
+  }
+  return [...byFinding.values()];
+}
+
+/**
+ * A CI check's own source degradation, which its projection state does not
+ * carry.
+ *
+ * The archive can return a complete, validated record whose provider read was
+ * rate limited or failed underneath it. `ci_checks` is then legitimately
+ * `ready`, and drawing that as a green Ready said the run was fully read when it
+ * was not. Rate limiting and failure stay distinct: one is a read that will
+ * complete later, the other is a read that did not happen.
+ */
+const CI_SOURCE_DEGRADATION: Record<
+  string,
+  { readonly kind: DomainStateKind; readonly severity: number; readonly note: string }
+> = {
+  rate_limited: {
+    kind: 'partial',
+    severity: 2,
+    note: 'the provider read was rate limited, so this run is not fully read',
+  },
+  failed: { kind: 'error', severity: 5, note: 'the provider read failed for this run' },
+};
+
+function ciSourceDegradations(checks: DeliveryCiTimeline | null): SourceReading[] {
+  if (checks === null) return [];
+  return checks.items.flatMap((check) => {
+    if (check.source_degradation === null || check.source_degradation === '') return [];
+    const source = `${check.provider} provider read`;
+    const known = CI_SOURCE_DEGRADATION[check.source_degradation];
+    return [
+      known === undefined
+        ? {
+            source,
+            kind: 'unknown' as const,
+            severity: 6,
+            // Named, not swallowed: an unrecognized degradation label is still
+            // the daemon saying the read was degraded.
+            detail: `reported source degradation ${check.source_degradation}, which this build does not recognize`,
+          }
+        : { source, kind: known.kind, severity: known.severity, detail: known.note },
+    ];
+  });
+}
+
+/** The indexed generation as its own reading. A `ready` projection can carry a
+ * `behind` comparison, which is a stale index and not a complete read. */
+const GENERATION_STATE: Record<DeliveryGenerationComparison, DomainStateKind> = {
+  current: 'ready',
+  behind: 'stale',
+};
+
+const GENERATION_EVIDENCE: Record<DeliveryGenerationComparison, EvidenceQuality> = {
+  current: 'measured',
+  behind: 'unknown',
+};
+
+function generationComparison(
+  generation: DeliveryGenerationFreshness | null,
+): SourceReading[] {
+  if (generation === null || GENERATION_STATE[generation.comparison] === 'ready') return [];
+  return [
+    {
+      source: 'indexed commit',
+      kind: GENERATION_STATE[generation.comparison],
+      severity: 1,
+      detail: `${generation.comparison} · HEAD ${shortOid(generation.head_commit)} · indexed ${shortOid(generation.indexed_commit)}`,
+    },
+  ];
+}
+
+function generationEvidence(generation: DeliveryGenerationFreshness | null): EvidenceQuality {
+  return generation === null ? 'unknown' : GENERATION_EVIDENCE[generation.comparison];
+}
+
+/* --------------------------------------------------------- measured detail */
+
+function changeDetail(
+  changes: DeliveryGitStatus | null,
+  commits: DeliveryCommitTimeline | null,
+): string | null {
+  const parts: string[] = [];
+  if (commits !== null) parts.push(commitCountDetail(commits));
+  if (changes !== null) {
+    parts.push(countLabel(changes.changed_paths.length, 'changed path'));
+  }
+  return parts.length === 0 ? null : parts.join(' · ');
+}
+
+function reviewDetail(
+  pullRequests: DeliveryPullRequestTimeline | null,
+  reviews: DeliveryReviewTimeline | null,
+): string | null {
+  const parts: string[] = [];
+  if (pullRequests !== null) {
+    parts.push(countLabel(pullRequests.items.length, 'pull request'));
+  }
+  if (reviews !== null) parts.push(countLabel(reviews.items.length, 'review comment'));
+  return parts.length === 0 ? null : parts.join(' · ');
+}
+
+function ciDetail(
+  checks: DeliveryCiTimeline | null,
+  localization: DeliveryFailureLocalizationTimeline | null,
+): string | null {
+  const parts: string[] = [];
+  if (checks !== null) parts.push(countLabel(checks.items.length, 'check'));
+  if (localization !== null) {
+    parts.push(countLabel(localization.items.length, 'localized failure'));
+  }
+  return parts.length === 0 ? null : parts.join(' · ');
+}
+
+/**
+ * Releases read from a bounded tag walk, stated as a floor.
+ *
+ * The commit timeline carries a `truncated` flag and this projection does not,
+ * so nothing here can tell a repository that has exactly this many tags from one
+ * whose walk hit its bound. A bare count would let the second read as the first,
+ * so the missing statement is disclosed rather than papered over.
+ */
+function releaseDetail(releases: DeliveryReleaseTimeline | null): string | null {
+  return releases === null
+    ? null
+    : `${countLabel(releases.items.length, 'release')} · no truncation stated, so this is a floor`;
+}
+
+function generationDetail(generation: DeliveryGenerationFreshness | null): string | null {
+  return generation === null
+    ? null
+    : `HEAD ${shortOid(generation.head_commit)} · indexed ${shortOid(generation.indexed_commit)}`;
+}
+
+/* ------------------------------------------------------------- host rows */
+
+/**
+ * The two independently measured axes of one host component: whether the
+ * receipt-backed component itself is current, and whether its registration is.
+ * A registration that is missing while the component is current is a real,
+ * separately reportable degradation, so each gets its own chip rather than being
+ * folded into one word.
+ */
+const HOST_COMPONENT_STATE: Record<string, DomainStateKind> = {
+  current: 'ready',
+  // Measured with no doctor verdict attached — neither graded healthy nor
+  // reported degraded, which is exactly what `unknown` says.
+  observed: 'unknown',
+  repairable: 'partial',
+  ownership_conflict: 'conflicting',
+  missing: 'unavailable',
+  corrupt: 'error',
+};
+
+const HOST_REGISTRATION_STATE: Record<string, DomainStateKind> = {
+  current: 'ready',
+  repairable: 'partial',
+  missing: 'unavailable',
+  corrupt: 'error',
+};
+
+const DEGRADED_HOST_STATES: ReadonlySet<DomainStateKind> = new Set<DomainStateKind>([
+  'partial',
+  'conflicting',
+  'unavailable',
+  'error',
+]);
+
+function HostEvidenceItems({ projection }: { projection: DeliveryOverview['host_evidence'] }) {
+  if (!('value' in projection)) return null;
+  const rows = projection.value.items.map(hostRow);
+  const degraded = rows.filter((row) => row.degraded).length;
+  const unreadable = rows.filter((row) => row.unreadable).length;
+  const artifacts = rows.reduce((total, row) => total + row.artifacts, 0);
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="text-3xs leading-relaxed text-text-muted">
+        {projection.state === 'ready' ? '' : 'Retained by this read: '}
+        {countLabel(rows.length, 'component row')} · {degraded} degraded ·{' '}
+        {countLabel(artifacts, 'artifact')}
+        {unreadable > 0 ? ` · ${unreadable} in a state this build cannot read` : ''}
+      </p>
+      <ul aria-label="Host integration components" className="flex flex-col gap-1">
+        {rows.map((row) => (
+          <li key={row.key}>
+            <div
+              role="group"
+              aria-label={row.name}
+              className="flex flex-wrap items-center gap-x-1.5 gap-y-1"
+            >
+              <span className="text-2xs text-text-secondary">{row.name}</span>
+              <StateChip kind={row.component.kind} detail={row.component.detail} />
+              {row.registration === null ? null : (
+                <StateChip kind={row.registration.kind} detail={row.registration.detail} />
+              )}
+              <span className="text-3xs text-text-muted">
+                {countLabel(row.artifacts, 'artifact')}
+              </span>
+              {/* The receipt path is longer than this rail, and the path is the
+                * evidence — so the truncated view carries the whole thing on
+                * hover rather than leaving the reader with a stem. */}
+              <span
+                className="td-value min-w-0 truncate text-3xs text-text-muted"
+                title={row.evidenceSource}
+              >
+                {row.evidenceSource}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+interface HostAxis {
+  readonly kind: DomainStateKind;
+  readonly detail: string;
+}
+
+interface HostRow {
+  readonly key: string;
+  readonly name: string;
+  readonly component: HostAxis;
+  readonly registration: HostAxis | null;
+  readonly artifacts: number;
+  readonly evidenceSource: string;
+  readonly degraded: boolean;
+  readonly unreadable: boolean;
+}
+
+function hostRow(item: DeliveryHostEvidence): HostRow {
+  const component: HostAxis = {
+    kind: HOST_COMPONENT_STATE[item.state] ?? 'unsupported_schema',
+    detail: `component ${readable(item.state)}`,
+  };
+  const registration: HostAxis | null =
+    item.registration === null
+      ? null
+      : {
+          kind: HOST_REGISTRATION_STATE[item.registration] ?? 'unsupported_schema',
+          detail: `registration ${readable(item.registration)}`,
+        };
+  return {
+    key: `${item.host}:${item.component ?? 'bundle'}:${item.evidence_source}`,
+    name: `${item.host} · ${item.component ?? 'bundle'}`,
+    component,
+    registration,
+    artifacts: item.artifact_count,
+    evidenceSource: item.evidence_source,
+    degraded:
+      DEGRADED_HOST_STATES.has(component.kind)
+      || (registration !== null && DEGRADED_HOST_STATES.has(registration.kind)),
+    // Counted apart from `degraded` so an unrecognized label is neither claimed
+    // as healthy nor silently folded into a degradation total.
+    unreadable:
+      component.kind === 'unsupported_schema' || registration?.kind === 'unsupported_schema',
+  };
+}
+
+function readable(value: string): string {
+  return value.replaceAll('_', ' ');
 }
 
 function shortOid(value: string): string {
