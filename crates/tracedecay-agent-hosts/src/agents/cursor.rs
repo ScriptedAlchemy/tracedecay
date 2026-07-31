@@ -341,7 +341,7 @@ fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
     crate::agents::plugin_bundle::cursor_files()
 }
 
-pub(crate) fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
+pub fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tracedecay")
 }
 

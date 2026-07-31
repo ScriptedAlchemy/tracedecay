@@ -53,7 +53,7 @@ fn registered_context_scout_owners() -> &'static StdMutex<ProjectContextScoutOwn
     OWNERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
-pub(crate) fn lookup_registered_context_scout_owners(
+pub fn lookup_registered_context_scout_owners(
     project_id: [u8; 16],
 ) -> Vec<Arc<ProjectContextScoutOwnerV1>> {
     let Ok(mut owners) = registered_context_scout_owners().lock() else {
