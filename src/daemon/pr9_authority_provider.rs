@@ -522,11 +522,11 @@ pub(crate) mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
     use tracedecay_domain::{
-        CalibrationProfileId, ChunkerRevision, ComponentRevision, DiversityPolicy,
-        EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1,
-        EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, FusionProfile,
-        ManifestDigest, ProjectId, RetrievalBudget, UtcMicros, VectorGenerationIdV1,
-        canonical_sha256,
+        CalibrationProfileId, ChunkerRevision, CodeGenerationId, ComponentRevision,
+        DiversityPolicy, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
+        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
+        EmbeddingTruncationSideV1, FusionProfile, ManifestDigest, ProjectId, RetrievalBudget,
+        UtcMicros, VectorGenerationIdV1, canonical_sha256,
     };
     use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 
@@ -939,8 +939,7 @@ pub(crate) mod tests {
         git(project.path(), &["add", "."]);
         git(project.path(), &["commit", "-qm", "fixture"]);
 
-        let project_id =
-            ProjectId::new("project.pr9-semantic-activation").expect("project id");
+        let project_id = ProjectId::new("project.pr9-semantic-activation").expect("project id");
         let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
             project.path(),
             &project_id,
@@ -949,12 +948,7 @@ pub(crate) mod tests {
         let store = TempDir::new().expect("store root");
         let registry = super::super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
         registry
-            .mount_worktree(
-                project_id,
-                project.path(),
-                store.path().to_path_buf(),
-                None,
-            )
+            .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
             .await
             .expect("mount code index");
         let provider = DaemonPr9AuthorityProviderV1::default();
