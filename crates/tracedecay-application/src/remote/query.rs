@@ -30,13 +30,11 @@ use super::protocol::{
     remote_protocol_problem,
 };
 use crate::{
-    ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, CancellationSignal,
-    Deadline, RequestId, ResolvedScope, ResultContractRef,
+    ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, AuthorityReceipt, Deadline,
+    RequestId, ResolvedScope, ResultContractRef,
 };
 
 pub const REMOTE_QUERY_SCHEMA_REVISION_V1: u16 = 1;
-pub const MAX_REMOTE_QUERY_PAGE_SIZE_V1: u16 = 100;
-pub const MAX_REMOTE_QUERY_CURSOR_BYTES_V1: usize = 512;
 pub const REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1: &str =
     "use-case.remote.query.exact-observation";
 
@@ -57,42 +55,6 @@ pub enum RemoteQueryOperationV1 {
     },
 }
 
-/// Bounded continuation metadata. The cursor is opaque to the caller and
-/// bound by the serving owner to exact identity/generation inventory.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteQueryPageBoundsV1 {
-    pub page_size: u16,
-    pub cursor: Option<String>,
-}
-
-impl RemoteQueryPageBoundsV1 {
-    pub fn new(page_size: u16, cursor: Option<String>) -> Result<Self, ApplicationContractError> {
-        let value = Self { page_size, cursor };
-        value.validate()?;
-        Ok(value)
-    }
-
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        if self.page_size == 0 || self.page_size > MAX_REMOTE_QUERY_PAGE_SIZE_V1 {
-            return Err(ApplicationContractError::InvalidRange {
-                field: "remote query page size",
-            });
-        }
-        if let Some(cursor) = &self.cursor
-            && (cursor.is_empty()
-                || cursor.len() > MAX_REMOTE_QUERY_CURSOR_BYTES_V1
-                || cursor.trim() != cursor
-                || cursor.chars().any(char::is_control))
-        {
-            return Err(ApplicationContractError::InvalidIdentifier {
-                field: "remote query cursor",
-            });
-        }
-        Ok(())
-    }
-}
-
 /// Query only for authenticated composition/coverage of one exact repository
 /// scope and explicitly expected immutable shard generations.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -103,7 +65,6 @@ pub struct RemoteQueryRequestV1 {
     pub expected_shards: Vec<ExpectedRemoteShardV1>,
     pub expected_authority: RemoteWriterFenceV1,
     pub operation: RemoteQueryOperationV1,
-    pub page: RemoteQueryPageBoundsV1,
 }
 
 impl RemoteQueryRequestV1 {
@@ -119,12 +80,6 @@ impl RemoteQueryRequestV1 {
             .map_err(|_| ApplicationContractError::Inconsistent {
                 field: "remote query expected authority",
             })?;
-        self.page.validate()?;
-        if self.page.page_size != 1 || self.page.cursor.is_some() {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "remote exact observation page bounds",
-            });
-        }
         if self.expected_shards.len() != 1 {
             return Err(ApplicationContractError::InvalidRange {
                 field: "remote query expected shard inventory",
@@ -319,6 +274,102 @@ impl RemoteExactObservationQueryBudgetV1 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteQueryAuthorizationDecisionV1 {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteQueryPolicyRecordV1 {
+    pub repository_scope: RemoteRepositoryScopeV1,
+    pub scope: ResolvedScope,
+    pub policy_revision: u64,
+    pub decision: RemoteQueryAuthorizationDecisionV1,
+    pub authority: AuthorityReceipt,
+    pub revalidated_at: UtcMicros,
+}
+
+impl RemoteQueryPolicyRecordV1 {
+    pub fn validate(&self) -> Result<(), RemoteExactObservationQueryErrorV1> {
+        self.repository_scope
+            .validate()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        self.scope
+            .validate()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        self.authority
+            .validate_for(&self.scope)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        if !resolved_scope_matches(&self.scope, &self.repository_scope)
+            || self.policy_revision == 0
+            || self.authority.policy.revision != self.policy_revision
+        {
+            return Err(RemoteExactObservationQueryErrorV1::PolicyUnavailable);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteQueryAuthorizationEvidenceV1 {
+    pub repository_scope: RemoteRepositoryScopeV1,
+    pub observation_id: CanonicalObservationIdV1,
+    pub expected_authority: RemoteWriterFenceV1,
+    pub policy_revision: u64,
+    pub decision: RemoteQueryAuthorizationDecisionV1,
+    pub authority: AuthorityReceipt,
+    pub revalidated_at: UtcMicros,
+}
+
+impl RemoteQueryAuthorizationEvidenceV1 {
+    pub fn validate_for(
+        &self,
+        scope: &ResolvedScope,
+        repository_scope: &RemoteRepositoryScopeV1,
+        observation_id: &CanonicalObservationIdV1,
+        expected_authority: &RemoteWriterFenceV1,
+        observed_at: UtcMicros,
+    ) -> Result<(), RemoteExactObservationQueryErrorV1> {
+        self.repository_scope
+            .validate()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        self.expected_authority
+            .validate()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        self.authority
+            .validate_for(scope)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        if self.repository_scope != *repository_scope
+            || self.observation_id != *observation_id
+            || self.expected_authority != *expected_authority
+            || self.policy_revision == 0
+            || self.authority.policy.revision != self.policy_revision
+            || self.revalidated_at > observed_at
+        {
+            return Err(RemoteExactObservationQueryErrorV1::PolicyUnavailable);
+        }
+        if self.decision == RemoteQueryAuthorizationDecisionV1::Deny {
+            return Err(RemoteExactObservationQueryErrorV1::PolicyDenied);
+        }
+        Ok(())
+    }
+}
+
+pub trait RemoteQueryAuthorizationPortV1: Send + Sync {
+    fn authorize(
+        &self,
+        scope: &ResolvedScope,
+        repository_scope: &RemoteRepositoryScopeV1,
+        observation_id: &CanonicalObservationIdV1,
+        expected_authority: &RemoteWriterFenceV1,
+        observed_at: UtcMicros,
+    ) -> Result<RemoteQueryAuthorizationEvidenceV1, RemoteExactObservationQueryErrorV1>;
+}
+
 #[derive(Clone, Debug)]
 pub struct RemoteExactObservationQueryCommandV1 {
     pub request_id: RequestId,
@@ -328,8 +379,8 @@ pub struct RemoteExactObservationQueryCommandV1 {
     pub expected_authority: RemoteWriterFenceV1,
     pub expected_shard: ExpectedRemoteShardV1,
     pub caller_admission: RemoteEnrollmentCommitReceiptV1,
+    pub query_authorization: RemoteQueryAuthorizationEvidenceV1,
     pub effective_deadline: Deadline,
-    pub cancellation: CancellationSignal,
     pub budget: RemoteExactObservationQueryBudgetV1,
     pub observed_at: UtcMicros,
 }
@@ -362,6 +413,7 @@ impl RemoteQueryClockPortV1 for SystemRemoteQueryClockV1 {
 
 pub struct RemoteExactObservationQueryServiceV1 {
     credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
+    authorization: Arc<dyn RemoteQueryAuthorizationPortV1>,
     read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
     clock: Arc<dyn RemoteQueryClockPortV1>,
 }
@@ -369,18 +421,26 @@ pub struct RemoteExactObservationQueryServiceV1 {
 impl RemoteExactObservationQueryServiceV1 {
     pub fn new(
         credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
+        authorization: Arc<dyn RemoteQueryAuthorizationPortV1>,
         read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
     ) -> Self {
-        Self::new_with_clock(credentials, read, Arc::new(SystemRemoteQueryClockV1))
+        Self::new_with_clock(
+            credentials,
+            authorization,
+            read,
+            Arc::new(SystemRemoteQueryClockV1),
+        )
     }
 
     pub fn new_with_clock(
         credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
+        authorization: Arc<dyn RemoteQueryAuthorizationPortV1>,
         read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
         clock: Arc<dyn RemoteQueryClockPortV1>,
     ) -> Self {
         Self {
             credentials,
+            authorization,
             read,
             clock,
         }
@@ -390,20 +450,6 @@ impl RemoteExactObservationQueryServiceV1 {
         &self,
         request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
         credential: &OpaqueRemoteCredential,
-    ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1> {
-        let cancellation = CancellationSignal::active(format!(
-            "cancel.remote-exact-observation.{}",
-            request.request_id.as_str()
-        ))
-        .map_err(|_| RemoteExactObservationQueryErrorV1::InvalidRequest)?;
-        self.query_with_cancellation(request, credential, cancellation)
-    }
-
-    pub fn query_with_cancellation(
-        &self,
-        request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
-        credential: &OpaqueRemoteCredential,
-        cancellation: CancellationSignal,
     ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1> {
         if request.protocol_version != REMOTE_PROTOCOL_VERSION_V1 {
             return Err(RemoteExactObservationQueryErrorV1::UnsupportedVersion);
@@ -417,9 +463,6 @@ impl RemoteExactObservationQueryServiceV1 {
             .clock
             .now()
             .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
-        if cancellation.is_cancelled() {
-            return Err(RemoteExactObservationQueryErrorV1::Cancelled);
-        }
         let caller = self
             .credentials
             .authority_enrollment(
@@ -472,6 +515,20 @@ impl RemoteExactObservationQueryServiceV1 {
         if effective_deadline.is_elapsed_at(observed_at) {
             return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed);
         }
+        let query_authorization = self.authorization.authorize(
+            &scope,
+            &request.body.scope,
+            request.body.observation_id(),
+            &request.body.expected_authority,
+            observed_at,
+        )?;
+        query_authorization.validate_for(
+            &scope,
+            &request.body.scope,
+            request.body.observation_id(),
+            &request.body.expected_authority,
+            observed_at,
+        )?;
         let command = RemoteExactObservationQueryCommandV1 {
             request_id: request.request_id.clone(),
             observation_id: request.body.observation_id().clone(),
@@ -480,16 +537,34 @@ impl RemoteExactObservationQueryServiceV1 {
             expected_authority: request.body.expected_authority.clone(),
             expected_shard: request.body.expected_shards[0].clone(),
             caller_admission,
+            query_authorization: query_authorization.clone(),
             effective_deadline,
-            cancellation: cancellation.clone(),
             budget,
             observed_at,
         };
         let outcome = self.read.read_exact_observation(&command)?;
-        if cancellation.is_cancelled() {
-            return Err(RemoteExactObservationQueryErrorV1::Cancelled);
-        }
         validate_returned_authority(&outcome.authority, &command.expected_authority)?;
+        let publication_observed_at = self.clock.now()?;
+        if publication_observed_at > command.effective_deadline.expires_at {
+            return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed);
+        }
+        let publication_authorization = self.authorization.authorize(
+            &scope,
+            &request.body.scope,
+            request.body.observation_id(),
+            &request.body.expected_authority,
+            publication_observed_at,
+        )?;
+        publication_authorization.validate_for(
+            &scope,
+            &request.body.scope,
+            request.body.observation_id(),
+            &request.body.expected_authority,
+            publication_observed_at,
+        )?;
+        if publication_authorization != query_authorization {
+            return Err(RemoteExactObservationQueryErrorV1::PolicyUnavailable);
+        }
         validate_result_identity(
             &outcome.result.contract,
             &outcome.result.request_id,
@@ -794,8 +869,6 @@ pub enum RemoteExactObservationQueryErrorV1 {
     BudgetExceeded,
     #[error("remote exact observation query deadline elapsed")]
     DeadlineElapsed,
-    #[error("remote exact observation query was cancelled")]
-    Cancelled,
     #[error("remote exact observation query receipt is mismatched")]
     ReceiptMismatch,
 }
@@ -836,8 +909,7 @@ pub(super) fn query_protocol_failure(
         | RemoteExactObservationQueryErrorV1::AuthorityUnavailable
         | RemoteExactObservationQueryErrorV1::ReceiptMismatch
         | RemoteExactObservationQueryErrorV1::BudgetExceeded
-        | RemoteExactObservationQueryErrorV1::DeadlineElapsed
-        | RemoteExactObservationQueryErrorV1::Cancelled => {
+        | RemoteExactObservationQueryErrorV1::DeadlineElapsed => {
             RemoteProtocolFailureV1::AuthorityUnavailable
         }
         RemoteExactObservationQueryErrorV1::StaleFence => {

@@ -1,9 +1,18 @@
 # Pure Projector Extraction Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Extract deterministic session and observation reducers so projection
 edits do not compile database/runtime adapters.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Source: `src/sessions/claude/canonical_projection.rs` and
   `src/global_db/observation_projection/**`.
@@ -29,7 +38,7 @@ The crate accepts owned domain events/state and returns deterministic state plus
 watermark. It imports no rusqlite, filesystem, daemon, transport, clock,
 network, or mutable registry authority.
 
-## Tasks and tests
+## Historical task checklist
 
 - [ ] Add architecture failures for DB/runtime imports and nondeterministic
       time/random/filesystem access.
@@ -38,14 +47,14 @@ network, or mutable registry authority.
       transaction boundaries in adapters.
 - [ ] Add replay, reorder rejection, idempotency, redaction, and watermark tests.
 
-Direct tests replay canonical session/observation fixtures into identical rows
-and digests. Negative tests reject out-of-order, wrong-owner, malformed,
-unredacted, stale-watermark, and unsupported-version input before persistence.
+## Product outcome contributed
 
-Run crate checks/nextest, root projection suites, observation/session temporal
-journeys, and architecture boundaries.
+Deterministic session and observation reducers became separable from
+database/runtime adapters while replay, identity, redaction, ordering, and
+watermark behavior remained equivalent. Current direct behavior and acceptance
+live in the applicable numbered V2 plan.
 
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 No schema migration. Commit session reducer, observation reducer, adapter
 wiring, and root cleanup separately. `git revert` restores each boundary.

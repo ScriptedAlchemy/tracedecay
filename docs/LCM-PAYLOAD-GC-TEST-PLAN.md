@@ -1,8 +1,15 @@
 # LCM external payload GC & retention — test plan
 
-Status: **historical test plan**. The implementation now lives in
-`src/sessions/lcm/gc.rs` with tests in `src/sessions/lcm/gc/tests.rs`; those
-sources, not the pre-implementation file/line anchors below, are authoritative.
+> **Archived record — not implementation authority.** This document preserves
+> historical safety intent and case evidence. Current requirements come only
+> from the `docs/plans/tracedecay-v2/` hierarchy, while the actual payload
+> integrity and deletion boundaries remain product safety constraints. Exact
+> test names/counts, hooks, file/line anchors, receipts, and gate matrices below
+> are not rebuild instructions; validate current GC behavior directly.
+
+Status: **historical test plan**. The implementation now lives in the runtime;
+its observable behavior, not the pre-implementation source shape below, is
+authoritative.
 This was the third
 sibling of the payload work; it enumerates the **named test cases, fixtures, and
 pass/fail criteria** the implementation (`t_baa1d2cf`) must satisfy. The *what/why*,

@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::OperationBudgetUsage;
+use tracedecay_application::{OperationBudgetUsage, ResolvedScope};
 use tracedecay_application::remote::auth::{
     RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
     RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
@@ -22,10 +22,15 @@ use tracedecay_application::remote::replay::{
     RemoteReplayFrameV1, RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
     RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1,
 };
+use tracedecay_application::remote::query::{
+    RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationEvidenceV1,
+    RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
+};
 use tracedecay_domain::{
-    BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1,
-    EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EnrollmentGrantV1, EntityId,
-    RemoteAuthorityUnavailableReasonV1, RemoteRepositoryScopeV1, UtcMicros, canonical_sha256,
+    BrainId, BrainNodeId, CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1,
+    CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1,
+    EnrollmentGrantV1, EntityId, RemoteAuthorityUnavailableReasonV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_store::{AuthorityCasV1, ShardWatermarkV1, StoreRuntimeBindingV1};
 
@@ -34,10 +39,6 @@ use crate::migration_sql::{
     MigrationSqlTransaction, MigrationSqlValue,
 };
 use crate::remote_spool::RemoteAuthorityReachabilityPortV1;
-
-#[path = "remote_query.rs"]
-mod query;
-pub use query::RusqliteRemoteExactObservationQueryPortV1;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS remote_authority_v1 (
@@ -89,6 +90,14 @@ CREATE TABLE IF NOT EXISTS remote_replay_policy_v1 (
     scope_digest TEXT PRIMARY KEY,
     policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
     evidence_json TEXT NOT NULL
+) STRICT;
+"#;
+
+const REMOTE_QUERY_POLICY_SCHEMA_V1: &str = r#"
+CREATE TABLE IF NOT EXISTS remote_query_policy_v1 (
+    scope_digest TEXT PRIMARY KEY,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+    record_json TEXT NOT NULL
 ) STRICT;
 "#;
 
@@ -621,6 +630,129 @@ impl RemoteReplayPolicyEvidencePortV1 for RegisteredRemoteReplayPolicyAuthorityV
     ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
         let evidence = self.load(&frame.capture.writer.scope)?;
         evidence.validate_for(frame)?;
+        Ok(evidence)
+    }
+}
+
+#[derive(Clone)]
+pub struct RegisteredRemoteQueryPolicyAuthorityV1 {
+    handle: MigrationSqlHandle,
+}
+
+impl RegisteredRemoteQueryPolicyAuthorityV1 {
+    pub fn from_registered(
+        handle: MigrationSqlHandle,
+    ) -> Result<Self, RemoteExactObservationQueryErrorV1> {
+        handle
+            .execute_batch(REMOTE_QUERY_POLICY_SCHEMA_V1.to_owned())
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        Ok(Self { handle })
+    }
+
+    pub fn provision(
+        &self,
+        record: &RemoteQueryPolicyRecordV1,
+    ) -> Result<(), RemoteExactObservationQueryErrorV1> {
+        record.validate()?;
+        let scope_digest = canonical_sha256(&(
+            "tracedecay.remote-query-policy-scope.v1",
+            &record.repository_scope,
+        ))
+        .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        let revision = i64::try_from(record.policy_revision)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        let encoded = serde_json::to_string(record)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        self.handle
+            .execute(
+                enrollment_statement(
+                    "INSERT INTO remote_query_policy_v1 (
+                            scope_digest, policy_revision, record_json
+                         ) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(scope_digest) DO UPDATE SET
+                            policy_revision = excluded.policy_revision,
+                            record_json = excluded.record_json
+                         WHERE excluded.policy_revision > remote_query_policy_v1.policy_revision
+                            OR (
+                                excluded.policy_revision = remote_query_policy_v1.policy_revision
+                                AND excluded.record_json = remote_query_policy_v1.record_json
+                            )",
+                    vec![
+                        MigrationSqlValue::Text(scope_digest.as_str().to_owned()),
+                        MigrationSqlValue::Integer(revision),
+                        MigrationSqlValue::Text(encoded),
+                    ],
+                )
+                .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?,
+            )
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        if self.load(&record.repository_scope)? != *record {
+            return Err(RemoteExactObservationQueryErrorV1::PolicyUnavailable);
+        }
+        Ok(())
+    }
+
+    fn load(
+        &self,
+        repository_scope: &RemoteRepositoryScopeV1,
+    ) -> Result<RemoteQueryPolicyRecordV1, RemoteExactObservationQueryErrorV1> {
+        let scope_digest = canonical_sha256(&(
+            "tracedecay.remote-query-policy-scope.v1",
+            repository_scope,
+        ))
+        .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        let rows = self
+            .handle
+            .query(
+                enrollment_statement(
+                    "SELECT record_json FROM remote_query_policy_v1 WHERE scope_digest = ?1",
+                    vec![MigrationSqlValue::Text(scope_digest.as_str().to_owned())],
+                )
+                .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?,
+                Duration::from_secs(5),
+            )
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        let encoded = rows
+            .rows
+            .first()
+            .and_then(|row| enrollment_text(&row.values, 0))
+            .ok_or(RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        let record: RemoteQueryPolicyRecordV1 = serde_json::from_str(encoded)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        record.validate()?;
+        Ok(record)
+    }
+}
+
+impl RemoteQueryAuthorizationPortV1 for RegisteredRemoteQueryPolicyAuthorityV1 {
+    fn authorize(
+        &self,
+        scope: &ResolvedScope,
+        repository_scope: &RemoteRepositoryScopeV1,
+        observation_id: &CanonicalObservationIdV1,
+        expected_authority: &RemoteWriterFenceV1,
+        observed_at: UtcMicros,
+    ) -> Result<RemoteQueryAuthorizationEvidenceV1, RemoteExactObservationQueryErrorV1> {
+        let record = self.load(repository_scope)?;
+        if record.scope != *scope || record.revalidated_at > observed_at {
+            return Err(RemoteExactObservationQueryErrorV1::PolicyUnavailable);
+        }
+        let evidence = RemoteQueryAuthorizationEvidenceV1 {
+            repository_scope: repository_scope.clone(),
+            observation_id: observation_id.clone(),
+            expected_authority: expected_authority.clone(),
+            policy_revision: record.policy_revision,
+            decision: record.decision,
+            authority: record.authority,
+            revalidated_at: record.revalidated_at,
+        };
+        evidence.validate_for(
+            scope,
+            repository_scope,
+            observation_id,
+            expected_authority,
+            observed_at,
+        )?;
         Ok(evidence)
     }
 }

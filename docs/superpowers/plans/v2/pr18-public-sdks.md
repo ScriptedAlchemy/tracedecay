@@ -1,9 +1,18 @@
 # PR18 Public SDK Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Publish Rust, TypeScript, and Python SDKs for accepted PR12–PR17
 operations without inventing lifecycle semantics.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Rust workspace SDK crate and generated wire types.
 - TypeScript and Python package roots, generators, conformance fixtures,
@@ -16,7 +25,7 @@ idempotency, typed errors, operation receipts, `TaskHandoffToken`, and host
 handoff tokens. Names freeze only after each operation's production journey is
 accepted.
 
-## Ordered slices
+## Historical ordered slices
 
 1. Freeze accepted operation/schema manifest.
 2. Generate Rust/TS/Python wire models deterministically.
@@ -25,17 +34,14 @@ accepted.
 5. Add examples and cross-language golden conformance.
 6. Package/install/publish dry runs and compatibility policy.
 
-## Tests
+## Product outcome contributed
 
-Direct: each language performs authentication, scoped read/write, paging, SSE
-resume, cancellation, idempotent retry, Work admission/control, receipt
-inspection, and handoff against local and remote fixtures.
+The work contributed Rust, TypeScript, and Python SDK façades over one operation
+catalog with equivalent authentication, scope, lifecycle, paging/SSE,
+cancellation, idempotency, and typed outcomes. Current direct behavior and
+acceptance live in the applicable numbered V2 plan.
 
-Negative: stale cursor/CAS, wrong scope, missing capability, unavailable remote,
-disconnect, duplicate changed-input request, malformed event, unsupported
-version, and partial result remain the same typed error/outcome in each SDK.
-
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 Generated schemas are additive until the accepted major-version policy permits
 removal. Rollback unpublishes or yanks a package release according to registry

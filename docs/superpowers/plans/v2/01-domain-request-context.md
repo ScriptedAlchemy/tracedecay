@@ -1,12 +1,21 @@
 # Domain DTO and RequestContext Convergence Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Make query-facing DTOs and request scope independent of the root
 crate before extracting query.
 
-**Authority:** Plan 12 leaves-first sequencing; Plan 09 application ownership;
-the [super plan](../2026-07-28-v2-delivery-root-crate-breakup.md).
+**Historical inputs:** Plan 12 leaves-first sequencing, Plan 09 application
+ownership, and the [archived parent plan](../2026-07-28-v2-delivery-root-crate-breakup.md).
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Modify `crates/tracedecay-domain/src/code_intelligence/{mod.rs,graph.rs}` to
   own graph/query DTOs.
@@ -37,7 +46,7 @@ The domain chunk DTO retains byte-exact identity, source range, language,
 content digest, generation, and owning project identity. Root compatibility is
 `pub use tracedecay_domain::code_intelligence::*`; it owns no duplicate types.
 
-## Tasks
+## Historical task checklist
 
 - [ ] Add compile-fail architecture coverage that domain imports neither root
       query nor root code-index modules.
@@ -48,25 +57,14 @@ content digest, generation, and owning project identity. Root compatibility is
       byte-stable generated output or review the explicit schema delta.
 - [ ] Remove every query dependency on `crate::code_index::chunks`.
 
-## Tests
+## Product outcome contributed
 
-Direct: exact-root CLI/MCP/HTTP/LSP calls resolve the same project and scope;
-query DTO round trips preserve digests and ranges.
+Query-facing DTO and request-scope ownership moved toward domain/application
+boundaries while preserving identity, digest, range, and fail-closed scope
+behavior. Current direct behavior and acceptance live in the applicable
+numbered V2 plan.
 
-Negative: CWD fallback, missing registry, unauthorized sibling root, ambiguous
-scope, stale project generation, and root/domain type mismatch fail closed.
-
-Run:
-
-```bash
-cargo check -p tracedecay-domain --lib --all-features
-cargo test -p tracedecay-domain --all-features
-cargo check -p tracedecay-application --lib --all-features
-cargo nextest run --all-features -E 'test(architecture_boundaries)'
-cd dashboard && npm run contracts:check
-```
-
-## Migration, rollback, and measurement
+## Historical migration, rollback, and measurement notes
 
 Migrate callers one surface at a time behind the root re-export. Rollback by
 reverting the caller slice; persisted data does not change. Measure warm domain

@@ -9,10 +9,11 @@ use std::{
 
 use rusqlite::Transaction;
 use tracedecay_store::{
-    AdmissionConfigV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1,
+    AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1,
+    FrozenWatermarkVectorV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1,
     RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, StoreShardScopeV1,
-    VerifiedStoreLocatorV1,
+    RuntimeSubmitRequestV1, ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1,
+    StoreShardScopeV1, VerifiedStoreLocatorV1,
 };
 
 use crate::{
@@ -676,10 +677,32 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
                 ));
             }
         };
-        RuntimeReadOutcomeV1::new(
-            Some(value),
-            RuntimeReadCoverageV1::Latest { observed: None },
-        )
+        let coverage = match request.consistency() {
+            ConsistencyModeV1::LatestAvailable => RuntimeReadCoverageV1::Latest { observed: None },
+            ConsistencyModeV1::AtLeast { commit_sequence } => {
+                let observed = ShardWatermarkV1 {
+                    shard_id: request.binding().shard_id.clone(),
+                    incarnation: request.binding().incarnation,
+                    authority_epoch: request.binding().authority_epoch,
+                    commit_sequence: *commit_sequence,
+                };
+                let required = FrozenWatermarkVectorV1::new([observed.clone()]).map_err(|error| {
+                    infrastructure(format!("construct repository required watermark: {error}"))
+                })?;
+                let coverage =
+                    FrozenWatermarkCoverageV1::new(required, [observed]).map_err(|error| {
+                        infrastructure(format!("construct repository read coverage: {error}"))
+                    })?;
+                RuntimeReadCoverageV1::Complete { coverage }
+            }
+            ConsistencyModeV1::ExactSnapshot { .. }
+            | ConsistencyModeV1::FrozenWatermarkVector { .. } => {
+                return Err(infrastructure(
+                    "repository reader does not support snapshot consistency",
+                ));
+            }
+        };
+        RuntimeReadOutcomeV1::new(Some(value), coverage)
         .map_err(|error| infrastructure(format!("construct repository read outcome: {error}")))
     }
 }

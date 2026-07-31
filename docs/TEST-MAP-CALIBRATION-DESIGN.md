@@ -1,5 +1,11 @@
 # Test-Map / Test-Risk Calibration — Design Note
 
+> **Archived supporting design — not implementation authority.** This document
+> preserves historical calibration rationale. Current requirements come only
+> from the `docs/plans/tracedecay-v2/` hierarchy. The source scan described
+> below is part of the proposed product algorithm, not an acceptance shortcut;
+> exact counts, source shape, and golden snapshots are not rebuild instructions.
+
 **Task:** `t_d000933c` (Design integration-test coverage calibration heuristics)
 **Built on:** `docs/TEST-MAP-AUDIT.md` (`t_b1feb03c`) — the root-cause audit of the ~12% signal.
 **Scope:** how `tracedecay_test_risk` and `tracedecay_test_map` should change so their coverage
@@ -259,14 +265,19 @@ a Python reimplementation of the algorithm that already matched the tool to the 
    "trait_resolved"`. Negative spot-check: an unrelated `Display` impl must **not** gain attribution.
 3. **Public-API (H3).** `Database::get_all_nodes` and `TraceDecay::get_all_nodes` resolve to
    attributed via the `dashboard_api_test/` suite; `attribution_method` populated.
-4. **CLI entry (H4).** `src/main.rs::run` becomes attributed with `attribution_method: "cli_entry"`
-   only when the opt-in path fires; `--version`-only test does not over-attribute unrelated fns.
+4. **CLI entry (H4).** Preserve source scanning as the product attribution
+   algorithm, but validate it with fixture binaries whose integration tests
+   produce distinct observable behavior. `src/main.rs::run` becomes attributed
+   with `attribution_method: "cli_entry"` only when the opt-in path fires;
+   a `--version`-only invocation must not over-attribute unrelated functions.
 5. **Bucket invariants (H5).** `attributed + reachable_unattributed + orphan_entry == src fn count`;
    `excluded` count == audit's 357; `run` moves out of `orphan_entry` only after H4.
 6. **Cross-tool parity.** Any function `test_risk` calls attributed must appear covered in
    `test_map`; the `depth`/`attribution_method` values must agree.
-7. **Small-crate fixture.** A hand-built fixture crate with known coverage produces an exact expected
-   attribution map (golden-file test) — guards against drift on the heuristics.
+7. **Small-crate fixture.** A hand-built fixture crate executes known unit,
+   integration, trait-dispatch, and CLI behaviors, then verifies the resulting
+   attribution map. A serialized map may aid regression diagnosis, but matching
+   source text or a golden file alone is not acceptance.
 8. **Performance.** The seeded forward BFS completes within the existing `test_risk` budget on the
    full repo graph (7,669 fn nodes). Assert it does **not** regress vs. the current single-edge scan;
    the per-node `get_callers` anti-pattern is explicitly forbidden.

@@ -1,9 +1,18 @@
 # Capture Port Boundary Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Separate provider capture/sanitization from daemon/store adapters
 without weakening one-writer, cursor, replay, or privacy contracts.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Modify `crates/tracedecay-application` capture use cases and ports.
 - Migrate provider families under `src/sessions/**`, `src/agents/**`,
@@ -31,7 +40,7 @@ pub trait CaptureAdmission: Send + Sync {
 Only sanitized, identity-bound batches cross `CaptureSink`. Cursor identity
 includes profile, project/store, provider/source, and generation.
 
-## Tasks and tests
+## Historical task checklist
 
 - [ ] Add compile failures for application-to-root/provider adapter imports.
 - [ ] Add sanitization-before-write and no-raw-payload boundary tests.
@@ -39,14 +48,13 @@ includes profile, project/store, provider/source, and generation.
 - [ ] Migrate one provider family per commit, preserving replay receipts.
 - [ ] Verify every supported host/provider and one-writer admission.
 
-Direct tests ingest the same provider fixture through ports and production
-adapters, then compare durable capture/projection/cursor receipts.
+## Product outcome contributed
 
-Negative tests cover wrong profile/project/store, cursor aliasing, duplicate
-replay, crash between append/cursor, cancellation, privacy rejection,
-unavailable admission, and concurrent writer loss.
+Provider capture and sanitization became separable from daemon/store adapters
+without weakening one-writer, cursor, replay, identity, or privacy behavior.
+Current direct behavior and acceptance live in the applicable numbered V2 plan.
 
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 No format cutover occurs until a provider's old and new paths produce identical
 receipts. Revert provider slices independently; never dual-write. Measure

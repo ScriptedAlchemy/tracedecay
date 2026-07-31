@@ -9,94 +9,28 @@ verified Kimi Code and OpenCode capabilities and turns that foundation into
 installable, repairable host integrations that deliver the working feedback
 journey. It does not add a second catalog or a generic connector framework.
 
-**PR13 reachability correction (2026-07-26); guards closed 2026-07-29.** The PR6
-observation foundation above was not a completion statement for the PR13
-lifecycle guards below. Four reachability gaps were recorded on 2026-07-26, and
-all four are now production-reached on `codex/v2-root-breakup`:
+**Status correction (2026-07-29).** Earlier reachability gaps in conflict
+discovery, capability reporting, checked-in native evidence consumption, and
+unsupported-host classification are closed through production callers. Do not
+recreate their former helper, packet, file-layout, or test-target structure.
 
-- the official component-set dry run passed an empty competing-extension claim
-  slice, so conflict discovery never supplied the guard. `356353fbf` runs
-  discovery before preflight, carries its claims on the preview and the
-  confirmed plan digest, makes a claim that appears after confirmation stale,
-  refuses an unreadable host document instead of reporting a clear surface, and
-  stops a full default install for an explicit `--yes` rather than resolving
-  ambiguous ownership on the operator's behalf. The stricter OpenCode refusal of
-  an ambiguous TraceDecay-aliasing analyzer is retained. `ec9a5b68c` keeps an
-  explicitly requested component on an unsupported host a refusal carrying that
-  host's exact typed reason, instead of short-circuiting to a silent skip;
-- `cline_family_evidence`, `require_capability`, and
-  `native_host_edit_stop_conformance_evidence` had no production caller.
-  `c45170fcf` reads each Cline-family provider's recorded admission and verbatim
-  reason from the checked-in evidence packet
-  (`crates/tracedecay-hooks/fixtures/host_events/cline-family.json`, embedded
-  and digest-bound) rather than inferring a route from the existence of an
-  adapter source file, and gives the native edit/stop conformance matrix a
-  consumer on `HostBundleDoctorReportV1::native_edit_stop_conformance`, which
-  `doctor` prints even when nothing is installed, so an empty install never
-  reads as an absence of host evidence. `require_capability` and
-  `cline_family_evidence` were already reached in production through
-  `require_component_capabilities` (`src/agents/host_bundle_registry.rs`); that
-  path was verified rather than given a second caller;
-- the native-fixture helper no longer reads repository-relative paths at
-  runtime. `stock_host_native_fixture_evidence` embeds every fixture with
-  `include_bytes!` and digests the embedded bytes, and OpenCode resolves to the
-  present `opencode/baseline.json` reported as
-  `Degraded(NativeFixtureLimited)` rather than supported; and
-- `CursorCloud` no longer falls through to an empty default component set.
-  `0dfb5bef0` makes the arm exhaustive and returns
-  `HostComponentSetUnavailable { host, reason }` from the default, explicit, and
-  project-local set builders — `HostRegistrationUnsupported` for `CursorCloud`,
-  `NativeFixtureLimited` for Kiro, and `CheckedInEvidenceMissing` for the
-  Cline family — so "no installable components" is distinguishable from
-  "nothing to install".
+The retained product rules are:
 
-Both standing constraints survive the closure and are not reopened by it.
-`CursorCloud` must remain typed unavailable unless an installable component set
-is delivered; its presence in an enum or capability catalog is not host-support
-evidence. Family resemblance, a shared configuration shape, or extension
-ancestry still never establishes a Cline-family route.
+- conflict discovery precedes confirmation, and changed ownership state makes a
+  confirmed lifecycle plan stale;
+- authentic checked-in provider fixtures carry origin, native version, and
+  content digest and are consumed by the real sanitizer and host path;
+- Cursor Cloud and every other unadmitted host report a typed unavailable
+  reason rather than an empty supported component set; and
+- shared branding, configuration shape, source layout, or extension ancestry
+  never establishes a Cline-family route.
 
-**Observed evidence for the closure (focused and local only).** `9824ce6c4`
-covers the guards directly: a dry run that reports a competing analyzer, demands
-confirmation, changes the plan digest, leaves the artifact plan alone, and makes
-an earlier confirmation stale once another claim appears; an unparseable host
-document that refuses instead of reporting a clear surface; every Cline-family
-provider mirroring the packet's exact admission and reason; the Doctor report
-carrying native edit/stop conformance with nothing installed; and unsupported
-hosts asserting their exact unavailable reason instead of a bare
-incompatibility. The `pr13_host_bundle_acceptance` target reported 27 passed,
-the `agents::host_bundle_registry` unit tests 20 passed, and the
-`agent_cmd::tests` binary filter 18 of 19 passed. No full suite and no CI run
-supports this slice.
-
-**What this closure does not claim.** It closes four named reachability gaps,
-not PR13 acceptance. The Direct acceptance items below remain unrun: the
-official lifecycle dogfood across supported hosts, the cross-platform host runs,
-host-by-host competing-extension/interruption rollback, the feedback rollback
-switch, Kimi Code and OpenCode conformance including duplicate-analyzer
-prevention, and an end-to-end Cline-family route proof. The Cursor Core
-component-ownership conflict observed under `cargo dogfood` is also still open
-and is not addressed here.
-
-Two test caveats travel with this slice and must not be read as closed. The
-`agent_cmd` binary test
-`explicit_core_component_lifecycle_preserves_opencode_companions` fails only
-under parallel execution and passes in isolation: `which_tracedecay()`
-reads `PATH` and `CARGO_TARGET_DIR` while sibling tests mutate the environment
-under a `HOST_ENV_LOCK` this test does not take. That isolation flake is
-pre-existing, is not caused by this slice, and remains open until it is fixed
-separately by giving the test the same environment lease its siblings hold —
-never by relaxing the assertion or ignoring the test. Separately,
-`deferred_kimi_refresh_does_not_block_maintenance` and a daemonless-init
-bootstrap test fail in untouched peer territory; they are outside this slice and
-are not evidence about these guards.
-
-PR6 bundle names, generated matrices, packet gates, exact file inventories,
-and intermediate registration scaffolding are historical evidence, not
-prerequisites or artifacts to recreate. Installed/persisted lifecycle state
-and published host contracts retain compatibility and migration obligations;
-all other retention is evaluated through install, repair, delivery,
-cross-platform, rollback, and conformance behavior below.
+The remaining product work is the official lifecycle and feedback journey,
+OpenCode duplicate-analyzer prevention, selected cross-platform lifecycle and
+rollback combinations, real Cline-family route or unavailable proof, and the
+Cursor Core component-ownership conflict. Exact test names, counts, generated
+matrices, and intermediate registration scaffolding are historical evidence,
+not acceptance requirements.
 
 ## PR13 user outcome
 
@@ -363,14 +297,11 @@ the host observation replay spool.
 - On each supported host, a real install followed by a real saved edit and
   stop boundary produces the same authorized Plan 09 feedback where
   capabilities overlap.
-- Claude Code registers the single configured-language LSP route; Cursor
-  desktop uses native diagnostics; Kimi Code proves manifest and global
-  `PostToolUse`/`Stop`, MCP, and skills/commands; OpenCode proves its local
-  JS/TS `file.edited`, `tool.execute.after`, `session.idle`/`session.status`
-  and LSP event paths, custom LSP, MCP, custom agents/skills, commands (prompt
-  templates), and instruction/rules content; Cursor cloud, Codex, Hermes, and
-  Kiro prove hook/MCP/CLI delivery or an exact unavailable result without
-  claiming LSP.
+- Host-specific product tests exercise each supported host's actual native
+  surface: Claude Code LSP, Cursor desktop diagnostics, Kimi Code native hooks
+  and installed capabilities, OpenCode plugin/LSP events and analyzer
+  ownership, and hook/MCP/CLI delivery or typed unavailable behavior for hosts
+  without automatic editor diagnostics.
 - OpenCode conformance starts the TraceDecay custom LSP with an existing
   language analyzer present and proves exactly one analyzer owns that language
   before, during, and after install, repair, rollback, and uninstall while
@@ -380,25 +311,18 @@ the host observation replay spool.
   content, schema/version/capability mismatch, protocol skew, ownership
   conflicts, and partial installs fail before unsafe mutation and roll back
   only TraceDecay-owned state.
-- Dogfood the official TraceDecay install, upgrade, repair, and uninstall
-  operations—not hand edits or test-only installers—against every supported
-  host, explicitly including Kimi Code and OpenCode, on Linux and Windows and
-  on macOS wherever that host exists. Verify native registration, real feedback
-  delivery, receipt identity, unrelated configuration preservation, and clean
+- Platform-substrate tests cover path handling, atomic writes, file modes,
+  process discovery, locking, interruption boundaries, and rollback on every
+  supported operating system independently of host branding.
+- Selected real host/OS/fault combinations cover each distinct native
+  registration mechanism and lifecycle risk. They include Kimi Code and
+  OpenCode, competing ownership, interruption on both sides of the commit
+  boundary, partial component failure, restart, and feedback rollback without
+  requiring a Cartesian host-by-OS-by-fault matrix.
+- Official install, upgrade, repair, and uninstall operations—not hand edits or
+  test-only installers—verify native registration, real feedback delivery,
+  runtime receipt identity, unrelated configuration preservation, and
   ownership-aware removal.
-- For every supported host independently, including Kimi Code and OpenCode,
-  inject a competing-extension claim, interruption before and after the
-  lifecycle commit point, and a partial component failure. Prove rollback
-  restores the exact prior hook, plugin, LSP, MCP, skill, agent, command,
-  instruction/rules, and analyzer state. Command prompt templates restore
-  through the command component and referenced prompt files through their
-  owning agent component; other hosts/components remain running, and rollback
-  remains repeatable after restart.
-- Exercise the direct feedback rollback switch host by host, explicitly
-  including Kimi Code and OpenCode, after the V2 path is live; prove delivery
-  returns to the prior supported route without duplicate findings or lost
-  accepted events, then re-enable V2 from the retained receipt/configuration
-  identity.
 - Every Cline-family fixture proves either one real packaged hook/MCP/CLI route
   end to end or an evidence-backed typed unavailable result for the exact
   host/version; family resemblance alone never satisfies acceptance.
@@ -417,13 +341,10 @@ the host observation replay spool.
   cannot open stores, widen project scope, or become daemon writers.
 - Unavailable daemon, component, host API, GitHub authorization, rate limit,
   and protocol capability remain typed and do not trigger silent fallback.
-- The official lifecycle dogfood, cross-platform host runs,
-  competing-extension/interruption/host-by-host rollback, feedback rollback
-  switch, Kimi Code and OpenCode conformance, OpenCode duplicate-analyzer
-  prevention, Cline-family route/unavailable proof, and feedback integration
-  tests run together through ordinary repository checks; they do not create a
-  PR13 acceptance gate. Exact file inventories, giant fixture matrices, and
-  placeholder benchmarks are not deliverables.
+- These host-specific journeys, platform-substrate tests, selected real
+  combinations, and ordinary repository checks are the evidence. Exact file
+  inventories, fixed test names/counts, giant matrices, and placeholder
+  benchmarks are not deliverables.
 
 ## Later callable extensions
 

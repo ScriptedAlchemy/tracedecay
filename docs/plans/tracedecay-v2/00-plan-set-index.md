@@ -6,14 +6,15 @@ implemented and focused-suite-verified checkpoint, but acceptance remains
 blocked on the open Plan 11 journeys and on stable PR12/PR13 product contracts,
 direct tests, and normal CI. The repository is not green.
 
-This file owns delivery order. The master and numbered plans define product
-requirements and component boundaries; they are not independent queues and do
-not require one crate-first pull request per document.
+This file is the sole authority for V2 precedence, rejected mechanisms,
+delivery order, and acceptance. Numbered plans own semantic product behavior,
+failure semantics, migrations, and direct acceptance; they are not independent
+queues and do not require one crate-first pull request per document. `NEXT.md`
+tracks current outcomes and blockers only. `GAP-LEDGER-PR8-PR14.md` and
+`pr9/00-contract-spine.md` are historical records, not parallel authorities.
 
-The canonical execution plan is
-[`docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`](../../superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md).
-It records the approved sequencing override: core Work and the minimal Plan
-24/32 runtime ship in PR14; PR17 retains residual advanced workflow capability.
+Core Work and the minimal Plan 24/32 runtime ship in PR14; PR17 retains
+residual advanced workflow capability.
 Dashboard acceptance is desktop-first, not desktop-only: desktop visual
 baselines lead review while responsive, zoom, keyboard, forced-colors, and
 accessibility function remain mandatory.
@@ -118,23 +119,13 @@ suite.
   285 minutes stale while this reconciliation was being checked). Plan 25 and
   the active incremental-indexing slice own cadence/freshness diagnosis; the
   new serve-during-refresh behavior does not close that issue.
-- Roughly eight known test failures remain, and roughly 4,169 tests have not
-  been measured because no full suite run has completed. The active PR12/PR13
-  stabilization slice owns reducing that uncertainty and reporting the next
-  full run truthfully; no PR9–PR14 acceptance follows from focused green suites.
-- No CI has run since 01:24 UTC on 2026-07-27. PR #421 has been conflicting
-  since 05:13 UTC, and `pull_request` workflows cannot build a merge ref for a
-  conflicting pull request, so roughly 60 commits — the entire 2026-07-27 night
-  batch of repairs included — are verified only by scoped, contended local runs.
-  Nothing in that batch may be reported as CI-validated.
-- Commit `9e3ca9fd2` deleted 124 first-party tests, 75 of which cover behavior
-  that still ships. `GAP-LEDGER-PR8-PR14.md` records them as verification-
-  coverage corrections rather than retractions, together with the seven
-  instances of gates that attested to something they never checked. The
-  restoration completed on 2026-07-28 across five commit groups, each with a
-  falsifiability probe; one leg — a generation rebuild after reopen — remains
-  open, and one earlier finding was corrected because the coverage it called
-  lost had in fact been migrated in-crate.
+- Repository tests and normal CI remain incomplete or failing. Focused local
+  success does not establish PR9–PR14 acceptance, and unexecuted, skipped,
+  empty-filter, or partial coverage must remain unresolved.
+- Historical deleted-test and vacuous-verification incidents are summarized in
+  `GAP-LEDGER-PR8-PR14.md`. Restored test names, counts, commit groupings, and
+  CI chronology are historical evidence rather than roadmap requirements. The
+  remaining product-relevant gap is direct generation rebuild after reopen.
 
 Completed-slice names are historical implementation evidence, not instructions
 to recreate a type, file layout, fixture filename, milestone, or gate. A deleted
@@ -538,54 +529,31 @@ adapter, ECharts as the single charting library, SSE monotone reducer). The
 legacy multi-bundle dashboard was removed the same day; Plan 11 is the single
 authority for frontend structure, styling, and dependency decisions.
 
-**Implementation checkpoint (2026-07-25; not acceptance).** Commits
-`03bf4590f`, `811e37eab`, `76895d201`, `4444833b8`, `5eb400a45`,
-`886609713`, `1933e6f1a`, `f2b5db388`, `d97f7160d`, `3f5268d4f`, and
-`30955e3f0` implement the current PR14 integration checkpoint: the real
+**Implementation checkpoint (2026-07-25; not acceptance).** The real
 `app-dist` application is served at `/` and the legacy placeholder is isolated
-at `/legacy`; all seven formerly claimed unsupported Settings capabilities are
+at `/legacy`; formerly claimed unsupported Settings capabilities are
 served by the existing backend and the UI now renders real capability and
 authority-failure state; storage budget findings and unreadable storage roles
 are preserved; graph failures render truthful partial/unverified state with
 discriminated registry outcomes, scoped failures no longer masquerade as
 `not mounted`, and Agents, Costs, Knowledge, and Sessions preserve unavailable
 reads; Explorer owns its coordinator and source-local query binding, LCM
-size/read-context support, and reduced automated accessibility violations from
-12 to 0; Loom has explicit time boundaries; and the Delivery, Explorer, Doctor,
+size/read-context support and direct accessibility coverage; Loom has explicit
+time boundaries; and the Delivery, Explorer, Doctor,
 storage telemetry, Loom, asset serving, and feedback-observation paths are
 implemented.
 
-**Suite status correction (2026-07-27).** The Rust `dashboard_api_test` suite
-now completes successfully — 58 tests run, 58 passed, on two consecutive
-`--all-features` runs — so the blanket "implemented but unverified" status this
-section attached to Settings CAS, Delivery, Explorer routes, Doctor, storage
-telemetry, Loom, and asset serving is withdrawn. Both 2026-07-26 verification
-qualifications are closed, not merely restated:
+**Verification correction (2026-07-27).** Direct backend and frontend coverage
+now reaches Settings CAS, Delivery, Explorer routes, Doctor, storage telemetry,
+Loom, asset serving, and all dashboard workspaces. The daemon-hosted dashboard
+uses the production invocation executor; an unavailable control plane remains
+typed unavailable, while a real daemon-hosted Settings mutation proves apply,
+durable reread, and stale-revision rejection. Exact test names and counts are
+run output, not roadmap status.
 
-- Loom's backend test is declared (`mod loom;` in the suite's `main.rs`) and
-  `loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities`
-  executes, so it can contribute to a Loom verification claim.
-- `InjectedConfigurationClient` no longer exists. The dashboard now takes a
-  host-supplied `Arc<dyn DaemonInvocationExecutor>`, so a daemon-hosted
-  dashboard carries the daemon's own in-process executor. The in-process test
-  fixture has no control plane and correctly answers a typed
-  `configuration_authority_unavailable` without advertising the apply, and the
-  production write is proven separately by
-  `dashboard_project_settings_commit_through_the_daemon_control_plane`
-  (`tests/pr11_pr12_runtime_acceptance.rs`): it starts the dashboard inside a
-  real daemon — the same route `tracedecay dashboard` takes — and asserts the
-  advertised apply, the commit, the advanced revision, the durable re-read, an
-  untouched `config.json`, and CAS rejection of the superseded revision.
-
-Acceptance remains open. A focused frontend suite, `typecheck`,
-`contracts:check`, and both accessibility gates (`axe:audit`, `axe:explorer`)
-have completed successfully at this checkpoint with zero reported axe
-violations, page errors, or state-assertion failures; exact case counts remain
-run output rather than roadmap status. The accessibility gates are now enforced
-by the `dashboard-assets` CI job rather than run only locally. Still
-unexecuted: the Plan 11 performance budgets, renderer parity/fallback
-measurement, SSE-churn sustain runs, real-Chrome visual review, manual
-NVDA/VoiceOver, and the 12-participant usability study.
+Acceptance remains open on the Plan 11 performance budgets, renderer
+parity/fallback measurement, sustained update behavior, real-Chrome visual
+review, manual assistive-technology completion, and the usability study.
 
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
@@ -687,8 +655,8 @@ HMAC/attestation layers or speculative transport abstractions.
 observe exactly-once admitted effects, query from another enrolled node, then
 back up, restore, and fail over while stale epochs are rejected. Verify
 partition/restart recovery, revoked enrollment, authenticated manifests,
-deletion replay, unavailable authority, and the aggregate remote durability
-gate.
+deletion replay, and unavailable authority through direct remote durability
+journeys and normal repository checks.
 
 **Not in this PR.** Multi-primary mutation and automatic conflict convergence
 are not product paths. Executable work orchestration belongs to PR17.
@@ -760,8 +728,8 @@ exact evidence, review decomposition/sizing/model proposals, admit steps against
 real supported provider adapters, inspect progress/effects/artifacts/outcomes,
 exercise cancellation/retry and independent review, and accept or reject a
 replan. Cover no-Git and Git-backed placements, provider unavailable/fallback,
-lease loss, restart/replay, exact project scope, and aggregate task/runtime
-gates.
+lease loss, restart/replay, and exact project scope through direct task/runtime
+journeys and normal repository checks.
 
 **Not in this PR.** Public SDK commitments belong to PR18. Suggestions never
 silently choose a model, mutate the graph, or execute an unadmitted step.
@@ -997,6 +965,6 @@ sources, and the rusqlite reserved-health size/table-growth primitive plus
 scoped daemon application adapter landed on 2026-07-23. Store soft budgets are
 owner-configured and inert by default.
 
-Draft PR #421 is the consolidated delivery vehicle that supersedes six
-separate PR8–PR13 pull requests. It stays open through PR20 and merges only
-after PR20, direct product tests, and normal cross-platform CI are stable.
+The remaining delivery proceeds by complete product journeys under this index.
+Branch, pull-request, merge, worktree, and SHA choreography is not roadmap
+authority.

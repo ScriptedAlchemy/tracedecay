@@ -1,9 +1,18 @@
 # PR15 Authorized Multi-Root Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Add explicit scope-set federation across query, LSP, Git, feedback,
 Work, and dashboard without CWD/path fallback or identity aliasing.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Domain/application scope authorities and generated contracts.
 - Query federation and cursors in `crates/tracedecay-query`.
@@ -15,7 +24,7 @@ Interfaces: `ScopeSetId`, immutable `AuthorizedScopeSet`,
 `Unavailable`), frozen `CollectionRevision`, and frozen `StackRevision`.
 Every cursor binds scope-set digest, root generations, query, order, and page.
 
-## Ordered slices
+## Historical ordered slices
 
 1. Scope-set identity, canonical digest, and CAS.
 2. Centralized authorization/resolution authority.
@@ -27,18 +36,14 @@ Every cursor binds scope-set digest, root generations, query, order, and page.
 8. Dashboard scope pivots and per-root truth.
 9. Joint CLI/MCP/HTTP/LSP/dashboard acceptance journey.
 
-## Tests
+## Product outcome contributed
 
-Direct: select an authorized mixed root/worktree set, query it, page with a
-frozen cursor, inspect per-root Work/Git/feedback state, edit through LSP, and
-render dashboard pivots with exact provenance.
+The work contributed explicit authorized scope-set federation across query,
+LSP, Git, feedback, Work, and dashboard while preserving exact root identity,
+bounded partial outcomes, and fail-closed scope. Current direct behavior and
+acceptance live in the applicable numbered V2 plan.
 
-Negative: duplicate aliases, moved roots, unauthorized sibling, stale
-collection/stack revision, root deletion, one unavailable store, partial
-feedback, cursor tampering, CWD/path fallback, and mixed project/profile/store
-identity cannot widen scope or become success.
-
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 Single-root requests lower to a one-element scope set; no dual authority.
 Rollback disables multi-root capability/routes while retaining single-root

@@ -1,12 +1,21 @@
 # `tracedecay-query` Extraction Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Move the query kernel and focused tests out of the root crate while
 preserving every public path and result byte.
 
-**Dependencies:** `01-domain-request-context.md` is green; domain owns all
-query-facing DTOs and application owns request scope.
+**Historical dependency assumption:** Domain owned query-facing DTOs and
+application owned request scope before this extraction.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Create `crates/tracedecay-query/{Cargo.toml,src/lib.rs}`.
 - Move `src/query/**` into `crates/tracedecay-query/src/**`.
@@ -26,7 +35,7 @@ pub use tracedecay_query as query;
 on root, daemon, MCP, dashboard, commands, global DB adapters, or
 `crate::code_index::chunks`.
 
-## Tasks
+## Historical task checklist
 
 - [ ] Add architecture tests rejecting root/daemon/MCP imports from the crate.
 - [ ] Create the manifest with the minimum direct dependencies and feature map.
@@ -38,33 +47,18 @@ on root, daemon, MCP, dashboard, commands, global DB adapters, or
 - [ ] Verify default, all-feature, no-default/lite, package, and generated-doc
       contracts.
 
-## Tests
+## Product outcome contributed
 
-Direct: lexical, graph, temporal, cursor, semantic, exact-flat, redaction, and
-pagination results are byte-for-byte equal at the pinned fixture generation.
+The query kernel and focused ownership moved out of the root crate while query
+results, public compatibility, authorization, and truthful partial/unavailable
+states remained equivalent. Current direct behavior and acceptance live in the
+applicable numbered V2 plan.
 
-Negative: malformed/forged cursor, unauthorized root, unavailable semantic
-provider, partial generation, deleted source, and stale scope never become
-successful empty results.
+## Historical migration, rollback, measurement, and deletion notes
 
-Run:
-
-```bash
-cargo check -p tracedecay-query
-cargo check -p tracedecay-query --all-features
-cargo nextest run -p tracedecay-query --all-features
-cargo nextest run --all-features -E 'test(query_kernel)'
-cargo check -p tracedecay --lib --all-features
-cargo package -p tracedecay-query --locked --allow-dirty --no-verify
-```
-
-## Migration, rollback, measurement, deletion
-
-Land manifest/scaffold, mechanical move, caller wiring, test relocation, and
-façade/deletion as separate compile-green commits. Roll back with `git revert`;
-there is no data migration. Gate A-query passes only when the identical warm
-private query edit improves at least 20% or 8s, root no longer compiles query
-sources inline, and rebuilt-unit evidence confirms focused ownership.
+The recorded sequence used separate compile-green commits and `git revert`;
+there was no data migration. Its Gate A threshold and rebuilt-unit protocol
+were historical experiment criteria and are not current acceptance.
 
 Delete old root files and the `code_index::chunks` exception only after all
 production callers use the crate and default/all/lite/package contracts pass.

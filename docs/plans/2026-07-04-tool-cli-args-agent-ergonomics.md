@@ -1,5 +1,12 @@
 # `tracedecay tool` CLI arguments, reimagined for the AI-agent consumer
 
+> **Archived record — not implementation authority.** This document preserves
+> historical intent and evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts, source-string
+> checks, branch/commit/worktree choreography, snapshots, receipts,
+> attestations, PR packets, and gate matrices below are not rebuild
+> instructions; validate current parser, runtime, and product behavior directly.
+
 Date: 2026-07-04
 Branch: `codex/cli-args-stdin` (PR #286, "Support stdin for tool args")
 Status: implemented on `codex/cli-args-stdin` — the branch now includes the

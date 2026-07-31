@@ -1,5 +1,11 @@
 # PR7 memory, fact, anchor, and migration evidence
 
+> **Historical evidence only.** Preserve the migration fixtures and provenance
+> in this directory. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy; exact commands, test names/counts,
+> snapshots, receipts, attestations, PR packets, and gate fields below are not
+> rebuild instructions. Validate current migration and memory behavior directly.
+
 Direct behavioral coverage for the PR7 memory/fact/provenance slice. There is
 no measurement harness, owner receipt, gate manifest, content-addressed
 acceptance snapshot, signature, trust root, or attestation in this directory.
