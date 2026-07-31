@@ -1,4 +1,5 @@
-use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
+use rusqlite::types::Value;
+use rusqlite::{OptionalExtension, Savepoint, Transaction, params, params_from_iter};
 use serde::Serialize;
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
@@ -525,46 +526,33 @@ fn read_lineage(
 ) -> rusqlite::Result<Vec<FactLineageEventV1>> {
     let owner = OwnerColumns::new(query.owner())?;
     let limit = usize_to_i64(query.limit(), "fact lineage limit")?;
+    let mut bindings = vec![
+        Value::Text(query.fact_id().as_str().to_owned()),
+        Value::Text(owner.kind.to_owned()),
+        Value::Text(owner.project_id),
+    ];
+    // The keyset cursor is the only optional predicate, so fold it into the
+    // one statement rather than carrying two near-identical copies.
+    let cursor = match query.after() {
+        Some(after) => {
+            bindings.push(Value::Integer(after.occurred_at().0));
+            bindings.push(Value::Text(after.event_id().as_str().to_owned()));
+            "AND (occurred_at > ?4 OR (occurred_at = ?4 AND event_id > ?5))"
+        }
+        None => "",
+    };
+    let limit_index = bindings.len() + 1;
+    bindings.push(Value::Integer(limit));
+    let mut statement = connection.prepare(&format!(
+        "SELECT event_json FROM memory_v2_lineage_events
+         WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
+           {cursor}
+         ORDER BY occurred_at, event_id LIMIT ?{limit_index}"
+    ))?;
+    let rows = statement.query_map(params_from_iter(bindings), |row| row.get::<_, String>(0))?;
     let mut events: Vec<FactLineageEventV1> = Vec::new();
-    if let Some(after) = query.after() {
-        let mut statement = connection.prepare(
-            "SELECT event_json FROM memory_v2_lineage_events
-             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-               AND (occurred_at > ?4 OR (occurred_at = ?4 AND event_id > ?5))
-             ORDER BY occurred_at, event_id LIMIT ?6",
-        )?;
-        let rows = statement.query_map(
-            params![
-                query.fact_id().as_str(),
-                owner.kind,
-                owner.project_id,
-                after.occurred_at().0,
-                after.event_id().as_str(),
-                limit,
-            ],
-            |row| row.get::<_, String>(0),
-        )?;
-        for row in rows {
-            events.push(decode(row?)?);
-        }
-    } else {
-        let mut statement = connection.prepare(
-            "SELECT event_json FROM memory_v2_lineage_events
-             WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3
-             ORDER BY occurred_at, event_id LIMIT ?4",
-        )?;
-        let rows = statement.query_map(
-            params![
-                query.fact_id().as_str(),
-                owner.kind,
-                owner.project_id,
-                limit,
-            ],
-            |row| row.get::<_, String>(0),
-        )?;
-        for row in rows {
-            events.push(decode(row?)?);
-        }
+    for row in rows {
+        events.push(decode(row?)?);
     }
     if events
         .iter()
