@@ -1070,11 +1070,10 @@ impl RusqliteRemoteAuthorityStoreV1 {
         }
         if let Some(installed) = read_fence(&transaction, &shard_key, sink_id)?
             && installed != (writer.clone(), binding.clone(), placement_revision)
+            && installed.0.authority.fence.authority_epoch
+                >= writer.authority.fence.authority_epoch
         {
-            if installed.0.authority.fence.authority_epoch >= writer.authority.fence.authority_epoch
-            {
-                return Err(RemoteAuthorityStorageErrorV1::StaleFence);
-            }
+            return Err(RemoteAuthorityStorageErrorV1::StaleFence);
         }
         transaction
             .execute(
