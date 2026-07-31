@@ -6471,10 +6471,27 @@ mod tests {
         let uninstalled = inspect_installed_host_bundle_components_at(
             artifacts.path(),
             lifecycle.path(),
-            &CurrentRegistration,
+            &MissingRegistration,
         )
         .unwrap();
         assert!(uninstalled.components.is_empty());
+
+        // The same uninstall receipt with the host still advertising the
+        // component is a registered orphan: nothing owns the registration, so
+        // Doctor must surface it rather than skip past the receipt.
+        let orphaned = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert_eq!(orphaned.components.len(), 1);
+        assert_eq!(
+            orphaned.components[0].state,
+            HostBundleComponentDoctorStateV1::OrphanedRegistration
+        );
+        assert_eq!(orphaned.components[0].host, Some(HostKindV1::Hermes));
+        assert!(orphaned.components[0].artifacts.is_empty());
     }
 
     #[test]
