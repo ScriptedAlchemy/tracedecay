@@ -231,8 +231,10 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 
 ## Replacement and deletion
 
-PR18 removes temporary PR17-only public spellings directly because they were
-never published; no compatibility window is created by branch sequencing.
+PR18 removes source-only temporary PR17 spellings directly. Callable PR17
+spellings potentially retained by dogfood clients or host files remain aliases
+until an authorized installed-client/host census proves absence; branch
+sequencing alone creates no public compatibility window.
 It also removes duplicate surface-specific models, generated-type-only sample
 packages, and any SDK-side business or retry decision that competes with the
 daemon. Stable compatibility aliases remain thin delegates.

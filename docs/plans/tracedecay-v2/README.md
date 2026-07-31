@@ -15,16 +15,17 @@ crate-first work queues.
 
 `TraceDecay V2` is the product-roadmap name, not evidence that every contract
 or schema needs a V2 shape. A compatibility alias, deprecation path, dual
-reader/writer, contract/schema V2 or V3, or migration is required only when the
-predecessor demonstrably exists on `origin/master`, in a published package or
-release, or in a live persisted format. Branch-local shapes, PR order,
-historical type names, tests, and future consumers are not release evidence.
-Pure transient wire/request DTOs and source-only contracts change to their
-final shape in place. Anything written to a store, spool, file, installed host
-surface, or persisted projection remains a potential live format and preserves
-backward-read/migration recovery until a separately authorized census proves
-absence. A `V1` suffix may name an initial final wire format without requiring
-a sibling version by itself.
+reader/writer, contract/schema V2 or V3, or migration is required when the
+predecessor exists on `origin/master`, in a published package/release, an
+independently deployed client, a live host installation, or a live persisted
+format. Branch-local shapes, PR order, historical type names, tests, and future
+consumers are not publication evidence. Pure transient wire/request DTOs and
+source-only contracts change to their final shape in place. Anything
+potentially installed or written to a store, spool, file, or persisted
+projection fail-closes as live and preserves compatibility, backward-read, and
+migration/recovery until a separately authorized census proves absence. A `V1`
+suffix may name an initial final wire format without requiring a sibling
+version by itself.
 
 ## Current product foundation
 
@@ -139,11 +140,12 @@ The authoritative acceptance rule in
 historical plan.
 
 PR12 transport and PR18 SDK contracts prove structural, semantic, and lifecycle
-compatibility against supported old and current consumers only when those
-consumers are evidenced by `origin/master`, a published package/release, or a
-live persisted format. Direct fault, restart, concurrency, cross-platform,
-migration, recovery, and deletion tests remain part of the product journey
-they protect.
+compatibility against supported old and current consumers evidenced by
+`origin/master`, a published package/release, an independently deployed client,
+or a live host installation. Potentially installed branch-era consumers remain
+in the compatibility set until an authorized installed-client/host census
+proves absence. Direct fault, restart, concurrency, cross-platform, migration,
+recovery, and deletion tests remain part of the product journey they protect.
 
 Product, contributor, CI, release, and publication behavior preserves stock
 Cargo semantics. A slice that materially changes crate boundaries, dependency

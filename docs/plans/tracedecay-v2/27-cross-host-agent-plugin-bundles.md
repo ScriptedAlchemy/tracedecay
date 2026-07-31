@@ -281,10 +281,12 @@ the host observation replay spool.
 
 ## Replacement and deletion
 
-- Delete unreleased PR6 compatibility generators and duplicate integration
-  shapes once all package projections consume the single existing manifest;
-  branch history creates no compatibility window. Preserve only shapes proven
-  in a released bundle/package or live host installation.
+- Delete source-only PR6 compatibility generators and duplicate integration
+  scaffolds once all package projections consume the single existing manifest.
+  Potentially installed manifests, generated host files, queues, checkpoints,
+  receipts, callable names, and protocol revisions remain readable/negotiable
+  until an authorized installed-host/profile census proves absence; branch
+  history alone creates no public compatibility window.
 - Remove the generic source-connector contract, generic capability catalog,
   future work/task/native-execution projection fields, exact type/file/schema
   inventories, enumerated fixture-directory manifests, Cartesian host

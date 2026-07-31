@@ -95,9 +95,10 @@ history, tags, or remotes.
    values. It does not infer an untyped rewrite language.
 2. Every compatibility alias/wrapper declares
    `stable_public_contract | temporary`, external consumer, owner, deprecation
-   policy, release evidence, and—when temporary—the exact PR19 deletion
-   condition. A branch-local predecessor is replaced directly and is not an
-   alias disposition. Missing required disposition blocks apply.
+   policy, evidence/census status, and—when source-only temporary—the exact
+   PR19 deletion condition. A pure source-only predecessor is replaced directly
+   and is not an alias disposition; a branch-era callable predecessor remains
+   census-gated. Missing required disposition blocks apply.
 3. Primary production consumers move before old names are restricted to
    approved compatibility boundaries. Type aliases are used only when language
    semantics preserve compatibility; otherwise an explicit wrapper/conversion
