@@ -20,10 +20,12 @@ import {
   projectRegistryInvalidationKey,
   useProjectRegistry,
 } from '../query/projectRegistry.ts';
+import type { LegacyResult } from '../query/legacy.ts';
 import {
   workProjectInvalidationKeys,
   workScopeInvalidationKeys,
 } from '../query/work.ts';
+import type { ProjectsPayload } from '../../contracts/wire.ts';
 
 /**
  * Period of the render clock. The plan bounds SSE-driven work at "at most ten
@@ -79,10 +81,17 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
   const clock = useMemo(() => createRenderClock(connection), [connection]);
   const queryClient = useQueryClient();
   const registry = useProjectRegistry();
-  const activeProjectId =
-    registry.data?.outcome === 'ok' && registry.data.data.status === 'ok'
-      ? registry.data.data.active_project_id
-      : null;
+  // Held by value, not by object identity. The invalidation effect below tears
+  // itself down and re-arms whenever its dependencies change, and re-arming
+  // abandons the follow-up a canonical refresh already in flight is owed — so a
+  // fresh reading object on a render that established no new fact must not
+  // count as a change.
+  const reading = activeProjectFrom(registry.data);
+  const readingCache = useRef(reading);
+  if (activeProjectKey(readingCache.current) !== activeProjectKey(reading)) {
+    readingCache.current = reading;
+  }
+  const activeProject = readingCache.current;
   useEffect(
     () => () => {
       clock.stop();
@@ -131,7 +140,7 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
     }
 
     function applyTargeted(batch: SseBatch): void {
-      for (const pending of invalidate(targetedInvalidationKeys(batch, activeProjectId))) {
+      for (const pending of invalidate(targetedInvalidationKeys(batch, activeProject))) {
         void pending.catch(() => {
           // A targeted refresh that rejected leaves its slice unfresh. Escalate
           // to the canonical path rather than leaving the rejection unobserved.
@@ -148,7 +157,7 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
       if ((batch.refetch || batch.stale) && reducer.canonicalRefreshOutstanding()) {
         // The whole-projection key this maps a canonical batch to subsumes every
         // targeted key, so it is the only refresh this batch needs.
-        startCanonicalRefresh(invalidationKeysForBatch(batch));
+        startCanonicalRefresh(invalidationKeysForBatch(batch, activeProject));
         return;
       }
       // Not the batch that starts a refresh — either nothing canonical happened,
@@ -162,7 +171,7 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
       stopped = true;
       unsubscribe();
     };
-  }, [activeProjectId, clock, connection, queryClient]);
+  }, [activeProject, clock, connection, queryClient]);
   return (
     <EventsContext.Provider value={connection}>
       <RenderClockContext.Provider value={clock}>{children}</RenderClockContext.Provider>
@@ -173,11 +182,74 @@ export function EventsProvider({ children, url }: { children: ReactNode; url?: s
 /** The canonical whole-projection refresh: every query, no key filter. */
 const CANONICAL_INVALIDATION_KEY: ReadonlyArray<string> = [];
 
+/**
+ * Which project the unprefixed Work route serves, as a reading rather than a
+ * bare id.
+ *
+ * The default-scope Work cache entries — snapshot and delta under the `all`
+ * scope — are fetched from the unprefixed route, which the daemon serves from
+ * whichever project is active, so a task event only earns them a refresh when it
+ * belongs to that project. Expressing "which project" as `string | null` conflated two
+ * different answers: the registry saying there is no active project, and the
+ * registry not having answered at all. Both arrived as `null`, and `null`
+ * matches no event, so a registry that was missing, unreachable, or merely
+ * still in flight silently stopped the default scope from ever refreshing while
+ * the link indicator still read `live`.
+ */
+export type ActiveProjectReading =
+  /** The registry named the active project. */
+  | { readonly kind: 'resolved'; readonly projectId: string }
+  /** The registry answered and holds no active project. */
+  | { readonly kind: 'absent' }
+  /** No registry answer to read: pending, unavailable, or undecodable. */
+  | { readonly kind: 'unresolved' };
+
+/**
+ * The active project as the registry read establishes it — never more than it
+ * established.
+ *
+ * Every non-`ok` outcome is `unresolved` rather than `absent`, including the
+ * typed `unavailable` one: a registry that could not be opened has said nothing
+ * about which project is active.
+ */
+export function activeProjectFrom(
+  result: LegacyResult<ProjectsPayload> | undefined,
+): ActiveProjectReading {
+  if (result === undefined) return { kind: 'unresolved' };
+  switch (result.outcome) {
+    case 'ok': {
+      if (result.data.status !== 'ok') return { kind: 'unresolved' };
+      const projectId = result.data.active_project_id;
+      return projectId === null || projectId === ''
+        ? { kind: 'absent' }
+        : { kind: 'resolved', projectId };
+    }
+    case 'unavailable':
+    case 'offline':
+    case 'unauthorized':
+    case 'denied':
+    case 'error':
+    case 'unsupported_schema':
+      return { kind: 'unresolved' };
+    default: {
+      const unhandled: never = result;
+      return unhandled;
+    }
+  }
+}
+
+/** Value identity of a reading, so two readings that establish the same fact
+ * compare equal however many times the registry answer was re-read. */
+function activeProjectKey(reading: ActiveProjectReading): string {
+  return reading.kind === 'resolved' ? `resolved\u0000${reading.projectId}` : reading.kind;
+}
+
 export function invalidationKeysForBatch(
   batch: SseBatch,
+  activeProject: ActiveProjectReading = { kind: 'unresolved' },
 ): ReadonlyArray<ReadonlyArray<string>> {
   if (batch.refetch || batch.stale) return [CANONICAL_INVALIDATION_KEY];
-  return targetedInvalidationKeys(batch);
+  return targetedInvalidationKeys(batch, activeProject);
 }
 
 /**
@@ -189,7 +261,7 @@ export function invalidationKeysForBatch(
  */
 export function targetedInvalidationKeys(
   batch: SseBatch,
-  activeProjectId: string | null = null,
+  activeProject: ActiveProjectReading = { kind: 'unresolved' },
 ): ReadonlyArray<ReadonlyArray<string>> {
   let storage = false;
   let projects = false;
@@ -213,11 +285,30 @@ export function targetedInvalidationKeys(
   if (projects) keys.push([...projectRegistryInvalidationKey]);
   for (const projectId of workProjects) {
     for (const key of workProjectInvalidationKeys(projectId)) keys.push([...key]);
-    if (projectId === activeProjectId) {
-      for (const key of workScopeInvalidationKeys('all')) keys.push([...key]);
-    }
+  }
+  if (defaultScopeIsOwed(activeProject, workProjects)) {
+    for (const key of workScopeInvalidationKeys('all')) keys.push([...key]);
   }
   return keys;
+}
+
+function defaultScopeIsOwed(
+  activeProject: ActiveProjectReading,
+  workProjects: ReadonlySet<string>,
+): boolean {
+  if (workProjects.size === 0) return false;
+  switch (activeProject.kind) {
+    case 'resolved':
+      return workProjects.has(activeProject.projectId);
+    case 'absent':
+      return false;
+    case 'unresolved':
+      return true;
+    default: {
+      const unhandled: never = activeProject;
+      return unhandled;
+    }
+  }
 }
 
 function exactProjectId(scope: string): string | null {
