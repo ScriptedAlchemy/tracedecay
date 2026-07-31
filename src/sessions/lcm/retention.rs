@@ -67,7 +67,7 @@ use crate::db::engine::{
 };
 
 use super::payload::{ExternalPayloadWrite, PayloadFileRollback};
-use super::{LcmError, payload, util};
+use super::{LcmError, payload, schema, util};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
@@ -496,12 +496,7 @@ async fn write_retention_metadata(
         ("last_retention_rows", acted.to_string()),
         ("last_retention_bytes", bytes_reclaimed.to_string()),
     ] {
-        executor
-            .execute(
-                "INSERT OR REPLACE INTO lcm_gc_meta (key, value) VALUES (?1, ?2)",
-                params![key, value],
-            )
-            .await?;
+        schema::set_gc_meta(executor, key, &value).await?;
     }
     Ok(())
 }
