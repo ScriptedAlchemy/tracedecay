@@ -247,12 +247,14 @@ where
         let requested_route = execution.route().clone();
         let leased = self.execution.acquire_lease(
             &self.authority,
-            snapshot,
-            identity,
-            binding,
-            execution,
-            lease,
-            requested_route,
+            WorkAttemptAcquireLeaseRequestV1 {
+                snapshot: snapshot.clone(),
+                identity,
+                projection_binding: binding,
+                execution,
+                lease,
+                requested_route,
+            },
         )?;
         self.publish_activity("leased").await;
         Ok(leased)
