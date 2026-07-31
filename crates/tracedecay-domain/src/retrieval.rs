@@ -21,7 +21,7 @@ use thiserror::Error;
 use crate::code_intelligence::{
     CodeGenerationId, ProjectionKeyV1, SemanticSearchIndexKeyV1, VectorGenerationIdV1,
 };
-use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId};
+use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId, digest_id};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
 use crate::research::{DomainError, canonical_sha256};
@@ -91,82 +91,16 @@ macro_rules! retrieval_string_id {
     )+};
 }
 
-fn validate_retrieval_digest(
-    value: &str,
-    field: &'static str,
-) -> Result<(), RetrievalContractError> {
-    if value.is_empty() {
-        return Err(RetrievalContractError::InvalidIdentity { field });
-    }
-    let valid = value
-        .split_once(':')
-        .and_then(|(algorithm, encoded)| {
-            let expected_len = match algorithm {
-                "sha256" | "blake3" => 64,
-                "sha512" => 128,
-                _ => return None,
-            };
-            Some(
-                encoded.len() == expected_len
-                    && encoded
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            )
-        })
-        .unwrap_or(false);
-    if !valid {
-        return Err(RetrievalContractError::InvalidIdentity { field });
-    }
-    Ok(())
-}
-
-macro_rules! retrieval_digest_id {
-    ($($name:ident),+ $(,)?) => {$(
-        #[doc = concat!("Strongly typed algorithm-tagged integrity digest: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, RetrievalContractError> {
-                let value = value.into();
-                validate_retrieval_digest(&value, stringify!($name))?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), RetrievalContractError> {
-                validate_retrieval_digest(&self.0, stringify!($name))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?)
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = RetrievalContractError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
+/// Restate a shared integrity-digest rejection as a retrieval-contract error.
+///
+/// The retrieval kernel makes no distinction between an empty digest and a
+/// malformed one; both are simply a non-canonical identity.
+fn retrieval_digest_error(error: DomainError) -> RetrievalContractError {
+    let field = match error {
+        DomainError::Empty { field } | DomainError::NonCanonical { field } => field,
+        _ => "retrieval integrity digest",
+    };
+    RetrievalContractError::InvalidIdentity { field }
 }
 
 retrieval_string_id!(
@@ -191,7 +125,8 @@ retrieval_string_id!(
     EvaluationDecisionId,
 );
 
-retrieval_digest_id!(
+digest_id!(
+    RetrievalContractError, retrieval_digest_error;
     FallbackSubpayloadDigest,
     CandidateSetDigest,
     FreshnessVectorDigest,

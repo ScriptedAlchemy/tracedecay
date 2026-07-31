@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::research::DomainError;
+use crate::research::id::digest_id;
 
 /// Whether a canonical repository-relative path is exactly the requested
 /// scope or one of its descendants.
@@ -83,81 +84,6 @@ macro_rules! code_id {
     )+};
 }
 
-fn validate_code_digest(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty() {
-        return Err(DomainError::Empty { field });
-    }
-    let valid = value
-        .split_once(':')
-        .and_then(|(algorithm, encoded)| {
-            let expected_len = match algorithm {
-                "sha256" | "blake3" => 64,
-                "sha512" => 128,
-                _ => return None,
-            };
-            Some(
-                encoded.len() == expected_len
-                    && encoded
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            )
-        })
-        .unwrap_or(false);
-    if !valid {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
-
-macro_rules! code_digest_id {
-    ($($name:ident),+ $(,)?) => {$(
-        #[doc = concat!("Strongly typed algorithm-tagged integrity digest: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-                let value = value.into();
-                validate_code_digest(&value, stringify!($name))?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                validate_code_digest(&self.0, stringify!($name))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?)
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = DomainError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
-}
-
 code_id!(
     CodeGenerationId,
     FileOccurrenceId,
@@ -174,7 +100,12 @@ code_id!(
     PolicyRevisionId,
 );
 
-code_digest_id!(ContentDigest, FileIdentityDigest, SymbolIdentityDigest,);
+digest_id!(
+    DomainError, std::convert::identity;
+    ContentDigest,
+    FileIdentityDigest,
+    SymbolIdentityDigest,
+);
 
 impl ContentDigest {
     /// Canonical content identity over byte-exact source.
