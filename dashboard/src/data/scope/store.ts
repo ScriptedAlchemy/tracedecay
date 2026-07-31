@@ -230,6 +230,40 @@ export function scopeWritable(scope: DashboardScope): ScopeWritability {
   }
 }
 
+/**
+ * The sentence a control carries about what this scope means for it.
+ *
+ * One exhaustive switch for all of them. The two refusing states are answered
+ * with the authority's own `reason` — reworded per call site they would drift
+ * apart, and the reason is the same fact everywhere — while `writable` is the
+ * only state whose wording is genuinely local, because what is being written
+ * differs (a scheduler toggle, a remediation) and the target has to be named.
+ *
+ * `writable` is answered rather than thrown on even where a call site cannot
+ * reach it: producing a sentence is what this is for.
+ */
+export function scopeWriteSentence(
+  writability: ScopeWritability,
+  sentences: {
+    writable: (target: string) => string;
+    /** For a site that frames the refusal before repeating it. Defaults to the
+     * reason alone. */
+    refused?: (reason: string) => string;
+  },
+): string {
+  switch (writability.state) {
+    case 'writable':
+      return sentences.writable(writability.target);
+    case 'read_only':
+    case 'unknown':
+      return sentences.refused ? sentences.refused(writability.reason) : writability.reason;
+    default: {
+      const exhaustive: never = writability;
+      return exhaustive;
+    }
+  }
+}
+
 /** The `status` the project gateway answers a refused write with. */
 export const READ_ONLY_SCOPE_STATUS = 'read_only_project';
 

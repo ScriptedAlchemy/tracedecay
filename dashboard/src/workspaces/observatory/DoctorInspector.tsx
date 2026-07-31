@@ -9,7 +9,6 @@ import {
   Clock,
   FileSearch,
   HelpCircle,
-  RefreshCw,
   ShieldCheck,
   ShieldX,
   X,
@@ -30,8 +29,6 @@ import {
   type DoctorReportEntry,
   type DoctorReportCoverage,
   type ResolvedScope,
-  type WireCoverage,
-  type WireFreshness,
   type WireLegalActionRef,
 } from '../../contracts/wire.ts';
 import {
@@ -45,7 +42,13 @@ import {
 } from '../../data/query/doctor.ts';
 import { mintBrowserIdempotencyKey } from '../../data/identity.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
-import { scopeWritable, useScope, type ScopeWritability } from '../../data/scope/store.ts';
+import {
+  scopeWritable,
+  scopeWriteSentence,
+  useScope,
+  type ScopeWritability,
+} from '../../data/scope/store.ts';
+import { EnvelopeTruth, ReadModelState } from '../../ui/EnvelopeTruth.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn.ts';
@@ -280,42 +283,27 @@ function DoctorFindings({
   onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
 }) {
   if (pending) {
-    return <DoctorState kind="loading" detail="requesting canonical Doctor findings" />;
+    return <ReadModelState kind="loading" detail="requesting canonical Doctor findings" />;
   }
-  if (!result) return <DoctorState kind="unknown" detail="no Doctor response recorded" />;
+  if (!result) return <ReadModelState kind="unknown" detail="no Doctor response recorded" />;
   if (result.outcome === 'transport') {
-    return <DoctorState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
+    return <ReadModelState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
   }
 
   const { envelope } = result;
-  const refresh = envelope.legal_actions.find((action) => action.kind === 'refresh');
   if (envelope.payload.entries.length === 0) {
     return (
       <>
-        <DoctorTruth
-          coverage={envelope.coverage}
-          freshness={envelope.freshness}
-          state={envelope.domain_state}
-          refresh={refresh}
-          refreshing={refreshing}
-          onRefresh={onRefresh}
-        />
+        <EnvelopeTruth envelope={envelope} refreshing={refreshing} onRefresh={onRefresh} />
         <DoctorReportCoverageGaps coverage={envelope.payload.report_coverage} />
-        <DoctorState kind={envelope.domain_state} detail={envelope.payload.note} />
+        <ReadModelState kind={envelope.domain_state} detail={envelope.payload.note} />
       </>
     );
   }
 
   return (
     <>
-      <DoctorTruth
-        coverage={envelope.coverage}
-        freshness={envelope.freshness}
-        state={envelope.domain_state}
-        refresh={refresh}
-        refreshing={refreshing}
-        onRefresh={onRefresh}
-      />
+      <EnvelopeTruth envelope={envelope} refreshing={refreshing} onRefresh={onRefresh} />
       <DoctorReportCoverageGaps coverage={envelope.payload.report_coverage} />
       <OverviewGrid>
         {envelope.payload.entries.map((entry, index) => {
@@ -404,23 +392,14 @@ function consultationState(
  * here instead of silently rendering an unexplained disabled control.
  */
 function ScopeWriteNote({ writability }: { writability: ScopeWritability }) {
-  const sentence = ((): string => {
-    switch (writability.state) {
-      case 'writable':
-        return `Remediations apply to ${writability.target}.`;
-      case 'read_only':
-      case 'unknown':
-        return writability.reason;
-      default:
-        return assertNever(writability);
-    }
-  })();
   return (
     <p
       data-scope-writability={writability.state}
       className="mt-2 text-2xs text-text-secondary"
     >
-      {sentence}
+      {scopeWriteSentence(writability, {
+        writable: (target) => `Remediations apply to ${target}.`,
+      })}
     </p>
   );
 }
@@ -593,57 +572,6 @@ function RemediationAvailabilityNote({
   );
 }
 
-function DoctorTruth({
-  coverage,
-  freshness,
-  state,
-  refresh,
-  refreshing,
-  onRefresh,
-}: {
-  coverage: WireCoverage;
-  freshness: WireFreshness;
-  state: DomainStateKind;
-  refresh: WireLegalActionRef | undefined;
-  refreshing: boolean;
-  onRefresh: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-3 px-4 pt-2">
-      <StateChip kind={state} />
-      <EvidenceTruthStrip
-        coverage={{
-          completeness: coverage.completeness,
-          eligible: coverage.eligible,
-          examined: coverage.examined,
-        }}
-        freshness={{
-          state: freshness.state,
-          observed_at:
-            freshness.observed_at_micros == null
-              ? undefined
-              : new Date(freshness.observed_at_micros / 1000).toLocaleTimeString(),
-        }}
-        omissions={coverage.omitted ?? undefined}
-      />
-      {refresh ? (
-        <button
-          type="button"
-          className={`${secondaryButtonClass} ml-auto`}
-          onClick={onRefresh}
-          disabled={refreshing}
-          data-operation={refresh.operation}
-        >
-          <span className={secondaryBezelClass}>
-            <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
-            {refreshing ? 'Refreshing' : 'Refresh'}
-          </span>
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
 function OperationStatus({
   result,
   pending,
@@ -660,27 +588,27 @@ function OperationStatus({
   // the absence of one rather than a phase. `locked` is the state for a surface
   // that will not accept a change, and the reason is the scope authority's own.
   if (result?.outcome === 'not_dispatched') {
-    return <DoctorState kind="locked" detail={result.writability.reason} />;
+    return <ReadModelState kind="locked" detail={result.writability.reason} />;
   }
   if (transportScopeMismatch) {
     return (
-      <DoctorState
+      <ReadModelState
         kind="conflicting"
         detail="saved remediation belongs to a different dashboard scope"
       />
     );
   }
   if (pending && !result) {
-    return <DoctorState kind="loading" detail="checking remediation operation" />;
+    return <ReadModelState kind="loading" detail="checking remediation operation" />;
   }
-  if (!result) return <DoctorState kind="unknown" detail="operation status is unavailable" />;
+  if (!result) return <ReadModelState kind="unknown" detail="operation status is unavailable" />;
   if (result.outcome === 'transport') {
-    return <DoctorState kind={result.state} detail={result.detail ?? 'operation owner unreachable'} />;
+    return <ReadModelState kind={result.state} detail={result.detail ?? 'operation owner unreachable'} />;
   }
   const { payload } = result.envelope;
   if (payload.status === 'unavailable') {
     return (
-      <DoctorState
+      <ReadModelState
         kind={result.envelope.domain_state}
         detail={`remediation ${payload.reason.replaceAll('_', ' ')}`}
       />
@@ -922,14 +850,6 @@ function RemediationResult({ result }: { result: DoctorWriteResult | undefined }
       kind={operationPhaseState(payload.operation.phase)}
       detail={payload.operation.phase.replaceAll('_', ' ')}
     />
-  );
-}
-
-function DoctorState({ kind, detail }: { kind: DomainStateKind; detail: string }) {
-  return (
-    <div className="flex min-h-24 items-center justify-center p-4">
-      <StateChip kind={kind} detail={detail} />
-    </div>
   );
 }
 
