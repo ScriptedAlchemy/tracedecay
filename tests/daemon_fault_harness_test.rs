@@ -243,7 +243,6 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             "{stage} fault leaked replay state after restart"
         );
 
-        drop(restarted_store);
         restarted.close();
         set_statement_fault(&tmp, stage, table, false).await;
         let retry = open_lcm_db(&tmp).await;
@@ -257,7 +256,6 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
             other => panic!("{stage} retry must commit once, got {other:?}"),
         };
         assert_eq!(committed.sequence(), 1);
-        drop(retry_store);
         retry.close();
 
         let replayed = open_lcm_db(&tmp).await;
@@ -287,7 +285,6 @@ async fn observation_store_statement_faults_roll_back_and_retry_exactly_once() {
                 .unwrap(),
             Some(cursor(stage, 100))
         );
-        drop(replayed_store);
         replayed.close();
         assert_eq!(
             observation_state_counts(&tmp).await,

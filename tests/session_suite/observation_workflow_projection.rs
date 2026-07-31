@@ -989,7 +989,6 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
         .execute("DROP TRIGGER fail_workflow_rebuild_activation", ())
         .unwrap();
     drop(raw_conn);
-    drop(store);
     drop(runtime);
 
     let reopened = profile_runtime(&tmp).await;
@@ -1004,7 +1003,6 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
         table_count(&database_path, "observation_projection_rebuilds"),
         0
     );
-    drop(reopened_store);
     drop(reopened);
 
     let raw_conn = rusqlite::Connection::open(&database_path).unwrap();

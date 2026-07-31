@@ -20,7 +20,6 @@ async fn unsupported_legacy_provenance_shape_is_rejected_before_drop() {
     );
     persist(&store, candidate, None).await;
     drain_projection_queue(&store).await;
-    drop(store);
     drop(runtime);
 
     reinstall_projection_provenance_schema(&tmp, "forward_owner TEXT,").await;
