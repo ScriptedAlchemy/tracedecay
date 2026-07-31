@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::{def, def_always_load, required_object_schema, string_property};
+use super::{def, def_always_load, def_rw, required_object_schema, string_property};
 use crate::mcp::tools::ToolDefinition;
 
 fn closed_object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
