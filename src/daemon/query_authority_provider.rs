@@ -490,8 +490,8 @@ pub(crate) mod tests {
         CalibrationProfileId, ChunkerRevision, CodeGenerationId, ComponentRevision,
         DiversityPolicy, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
         EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-        EmbeddingTruncationSideV1, FusionProfile, ManifestDigest, ProjectId, RetrievalBudget,
-        UtcMicros, VectorGenerationIdV1, canonical_sha256,
+        EmbeddingTruncationSideV1, FreshnessVectorDigest, FusionProfile, ManifestDigest, ProjectId,
+        RetrievalBudget, UtcMicros, VectorGenerationIdV1, canonical_sha256,
     };
     use tracedecay_domain::{
         EphemeralSanitizedQueryViewV1, PrincipalId, QueryNormalizationRevision, RepositoryId,
@@ -983,7 +983,8 @@ pub(crate) mod tests {
             temporal_mode: TemporalModeV1::Current,
             snapshot: RetrievalSnapshot {
                 watermarks: VectorWatermark::default(),
-                freshness_digest: id("freshness.query-restart"),
+                freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "7".repeat(64)))
+                    .expect("freshness digest"),
                 authorization_revision: id("authorization.query-restart"),
                 captured_at: UtcMicros(100),
             },
@@ -1019,6 +1020,14 @@ pub(crate) mod tests {
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
         let project_id = ProjectId::new("project.query-restart").expect("project id");
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("production project enrollment");
         let profile_sessions_path = crate::sessions::user_sessions_db_path(identity.profile_root());
         let _scope_guard =
             crate::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
@@ -1122,7 +1131,7 @@ pub(crate) mod tests {
             .await
             .expect("reopened session registry");
         let reopened = reopened_registry
-            .project_sessions(project_id, [project_root])
+            .project_sessions(project_id.clone(), [project_root])
             .await
             .expect("reopened durable project session database");
         assert!(
@@ -1137,7 +1146,11 @@ pub(crate) mod tests {
         );
         let reopened_provider = DaemonQueryAuthorityProviderV1::default();
         reopened_provider
-            .install_evaluated_initial_state(scope.clone(), state, reopened_keys)
+            .install_evaluated_initial_state(
+                scope.clone(),
+                state.clone(),
+                Arc::clone(&reopened_keys),
+            )
             .expect("install reopened production authority");
         let reopened_authority =
             super::super::code_index_scheduler::query_runtime::prepare_query_authority(
@@ -1170,5 +1183,60 @@ pub(crate) mod tests {
                 Some(&fusion_cursor),
             )
             .expect("resume fusion continuation after reopen");
+
+        let foreign_root = directory.path().join("foreign-project");
+        std::fs::create_dir_all(&foreign_root).expect("foreign project root");
+        let foreign_project_id =
+            ProjectId::new("project.query-restart-foreign").expect("foreign project id");
+        crate::storage::write_enrollment_marker(
+            &foreign_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: foreign_project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("foreign production project enrollment");
+        let foreign_database = reopened_registry
+            .project_sessions(foreign_project_id, [foreign_root])
+            .await
+            .expect("foreign project session database");
+        let foreign_keys = Arc::new(
+            foreign_database
+                .load_session_cursor_key_provider_result()
+                .await
+                .expect("foreign durable cursor key provider"),
+        );
+        let mismatched_provider = DaemonQueryAuthorityProviderV1::default();
+        mismatched_provider
+            .install_evaluated_initial_state(scope.clone(), state, foreign_keys)
+            .expect("install mismatched production authority");
+        let mismatched_authority =
+            super::super::code_index_scheduler::query_runtime::prepare_query_authority(
+                &scope,
+                &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
+                &mismatched_provider,
+            )
+            .expect("mismatched production query authority");
+        assert!(
+            tracedecay_query::retrieval::PreparedQueryV1::prepare(
+                Arc::clone(&mismatched_authority),
+                request.clone(),
+                Some(&prepared_cursor),
+            )
+            .is_err(),
+            "a foreign project's durable key must not authenticate the prepared cursor"
+        );
+        assert!(
+            mismatched_authority
+                .compose(
+                    &request,
+                    &query,
+                    empty_restart_lanes(),
+                    1,
+                    Some(&fusion_cursor),
+                )
+                .is_err(),
+            "a foreign project's durable key must not authenticate the fusion cursor"
+        );
     }
 }
