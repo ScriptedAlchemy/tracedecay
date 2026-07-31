@@ -15,9 +15,10 @@ remaining error is `E0432`/`E0433` on a `crate::<root module>` path — the
 modules this crate reads that have not been extracted yet. They are cataloged
 below so the lead can repoint them mechanically at integration.
 
-Status at hand-off: `cargo check -p tracedecay-dashboard-api` → **212 errors**
-(170 × E0433, 42 × E0432). All of them are unresolved root-module paths; there
-are zero type errors, so the catalog below is exhaustive.
+Status at hand-off: `cargo check -p tracedecay-dashboard-api` → **210 errors**
+(170 × E0433, 40 × E0432). Every one of them is an unresolved root-module path;
+there are zero type errors, so the catalog below is exhaustive. `cargo fmt -p
+tracedecay-dashboard-api --check` is clean.
 
 ## Resolved during the move
 
@@ -43,6 +44,14 @@ MCP server and daemon keep *supplying* the resolver, the dashboard keeps
 Note: the moved `RetainedProjectGraphRequest` constructors still call
 `crate::worktree::git_common_dir` / `crate::branch::current_branch` — see the
 kernel seam row below.
+
+### Workspace-crate refs pointed at their crates
+
+`crate::types` is a pure façade over `tracedecay-domain` /
+`tracedecay-application`, so its 3 references now import
+`tracedecay_domain::code_intelligence::{Edge, Node, FileRecord, GraphStats}`
+directly (`graph_structure_api.rs`, `graph_service.rs`). No other seam module
+turned out to be a façade — the rest are real root-crate code.
 
 ### Visibility
 
@@ -101,7 +110,6 @@ destination column is from the split target map.
 | `errors` | 7 | — | `tracedecay-runtime-core` |
 | `request_identity` | 4 | 4 | unassigned (root today) |
 | `application_surface` | 4 | — | `tracedecay-api` |
-| `types` | 3 | 2 | `tracedecay-runtime-core` |
 | `sessions` | 3 | — | `tracedecay-sessions` (mover assigned) |
 | `project_registry` | 3 | — | unassigned (root today) |
 | `daemon_client` | 3 | — | `tracedecay-daemon` / application transport |
