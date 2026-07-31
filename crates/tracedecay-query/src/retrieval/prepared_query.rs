@@ -17,8 +17,8 @@ use tracedecay_domain::{
 use super::fusion::{PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1, QueryDigestAuthenticationError};
 use super::{Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1};
 
-const PREPARED_QUERY_CURSOR_PREFIX_V1: &str = "ccq1.";
-const PREPARED_QUERY_CURSOR_REVISION_V1: u16 = 1;
+const PREPARED_QUERY_CURSOR_PREFIX_V2: &str = "ccq2.";
+const PREPARED_QUERY_CURSOR_REVISION_V2: u16 = 2;
 const PREPARED_QUERY_CURSOR_TTL_MICROS_V1: i64 = 15 * 60 * 1_000_000;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -79,6 +79,7 @@ pub struct PreparedQueryPageV1<T> {
     pub items: Vec<T>,
     pub total: u64,
     pub next_cursor: Option<String>,
+    pub expires_at: Option<UtcMicros>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +93,7 @@ struct PreparedQueryCursorPayloadV1 {
     candidate_set_digest: ManifestDigest,
     authentication_key_id: RetrievalCursorKeyId,
     next_offset: u32,
+    page_size: u32,
     expires_at: UtcMicros,
 }
 
@@ -155,6 +157,7 @@ impl PreparedQueryV1 {
                 if cursor.payload.operation != bindings.operation
                     || cursor.payload.scope_digest != bindings.scope_digest
                     || cursor.payload.query_binding_digest != bindings.query_binding_digest
+                    || cursor.payload.page_size != page_size
                 {
                     return Err(PreparedQueryErrorV1::Invalid);
                 }
@@ -168,7 +171,7 @@ impl PreparedQueryV1 {
         }
         let page_size = usize::try_from(page_size).map_err(|_| PreparedQueryErrorV1::Invalid)?;
         let end = start.saturating_add(page_size).min(items.len());
-        let next_cursor = if end < items.len() {
+        let (next_cursor, expires_at) = if end < items.len() {
             let expires_at = match &self.cursor {
                 Some(cursor) => cursor.payload.expires_at,
                 None => UtcMicros(
@@ -178,7 +181,7 @@ impl PreparedQueryV1 {
                 ),
             };
             let payload = PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V1,
+                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
                 operation: bindings.operation.clone(),
                 scope_digest: bindings.scope_digest.clone(),
                 generation: bindings.generation.clone(),
@@ -186,6 +189,8 @@ impl PreparedQueryV1 {
                 candidate_set_digest,
                 authentication_key_id: self.authority.active_query_key_id(),
                 next_offset: u32::try_from(end).map_err(|_| PreparedQueryErrorV1::Unavailable)?,
+                page_size: u32::try_from(page_size)
+                    .map_err(|_| PreparedQueryErrorV1::Unavailable)?,
                 expires_at,
             };
             let authentication = self
@@ -195,14 +200,15 @@ impl PreparedQueryV1 {
                     &cursor_authentication_payload_bytes(&payload)?,
                 )
                 .map_err(map_authority_error)?;
-            Some(encode_cursor(payload, authentication)?)
+            (Some(encode_cursor(payload, authentication)?), Some(expires_at))
         } else {
-            None
+            (None, None)
         };
         Ok(PreparedQueryPageV1 {
             items: items.into_iter().skip(start).take(end - start).collect(),
             total,
             next_cursor,
+            expires_at,
         })
     }
 }
@@ -261,6 +267,7 @@ fn cursor_authentication_payload_bytes(
         candidate_set_digest: &'a ManifestDigest,
         authentication_key_id: &'a RetrievalCursorKeyId,
         next_offset: u32,
+        page_size: u32,
         expires_at: UtcMicros,
     }
     serde_json::to_vec(&PreparedQueryCursorAuthenticationPayloadV1 {
@@ -273,6 +280,7 @@ fn cursor_authentication_payload_bytes(
         candidate_set_digest: &payload.candidate_set_digest,
         authentication_key_id: &payload.authentication_key_id,
         next_offset: payload.next_offset,
+        page_size: payload.page_size,
         expires_at: payload.expires_at,
     })
     .map_err(|_| PreparedQueryErrorV1::Unavailable)
@@ -288,7 +296,7 @@ fn encode_cursor(
     })
     .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
     Ok(format!(
-        "{PREPARED_QUERY_CURSOR_PREFIX_V1}{}",
+        "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
         hex::encode(bytes)
     ))
 }
@@ -297,7 +305,7 @@ fn decode_cursor(
     encoded: &str,
 ) -> Result<AuthenticatedPreparedQueryCursorV1, PreparedQueryErrorV1> {
     let encoded = encoded
-        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V1)
+        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
         .ok_or(PreparedQueryErrorV1::Invalid)?;
     let bytes = hex::decode(encoded).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if hex::encode(&bytes) != encoded {
@@ -306,7 +314,7 @@ fn decode_cursor(
     let cursor: AuthenticatedPreparedQueryCursorV1 =
         serde_json::from_slice(&bytes).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if serde_json::to_vec(&cursor).map_err(|_| PreparedQueryErrorV1::Invalid)? != bytes
-        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V1
+        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V2
     {
         return Err(PreparedQueryErrorV1::Invalid);
     }
@@ -335,7 +343,7 @@ mod tests {
     fn cursor(next_offset: u32, expires_at: UtcMicros) -> String {
         encode_cursor(
             PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V1,
+                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
                 operation: "code_exact_occurrence".to_owned(),
                 scope_digest: digest("scope"),
                 generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
@@ -344,6 +352,7 @@ mod tests {
                 authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
                     .expect("cursor key"),
                 next_offset,
+                page_size: 1,
                 expires_at,
             },
             QueryDigest::new(
@@ -382,9 +391,9 @@ mod tests {
         assert_eq!(decode_cursor(&tampered), Err(PreparedQueryErrorV1::Invalid));
 
         let uppercase = format!(
-            "{PREPARED_QUERY_CURSOR_PREFIX_V1}{}",
+            "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
             encoded
-                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V1)
+                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V2)
                 .to_ascii_uppercase()
         );
         assert_eq!(
@@ -399,13 +408,9 @@ mod tests {
         let second = cursor(2, UtcMicros(1_000));
 
         assert_eq!(first, second);
-        assert_eq!(
-            first,
-            "ccq1.7b227061796c6f6164223a7b227265766973696f6e223a312c226f7065726174696f6e223a22636f64655f65786163745f6f6363757272656e6365222c2273636f70655f646967657374223a227368613235363a32653534336135303264393764333038306466363631313337386438633532633336623933633731653762663064373862313961313234353166313432363031222c2267656e65726174696f6e223a2267656e65726174696f6e2e63616c6c61626c652d70616765222c2271756572795f62696e64696e675f646967657374223a227368613235363a34633466323861306663396134663239353030323964353230373734343530366362316136633261383336626534366264643132366366366666353037333039222c2263616e6469646174655f7365745f646967657374223a227368613235363a66623464373630353138396533313032646463623665323431656531336566353530313739373333616130306266313834663732633133653565333263323065222c2261757468656e7469636174696f6e5f6b65795f6964223a22637572736f722d6b65792e63616c6c61626c652d70616765222c226e6578745f6f6666736574223a322c22657870697265735f6174223a313030307d2c2261757468656e7469636174696f6e223a7b22707269766163795f646f6d61696e223a22707269766163792e63616c6c61626c652d70616765222c226b65795f65706f6368223a312c226d6163223a22686d61632d7368613235363a37373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737373737227d7d"
-        );
         let first_bytes = hex::decode(
             first
-                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V1)
+                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
                 .expect("prepared cursor prefix"),
         )
         .expect("prepared cursor bytes");
@@ -421,7 +426,7 @@ mod tests {
         // The authentication payload is domain-separated for prepared cursors and
         // must never embed query sanitizer/normalization revision strings.
         let payload = PreparedQueryCursorPayloadV1 {
-            revision: PREPARED_QUERY_CURSOR_REVISION_V1,
+            revision: PREPARED_QUERY_CURSOR_REVISION_V2,
             operation: "code_exact_occurrence".to_owned(),
             scope_digest: digest("scope"),
             generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
@@ -430,6 +435,7 @@ mod tests {
             authentication_key_id: RetrievalCursorKeyId::new("cursor-key.callable-page")
                 .expect("cursor key"),
             next_offset: 2,
+            page_size: 1,
             expires_at: UtcMicros(1_000),
         };
         let bytes = cursor_authentication_payload_bytes(&payload).expect("payload bytes");

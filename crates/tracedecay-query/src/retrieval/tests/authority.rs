@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    ComponentRevision, EphemeralSanitizedQueryViewV1, QueryMac, QueryNormalizationRevision,
-    RetrievalCursorKeyId, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ComponentRevision, EphemeralSanitizedQueryViewV1, PrincipalId, QueryMac,
+    QueryNormalizationRevision, RepositoryId, RetrievalCursorKeyId, RetrieverKind,
+    RetrieverOutcome, SanitizerRevision, TemporalModeV1,
 };
 
 use super::{batch, composition_lanes, id, no_caps, profile, request};
@@ -202,6 +203,37 @@ fn prepared_cursor_authentication_binds_the_selected_key_id() {
             QueryDigestAuthenticationError::AuthenticationFailed,
         ))
     );
+}
+
+#[test]
+fn prepared_cursor_authentication_binds_principal_scope_and_temporal_mode() {
+    let request = request();
+    let active_key = id::<RetrievalCursorKeyId>("retrieval-key.authority.v1");
+    let authority = authority();
+    let payload = br#"{"cursor":"prepared"}"#;
+    let digest = authority
+        .authenticate_prepared_cursor_payload(&request, payload)
+        .expect("prepared cursor digest");
+
+    let mut mismatches = Vec::new();
+    let mut principal = request.clone();
+    principal.principal = id::<PrincipalId>("principal.other");
+    mismatches.push(principal);
+    let mut scope = request.clone();
+    scope.scope.root.repository = id::<RepositoryId>("repository.other");
+    mismatches.push(scope);
+    let mut temporal = request.clone();
+    temporal.temporal_mode = TemporalModeV1::Evolution;
+    mismatches.push(temporal);
+
+    for mismatch in mismatches {
+        assert_eq!(
+            authority.verify_prepared_cursor_payload(&active_key, &mismatch, payload, &digest),
+            Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+                QueryDigestAuthenticationError::AuthenticationFailed,
+            ))
+        );
+    }
 }
 
 #[test]

@@ -15,7 +15,7 @@ use tracedecay_domain::{
     RankingDecision, RankingDecisionKind, SourceOccurrenceId,
 };
 
-use super::fusion::compare_fused;
+use super::ordering::compare_fused;
 
 /// Failures of the dedupe stage.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
