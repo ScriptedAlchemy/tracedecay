@@ -222,10 +222,6 @@ pub struct GitWatcher {
 
 pub(super) struct GitWatcherInner {
     pub(super) config: SyncConfig,
-    /// Profile selected by the owning daemon. Every open and administration
-    /// action must use this identity rather than whichever profile a watcher
-    /// task happens to resolve from its environment.
-    profile_root: PathBuf,
     /// Serializes every store-writing lifetime with daemon branch administration.
     pub(super) administration: StoreAdministration,
     maintenance: MaintenanceCoordinator,
@@ -256,7 +252,6 @@ impl GitWatcher {
         Self::from_parts(
             SyncConfig::default(),
             StoreAdministration::default(),
-            current_profile_root(),
             false,
             MaintenanceCoordinator::default(),
         )
@@ -265,7 +260,6 @@ impl GitWatcher {
     fn from_parts(
         config: SyncConfig,
         administration: StoreAdministration,
-        profile_root: PathBuf,
         enabled: bool,
         maintenance: MaintenanceCoordinator,
     ) -> Self {
@@ -273,7 +267,6 @@ impl GitWatcher {
         Self {
             inner: Arc::new(GitWatcherInner {
                 config,
-                profile_root,
                 administration,
                 maintenance,
                 enabled,
@@ -295,7 +288,6 @@ impl GitWatcher {
         Self::new_with_administration(
             config,
             StoreAdministration::default(),
-            current_profile_root(),
             MaintenanceCoordinator::default(),
         )
     }
@@ -306,15 +298,13 @@ impl GitWatcher {
     pub(super) fn new_with_administration(
         config: SyncConfig,
         administration: StoreAdministration,
-        profile_root: PathBuf,
         maintenance: MaintenanceCoordinator,
     ) -> Self {
         let enabled = config.auto_watch;
-        Self::from_parts(config, administration, profile_root, enabled, maintenance)
+        Self::from_parts(config, administration, enabled, maintenance)
     }
 
     // Doctor watcher-health surface (follow-up wiring).
-    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.inner.enabled
     }
@@ -420,13 +410,6 @@ impl GitWatcher {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
-}
-
-/// Falls back to an empty path only when the process cannot resolve a current
-/// profile. Daemon construction passes its canonical profile explicitly; the
-/// fallback exists solely for standalone/test construction.
-fn current_profile_root() -> PathBuf {
-    crate::storage::default_profile_root().unwrap_or_default()
 }
 
 async fn retained_project_graph(

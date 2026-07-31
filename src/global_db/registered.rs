@@ -57,7 +57,6 @@ impl RegisteredWorkApplicationServicesV1 {
 ///
 /// [`WorkflowSqliteAuthority`]: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority
 pub(crate) struct RegisteredWorkflowApplicationServicesV1 {
-    authority: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     definitions: tracedecay_application::WorkflowDefinitionService<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     >,
@@ -67,12 +66,6 @@ pub(crate) struct RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
-    pub(crate) fn authority(
-        &self,
-    ) -> tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority {
-        self.authority.clone()
-    }
-
     pub(crate) fn definitions(
         &self,
     ) -> &tracedecay_application::WorkflowDefinitionService<
@@ -363,7 +356,6 @@ impl RegisteredGlobalDb {
     ) -> crate::errors::Result<RegisteredWorkflowApplicationServicesV1> {
         let authority = self.workflow_storage()?;
         Ok(RegisteredWorkflowApplicationServicesV1 {
-            authority: authority.clone(),
             definitions: tracedecay_application::WorkflowDefinitionService::new(authority.clone()),
             handoffs: tracedecay_application::TaskHandoffService::new(authority),
         })

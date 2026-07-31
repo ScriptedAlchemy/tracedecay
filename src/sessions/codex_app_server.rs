@@ -187,22 +187,6 @@ pub fn run_prompt_with_codex_app_server(
     run_prompt_with_optional_cancellation(prompt, config, thread_source, None, None, None)
 }
 
-pub(crate) fn run_prompt_with_codex_app_server_cancellable(
-    prompt: &str,
-    config: &CodexAppServerSummaryConfig,
-    thread_source: &str,
-    cancellation: &CodexAppServerCancellation,
-) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_cancellation(
-        prompt,
-        config,
-        thread_source,
-        Some(cancellation),
-        None,
-        None,
-    )
-}
-
 pub(crate) fn run_work_with_codex_app_server(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
