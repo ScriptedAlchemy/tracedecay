@@ -618,7 +618,9 @@ async fn run_drop_pass(
         return Ok(report);
     }
 
-    let txn = transaction.expect("apply mode starts a session retention drop transaction");
+    let txn = transaction.ok_or_else(|| {
+        LcmError::Db("apply mode did not start a session retention drop transaction".to_owned())
+    })?;
     for target in &targets {
         authorize("drop session retention row")?;
         // Drop the projected twin first (its FTS delete trigger fires), then
@@ -903,7 +905,9 @@ async fn run_dedupe_pass(
         return Ok(report);
     }
 
-    let txn = transaction.expect("apply mode starts a session retention dedupe transaction");
+    let txn = transaction.ok_or_else(|| {
+        LcmError::Db("apply mode did not start a session retention dedupe transaction".to_owned())
+    })?;
     let delete_sql = format!(
         "DELETE FROM session_messages
          WHERE provider = ?1
