@@ -9,6 +9,10 @@ owns how those semantics look, move, and connect. Normative like 11a/11b: every
 channel encodes a stated measurement, absence is drawn, degenerate
 distributions are said rather than drawn, caps are captioned.
 
+Plan 24's unreleased-contract rule applies here: branch-only Work DTOs and
+routes change in place, while product graph/item versions remain UI-visible
+history/CAS identities rather than evidence for another wire version.
+
 The user explicitly requires a first-class TraceDecay task graph/Kanban
 inspired by Hermes but more powerful; it is a product feature, not roadmap
 plumbing and does not require GitHub. PR14 ships Kanban, DAG, timeline, causal,
