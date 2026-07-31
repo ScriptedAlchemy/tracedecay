@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(summary.status, DirectEvaluationStatusV1::Pass);
         assert_eq!(
             summary.workload_digest,
-            "sha256:9c793070efc601a13e145c233dbc6fb859764ce9d24d64c636552c9e020db1ce"
+            "sha256:a8e1def7179a2aa8f490676724514b4284aaf727f7f9e501eda3b3e6554b1347"
         );
         assert_eq!(summary.profile_count, 3);
     }

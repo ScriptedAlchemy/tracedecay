@@ -3,6 +3,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 
 #[test]
+fn legacy_sealed_generation_is_rejected_before_manifest_decode() {
+    let legacy = br#"{"generation":{"format_revision":2}}"#;
+
+    assert!(
+        !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(legacy)
+            .expect("legacy format probe")
+    );
+    let error = CodeIndexPublishedGenerationV1::decode_sealed(legacy)
+        .expect_err("legacy generation must require a rebuild");
+    assert!(
+        error
+            .to_string()
+            .contains("format revision is incompatible")
+    );
+}
+
+#[test]
 fn code_index_extraction_parallelism_is_bounded_by_files_and_capacity() {
     let available = std::thread::available_parallelism()
         .map_or(1, usize::from)

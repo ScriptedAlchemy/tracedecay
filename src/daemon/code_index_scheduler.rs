@@ -257,6 +257,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     "immutable code-generation filename does not match its sealed bytes",
                 ));
             }
+            if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&bytes)
+                .map_err(Self::unavailable)?
+            {
+                continue;
+            }
             let generation =
                 CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::unavailable)?;
             if generation.manifest().generation_id != *generation_id {
@@ -300,6 +305,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
             return Err(Self::unavailable(
                 "sealed code-generation bytes do not match the active pointer digest",
             ));
+        }
+        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&generation_bytes)
+            .map_err(Self::unavailable)?
+        {
+            return Ok(None);
         }
         let generation = CodeIndexPublishedGenerationV1::decode_sealed(&generation_bytes)
             .map_err(Self::unavailable)?;
