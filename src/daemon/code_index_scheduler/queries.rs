@@ -48,8 +48,9 @@ use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceR
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1,
-    QueryExecutionContractErrorV1, inspect_prepared_query_cursor,
+    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
+    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QueryExecutionContractErrorV1,
+    route_authenticated_prepared_query_cursor,
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
@@ -320,6 +321,34 @@ fn retrieval_budget(page_size: u32) -> RetrievalBudget {
         max_hydration_bytes: u64::from(page_size).saturating_mul(65_536),
         deadline_micros: None,
     }
+}
+
+fn prepared_routing_bindings(
+    context: &RetrievalPortContext<'_>,
+    temporal_mode: TemporalModeV1,
+    operation: &'static str,
+    query_binding_digest: ManifestDigest,
+    page_size: u32,
+) -> Result<PreparedQueryRoutingBindingsV1, CallableCodeCursorError> {
+    Ok(PreparedQueryRoutingBindingsV1 {
+        operation: operation.to_owned(),
+        scope_digest: context.request.scope().scope_digest.clone(),
+        principal: typed::<PrincipalId>(context.request.actor().to_string())
+            .map_err(|_| CallableCodeCursorError::Invalid)?,
+        root: SingleRootScopeV1 {
+            repository: context.request.scope().repository_id.clone(),
+            worktree: Some(context.request.scope().worktree_id.clone()),
+            reference: context.request.scope().reference.clone(),
+        },
+        temporal_mode,
+        query_binding_digest,
+        page_size,
+        authorization_revision: AuthorizationRevision::new(format!(
+            "authorization.grant.{}",
+            context.request.grant().revision
+        ))
+        .map_err(|_| CallableCodeCursorError::Invalid)?,
+    })
 }
 
 pub(in crate::daemon) fn maximum_retrieval_budget() -> RetrievalBudget {
@@ -1184,7 +1213,20 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a ExactOccurrenceRequest,
     ) -> CallableCodeQueryFuture<'a, ExactOccurrenceRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, query_binding_digest) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_exact_occurrence",
+                (
+                    "code_exact_occurrence",
+                    &request.literal,
+                    &request.kind,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = query_finished_at();
@@ -1208,16 +1250,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 budget: base.budget,
                 base: base.clone(),
                 query_view: &query_view,
-            };
-            let Ok(query_binding_digest) = canonical_sha256(&(
-                "code_exact_occurrence",
-                &request.literal,
-                &request.kind,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(finished_at);
             };
             let Ok(owners) = latest.production_query_owners() else {
                 return unavailable(finished_at);
@@ -1259,7 +1291,22 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a PhraseSearchRequest,
     ) -> CallableCodeQueryFuture<'a, LexicalOccurrenceRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, query_binding_digest) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_phrase_search",
+                (
+                    "code_phrase_search",
+                    request.query.as_str(),
+                    &request.phrases,
+                    &request.field_filters,
+                    request.fuzzy_budget,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = query_finished_at();
@@ -1307,18 +1354,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 budget: base.budget,
                 base: base.clone(),
             };
-            let Ok(query_binding_digest) = canonical_sha256(&(
-                "code_phrase_search",
-                request.query.as_str(),
-                &request.phrases,
-                &request.field_filters,
-                request.fuzzy_budget,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(finished_at);
-            };
             let Ok(owners) = latest.production_query_owners() else {
                 return unavailable(finished_at);
             };
@@ -1357,7 +1392,21 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeRelationRequest,
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, query_binding_digest) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_callees",
+                (
+                    "code_callees",
+                    &request.node_id,
+                    request.maximum_depth,
+                    request.resolve_trait_dispatch,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let latest = &prepared.latest;
             let served_generation = latest.generation.manifest().generation_id.clone();
             let finished_at = query_finished_at();
@@ -1401,17 +1450,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 budget: base.budget,
                 base: base.clone(),
             };
-            let Ok(query_binding_digest) = canonical_sha256(&(
-                "code_callees",
-                &request.node_id,
-                request.maximum_depth,
-                request.resolve_trait_dispatch,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(finished_at);
-            };
             let Ok(owners) = latest.production_query_owners() else {
                 return unavailable(finished_at);
             };
@@ -1450,7 +1488,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeSymbolSearchRequest,
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_symbol_search",
+                (
+                    "code_symbol_search",
+                    request.query.as_str(),
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let query = request.query.as_str().to_ascii_lowercase();
             let mut ranked = prepared
                 .latest
@@ -1493,15 +1543,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .map(|(_, record)| record)
                 .collect::<Vec<_>>();
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_symbol_search",
-                request.query.as_str(),
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             finish_direct_query(
                 &prepared,
                 &context,
@@ -1520,7 +1561,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a QualifiedNameRequest,
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_qualified_name",
+                (
+                    "code_qualified_name",
+                    &request.qualified_name,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let mut items = prepared
                 .latest
                 .generation
@@ -1533,15 +1586,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .collect::<Vec<_>>();
             items.sort_by(|left, right| left.node_id.cmp(&right.node_id));
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_qualified_name",
-                &request.qualified_name,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             finish_direct_query(
                 &prepared,
                 &context,
@@ -1560,7 +1604,21 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeSignatureRequest,
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_signature_search",
+                (
+                    "code_signature_search",
+                    &request.returns,
+                    &request.params,
+                    request.is_async,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let mut items = prepared
                 .latest
                 .generation
@@ -1589,17 +1647,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .then(left.node_id.cmp(&right.node_id))
             });
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_signature_search",
-                &request.returns,
-                &request.params,
-                request.is_async,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             finish_direct_query(
                 &prepared,
                 &context,
@@ -1618,7 +1665,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeImplementationsRequest,
     ) -> PortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_implementations",
+                (
+                    "code_implementations",
+                    &request.selector,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let selector = match &request.selector {
                 tracedecay_application::retrieval::ImplementationSelector::Trait { name }
                 | tracedecay_application::retrieval::ImplementationSelector::Method { name } => {
@@ -1653,15 +1712,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             items.sort_by(|left, right| left.symbol.node_id.cmp(&right.symbol.node_id));
             items.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_implementations",
-                &request.selector,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
                 items,
@@ -1688,7 +1738,20 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeHierarchyRequest,
     ) -> PortFuture<'a, TypeHierarchyRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_type_hierarchy",
+                (
+                    "code_type_hierarchy",
+                    &request.node_id,
+                    request.maximum_depth,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
                 return unavailable(query_finished_at());
             };
@@ -1716,16 +1779,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 })
                 .collect::<Vec<_>>();
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_type_hierarchy",
-                &request.node_id,
-                request.maximum_depth,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
                 items,
@@ -1752,7 +1805,21 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeRelationRequest,
     ) -> PortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_callers",
+                (
+                    "code_callers",
+                    &request.node_id,
+                    request.maximum_depth,
+                    request.resolve_trait_dispatch,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
                 return unavailable(query_finished_at());
             };
@@ -1771,17 +1838,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.scope,
             );
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_callers",
-                &request.node_id,
-                request.maximum_depth,
-                request.resolve_trait_dispatch,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
                 items,
@@ -1808,7 +1864,20 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeImpactRequest,
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_impact",
+                (
+                    "code_impact",
+                    &request.node_id,
+                    request.maximum_depth,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
                 return unavailable(query_finished_at());
             };
@@ -1839,16 +1908,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .map(|relation| relation.symbol)
                 .collect::<Vec<_>>();
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_impact",
-                &request.node_id,
-                request.maximum_depth,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             finish_direct_query(
                 &prepared,
                 &context,
@@ -1867,7 +1926,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a ModuleApiRequest,
     ) -> PortFuture<'a, SymbolPrimitiveRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_module_api",
+                (
+                    "code_module_api",
+                    &request.path,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let prefix = format!("{}/", request.path.trim_end_matches('/'));
             let mut items = prepared
                 .latest
@@ -1894,15 +1965,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .then(left.node_id.cmp(&right.node_id))
             });
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_module_api",
-                &request.path,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             finish_direct_query(
                 &prepared,
                 &context,
@@ -1921,7 +1983,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a SourceMetadataRequest,
     ) -> PortFuture<'a, SourceMetadataRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_source_metadata",
+                (
+                    "code_source_metadata",
+                    &request.files,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let requested = request.files.iter().collect::<BTreeSet<_>>();
             let items = prepared
                 .latest
@@ -1945,15 +2019,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 })
                 .collect::<Vec<_>>();
             let eligible = request.files.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_source_metadata",
-                &request.files,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
                 items,
@@ -1980,7 +2045,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeFacetRequest,
     ) -> PortFuture<'a, CodeFacetRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_facets",
+                (
+                    "code_facets",
+                    request.dimension,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let mut counts = std::collections::BTreeMap::<String, u64>::new();
             match request.dimension {
                 CodeFacetDimension::Kind => {
@@ -2023,15 +2100,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 })
                 .collect::<Vec<_>>();
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_facets",
-                request.dimension,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
                 items,
@@ -2058,7 +2126,18 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeTimelineRequest,
     ) -> PortFuture<'a, CodeTimelineRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_timeline",
+                (
+                    "code_timeline",
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let generation = prepared.latest.generation.manifest().generation_id.clone();
             let items = vec![CodeTimelineRecord {
                 generation: generation.clone(),
@@ -2081,14 +2160,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .filter(|symbol| path_is_in_code_query_scope(&symbol.file, &request.scope))
                     .count() as u64,
             }];
-            let Ok(binding) = canonical_sha256(&(
-                "code_timeline",
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             let page = CodeQueryPage::new(generation, items, None, None, None)
                 .unwrap_or_else(|_| panic!("generation-owned timeline creates a valid page"));
             finish_direct_query(
@@ -2133,7 +2204,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeNavigationRequest,
     ) -> PortFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let prepared = prepare_callable_query_or_return!(self, context, request);
+            let (prepared, binding) = prepare_callable_query_or_return!(
+                self,
+                context,
+                request,
+                "code_references",
+                (
+                    "code_references",
+                    &request.node_id,
+                    &request.scope,
+                    &request.meta.projection,
+                    &request.meta.order,
+                )
+            );
             let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
                 return unavailable(query_finished_at());
             };
@@ -2157,15 +2240,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 &request.scope,
             );
             let eligible = items.len() as u64;
-            let Ok(binding) = canonical_sha256(&(
-                "code_references",
-                &request.node_id,
-                &request.scope,
-                &request.meta.projection,
-                &request.meta.order,
-            )) else {
-                return unavailable(query_finished_at());
-            };
             let page = CodeQueryPage::new(
                 prepared.latest.generation.manifest().generation_id.clone(),
                 items,
@@ -2195,7 +2269,19 @@ fn navigation_symbol_query<'a>(
     resolve_type: bool,
 ) -> PortFuture<'a, SymbolPrimitiveRecord> {
     Box::pin(async move {
-        let prepared = prepare_callable_query_or_return!(registry, context, request);
+        let (prepared, binding) = prepare_callable_query_or_return!(
+            registry,
+            context,
+            request,
+            operation,
+            (
+                operation,
+                &request.node_id,
+                &request.scope,
+                &request.meta.projection,
+                &request.meta.order,
+            )
+        );
         let Ok(start) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
             return unavailable(query_finished_at());
         };
@@ -2230,15 +2316,6 @@ fn navigation_symbol_query<'a>(
         }
         items.retain(|symbol| path_is_in_code_query_scope(&symbol.file, &request.scope));
         let eligible = items.len() as u64;
-        let Ok(binding) = canonical_sha256(&(
-            operation,
-            &request.node_id,
-            &request.scope,
-            &request.meta.projection,
-            &request.meta.order,
-        )) else {
-            return unavailable(query_finished_at());
-        };
         finish_direct_query(
             &prepared,
             &context,
