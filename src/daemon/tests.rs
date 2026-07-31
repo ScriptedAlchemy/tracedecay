@@ -31,6 +31,7 @@ mod compatibility;
 mod handshake;
 mod lifecycle;
 mod logging;
+mod multi_root_journey;
 mod ownership;
 mod replay;
 mod restart_proxy;
@@ -82,9 +83,7 @@ fn multi_root_families_refuse_cross_family_fallback() {
     use crate::application_surface::ApplicationSurfaceOperation;
     use tracedecay_application::MultiRootOperationV1;
 
-    let git = MultiRootOperationV1::Git {
-        request: json!({}),
-    };
+    let git = MultiRootOperationV1::Git { request: json!({}) };
     assert!(multi_root_family_allows(
         &git,
         ApplicationSurfaceOperation::GitStatus
@@ -93,9 +92,7 @@ fn multi_root_families_refuse_cross_family_fallback() {
         &git,
         ApplicationSurfaceOperation::CodePhraseSearch
     ));
-    let query = MultiRootOperationV1::Query {
-        request: json!({}),
-    };
+    let query = MultiRootOperationV1::Query { request: json!({}) };
     assert!(multi_root_family_allows(
         &query,
         ApplicationSurfaceOperation::CodePhraseSearch
