@@ -32,6 +32,13 @@ Cursor Core component-ownership conflict. Exact test names, counts, generated
 matrices, and intermediate registration scaffolding are historical evidence,
 not acceptance requirements.
 
+Installed host/provider formats and names retain compatibility only when a
+released bundle/package or live host installation proves them. Kimi Code,
+OpenCode, and other PR13 branch-local bundle shapes change in place; fixture
+versions and PR6/PR13 sequencing alone require no alias, deprecation, dual
+reader, or migration. Bundle/protocol negotiation remains required for actual
+installed-version skew.
+
 ## PR13 user outcome
 
 A user can install TraceDecay into every supported host, make an edit or stop
@@ -271,8 +278,10 @@ the host observation replay spool.
 
 ## Replacement and deletion
 
-- Delete PR6 compatibility generators or duplicate public integration shapes
-  once all package projections consume the single existing manifest.
+- Delete unreleased PR6 compatibility generators and duplicate integration
+  shapes once all package projections consume the single existing manifest;
+  branch history creates no compatibility window. Preserve only shapes proven
+  in a released bundle/package or live host installation.
 - Remove the generic source-connector contract, generic capability catalog,
   future work/task/native-execution projection fields, exact type/file/schema
   inventories, enumerated fixture-directory manifests, Cartesian host
