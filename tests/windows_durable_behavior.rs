@@ -34,9 +34,7 @@ mod domain_session_contract;
 
 mod lcm_schema_durability {
     use tempfile::TempDir;
-    use tracedecay::application::host_admission::{
-        HostAdmissionScope, HostAdmissionTestRuntimeV1,
-    };
+    use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     use super::common::{lcm_payload_message, lcm_payload_session};
 
