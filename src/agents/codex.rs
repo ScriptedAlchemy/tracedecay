@@ -59,6 +59,25 @@ impl AgentIntegration for CodexIntegration {
         true
     }
 
+    fn preflight_non_interactive_install(
+        &self,
+        _ctx: &InstallContext,
+    ) -> Result<NonInteractiveInstallOutcome> {
+        // Codex exposes plugin activation only through its interactive plugin
+        // UI. Preflight reports the same typed deferral prepare returns so a
+        // read-only orchestration pass (dogfood) accepts the state instead of
+        // failing on the activation-capability probe.
+        Ok(NonInteractiveInstallOutcome::DeferredUserAction(
+            DeferredUserAction {
+                remediation: "Non-interactive Codex plugin activation is unavailable. In \
+                              Codex's plugin UI, activate tracedecay from the personal \
+                              marketplace, then re-run doctor."
+                    .to_string(),
+                staged_paths: Vec::new(),
+            },
+        ))
+    }
+
     fn prepare_non_interactive_install(
         &self,
         ctx: &InstallContext,
