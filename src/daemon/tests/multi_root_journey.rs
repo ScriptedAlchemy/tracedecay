@@ -160,7 +160,7 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
             format!("request.multi-root.pre-admission-execute-{index}"),
             MultiRootExecuteRequestV1::new(
                 scope_set_id.clone(),
-                pre_admission_revision.clone(),
+                pre_admission_revision,
                 pre_admission_digest.clone(),
                 operation,
                 0,
@@ -255,7 +255,7 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
     let second_uri = url::Url::from_file_path(second.path())
         .expect("second URI")
         .to_string();
-    let mut lsp_scopes = vec![
+    let mut lsp_scopes = [
         crate::daemon::project_open_owners::resolved_scope_for_project(
             first.path(),
             &first_project,
@@ -458,7 +458,7 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
                 format!("request.multi-root.execute-{index}"),
                 MultiRootExecuteRequestV1::new(
                     scope_set_id.clone(),
-                    revision.clone(),
+                    revision,
                     digest.clone(),
                     operation,
                     0,

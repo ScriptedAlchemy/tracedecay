@@ -61,7 +61,7 @@ pub fn capture_exact_git_snapshot_for_test(
     repository_id: tracedecay_domain::RepositoryId,
     worktree_id: tracedecay_domain::WorktreeId,
     captured_at: tracedecay_domain::UtcMicros,
-) -> tracedecay_domain::RepositoryStateSnapshotV1 {
+) -> crate::errors::Result<tracedecay_domain::RepositoryStateSnapshotV1> {
     git_transactions::capture_exact_snapshot_for_test(
         repository_root,
         project_id,
@@ -2015,20 +2015,28 @@ impl DaemonInvocationState {
                 );
             }
         };
-        let query_digest = tracedecay_domain::canonical_sha256(&(
+        let Ok(query_digest) = tracedecay_domain::canonical_sha256(&(
             "tracedecay.daemon.multi-root-query.v1",
             &operation_value,
-        ))
-        .expect("validated operation is canonical");
-        let order_digest = tracedecay_domain::canonical_sha256(&(
+        )) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::InvalidRequest,
+            );
+        };
+        let Ok(order_digest) = tracedecay_domain::canonical_sha256(&(
             "tracedecay.daemon.multi-root-order.v1",
             scope_set
                 .roots()
                 .iter()
                 .map(|scope| &scope.scope_digest)
                 .collect::<Vec<_>>(),
-        ))
-        .expect("validated scope set is canonical");
+        )) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::InvalidRequest,
+            );
+        };
         let database = match store_administration.registered_profile_database().await {
             Ok(database) => database,
             Err(_) => {
@@ -2048,23 +2056,41 @@ impl DaemonInvocationState {
             {
                 Ok(context) => context,
                 Err(_) => {
-                    generations.push(unavailable_root_generation(
+                    let Ok(generation) = unavailable_root_generation(
                         scope,
                         tracedecay_domain::ScopeUnavailableReasonV1::StoreUnavailable,
-                    ));
+                    ) else {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            service::invocation::DaemonInvocationProblem::InvalidRequest,
+                        );
+                    };
+                    generations.push(generation);
                     continue;
                 }
             };
             let Some(registry_context) = registry_context else {
-                generations.push(denied_root_generation(scope));
+                let Ok(generation) = denied_root_generation(scope) else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    );
+                };
+                generations.push(generation);
                 continue;
             };
             let root = PathBuf::from(registry_context.project.canonical_root);
             if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
-                generations.push(unavailable_root_generation(
+                let Ok(generation) = unavailable_root_generation(
                     scope,
                     tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-                ));
+                ) else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    );
+                };
+                generations.push(generation);
                 continue;
             }
             let Some((context, _authority_digest)) = self
@@ -2072,7 +2098,13 @@ impl DaemonInvocationState {
                 .multi_root_query_context(&root, scope, ordinal, observed_at)
                 .await
             else {
-                generations.push(denied_root_generation(scope));
+                let Ok(generation) = denied_root_generation(scope) else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    );
+                };
+                generations.push(generation);
                 continue;
             };
             let source_revision = if matches!(
@@ -2082,22 +2114,33 @@ impl DaemonInvocationState {
                 match explicit_git_state(&root) {
                     Some(head) => head,
                     None => {
-                        generations.push(unavailable_root_generation(
+                        let Ok(generation) = unavailable_root_generation(
                             scope,
                             tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-                        ));
+                        ) else {
+                            return DaemonInvocationResponse::problem(
+                                request_id,
+                                service::invocation::DaemonInvocationProblem::InvalidRequest,
+                            );
+                        };
+                        generations.push(generation);
                         continue;
                     }
                 }
             } else {
                 scope.scope_digest.as_str().to_owned()
             };
-            let generation = frozen_root_generation(
+            let Ok(generation) = frozen_root_generation(
                 scope,
                 scope_set.digest(),
                 &source_revision,
                 &operation_value,
-            );
+            ) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            };
             let value = self
                 .execute_one_multi_root_operation(
                     store_administration,
@@ -2120,27 +2163,40 @@ impl DaemonInvocationState {
                 },
             };
             contexts.push(context);
-            generations.push(
-                tracedecay_domain::RootScopeOutcomeV1::new(
-                    scope.scope_digest.clone(),
-                    tracedecay_domain::ScopeOutcome::Exact(generation),
-                )
-                .expect("persisted scope digest is valid"),
-            );
+            let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
+                scope.scope_digest.clone(),
+                tracedecay_domain::ScopeOutcome::Exact(generation),
+            ) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            };
+            generations.push(generation);
             outcomes.insert(scope.scope_digest.clone(), outcome);
         }
+        let Ok(capability_id) = tracedecay_tool_catalog::CapabilityId::new(
+            project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1,
+        ) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        };
+        let Ok(use_case_id) = tracedecay_tool_catalog::UseCaseId::new(
+            project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1,
+        ) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        };
         let query = tracedecay_application::MultiRootQueryRequestV1 {
             scope_set,
             contexts,
             root_generations: generations,
-            capability_id: tracedecay_tool_catalog::CapabilityId::new(
-                project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1,
-            )
-            .expect("static multi-root capability is valid"),
-            use_case_id: tracedecay_tool_catalog::UseCaseId::new(
-                project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1,
-            )
-            .expect("static multi-root use case is valid"),
+            capability_id,
+            use_case_id,
             observed_at,
             query: operation_value,
             query_digest,
@@ -2160,12 +2216,18 @@ impl DaemonInvocationState {
                 );
             }
         };
+        let Ok(application_request_id) = tracedecay_application::RequestId::new(request_id.clone())
+        else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::InvalidRequest,
+            );
+        };
         let Some((scope, outcome)) = self
             .service
             .multi_root_evidence(
                 active_project_root,
-                tracedecay_application::RequestId::new(request_id.clone())
-                    .expect("validated daemon request id"),
+                application_request_id,
                 "execute",
                 page,
                 observed_at,
@@ -2256,14 +2318,15 @@ impl DaemonInvocationState {
                     tracedecay_application::RequestId::new(format!(
                         "request.multi-root.surface.{ordinal}"
                     ))
-                    .expect("static federated request id is valid"),
-                    tracedecay_application::PageRequest::new(100, None)
-                        .expect("static federated page request is valid"),
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?,
+                    tracedecay_application::PageRequest::new(100, None).map_err(|_| {
+                        service::invocation::DaemonInvocationProblem::InvalidRequest
+                    })?,
                     deadline,
                     tracedecay_application::CancellationSignal::active(
                         cancellation.token_id.as_str(),
                     )
-                    .expect("validated cancellation token is reusable"),
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?,
                     wire.request,
                 )
                 .await
@@ -2314,6 +2377,14 @@ impl DaemonInvocationState {
                     return DaemonInvocationResponse::problem(request.request_id.clone(), problem);
                 }
             };
+            let Ok(application_request_id) =
+                tracedecay_application::RequestId::new(request.request_id.clone())
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            };
             return match self
                 .service
                 .compare_and_swap_scope_set(
@@ -2329,8 +2400,7 @@ impl DaemonInvocationState {
                         .service
                         .multi_root_evidence(
                             active_project_root,
-                            tracedecay_application::RequestId::new(request.request_id.clone())
-                                .expect("validated daemon request id"),
+                            application_request_id,
                             "scope_set_compare_and_swap",
                             result,
                             *observed_at,
@@ -2448,23 +2518,29 @@ impl tracedecay_application::MultiRootQueryPort<Value, Value> for PrecomputedMul
 
 fn denied_root_generation(
     scope: &tracedecay_application::ResolvedScope,
-) -> tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1> {
+) -> std::result::Result<
+    tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+    service::invocation::DaemonInvocationProblem,
+> {
     tracedecay_domain::RootScopeOutcomeV1::new(
         scope.scope_digest.clone(),
         tracedecay_domain::ScopeOutcome::Denied,
     )
-    .expect("persisted scope digest is valid")
+    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
 }
 
 fn unavailable_root_generation(
     scope: &tracedecay_application::ResolvedScope,
     reason: tracedecay_domain::ScopeUnavailableReasonV1,
-) -> tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1> {
+) -> std::result::Result<
+    tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+    service::invocation::DaemonInvocationProblem,
+> {
     tracedecay_domain::RootScopeOutcomeV1::new(
         scope.scope_digest.clone(),
         tracedecay_domain::ScopeOutcome::Unavailable { reason },
     )
-    .expect("persisted scope digest is valid")
+    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
 }
 
 fn frozen_root_generation(
@@ -2472,29 +2548,32 @@ fn frozen_root_generation(
     scope_set_digest: &tracedecay_domain::ManifestDigest,
     source_revision: &str,
     operation: &Value,
-) -> tracedecay_domain::RootGenerationV1 {
+) -> std::result::Result<
+    tracedecay_domain::RootGenerationV1,
+    service::invocation::DaemonInvocationProblem,
+> {
+    let collection_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.multi-root.collection.v1",
+        scope,
+        source_revision,
+    ))
+    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+    let collection_revision = tracedecay_domain::CollectionRevision::new(collection_digest)
+        .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+    let stack_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.multi-root.stack.v1",
+        scope_set_digest,
+        operation,
+    ))
+    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+    let stack_revision = tracedecay_domain::StackRevision::new(stack_digest)
+        .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
     tracedecay_domain::RootGenerationV1::new(
         scope.scope_digest.clone(),
-        tracedecay_domain::CollectionRevision::new(
-            tracedecay_domain::canonical_sha256(&(
-                "tracedecay.multi-root.collection.v1",
-                scope,
-                source_revision,
-            ))
-            .expect("validated scope and source revision are canonical"),
-        )
-        .expect("canonical collection digest is valid"),
-        tracedecay_domain::StackRevision::new(
-            tracedecay_domain::canonical_sha256(&(
-                "tracedecay.multi-root.stack.v1",
-                scope_set_digest,
-                operation,
-            ))
-            .expect("validated authority and operation are canonical"),
-        )
-        .expect("canonical stack digest is valid"),
+        collection_revision,
+        stack_revision,
     )
-    .expect("validated root generation is canonical")
+    .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)
 }
 
 fn explicit_git_state(root: &Path) -> Option<String> {
@@ -3642,9 +3721,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     where
         F: FnOnce(&Server) -> bool,
     {
-        let Some(entry) = self.servers.get_mut(key) else {
-            return None;
-        };
+        let entry = self.servers.get_mut(key)?;
         if !entry.publication.satisfies(ProjectServerRequirement::Core) || !matches(&entry.server) {
             return None;
         }

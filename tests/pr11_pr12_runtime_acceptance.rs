@@ -479,7 +479,8 @@ async fn preview_commit_via_mcp(
         scope.repository_id.clone(),
         scope.worktree_id.clone(),
         captured_at,
-    );
+    )
+    .expect("exact preview snapshot");
     let identity = GitCommitIdentityV1 {
         name: "TraceDecay Test".to_owned(),
         email: "tracedecay@example.com".to_owned(),
@@ -1230,7 +1231,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         scope.repository_id.clone(),
         scope.worktree_id.clone(),
         captured_at,
-    );
+    )
+    .expect("exact transaction snapshot");
     let identity = GitCommitIdentityV1 {
         name: "TraceDecay Test".to_owned(),
         email: "tracedecay@example.com".to_owned(),

@@ -1245,7 +1245,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(|_| panic!("static exact rule revision")),
             );
             let lane_request = ExactLaneRequest {
-                literals: authority.parse_literals(&query_view, &base),
+                literals: authority.parse_literals(&query_view, base),
                 generation: served_generation.clone(),
                 budget: base.budget,
                 base: base.clone(),
