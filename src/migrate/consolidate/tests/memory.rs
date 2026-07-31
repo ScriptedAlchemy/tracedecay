@@ -165,7 +165,6 @@ async fn overlapping_facts_merge_tags_metadata_and_feedback_without_duplication(
             .len(),
         2
     );
-    drop(store);
     drop(memory);
     graph.close();
 }
