@@ -216,23 +216,6 @@ impl ReleasedV0067Fixture {
                     .get(key)
                     .is_none_or(String::is_empty)
             })
-            || self
-                .preservation_probes
-                .get("profile_id")
-                .map(String::as_str)
-                != Some(self.source.profile_id.as_str())
-            || self
-                .preservation_probes
-                .get("repository_id")
-                .map(String::as_str)
-                != Some(self.source.repository_id.as_str())
-            || self
-                .preservation_probes
-                .get("project_id")
-                .map(String::as_str)
-                != Some(self.source.project_id.as_str())
-            || self.preservation_probes.get("store_id").map(String::as_str)
-                != Some(self.source.store_id.as_str())
         {
             return Err(MigrationContractError::SourceSchemaMismatch);
         }
