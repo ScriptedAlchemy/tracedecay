@@ -297,10 +297,6 @@ impl<T> NonEmptyUniqueVec<T> {
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
-
-    pub fn into_vec(self) -> Vec<T> {
-        self.0
-    }
 }
 
 impl<T> Deref for NonEmptyUniqueVec<T> {

@@ -157,17 +157,6 @@ impl SourceSpan {
     }
 }
 
-/// The exact occurrence key for a chunk within one code generation
-/// (Plan 25: `(CodeGenerationId, CodeSearchChunkId)` is the exact occurrence
-/// key; a digest change classifies an upsert and a move/rename or
-/// structural-boundary change classifies delete-plus-add).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct ChunkOccurrenceKeyV1 {
-    pub generation_id: CodeGenerationId,
-    pub chunk_id: CodeSearchChunkId,
-}
-
 /// The logical inputs that define chunk identity. Two chunks share one
 /// `CodeSearchChunkId` exactly when every field matches; content and
 /// generation are deliberately absent (Plan 25).

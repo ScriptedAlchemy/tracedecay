@@ -1617,9 +1617,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
     }
 }
 
-pub type CanonicalObservationSanitizationReceiptMaterialV1 =
-    CanonicalClaudeSanitizationReceiptMaterialV1;
-
 fn validate_receipt_sensitivity(
     disposition: SanitizerDispositionV1,
     sensitivity: SensitivityV1,

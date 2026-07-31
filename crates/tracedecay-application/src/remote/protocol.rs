@@ -499,9 +499,6 @@ fn safe_diagnostic(code: &str, message: &str) -> SafeDiagnostic {
     SafeDiagnostic::new(code, message).expect("static remote diagnostic is canonical")
 }
 
-pub type EnrollmentProtocolResultV1 = ApplicationResult<EnrollmentCredentialRecordV1>;
-pub type CurrentAuthorityProtocolResultV1 = ApplicationResult<CurrentRemoteAuthorityStateV1>;
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
