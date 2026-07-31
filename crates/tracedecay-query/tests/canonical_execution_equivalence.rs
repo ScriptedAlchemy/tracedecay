@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_domain::{
     CalibrationProfileId, ChunkerRevision, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
@@ -620,19 +621,106 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     let first_cursor = first.next_cursor.expect("first continuation cursor");
     let second_cursor = second.next_cursor.expect("second continuation cursor");
     let first_wire = first_cursor
-        .strip_prefix("ccq1.")
-        .expect("canonical prepared-query cursor");
+        .strip_prefix("ccq2.")
+        .expect("versioned prepared-query cursor");
     let second_wire = second_cursor
-        .strip_prefix("ccq1.")
-        .expect("canonical prepared-query cursor");
+        .strip_prefix("ccq2.")
+        .expect("versioned prepared-query cursor");
     assert_eq!(
         hex::decode(first_wire).expect("first cursor bytes"),
         hex::decode(second_wire).expect("second cursor bytes"),
     );
 
-    let routing = inspect_prepared_query_cursor(&first_cursor).expect("public cursor routing");
+    let routing_bindings = PreparedQueryRoutingBindingsV1 {
+        operation: "code_canonical_query".to_owned(),
+        scope_digest: digest::<ManifestDigest>('8'),
+        principal: request.principal.clone(),
+        root: request.scope.root.clone(),
+        temporal_mode: request.temporal_mode,
+        query_binding_digest: digest::<ManifestDigest>('9'),
+        page_size: 1,
+        authorization_revision: request.snapshot.authorization_revision.clone(),
+    };
+    let routing = authenticate_prepared_query_cursor_for_routing(
+        authority.as_ref(),
+        &routing_bindings,
+        &first_cursor,
+        UtcMicros(100),
+    )
+    .expect("authenticated cursor routing");
     assert_eq!(routing.generation, generation());
     assert_eq!(routing.expires_at, UtcMicros(900_000_010));
+    let effects = AtomicUsize::new(0);
+    let routed = route_authenticated_prepared_query_cursor(
+        authority.as_ref(),
+        &routing_bindings,
+        &first_cursor,
+        UtcMicros(100),
+        None,
+        |generation| {
+            effects.fetch_add(1, Ordering::SeqCst);
+            generation
+        },
+    )
+    .expect("authenticated generation route");
+    assert_eq!(routed, generation());
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+
+    let mut forged = first_cursor.clone();
+    forged.push('0');
+    let mut wrong_scope = routing_bindings.clone();
+    wrong_scope.scope_digest = digest::<ManifestDigest>('7');
+    let wrong_key = query_authority_with_secret(0x6b);
+    let wrong_generation = CodeGenerationId::new("generation.other").expect("generation");
+    for rejected in [
+        route_authenticated_prepared_query_cursor(
+            authority.as_ref(),
+            &routing_bindings,
+            &forged,
+            UtcMicros(100),
+            None,
+            |_| effects.fetch_add(1, Ordering::SeqCst),
+        ),
+        route_authenticated_prepared_query_cursor(
+            authority.as_ref(),
+            &routing_bindings,
+            &first_cursor,
+            UtcMicros(900_000_010),
+            None,
+            |_| effects.fetch_add(1, Ordering::SeqCst),
+        ),
+        route_authenticated_prepared_query_cursor(
+            wrong_key.as_ref(),
+            &routing_bindings,
+            &first_cursor,
+            UtcMicros(100),
+            None,
+            |_| effects.fetch_add(1, Ordering::SeqCst),
+        ),
+        route_authenticated_prepared_query_cursor(
+            authority.as_ref(),
+            &wrong_scope,
+            &first_cursor,
+            UtcMicros(100),
+            None,
+            |_| effects.fetch_add(1, Ordering::SeqCst),
+        ),
+        route_authenticated_prepared_query_cursor(
+            authority.as_ref(),
+            &routing_bindings,
+            &first_cursor,
+            UtcMicros(100),
+            Some(&wrong_generation),
+            |_| effects.fetch_add(1, Ordering::SeqCst),
+        ),
+    ] {
+        assert!(rejected.is_err());
+    }
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "forged, expired, wrong-key, scope, and pin failures must precede the generation effect"
+    );
 
     assert_eq!(
         PreparedQueryV1::prepare(authority.clone(), request.clone(), Some(&first_cursor))
@@ -644,7 +732,7 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
         .expect("authenticated prepared-query continuation")
         .paginate(&bindings, items.clone(), 1, UtcMicros(100))
         .expect("resumed prepared-query page");
-    let replayed = PreparedQueryV1::prepare(authority, request, Some(&first_cursor))
+    let replayed = PreparedQueryV1::prepare(authority.clone(), request, Some(&first_cursor))
         .expect("stateless continuation remains restart-stable")
         .paginate(&bindings, items, 1, UtcMicros(100))
         .expect("stateless continuation can be retried");
@@ -654,9 +742,14 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     assert_eq!(resumed.total, 3);
     let resumed_cursor = resumed.next_cursor.expect("second continuation cursor");
     assert_eq!(
-        inspect_prepared_query_cursor(&resumed_cursor)
-            .expect("resumed cursor routing")
-            .expires_at,
+        authenticate_prepared_query_cursor_for_routing(
+            authority.as_ref(),
+            &routing_bindings,
+            &resumed_cursor,
+            UtcMicros(100),
+        )
+        .expect("authenticated resumed cursor routing")
+        .expires_at,
         UtcMicros(900_000_010)
     );
 }
