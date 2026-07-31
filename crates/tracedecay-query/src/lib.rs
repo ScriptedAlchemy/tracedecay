@@ -1,3 +1,4 @@
+pub mod code_search;
 pub mod retrieval;
 
 /// Temporal session-query contracts, re-exported so historical
