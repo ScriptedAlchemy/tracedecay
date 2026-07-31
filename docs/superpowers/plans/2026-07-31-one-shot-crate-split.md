@@ -53,8 +53,28 @@ dashboard/assets.rs, hooks/ daemon-side handlers (cycle with daemon), and thin
 
 ## Aftermath queue (fix after the move)
 
-Compile errors from split seams; feature forwarding (production,
-test-transport, semantic-fastembed, lite/full); embedded asset paths
-(include_bytes/include_str) in agent-hosts; scripts that name old paths
-(check-distribution-acceptance.sh); doc references. All adjudicated by the
-whole-product gate, not per-crate ceremony.
+Compile errors from split seams (each mover's SEAMS.md is the work order);
+feature forwarding (production, test-transport, semantic-fastembed,
+lite/full); embedded asset paths (include_bytes/include_str) in agent-hosts;
+scripts that name old paths (check-distribution-acceptance.sh); doc
+references. All adjudicated by the whole-product gate, not per-crate
+ceremony.
+
+### Test relocation and import taming (owner order 2026-07-31)
+
+- **Tests move with their subjects.** Unit tests live in the crate that owns
+  the code; root integration tests that exercise one crate's surface migrate
+  into that crate's tests/ (with their fixtures, fixing the cargo-package
+  escapes the movers cataloged). The ~56 root test binaries shrink to the
+  cross-crate journeys only — that is where the relink win lives.
+- **Tame the imports.** The root shims (`pub use tracedecay_x::*`) are
+  transitional scaffolding, not architecture. After green, ast-grep sweeps
+  repoint root and test call sites from shim paths (`crate::sessions::X`)
+  to direct crate imports (`tracedecay_sessions::X`), then the glob shims
+  shrink and die. No permanent double-path for the same item.
+- **Scar cleanup once settled.** Delete each SEAMS.md as its rows resolve;
+  re-seal the benchmark manifests whose digests pinned old harness paths;
+  update docs citing src/ paths; audit the mass pub-widenings (613 sessions,
+  491 dashboard, 15 agent-hosts) and narrow anything no external caller
+  names; remove the `// SEAM(...)` markers; drop root Cargo.toml include
+  entries that moved with their crates.
