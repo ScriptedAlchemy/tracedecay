@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,9 +17,12 @@ use super::{
     test_handshake_defaults,
 };
 use crate::daemon::service::invocation::{
-    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
+    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
+    DaemonInvocationRequest, parse_daemon_invocation_request,
 };
-use crate::daemon::{DaemonHandshake, execute_daemon_invocation};
+use crate::daemon::{
+    DaemonHandshake, execute_daemon_invocation, execute_portable_daemon_invocation,
+};
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -70,6 +74,13 @@ fn controls(suffix: &str, observed_at: UtcMicros) -> (Deadline, CancellationCont
     )
 }
 
+fn wire_round_trip(request: &DaemonInvocationRequest) -> DaemonInvocationRequest {
+    let wire = serde_json::to_string(request).expect("daemon invocation wire");
+    parse_daemon_invocation_request(&wire)
+        .expect("daemon invocation protocol")
+        .expect("valid daemon invocation envelope")
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
@@ -94,18 +105,15 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
     let scope_set_id = ScopeSetId::new("scope-set.daemon-journey").expect("scope set id");
     let observed_at = now();
     let (deadline, cancellation) = controls("pre-admission-read", observed_at);
-    let pre_admission_read = execute_daemon_invocation(
-        &engine,
-        &first_handshake,
-        DaemonInvocationRequest::multi_root_scope_set_read(
-            "request.multi-root.pre-admission-read",
-            MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
-            observed_at,
-            deadline,
-            cancellation,
-        ),
-    )
-    .await;
+    let read_request = DaemonInvocationRequest::multi_root_scope_set_read(
+        "request.multi-root.pre-admission-read",
+        MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
+        observed_at,
+        deadline,
+        cancellation,
+    );
+    let pre_admission_read =
+        execute_daemon_invocation(&engine, &first_handshake, wire_round_trip(&read_request)).await;
     assert!(matches!(
         pre_admission_read.outcome,
         DaemonInvocationOutcome::Problem {
@@ -116,6 +124,49 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
         engine.project_open_attempts.load(Ordering::Relaxed),
         0,
         "quarantined read must refuse before project admission"
+    );
+    let portable_read = execute_portable_daemon_invocation(
+        engine.lifecycle.clone(),
+        engine.store_administration.clone(),
+        Arc::clone(&engine.project_open_gates),
+        &first_handshake,
+        &engine.invocation,
+        engine.http_application_registry.clone(),
+        wire_round_trip(&read_request),
+        Some(Arc::clone(&engine.project_open_attempts)),
+    )
+    .await;
+    assert!(matches!(
+        portable_read.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
+    assert_eq!(
+        engine.project_open_attempts.load(Ordering::Relaxed),
+        0,
+        "portable quarantined read must refuse before project admission"
+    );
+
+    let mut invalid_read = read_request;
+    let DaemonInvocationPayload::MultiRootScopeSetRead { observed_at, .. } =
+        &mut invalid_read.payload
+    else {
+        unreachable!("constructed read payload")
+    };
+    *observed_at = UtcMicros(0);
+    let invalid_response =
+        execute_daemon_invocation(&engine, &first_handshake, wire_round_trip(&invalid_read)).await;
+    assert!(matches!(
+        invalid_response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::InvalidRequest
+        }
+    ));
+    assert_eq!(
+        engine.project_open_attempts.load(Ordering::Relaxed),
+        0,
+        "invalid quarantined payload must be validated before project admission"
     );
     let (first_key, _, _, _) = engine
         .open_project_server(&first_handshake)
