@@ -6,6 +6,7 @@ use tracedecay_domain::{
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
     ObservationId, ObservationOrderingDomainV1, ProviderId, SessionId,
 };
+use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
 use crate::{ObservationRecordParseErrorV1, parse_cursor_human_timestamp};
 
@@ -436,36 +437,6 @@ pub fn cursor_projected_message_id(
         base
     };
     ObservationId::new(message_id).map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-}
-
-const CURSOR_MODEL_KEYS: &[&str] = &[
-    "model",
-    "model_id",
-    "modelId",
-    "model_name",
-    "modelName",
-    "model_slug",
-    "modelSlug",
-    "model_display_name",
-    "modelDisplayName",
-    "display_model",
-    "displayModel",
-    "display_model_name",
-    "displayModelName",
-];
-
-fn cursor_model_string(value: &Value) -> Option<String> {
-    CURSOR_MODEL_KEYS.iter().copied().find_map(|key| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|model| !model.trim().is_empty())
-            .map(str::to_string)
-    })
-}
-
-fn is_subagent_dispatch_tool(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "task" | "subagent")
 }
 
 fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
