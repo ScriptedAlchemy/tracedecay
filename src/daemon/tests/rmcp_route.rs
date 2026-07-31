@@ -32,8 +32,10 @@ async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity,
+        client_instance_id: format!("rmcp-route-{label}"),
         ..test_handshake_defaults()
     };
+    register_mcp_route_observer(&handshake.client_instance_id);
     let server = engine
         .project_server(&handshake)
         .await
@@ -137,6 +139,7 @@ async fn assert_initialized_route_is_rmcp<R, W>(
     let initialized = read_value(&mut reader, "initialize response timed out").await;
     assert_eq!(initialized["id"], json!(1));
     assert!(initialized.get("result").is_some(), "{initialized}");
+    wait_for_mcp_routes(&handshake.client_instance_id, &[ObservedMcpRoute::Rmcp]).await;
 
     let response_lifecycle = server.project_server_response_lifecycle();
     let response_gate = Arc::clone(response_lifecycle.response_gate());
@@ -200,9 +203,6 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
     )
     .await;
 
-    let response_lifecycle = fixture.server.project_server_response_lifecycle();
-    let response_gate = Arc::clone(response_lifecycle.response_gate());
-    let gate = response_gate.write().await;
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("legacy route socket pair");
     let engine = fixture.engine.clone();
@@ -222,18 +222,7 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
         .await
         .expect("write legacy handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
-    write_line(&mut writer, &blocked_tool_request(4)).await;
     write_line(&mut writer, &ping_request(5)).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), async {
-            let mut line = String::new();
-            reader.read_line(&mut line).await
-        })
-        .await
-        .is_err(),
-        "non-initialize traffic stopped using sequential legacy replay"
-    );
-    drop(gate);
     writer.shutdown().await.expect("shutdown legacy client");
     let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
         .await
@@ -242,6 +231,11 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
         .await
         .expect("join legacy route")
         .expect("serve legacy route");
+    wait_for_mcp_routes(
+        &fixture.handshake.client_instance_id,
+        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Legacy],
+    )
+    .await;
     assert!(
         responses.iter().any(|response| response["id"] == json!(5)),
         "legacy replay did not resume queued ping after the tool request: {responses:?}"
@@ -290,6 +284,66 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         &fixture.handshake,
         &fixture.server,
         server_task,
+    )
+    .await;
+
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("portable legacy route listener");
+    let lifecycle = DaemonLifecycle::default();
+    let store_administration = fixture.engine.store_administration.clone();
+    let legacy_task = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept legacy client");
+        Box::pin(super::super::serve_windows_broker_client(
+            stream,
+            AUTH_TOKEN,
+            &lifecycle,
+            store_administration,
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::ProjectOpenGates::default(),
+            )),
+            None,
+        ))
+        .await
+    });
+    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect portable legacy client");
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let preface = super::super::transport::DaemonAuthPreface::new(AUTH_TOKEN)
+        .to_line()
+        .expect("portable legacy auth preface");
+    writer
+        .write_all(preface.as_bytes())
+        .await
+        .expect("write legacy auth preface");
+    writer.write_all(b"\n").await.expect("auth newline");
+    writer
+        .write_all(
+            fixture
+                .handshake
+                .to_line()
+                .expect("portable legacy handshake")
+                .as_bytes(),
+        )
+        .await
+        .expect("write portable legacy handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, &ping_request(4)).await;
+    writer.shutdown().await.expect("shutdown legacy client");
+    let response = read_value(&mut reader, "portable legacy ping response").await;
+    assert_eq!(response["id"], json!(4));
+    read_to_eof(&mut reader).await;
+    legacy_task
+        .await
+        .expect("join portable legacy route")
+        .expect("serve portable legacy route");
+    wait_for_mcp_routes(
+        &fixture.handshake.client_instance_id,
+        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Legacy],
     )
     .await;
 }

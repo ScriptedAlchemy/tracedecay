@@ -34,11 +34,62 @@ mod logging;
 mod multi_root_journey;
 mod ownership;
 mod replay;
-mod rmcp_route;
 mod restart_proxy;
+mod rmcp_route;
 mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ObservedMcpRoute {
+    Rmcp,
+    Legacy,
+}
+
+fn observed_mcp_routes()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<ObservedMcpRoute>>> {
+    static ROUTES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<ObservedMcpRoute>>>,
+    > = std::sync::OnceLock::new();
+    ROUTES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn register_mcp_route_observer(client_instance_id: &str) {
+    observed_mcp_routes()
+        .lock()
+        .expect("route observer")
+        .insert(client_instance_id.to_owned(), Vec::new());
+}
+
+pub(super) fn record_mcp_route(client_instance_id: &str, route: ObservedMcpRoute) {
+    if let Some(routes) = observed_mcp_routes()
+        .lock()
+        .expect("route observer")
+        .get_mut(client_instance_id)
+    {
+        routes.push(route);
+    }
+}
+
+async fn wait_for_mcp_routes(client_instance_id: &str, expected: &[ObservedMcpRoute]) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let observed = observed_mcp_routes()
+                .lock()
+                .expect("route observer")
+                .get(client_instance_id)
+                .cloned()
+                .unwrap_or_default();
+            if observed.len() >= expected.len() {
+                assert_eq!(observed, expected);
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("production MCP route was not observed");
+}
 
 fn test_client_identity() -> DaemonClientIdentity {
     test_client_identity_for(PathBuf::from("/profiles/client"))

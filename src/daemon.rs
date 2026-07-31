@@ -7405,6 +7405,11 @@ async fn serve_broker_socket_client(
     }
     if let Some(server) = server {
         if is_mcp_initialize_request(&first_request_line) {
+            #[cfg(test)]
+            tests::record_mcp_route(
+                &handshake.client_instance_id,
+                tests::ObservedMcpRoute::Rmcp,
+            );
             serve_routed_rmcp_connection(
                 server,
                 transport,
@@ -7416,6 +7421,11 @@ async fn serve_broker_socket_client(
             )
             .await?;
         } else {
+            #[cfg(test)]
+            tests::record_mcp_route(
+                &handshake.client_instance_id,
+                tests::ObservedMcpRoute::Legacy,
+            );
             let mut transport = ReplayTransport::new(transport);
             transport.push_replay(first_request_line)?;
             for line in pending_project_open_lines {
@@ -7792,6 +7802,11 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         let (server, pending_lines) = server;
         if is_mcp_initialize_request(&first_request_line) {
+            #[cfg(test)]
+            tests::record_mcp_route(
+                &handshake.client_instance_id,
+                tests::ObservedMcpRoute::Rmcp,
+            );
             serve_routed_rmcp_connection(
                 server,
                 transport,
@@ -7803,6 +7818,11 @@ async fn serve_windows_broker_client_with_class_and_invocation(
             )
             .await?;
         } else {
+            #[cfg(test)]
+            tests::record_mcp_route(
+                &handshake.client_instance_id,
+                tests::ObservedMcpRoute::Legacy,
+            );
             let mut transport = ReplayTransport::new(transport);
             transport.push_replay(first_request_line)?;
             for line in pending_lines {
