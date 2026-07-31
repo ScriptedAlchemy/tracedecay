@@ -14,6 +14,11 @@ pub const APPLICATION_PROBLEM_REVISION: u32 = 1;
 pub const MAX_PROBLEM_DETAILS: usize = 8;
 pub const MAX_RETRY_AFTER_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 
+/// Canonical delay stamped whenever a problem carries
+/// `RetryDirective::AfterDelay` and its producer supplied no explicit figure.
+/// Matches the saturation backoff the operation-event stream already uses.
+pub const DEFAULT_RETRY_AFTER_MILLIS: u64 = 250;
+
 /// Versioned schema identity for an application result contract.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResultContractRef {
@@ -169,7 +174,13 @@ impl ApplicationProblemRecord {
             retryable: retry != RetryDirective::Never,
             retry,
             retry_scope,
-            retry_after_millis: None,
+            // An `after_delay` directive promises a delay: the serialized
+            // contract (enforced by every generated SDK client) rejects the
+            // directive with a null delay, so the canonical default fills it
+            // here at the single construction authority. Callers that know a
+            // better figure override via `with_retry_after_millis`.
+            retry_after_millis: (retry == RetryDirective::AfterDelay)
+                .then_some(DEFAULT_RETRY_AFTER_MILLIS),
             cancellation_stage: matches!(
                 kind,
                 ApplicationProblemKind::Cancelled | ApplicationProblemKind::TimedOut
