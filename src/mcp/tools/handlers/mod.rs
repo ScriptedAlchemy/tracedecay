@@ -884,7 +884,6 @@ enum RetainedMcpExecutionContext<'call, 'authority> {
         options: &'call ToolCallRegistryOptions<'authority>,
     },
     Project {
-        tool_name: &'call str,
         cg: &'call TraceDecay,
         scope_prefix: Option<&'call str>,
         active_project_session_db: Option<&'call Arc<RegisteredGlobalDb>>,
@@ -943,7 +942,6 @@ impl<'call> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
                     .await
                 }
                 RetainedMcpExecutionContext::Project {
-                    tool_name,
                     cg,
                     scope_prefix,
                     active_project_session_db,
@@ -952,7 +950,6 @@ impl<'call> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
                 } => {
                     execute_project_retained_application_tool(
                         request,
-                        tool_name,
                         cg,
                         scope_prefix,
                         active_project_session_db,
@@ -1443,7 +1440,6 @@ async fn dispatch_retained_application_tools(
     Some(
         invoke_retained_mcp_request(
             RetainedMcpExecutionContext::Project {
-                tool_name,
                 cg,
                 scope_prefix,
                 active_project_session_db,
@@ -1460,7 +1456,6 @@ async fn dispatch_retained_application_tools(
 #[allow(clippy::too_many_arguments)]
 async fn execute_project_retained_application_tool(
     request: CatalogBoundRetainedMcpRequest,
-    tool_name: &str,
     cg: &TraceDecay,
     scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
