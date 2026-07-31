@@ -680,10 +680,7 @@ fn sync_claude_plugin_cache(home: &Path, tracedecay_bin: &str) {
     }
 }
 
-fn refresh_registered_claude_plugin_cache(
-    home: &Path,
-    tracedecay_bin: &str,
-) -> Result<usize> {
+fn refresh_registered_claude_plugin_cache(home: &Path, tracedecay_bin: &str) -> Result<usize> {
     let registry = load_json_file(&home.join(".claude/plugins/installed_plugins.json"));
     let Some(entries) = registry
         .get("plugins")
@@ -704,9 +701,7 @@ fn refresh_registered_claude_plugin_cache(
             })?;
     let mut install_paths = Vec::with_capacity(entries.len());
     for entry in entries {
-        let Some(raw_install_path) = entry
-            .get("installPath")
-            .and_then(serde_json::Value::as_str)
+        let Some(raw_install_path) = entry.get("installPath").and_then(serde_json::Value::as_str)
         else {
             continue;
         };
