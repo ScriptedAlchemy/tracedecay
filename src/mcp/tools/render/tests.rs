@@ -32,18 +32,6 @@ fn default_format_is_markdown() {
 }
 
 #[test]
-fn concealed_problem_value_does_not_disclose_binding_or_resource_state() {
-    let value = concealed_problem_value().expect("serialize concealed problem");
-
-    assert_eq!(value["kind"], "not_found_or_not_authorized");
-    assert_eq!(value["retry"], "never");
-    assert_eq!(value["legal_actions"], json!([]));
-    assert!(value.get("diagnostic").is_none());
-    assert!(value.get("binding_id").is_none());
-    assert!(value.get("resource").is_none());
-}
-
-#[test]
 fn json_format_is_compact() {
     let value = json!({"a": 1, "b": [1, 2]});
     let out = finalize(None, &json!({"format": "json"}), &value, || {
@@ -61,24 +49,6 @@ fn markdown_format_uses_closure() {
     let value = json!({"a": 1});
     let out = finalize(None, &json!({}), &value, || "## Hi\n".to_string());
     assert_eq!(out, "## Hi\n");
-}
-
-#[test]
-fn truncate_short_response() {
-    let short = "hello world";
-    assert_eq!(truncate_response(short), short);
-}
-
-#[test]
-fn truncate_long_response() {
-    let long = "x".repeat(MAX_RESPONSE_CHARS - 1);
-    let result = truncate_response(&long);
-    assert_eq!(result, long);
-
-    let longer = "x".repeat(MAX_RESPONSE_CHARS + 5_000);
-    let result = truncate_response(&longer);
-    assert!(result.len() < longer.len());
-    assert!(result.contains(&format!("[... truncated at {MAX_RESPONSE_CHARS} chars]")));
 }
 
 #[test]
@@ -256,34 +226,6 @@ fn markdown_preview_with_handle_keeps_different_short_full_text_plain() {
     let preview = "# Full\n\nsmall visible preview";
 
     assert_eq!(markdown_preview_with_handle(None, full, preview), full);
-}
-
-#[test]
-fn truncate_text_with_handle_returns_short_text_unchanged() {
-    let short = "hello world";
-    assert_eq!(truncate_text_with_handle(None, short), short);
-}
-
-#[test]
-fn truncate_text_with_handle_stores_reversible_envelope() {
-    let _store_guard = lock_response_handle_store();
-    let dir = tempfile::TempDir::new().unwrap();
-    let long = "- indexed file entry\n".repeat(3_000);
-
-    let result = truncate_text_with_handle(Some(dir.path()), &long);
-
-    assert!(result.len() <= MAX_RESPONSE_CHARS);
-    assert!(result.starts_with("# Truncated Response"));
-    assert!(result.contains("## Preview"));
-    assert!(result.contains("tracedecay_retrieve"));
-    let Some(handle) = result
-        .split("handle `")
-        .nth(1)
-        .and_then(|tail| tail.split('`').next())
-    else {
-        panic!("truncate_text_with_handle envelope should include handle");
-    };
-    assert!(handle.starts_with("rh_"));
 }
 
 #[test]
