@@ -106,11 +106,11 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     check_inert_project_config(&mut dc, &project_path);
     let daemon_status = daemon_project_status(&project_path).await;
-    let storage_healthy = match daemon_status.as_ref() {
+    let storage_health = match daemon_status.as_ref() {
         Ok(status) => {
-            let healthy = check_database(&mut dc, status);
+            let health = check_database(&mut dc, status);
             check_daemon_doctor_report(&mut dc, status);
-            healthy
+            health
         }
         Err(error) => {
             report_daemon_diagnostics_unavailable(
@@ -118,9 +118,16 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
                 fallback_database_path(&project_path).as_deref(),
                 error,
             );
-            false
+            DatabaseHealth::Failed {
+                reason: "daemon_diagnostics_unavailable".to_string(),
+            }
         }
     };
+    if let DatabaseHealth::Unknown { reason } = &storage_health {
+        dc.info(&format!(
+            "Storage health is unknown [{reason}]; doctor observed no healthy store and is not claiming one"
+        ));
+    }
     check_session_temporal_health(&mut dc, daemon_status.as_ref().ok());
     check_semantic_runtime_health(&mut dc, daemon_status.as_ref().ok());
 
@@ -169,7 +176,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     check_network(&mut dc);
     print_summary(&dc);
 
-    doctor_result(&dc, daemon_status, storage_healthy)
+    doctor_result(&dc, daemon_status, &storage_health)
 }
 
 fn check_host_component_receipts(
@@ -323,20 +330,29 @@ fn report_native_edit_stop_conformance(
     }
 }
 
+/// Gates the doctor exit code.
+///
+/// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown` — a
+/// diagnostic that could not run — is reported to the user but never laundered
+/// into a healthy verdict nor turned into a hard failure.
 fn doctor_result(
     dc: &DoctorCounters,
     daemon_status: crate::errors::Result<serde_json::Value>,
-    storage_healthy: bool,
+    storage_health: &DatabaseHealth,
 ) -> crate::errors::Result<()> {
     match daemon_status {
         Err(error) => Err(error),
-        Ok(_) if !storage_healthy => Err(crate::errors::TraceDecayError::Config {
-            message: "doctor storage health check failed".to_string(),
-        }),
-        Ok(_) if dc.issues > 0 => Err(crate::errors::TraceDecayError::Config {
-            message: format!("doctor found {} issue(s)", dc.issues),
-        }),
-        Ok(_) => Ok(()),
+        Ok(_) => match storage_health {
+            DatabaseHealth::Failed { reason } => Err(crate::errors::TraceDecayError::Config {
+                message: format!("doctor storage health check failed [{reason}]"),
+            }),
+            DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } if dc.issues > 0 => {
+                Err(crate::errors::TraceDecayError::Config {
+                    message: format!("doctor found {} issue(s)", dc.issues),
+                })
+            }
+            DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(()),
+        },
     }
 }
 
@@ -1060,10 +1076,46 @@ fn check_daemon_doctor_report(dc: &mut DoctorCounters, status: &serde_json::Valu
     }
 }
 
-fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
+/// What Doctor actually observed about the current project's storage.
+///
+/// Deliberately three-state: a diagnostic that could not run (`Unknown`) is not
+/// evidence of a sound store, so it must never collapse into `Healthy`. Only
+/// `Failed` is an observed failure, and only `Failed` gates the exit code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DatabaseHealth {
+    Healthy,
+    Unknown { reason: String },
+    Failed { reason: String },
+}
+
+impl DatabaseHealth {
+    fn unknown(reason: impl Into<String>) -> Self {
+        Self::Unknown {
+            reason: reason.into(),
+        }
+    }
+
+    fn failed(reason: impl Into<String>) -> Self {
+        Self::Failed {
+            reason: reason.into(),
+        }
+    }
+
+    /// Combines two independent observations, keeping the most severe:
+    /// `Failed` > `Unknown` > `Healthy`.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (failed @ Self::Failed { .. }, _) | (_, failed @ Self::Failed { .. }) => failed,
+            (unknown @ Self::Unknown { .. }, _) | (_, unknown @ Self::Unknown { .. }) => unknown,
+            (Self::Healthy, Self::Healthy) => Self::Healthy,
+        }
+    }
+}
+
+fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> DatabaseHealth {
     let Some(storage) = status.get("storage_health") else {
         dc.fail("Daemon status omitted storage health; doctor did not open SQLite");
-        return false;
+        return DatabaseHealth::failed("storage_health_missing");
     };
     let db_path = storage
         .get("canonical_db_path")
@@ -1079,13 +1131,13 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
     {
         dc.pass(&format!("DB size: {}", format_bytes(size)));
     }
-    let integrity_healthy = match storage
+    let integrity_health = match storage
         .get("quick_check_ok")
         .and_then(serde_json::Value::as_bool)
     {
         Some(true) => {
             dc.pass("DB integrity: ok (checked by daemon owner)");
-            true
+            DatabaseHealth::Healthy
         }
         Some(false) => {
             let detail = storage
@@ -1103,7 +1155,7 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
             if let Some(path) = db_path.as_deref() {
                 print_database_recovery_guidance_for_problem(dc, path, detail);
             }
-            false
+            DatabaseHealth::failed(format!("integrity_check_failed: {detail}"))
         }
         None => {
             let detail = storage
@@ -1113,32 +1165,43 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
             dc.warn(&format!(
                 "Database integrity diagnostics unavailable: {detail}; no clean result was inferred"
             ));
-            true
+            DatabaseHealth::unknown(format!("integrity_diagnostics_unavailable: {detail}"))
         }
     };
-    let authority_healthy = match storage
+    let authority_health = match storage
         .get("authority_audit_ok")
         .and_then(serde_json::Value::as_bool)
     {
         Some(true) => {
             dc.pass("Observation database authority: ok (checked by daemon owner)");
-            true
+            DatabaseHealth::Healthy
         }
         Some(false) => {
             let reason = storage
                 .get("authority_audit_reason")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("authority_invariant_failed");
-            dc.fail(authority_audit_failure_message(reason));
-            false
+            let detail = storage
+                .get("authority_audit_error")
+                .and_then(serde_json::Value::as_str);
+            dc.fail(&authority_audit_failure_message(reason, detail));
+            DatabaseHealth::failed(reason)
         }
         None => {
+            // Producers before the typed-reason key wrote the vocabulary into
+            // `authority_audit_error`; read it before falling back to the bare
+            // literal so a known reason is never flattened into "unavailable".
             let reason = storage
                 .get("authority_audit_reason")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    storage
+                        .get("authority_audit_error")
+                        .and_then(serde_json::Value::as_str)
+                })
                 .unwrap_or("authority_audit_unavailable");
             dc.warn(authority_audit_unavailable_message(reason));
-            true
+            DatabaseHealth::unknown(reason)
         }
     };
     if storage
@@ -1152,15 +1215,26 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
             .unwrap_or("unparsed");
         dc.warn(&format!("Graph dirty marker present (state={state})"));
     }
-    integrity_healthy && authority_healthy
+    integrity_health.merge(authority_health)
 }
 
-fn authority_audit_failure_message(reason: &str) -> &'static str {
-    match reason {
+/// Builds the operator-facing failure line, preserving the observed detail the
+/// producer reported. Dropping that detail leaves the user with a bare
+/// classification and nothing to act on.
+fn authority_audit_failure_message(reason: &str, detail: Option<&str>) -> String {
+    let classification = match reason {
         "authority_invariant_failed" => {
             "Observation database authority audit failed [authority_invariant_failed]"
         }
         _ => "Observation database authority audit failed [authority_audit_failed]",
+    };
+    match detail {
+        // Older producers mirrored the reason into the detail key; do not echo
+        // the same token twice.
+        Some(detail) if !detail.is_empty() && detail != reason => {
+            format!("{classification}: {detail}")
+        }
+        _ => classification.to_string(),
     }
 }
 
