@@ -337,7 +337,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
     }
 }
 
-const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 1;
+const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
