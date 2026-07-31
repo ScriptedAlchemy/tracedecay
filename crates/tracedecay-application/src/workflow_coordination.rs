@@ -284,7 +284,7 @@ pub struct TaskHandoffToken {
 
 impl TaskHandoffToken {
     pub fn new(secret: String) -> Result<Self, TaskHandoffError> {
-        let byte_len = secret.as_bytes().len();
+        let byte_len = secret.len();
         if !(32..=512).contains(&byte_len)
             || secret.trim() != secret
             || secret.chars().any(char::is_control)

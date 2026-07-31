@@ -344,7 +344,7 @@ pub struct InvocationCancellation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApplicationResponse {
     Unary {
-        envelope: ApplicationEnvelope<Value>,
+        envelope: Box<ApplicationEnvelope<Value>>,
     },
     Stream(ApplicationStreamResponse),
     Cancellation(InvocationCancellation),
@@ -353,12 +353,14 @@ pub enum ApplicationResponse {
 
 impl ApplicationResponse {
     pub fn unary(envelope: ApplicationEnvelope<Value>) -> Self {
-        Self::Unary { envelope }
+        Self::Unary {
+            envelope: Box::new(envelope),
+        }
     }
 
     pub fn envelope(&self) -> Option<&ApplicationEnvelope<Value>> {
         match self {
-            Self::Unary { envelope } => Some(envelope),
+            Self::Unary { envelope } => Some(envelope.as_ref()),
             Self::Stream(_) | Self::Cancellation(_) | Self::ObservationAccepted => None,
         }
     }
