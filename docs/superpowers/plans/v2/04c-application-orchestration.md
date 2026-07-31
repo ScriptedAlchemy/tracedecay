@@ -47,8 +47,10 @@ direct behavior and acceptance live in the applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Land one operation family at a time. Use compatibility delegation only for an
-evidenced released caller; otherwise change branch-local operations in place.
+Land one operation family at a time. Use compatibility delegation for released
+or potentially deployed dogfood/host callers until the authorized
+installed-client/host census proves absence; change only source-only/internal
+operations in place.
 Do not dual-write. Revert by family if its direct journey fails. Measure application
 private edits and root handler edits before/after. Delete root orchestration
 only after production callers and all exposed surfaces reach the application
