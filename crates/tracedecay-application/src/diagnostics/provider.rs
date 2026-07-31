@@ -68,13 +68,6 @@ impl ProviderSourceIdentity {
             Self::SessionOverlay { .. } => None,
         }
     }
-
-    pub fn overlay_session_id(&self) -> Option<&SessionId> {
-        match self {
-            Self::CleanGeneration { .. } => None,
-            Self::SessionOverlay { session_id, .. } => Some(session_id),
-        }
-    }
 }
 
 /// Exact document attachment for a provider result.
