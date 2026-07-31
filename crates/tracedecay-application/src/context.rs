@@ -12,68 +12,15 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::error::ApplicationContractError;
+use crate::identity::application_identifier;
 
 const RESOLVED_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.application.scope.v1";
 
-macro_rules! application_id {
-    ($($name:ident => $field:literal),+ $(,)?) => {$(
-        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, ApplicationContractError> {
-                let value = value.into();
-                validate_identifier(&value, $field)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = ApplicationContractError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
-}
-
-application_id!(
-    RequestId => "request id",
-    CapabilityGrantId => "capability grant id",
-    CancellationTokenId => "cancellation token id",
+application_identifier!(
+    RequestId => ("request id", 512),
+    CapabilityGrantId => ("capability grant id", 512),
+    CancellationTokenId => ("cancellation token id", 512),
 );
-
-fn validate_identifier(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(ApplicationContractError::InvalidIdentifier { field });
-    }
-    Ok(())
-}
 
 /// The resolved PR11 scope is one exact project/repository/worktree root.
 ///

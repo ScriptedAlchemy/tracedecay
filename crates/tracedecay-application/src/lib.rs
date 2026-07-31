@@ -19,6 +19,7 @@ pub mod framed_log;
 pub mod git;
 pub mod handlers;
 pub mod historical_query;
+mod identity;
 pub mod invocation;
 pub mod lsp_context_catalog;
 pub mod memory;
