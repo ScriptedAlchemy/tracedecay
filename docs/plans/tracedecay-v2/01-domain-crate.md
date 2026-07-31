@@ -56,8 +56,11 @@ consumer.
   and unavailable evidence as explicit typed outcomes.
 - PR5 source positions and cursors are provider-safe opaque values; numeric and
   content-hash cursors cannot be compared under the wrong ordering rule.
-- Each later vertical PR adds the smallest contract it consumes and proves the
-  old version remains readable or supplies an explicit migration.
+- Each later vertical PR adds the smallest final contract it consumes.
+  Branch-local predecessors change in place. An old version remains readable
+  or receives an explicit migration only after `origin/master`, a published
+  package/release, or live persisted data proves that predecessor shipped; a
+  version suffix or test fixture alone is not such evidence.
 - Provider-exposed reasoning may be represented with visibility and retention;
   hidden reasoning is never inferred or reconstructed.
 
@@ -133,11 +136,13 @@ Plan 16 scope resolution, Plan 20 binding configuration mutation, Plan 23
 temporal interpretation, and Plan 27 acquisition, scheduling, packaging, and
 lifecycle.
 
-The additive migration seeds the first shipped source definition and maps
-existing profile/project observations to bindings without changing observation
-or anchor identity. It hashes legacy native identity in the existing privacy
+Where live persisted observations prove a predecessor exists, the additive
+migration seeds the first shipped source definition and maps those
+profile/project observations to bindings without changing observation or
+anchor identity. It hashes legacy native identity in the existing privacy
 domain, records `Unknown` coverage when an exact predecessor frontier cannot be
-proven, and returns the same receipt on rerun.
+proven, and returns the same receipt on rerun. Unreleased source-definition
+shapes are finalized in place and do not enter this migration.
 
 Direct regression evidence must prove canonical encoding and unknown-field
 handling; digest tamper, raw-identifier, ambiguous-scope, and invalid-capability
