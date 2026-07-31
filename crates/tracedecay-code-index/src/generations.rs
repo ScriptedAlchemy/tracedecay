@@ -876,16 +876,9 @@ mod tests {
             foreign_project_genesis.invalidation_digest,
             genesis.invalidation_digest
         );
-        assert_ne!(
-            foreign_project_genesis.generation_id,
-            genesis.generation_id
-        );
+        assert_ne!(foreign_project_genesis.generation_id, genesis.generation_id);
         assert_eq!(
-            foreign_project_planner.plan_generation(
-                &snapshot,
-                Some(&genesis),
-                UtcMicros(4_000)
-            ),
+            foreign_project_planner.plan_generation(&snapshot, Some(&genesis), UtcMicros(4_000)),
             Err(GenerationPlanningErrorV1::ForeignParentIdentity)
         );
     }
