@@ -35,8 +35,8 @@ use crate::sessions::shared::{
 };
 use crate::sessions::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotAdmissionRunner, SnapshotCaptureOutcome, StableMessageIdDomains,
-    bounded_snapshot_input_len, non_durable_snapshot_record, read_snapshot_text_bounded,
+    SnapshotCaptureOutcome, StableMessageIdDomains, bounded_snapshot_input_len,
+    capture_snapshot_observations, non_durable_snapshot_record, read_snapshot_text_bounded,
     snapshot_message_fields, stable_snapshot_message_id,
 };
 #[cfg(test)]
@@ -387,32 +387,29 @@ pub(crate) async fn capture_cline_like_snapshot_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
-    let mut runner = SnapshotAdmissionRunner::new(max_new_bytes);
-    let discovery = source.discover_transcript_paths(
-        project_root,
-        TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
-    );
-    if discovery.is_truncated() {
-        runner.defer();
-    }
-    for path in discovery.paths {
-        let input_bytes = snapshot_input_bytes(source.provider, &path)?;
-        runner
-            .admit_batch(facade, input_bytes, &scope, cancellation, || {
-                let Some(parsed) =
-                    source.parse_snapshot(&path, StoredCursor::default(), project_root, None)?
-                else {
-                    return Ok(None);
-                };
-                let generation =
-                    ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
-                let records =
-                    normalize_cline_like_snapshot_observations(source.provider, &parsed.messages)?;
-                Ok(Some((generation, records)))
-            })
-            .await?;
-    }
-    Ok(runner.finish())
+    capture_snapshot_observations(
+        facade,
+        scope,
+        cancellation,
+        max_new_bytes,
+        source.discover_transcript_paths(
+            project_root,
+            TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
+        ),
+        |path| snapshot_input_bytes(source.provider, path),
+        |path| {
+            let Some(parsed) =
+                source.parse_snapshot(path, StoredCursor::default(), project_root, None)?
+            else {
+                return Ok(None);
+            };
+            let generation = ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
+            let records =
+                normalize_cline_like_snapshot_observations(source.provider, &parsed.messages)?;
+            Ok(Some((generation, records)))
+        },
+    )
+    .await
 }
 
 fn ensure_bounded_file(
