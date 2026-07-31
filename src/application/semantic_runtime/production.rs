@@ -2726,6 +2726,11 @@ fn load_retained_code_generations(
         }
         let bytes =
             std::fs::read(&path).map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&bytes)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+        {
+            continue;
+        }
         let generation = CodeIndexPublishedGenerationV1::decode_sealed(&bytes)
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         let source = generation.manifest().generation_id.clone();
