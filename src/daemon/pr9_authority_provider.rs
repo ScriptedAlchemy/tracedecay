@@ -980,4 +980,208 @@ pub(crate) mod tests {
         );
         registry.shutdown().await;
     }
+    fn restart_request(profile: &tracedecay_domain::FusionProfile) -> RetrievalRequest {
+        RetrievalRequest {
+            principal: PrincipalId::new("principal.pr9-restart").expect("principal"),
+            scope: RetrievalScope {
+                privacy_domain: PrivacyDomainId::new("privacy.pr9-restart")
+                    .expect("privacy domain"),
+                root: SingleRootScopeV1 {
+                    repository: RepositoryId::new("repository.pr9-restart").expect("repository"),
+                    worktree: Some(WorktreeId::new("worktree.pr9-restart").expect("worktree")),
+                    reference: None,
+                },
+            },
+            temporal_mode: TemporalModeV1::Current,
+            snapshot: RetrievalSnapshot {
+                watermarks: VectorWatermark::default(),
+                freshness_digest: id("freshness.pr9-restart"),
+                authorization_revision: id("authorization.pr9-restart"),
+                captured_at: UtcMicros(100),
+            },
+            profile_id: profile.profile_id.clone(),
+            budget: profile.retrieval_budget,
+        }
+    }
+
+    fn empty_restart_lanes() -> Vec<tracedecay_query::retrieval::fusion::CompositionLaneInput> {
+        RetrieverKind::PR9_FALLBACK_LANES
+            .into_iter()
+            .map(|lane| {
+                tracedecay_query::retrieval::fusion::CompositionLaneInput::new(
+                    lane,
+                    RetrieverOutcome::Complete(RetrieverBatch {
+                        candidates: Vec::new(),
+                        evidence_by_occurrence: BTreeMap::<_, ()>::new(),
+                        coverage: Default::default(),
+                        continuation: None,
+                    }),
+                )
+                .expect("empty lane")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
+        let directory = TempDir::new().expect("temporary profile");
+        let profile_root = directory.path().join("profile");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let project_id = ProjectId::new("project.pr9-restart").expect("project id");
+        let profile_sessions_path = crate::sessions::user_sessions_db_path(identity.profile_root());
+        let _scope_guard =
+            crate::db::enter_daemon_database_scope(&profile_root, 1, "pr9-cursor-restart")
+                .expect("daemon database scope");
+        let session_registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity.clone(),
+            )
+            .await
+            .expect("session registry");
+        let database = session_registry
+            .project_sessions(project_id.clone(), [project_root.clone()])
+            .await
+            .expect("project session database");
+        assert_ne!(database.db_path(), profile_sessions_path);
+        assert!(
+            !profile_sessions_path.exists(),
+            "profile session shard must remain absent"
+        );
+        let cursor_keys = Arc::new(
+            database
+                .load_session_cursor_key_provider_result()
+                .await
+                .expect("durable cursor key provider"),
+        );
+        let scope = ResolvedScope::new(
+            project_id.clone(),
+            id("repository.pr9-restart"),
+            id("worktree.pr9-restart"),
+            None,
+        )
+        .expect("resolved scope");
+        let accepted = accepted_profile("pr9-restart", &RetrieverKind::PR9_FALLBACK_LANES);
+        let state = RetrievalProfileStateV1::new(
+            id::<ConfigurationRevisionId>("configuration.pr9-restart.1"),
+            accepted.clone(),
+            &RetrievalRuntimeCompatibilityV1 {
+                retrieval_ceiling: accepted.profile().retrieval_budget,
+                semantic: None,
+                semantic_ceiling: None,
+                rerank: None,
+                rerank_ceiling: None,
+            },
+        )
+        .expect("initial state");
+        let provider = DaemonPr9AuthorityProviderV1::default();
+        provider
+            .install_evaluated_initial_state(scope.clone(), state.clone(), cursor_keys)
+            .expect("install first production authority");
+        let authority =
+            super::super::code_index_scheduler::pr9_runtime::prepare_pr9_query_authority(
+                &scope,
+                &PrivacyDomainId::new("privacy.pr9-restart").expect("privacy domain"),
+                &provider,
+            )
+            .expect("first production query authority");
+        let request = restart_request(accepted.profile());
+        let query = EphemeralSanitizedQueryViewV1::sanitize(
+            "restart-stable query",
+            SanitizerRevision::new("query-sanitizer.pr9-restart").expect("sanitizer"),
+            QueryNormalizationRevision::new("query-normalization.pr9-restart")
+                .expect("normalization"),
+        )
+        .expect("query view");
+        let bindings = tracedecay_query::retrieval::PreparedQueryBindingsV1::new(
+            "code_symbol_search",
+            scope.scope_digest.clone(),
+            CodeGenerationId::new("generation.pr9-restart").expect("generation"),
+            digest('8'),
+        )
+        .expect("prepared bindings");
+        let prepared_cursor = tracedecay_query::retrieval::PreparedQueryV1::prepare(
+            Arc::clone(&authority),
+            request.clone(),
+            None,
+        )
+        .expect("prepare first page")
+        .paginate(
+            &bindings,
+            vec!["first".to_owned(), "second".to_owned()],
+            1,
+            UtcMicros(100),
+        )
+        .expect("issue prepared cursor")
+        .next_cursor
+        .expect("prepared continuation");
+        let composed = authority
+            .compose(&request, &query, empty_restart_lanes(), 1, None)
+            .expect("compose first fusion page");
+        let fusion_cursor = authority
+            .continuation_cursor_at(&request, &query, &composed.composition, 0)
+            .expect("issue fusion cursor");
+
+        drop(authority);
+        drop(provider);
+        drop(database);
+        drop(session_registry);
+        let reopened_registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("reopened session registry");
+        let reopened = reopened_registry
+            .project_sessions(project_id, [project_root])
+            .await
+            .expect("reopened durable project session database");
+        assert!(
+            !profile_sessions_path.exists(),
+            "reopen must not provision or consult the profile session shard"
+        );
+        let reopened_keys = Arc::new(
+            reopened
+                .load_session_cursor_key_provider_result()
+                .await
+                .expect("reopened durable cursor key provider"),
+        );
+        let reopened_provider = DaemonPr9AuthorityProviderV1::default();
+        reopened_provider
+            .install_evaluated_initial_state(scope.clone(), state, reopened_keys)
+            .expect("install reopened production authority");
+        let reopened_authority =
+            super::super::code_index_scheduler::pr9_runtime::prepare_pr9_query_authority(
+                &scope,
+                &PrivacyDomainId::new("privacy.pr9-restart").expect("privacy domain"),
+                &reopened_provider,
+            )
+            .expect("reopened production query authority");
+
+        let resumed = tracedecay_query::retrieval::PreparedQueryV1::prepare(
+            Arc::clone(&reopened_authority),
+            request.clone(),
+            Some(&prepared_cursor),
+        )
+        .expect("authenticate prepared continuation after reopen")
+        .paginate(
+            &bindings,
+            vec!["first".to_owned(), "second".to_owned()],
+            1,
+            UtcMicros(101),
+        )
+        .expect("resume prepared continuation after reopen");
+        assert_eq!(resumed.items, vec!["second"]);
+        reopened_authority
+            .compose(
+                &request,
+                &query,
+                empty_restart_lanes(),
+                1,
+                Some(&fusion_cursor),
+            )
+            .expect("resume fusion continuation after reopen");
+    }
 }
