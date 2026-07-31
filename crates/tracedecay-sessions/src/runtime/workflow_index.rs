@@ -1,0 +1,794 @@
+//! Workflow-run indexing.
+//!
+//! Indexes Claude Code **workflow runs** (`wf_*` directories) and their
+//! per-phase **agents** in the per-project `sessions.db`, alongside `sessions`,
+//! `session_messages`, and the git-correlation tables from PR #281.
+//!
+//! Containment mirrors the on-disk layout:
+//! `user thread (session) -> subagents -> workflow runs -> workflow agents`.
+//! A run's transcript files live under
+//! `~/.claude/projects/<slug>/<session_id>/subagents/workflows/<run_id>/`, and
+//! the run's meta+result is the sibling `workflows/<run_id>.json`. A run is
+//! therefore *owned* by the session that spawned it (`parent_session_id`), so
+//! it inherits that session's git spans: "workflows on branch X" resolves to
+//! runs whose parent session has a span on X (see [`runs_for_git_scope`]).
+//!
+//! This module owns the **storage + query** foundation only. The ingest sweep
+//! that discovers run directories and parses transcripts, and the
+//! `tracedecay_workflows` query surface, build on the APIs defined here.
+
+use std::fmt::Write as _;
+pub use tracedecay_sessions::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
+
+use crate::db::engine::{
+    Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
+};
+use crate::runtime::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
+
+/// Schema version recorded in `session_schema_migrations` under
+/// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
+pub const WORKFLOW_INDEX_SCHEMA_VERSION: i64 = 1;
+
+const MIGRATION_NAME: &str = "workflow_indexing";
+
+/// Hard cap on rows returned by run/agent list queries, matching the
+/// git-correlation ceiling so the two surfaces page alike.
+pub const MAX_WORKFLOW_LIMIT: usize = MAX_SESSIONS_FOR_LIMIT;
+
+/// Errors from the workflow-index store.
+///
+/// Shaped like [`crate::runtime::git_correlation::GitCorrelationError`] so
+/// callers and `?`-conversions read the same across both stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowIndexError {
+    /// Underlying database failure.
+    Db(String),
+    /// Caller-supplied argument was invalid (empty run id, …).
+    InvalidArgument(String),
+}
+
+impl std::fmt::Display for WorkflowIndexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Db(message) => write!(f, "workflow index db error: {message}"),
+            Self::InvalidArgument(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for WorkflowIndexError {}
+
+impl From<crate::db::engine::Error> for WorkflowIndexError {
+    fn from(err: crate::db::engine::Error) -> Self {
+        Self::Db(err.to_string())
+    }
+}
+
+impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowIndexError {
+    fn from(err: crate::runtime::git_correlation::GitCorrelationError) -> Self {
+        match err {
+            crate::runtime::git_correlation::GitCorrelationError::Db(message) => Self::Db(message),
+            crate::runtime::git_correlation::GitCorrelationError::InvalidArgument(message) => {
+                Self::InvalidArgument(message)
+            }
+        }
+    }
+}
+
+/// Ensures the workflow-index tables exist in the session store. Version-gated
+/// through the shared `session_schema_migrations` table exactly like
+/// [`crate::runtime::git_correlation::ensure_git_correlation_schema`], so both
+/// stores register under their own migration name in one table.
+pub(crate) async fn ensure_workflow_index_schema(
+    conn: &impl Executor,
+) -> Result<(), WorkflowIndexError> {
+    if schema_version(conn)
+        .await
+        .is_some_and(|version| version >= WORKFLOW_INDEX_SCHEMA_VERSION)
+    {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_schema_migrations (
+            name TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            run_id TEXT PRIMARY KEY,
+            parent_session_id TEXT NOT NULL DEFAULT '',
+            name TEXT,
+            description TEXT,
+            phase_json TEXT,
+            status TEXT NOT NULL DEFAULT 'unknown'
+                CHECK(status IN ('running', 'completed', 'failed', 'unknown')),
+            started_ts INTEGER,
+            ended_ts INTEGER,
+            result_summary TEXT,
+            agent_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent
+            ON workflow_runs(parent_session_id, started_ts);
+        CREATE TABLE IF NOT EXISTS workflow_agents (
+            run_id TEXT NOT NULL,
+            agent_label TEXT NOT NULL,
+            agent_id TEXT NOT NULL DEFAULT '',
+            phase TEXT,
+            transcript_path TEXT,
+            agent_session_id TEXT,
+            status TEXT NOT NULL DEFAULT 'unknown'
+                CHECK(status IN ('running', 'completed', 'failed', 'unknown')),
+            model TEXT,
+            tokens INTEGER NOT NULL DEFAULT 0,
+            started_ts INTEGER,
+            ended_ts INTEGER,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(run_id, agent_label, agent_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_agents_run
+            ON workflow_agents(run_id, phase);
+        CREATE TABLE IF NOT EXISTS workflow_index_meta (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );",
+    )
+    .await?;
+    conn.execute(
+        "INSERT INTO session_schema_migrations(name, version)
+         VALUES (?1, ?2)
+         ON CONFLICT(name) DO UPDATE SET
+            version = excluded.version,
+            applied_at = unixepoch()",
+        params![MIGRATION_NAME, WORKFLOW_INDEX_SCHEMA_VERSION],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn schema_version(conn: &impl QueryExecutor) -> Option<i64> {
+    let mut rows = conn
+        .query(
+            "SELECT version FROM session_schema_migrations WHERE name = ?1",
+            params![MIGRATION_NAME],
+        )
+        .await
+        .ok()?;
+    rows.next().await.ok()??.get(0).ok()
+}
+
+#[cfg(test)]
+async fn tables_present(conn: &impl QueryExecutor) -> Result<bool, WorkflowIndexError> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('workflow_runs', 'workflow_agents')",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(false);
+    };
+    Ok(row.get::<i64>(0)? == 2)
+}
+
+/// `workflow_index_meta` key holding the newest run-file mtime (unix seconds)
+/// the ingest sweep has already processed. Runs whose files are no newer than
+/// this value are skipped on the next sweep. See
+/// [`crate::runtime::workflow_ingest`].
+pub const INGEST_WATERMARK_KEY: &str = "ingest_watermark_mtime";
+
+/// Reads the ingest watermark (max processed run-file mtime, unix seconds), or
+/// `0` when unset / the schema predates this table. Never errors: a store
+/// without the meta table simply reports no watermark, forcing a full sweep.
+pub(crate) async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 {
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT value FROM workflow_index_meta WHERE key = ?1",
+            params![key],
+        )
+        .await
+    else {
+        return 0;
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn opt_text(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |text| Value::Text(text.to_string()))
+}
+
+fn opt_int(value: Option<i64>) -> Value {
+    value.map_or(Value::Null, Value::Integer)
+}
+
+/// Inserts or updates one run row (idempotent on `run_id`). Re-ingesting a run
+/// whose transcripts grew (e.g. a `running` run that later `completed`)
+/// overwrites the mutable columns and refreshes `updated_at`. `created_at` is
+/// preserved.
+pub(crate) async fn upsert_run(
+    conn: &impl Executor,
+    run: &WorkflowRun,
+) -> Result<(), WorkflowIndexError> {
+    if run.run_id.trim().is_empty() {
+        return Err(WorkflowIndexError::InvalidArgument(
+            "workflow run_id must not be empty".to_string(),
+        ));
+    }
+    conn.execute(
+        "INSERT INTO workflow_runs(
+             run_id, parent_session_id, name, description, phase_json,
+             status, started_ts, ended_ts, result_summary, agent_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(run_id) DO UPDATE SET
+             parent_session_id = excluded.parent_session_id,
+             name = excluded.name,
+             description = excluded.description,
+             phase_json = excluded.phase_json,
+             status = excluded.status,
+             started_ts = excluded.started_ts,
+             ended_ts = excluded.ended_ts,
+             result_summary = excluded.result_summary,
+             agent_count = excluded.agent_count,
+             updated_at = unixepoch()",
+        params![
+            run.run_id.clone(),
+            run.parent_session_id.clone(),
+            opt_text(run.name.as_deref()),
+            opt_text(run.description.as_deref()),
+            opt_text(run.phase_json.as_deref()),
+            run.status.as_str(),
+            opt_int(run.started_ts),
+            opt_int(run.ended_ts),
+            opt_text(run.result_summary.as_deref()),
+            run.agent_count,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Inserts or updates one agent row (idempotent on `(run_id, agent_label,
+/// agent_id)`).
+pub(crate) async fn upsert_agent(
+    conn: &impl Executor,
+    agent: &WorkflowAgent,
+) -> Result<(), WorkflowIndexError> {
+    if agent.run_id.trim().is_empty() {
+        return Err(WorkflowIndexError::InvalidArgument(
+            "workflow agent run_id must not be empty".to_string(),
+        ));
+    }
+    conn.execute(
+        "INSERT INTO workflow_agents(
+             run_id, agent_label, agent_id, phase, transcript_path,
+             agent_session_id, status, model, tokens, started_ts, ended_ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(run_id, agent_label, agent_id) DO UPDATE SET
+             phase = excluded.phase,
+             transcript_path = excluded.transcript_path,
+             agent_session_id = excluded.agent_session_id,
+             status = excluded.status,
+             model = excluded.model,
+             tokens = excluded.tokens,
+             started_ts = excluded.started_ts,
+             ended_ts = excluded.ended_ts,
+             updated_at = unixepoch()",
+        params![
+            agent.run_id.clone(),
+            agent.agent_label.clone(),
+            agent.agent_id.clone(),
+            opt_text(agent.phase.as_deref()),
+            opt_text(agent.transcript_path.as_deref()),
+            opt_text(agent.agent_session_id.as_deref()),
+            agent.status.as_str(),
+            opt_text(agent.model.as_deref()),
+            agent.tokens,
+            opt_int(agent.started_ts),
+            opt_int(agent.ended_ts),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+const RUN_COLUMNS: &str = "run_id, parent_session_id, name, description, phase_json,
+     status, started_ts, ended_ts, result_summary, agent_count";
+
+fn row_to_run(row: &Row) -> Result<WorkflowRun, WorkflowIndexError> {
+    let status: String = row.get(5)?;
+    Ok(WorkflowRun {
+        run_id: row.get(0)?,
+        parent_session_id: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        phase_json: row.get(4)?,
+        status: WorkflowStatus::from_disk(&status),
+        started_ts: row.get(6)?,
+        ended_ts: row.get(7)?,
+        result_summary: row.get(8)?,
+        agent_count: row.get::<Option<i64>>(9)?.unwrap_or(0),
+    })
+}
+
+const AGENT_COLUMNS: &str = "run_id, agent_label, agent_id, phase, transcript_path,
+     agent_session_id, status, model, tokens, started_ts, ended_ts";
+
+fn row_to_agent(row: &Row) -> Result<WorkflowAgent, WorkflowIndexError> {
+    let status: String = row.get(6)?;
+    Ok(WorkflowAgent {
+        run_id: row.get(0)?,
+        agent_label: row.get(1)?,
+        agent_id: row.get(2)?,
+        phase: row.get(3)?,
+        transcript_path: row.get(4)?,
+        agent_session_id: row.get(5)?,
+        status: WorkflowStatus::from_disk(&status),
+        model: row.get(7)?,
+        tokens: row.get::<Option<i64>>(8)?.unwrap_or(0),
+        started_ts: row.get(9)?,
+        ended_ts: row.get(10)?,
+    })
+}
+
+fn clamp_limit(limit: usize) -> i64 {
+    limit.clamp(1, MAX_WORKFLOW_LIMIT) as i64
+}
+
+/// Workflow-index reader pinned to one registry-owned database snapshot.
+///
+/// A run detail and its agents are therefore observed at one database
+/// generation; callers cannot rediscover or reopen the physical store.
+pub(crate) struct RegisteredWorkflowIndexSnapshot {
+    snapshot: RegisteredReadSnapshot,
+}
+
+impl RegisteredWorkflowIndexSnapshot {
+    pub(crate) fn from_snapshot(snapshot: RegisteredReadSnapshot) -> Self {
+        Self { snapshot }
+    }
+
+    async fn has_tables(&self, names: &[&str]) -> Result<bool, WorkflowIndexError> {
+        if names.is_empty() {
+            return Ok(true);
+        }
+        let placeholders = (1..=names.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN ({placeholders})"
+        );
+        let params = names
+            .iter()
+            .map(|name| Value::Text((*name).to_string()))
+            .collect::<Vec<_>>();
+        let mut rows = self.snapshot.query(&sql, params).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(false);
+        };
+        Ok(row.get::<i64>(0)? == i64::try_from(names.len()).unwrap_or(i64::MAX))
+    }
+
+    /// Whether the workflow index exists in this store yet.
+    ///
+    /// The query methods below already treat an absent index as empty, which is
+    /// safe but indistinguishable from a built index holding nothing. Callers
+    /// that report to a user ask this first so they can say which one it is.
+    pub(crate) async fn workflow_tables_present(&self) -> Result<bool, WorkflowIndexError> {
+        self.has_tables(&["workflow_runs", "workflow_agents"]).await
+    }
+
+    pub(crate) async fn runs_for_session(
+        &self,
+        parent_session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {RUN_COLUMNS}
+             FROM workflow_runs
+             WHERE parent_session_id = ?1
+             ORDER BY COALESCE(started_ts, 0) DESC, run_id DESC
+             LIMIT ?2"
+        );
+        let mut rows = self
+            .snapshot
+            .query(&sql, params![parent_session_id, clamp_limit(limit)])
+            .await?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next().await? {
+            runs.push(row_to_run(&row)?);
+        }
+        Ok(runs)
+    }
+
+    pub(crate) async fn run_for_id(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<WorkflowRun>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(None);
+        }
+        let sql = format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE run_id = ?1");
+        let mut rows = self.snapshot.query(&sql, params![run_id]).await?;
+        rows.next().await?.map(|row| row_to_run(&row)).transpose()
+    }
+
+    pub(crate) async fn agents_for_run(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowAgent>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {AGENT_COLUMNS}
+             FROM workflow_agents
+             WHERE run_id = ?1
+             ORDER BY COALESCE(started_ts, 0) ASC, agent_label ASC
+             LIMIT ?2"
+        );
+        let mut rows = self
+            .snapshot
+            .query(&sql, params![run_id, clamp_limit(limit)])
+            .await?;
+        let mut agents = Vec::new();
+        while let Some(row) = rows.next().await? {
+            agents.push(row_to_agent(&row)?);
+        }
+        Ok(agents)
+    }
+
+    pub(crate) async fn agent_count_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<i64, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(0);
+        }
+        let mut rows = self
+            .snapshot
+            .query(
+                "SELECT COUNT(*) FROM workflow_agents WHERE run_id = ?1",
+                params![run_id],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(0);
+        };
+        Ok(row.get(0)?)
+    }
+
+    pub(crate) async fn agent_for_run_label(
+        &self,
+        run_id: &str,
+        agent_label: &str,
+    ) -> Result<Option<WorkflowAgent>, WorkflowIndexError> {
+        if !self
+            .has_tables(&["workflow_runs", "workflow_agents"])
+            .await?
+        {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT {AGENT_COLUMNS}
+             FROM workflow_agents
+             WHERE run_id = ?1 AND agent_label = ?2
+             ORDER BY COALESCE(started_ts, 0) ASC, agent_id ASC
+             LIMIT 1"
+        );
+        let mut rows = self
+            .snapshot
+            .query(&sql, params![run_id, agent_label])
+            .await?;
+        rows.next().await?.map(|row| row_to_agent(&row)).transpose()
+    }
+
+    pub(crate) async fn runs_for_git_scope(
+        &self,
+        filter: &GitScopeFilter,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
+        if filter.is_empty() {
+            return Err(WorkflowIndexError::InvalidArgument(
+                "runs_for_git_scope requires at least one of branch/worktree/commit".to_string(),
+            ));
+        }
+        if !self
+            .has_tables(&[
+                "workflow_runs",
+                "workflow_agents",
+                "session_git_spans",
+                "commit_sessions",
+            ])
+            .await?
+        {
+            return Ok(Vec::new());
+        }
+
+        let clauses = crate::runtime::git_correlation::git_scope_exists_clauses(
+            filter,
+            "r.parent_session_id",
+        );
+        let mut sql = format!(
+            "SELECT {RUN_COLUMNS}
+             FROM workflow_runs AS r
+             WHERE r.parent_session_id <> ''
+               AND ("
+        );
+        let mut params = Vec::new();
+        for (index, (clause, values)) in clauses.into_iter().enumerate() {
+            if index > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str(&clause);
+            params.extend(values);
+        }
+        params.push(Value::Integer(clamp_limit(limit)));
+        let _ = write!(
+            sql,
+            ") ORDER BY COALESCE(r.started_ts, 0) DESC, r.run_id DESC LIMIT ?{}",
+            params.len()
+        );
+
+        let mut rows = self.snapshot.query(&sql, params).await?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next().await? {
+            runs.push(row_to_run(&row)?);
+        }
+        Ok(runs)
+    }
+}
+
+#[cfg(test)]
+async fn runs_for_session(
+    conn: &impl QueryExecutor,
+    parent_session_id: &str,
+    limit: usize,
+) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
+    if !tables_present(conn).await? {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT {RUN_COLUMNS}
+         FROM workflow_runs
+         WHERE parent_session_id = ?1
+         ORDER BY COALESCE(started_ts, 0) DESC, run_id DESC
+         LIMIT ?2"
+    );
+    let mut rows = conn
+        .query(&sql, params![parent_session_id, clamp_limit(limit)])
+        .await?;
+    let mut runs = Vec::new();
+    while let Some(row) = rows.next().await? {
+        runs.push(row_to_run(&row)?);
+    }
+    Ok(runs)
+}
+
+#[cfg(test)]
+async fn run_for_id(
+    conn: &impl QueryExecutor,
+    run_id: &str,
+) -> Result<Option<WorkflowRun>, WorkflowIndexError> {
+    if !tables_present(conn).await? {
+        return Ok(None);
+    }
+    let sql = format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE run_id = ?1");
+    let mut rows = conn.query(&sql, params![run_id]).await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(row_to_run(&row)?)),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+async fn agents_for_run(
+    conn: &impl QueryExecutor,
+    run_id: &str,
+    limit: usize,
+) -> Result<Vec<WorkflowAgent>, WorkflowIndexError> {
+    if !tables_present(conn).await? {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT {AGENT_COLUMNS}
+         FROM workflow_agents
+         WHERE run_id = ?1
+         ORDER BY COALESCE(started_ts, 0) ASC, agent_label ASC
+         LIMIT ?2"
+    );
+    let mut rows = conn
+        .query(&sql, params![run_id, clamp_limit(limit)])
+        .await?;
+    let mut agents = Vec::new();
+    while let Some(row) = rows.next().await? {
+        agents.push(row_to_agent(&row)?);
+    }
+    Ok(agents)
+}
+
+#[cfg(test)]
+async fn runs_for_git_scope(
+    conn: &impl QueryExecutor,
+    filter: &GitScopeFilter,
+    limit: usize,
+) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
+    if filter.is_empty() {
+        return Err(WorkflowIndexError::InvalidArgument(
+            "runs_for_git_scope requires at least one of branch/worktree/commit".to_string(),
+        ));
+    }
+    if !tables_present(conn).await? {
+        return Ok(Vec::new());
+    }
+    if !crate::runtime::git_correlation::tables_present(conn)
+        .await
+        .map_err(WorkflowIndexError::from)?
+    {
+        return Ok(Vec::new());
+    }
+
+    let clauses =
+        crate::runtime::git_correlation::git_scope_exists_clauses(filter, "r.parent_session_id");
+    let mut sql = format!(
+        "SELECT {RUN_COLUMNS}
+         FROM workflow_runs AS r
+         WHERE r.parent_session_id <> ''
+           AND ("
+    );
+    let mut params: Vec<Value> = Vec::new();
+    for (idx, (clause, mut values)) in clauses.into_iter().enumerate() {
+        if idx > 0 {
+            sql.push_str(" OR ");
+        }
+        sql.push_str(&clause);
+        params.append(&mut values);
+    }
+    params.push(Value::Integer(clamp_limit(limit)));
+    let _ = write!(
+        sql,
+        ") ORDER BY COALESCE(r.started_ts, 0) DESC, r.run_id DESC LIMIT ?{}",
+        params.len()
+    );
+
+    let mut rows = conn.query(&sql, params).await?;
+    let mut runs = Vec::new();
+    while let Some(row) = rows.next().await? {
+        runs.push(row_to_run(&row)?);
+    }
+    Ok(runs)
+}
+
+#[cfg(test)]
+fn workflow_scope_exists_predicate(
+    filter: &WorkflowScopeFilter,
+    message_source_path_col: &str,
+    message_session_id_col: &str,
+) -> (String, Vec<Value>) {
+    let mut params = vec![Value::Text(filter.run_id.clone())];
+    let mut predicate = format!(
+        "EXISTS (SELECT 1 FROM workflow_agents wa \
+         WHERE wa.run_id = ?1 \
+           AND (wa.transcript_path = {message_source_path_col} \
+                OR wa.agent_session_id = {message_session_id_col})"
+    );
+    if let Some(label) = &filter.agent_label {
+        params.push(Value::Text(label.clone()));
+        let _ = write!(predicate, " AND wa.agent_label = ?{}", params.len());
+    }
+    predicate.push(')');
+    (predicate, params)
+}
+
+mod port;
+pub(crate) use port::WorkflowIngestWriteTxn;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod detail_coverage_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_prefix_keeps_exact_last_agent_and_total_count_queryable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let connection =
+            crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+        ensure_workflow_index_schema(&connection)
+            .await
+            .expect("workflow schema");
+        upsert_run(
+            &connection,
+            &WorkflowRun {
+                run_id: "wf_bounded".to_string(),
+                parent_session_id: "session-1".to_string(),
+                name: None,
+                description: None,
+                phase_json: None,
+                status: WorkflowStatus::Running,
+                started_ts: Some(100),
+                ended_ts: None,
+                result_summary: None,
+                // Detail reads count indexed rows instead of trusting this
+                // potentially stale run metadata.
+                agent_count: 99,
+            },
+        )
+        .await
+        .expect("run");
+        for index in 1..=3 {
+            upsert_agent(
+                &connection,
+                &WorkflowAgent {
+                    run_id: "wf_bounded".to_string(),
+                    agent_label: format!("agent-{index}"),
+                    agent_id: format!("id-{index}"),
+                    phase: None,
+                    transcript_path: None,
+                    agent_session_id: None,
+                    status: WorkflowStatus::Running,
+                    model: None,
+                    tokens: 0,
+                    started_ts: Some(index),
+                    ended_ts: None,
+                },
+            )
+            .await
+            .expect("agent");
+        }
+
+        let snapshot = RegisteredWorkflowIndexSnapshot::from_snapshot(
+            connection.read_snapshot().await.expect("snapshot"),
+        );
+        let prefix = snapshot
+            .agents_for_run("wf_bounded", 2)
+            .await
+            .expect("bounded agents");
+        assert_eq!(prefix.len(), 2);
+        assert!(prefix.iter().all(|agent| agent.agent_label != "agent-3"));
+        assert_eq!(
+            snapshot
+                .agent_count_for_run("wf_bounded")
+                .await
+                .expect("agent count"),
+            3
+        );
+        assert_eq!(
+            snapshot
+                .agent_for_run_label("wf_bounded", "agent-3")
+                .await
+                .expect("exact agent")
+                .expect("last agent")
+                .agent_label,
+            "agent-3"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;
