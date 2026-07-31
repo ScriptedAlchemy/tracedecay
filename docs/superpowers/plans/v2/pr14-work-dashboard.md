@@ -8,6 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical version/compatibility/migration language cannot resurrect
+> branch-only scaffolding; without released or live predecessor evidence, the
+> current numbered plan changes the contract in place.
 
 **Goal:** Ship the core Plan 24 graph, minimal Plan 32 runtime, Work workspace,
 Doctor remediation, and all thirteen truthful dashboard workspaces.
@@ -59,8 +62,9 @@ applicable numbered V2 plans.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Migrate existing task/runtime-compatible records through versioned replay;
-verify deterministic projections before route activation. Rollback disables
+Only task/runtime records proven in a released or live persisted format require
+versioned replay; the recorded PR14 branch shapes were unreleased and change in
+place. Verify deterministic projections before route activation. Rollback disables
 routes/capabilities and reverts code while immutable events remain readable;
 never dual-write or auto-accept.
 
