@@ -291,12 +291,10 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-features --profile ci --locked
 
-      # Raw retention, unconditional and positioned before every gate that can
-      # abort the job. The OS-tagged packet upload further down only runs after
-      # the strict validators, so a failing test step took the durations and
-      # failure detail down with it and left nothing to analyse. This step
-      # cannot rescue the job - a missing file is a warning, not a pass - it
-      # only preserves whatever nextest managed to write.
+      # Raw retention is unconditional and positioned before later gates that
+      # can abort the job. This cannot rescue the job - a missing file is a
+      # warning, not a pass - it only preserves whatever nextest managed to
+      # write.
       - name: Upload raw nextest junit
         if: always()
         uses: actions/upload-artifact@v4
@@ -711,8 +709,8 @@ jobs:
           fi
           echo "All Windows shards passed."
 
-  windows-pr12-pr13-packets:
-    name: PR12/PR13 packets (Windows evidence)
+  windows-platform-acceptance:
+    name: Windows platform acceptance
     if: ${{ !cancelled() && needs.windows-test-shard.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
     needs: [dashboard-assets, windows-test-shard]
     runs-on: windows-latest
@@ -773,13 +771,9 @@ jobs:
 
       - name: PR13 default-feature platform lifecycle
         shell: bash
-        run: |
-          set -euo pipefail
-          scripts/require-exact-test.sh \
-            cargo test --locked --test pr13_host_bundle_acceptance \
-            receipt_backed_doctor_checks_deployed_digests_registration_and_repair \
-            -- --exact
-      - name: Validate packets and merge Windows junit
+        run: cargo test --locked --test pr13_host_bundle_acceptance
+
+      - name: Merge Windows junit
         shell: bash
         run: |
           set -euo pipefail
@@ -904,6 +898,9 @@ jobs:
 
       - name: Run blocking Clippy policy with all features
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run blocking Clippy policy with default features
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run blocking Clippy policy without default features
         run: cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings

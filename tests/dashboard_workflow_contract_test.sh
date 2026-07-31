@@ -49,7 +49,7 @@ for name, workflow in [
 for job in [
     "test",
     "windows-build",
-    "windows-pr12-pr13-packets",
+    "windows-platform-acceptance",
     "release-compatibility",
     "clippy",
     "dashboard",
@@ -254,7 +254,7 @@ if not os.access(guard, os.X_OK):
 # gates and the platform-lifecycle receipt, so both are held to the same rule.
 gate_jobs = {
     "test": 3,  # lite grammar, platform lifecycle, observation crash harness
-    "windows-pr12-pr13-packets": 2,  # lite grammar, platform lifecycle
+    "windows-platform-acceptance": 2,  # lite grammar, platform lifecycle
 }
 for job_name, guarded_gates in gate_jobs.items():
     block = job_block(ci, job_name)
@@ -508,9 +508,29 @@ if "github.event_name == 'push'" not in drift_job:
 if not re.search(r"(?m)^  push:\s*\n\s+branches: \[master\]", plugin):
     raise SystemExit("plugin validation must run on master pushes")
 cursor_job = job_block(plugin, "cursor-native-extension")
+platform_cursor_commands = [
+    "npm --prefix plugin/cursor-native-extension ci",
+    "npm --prefix plugin/cursor-native-extension run check",
+    "npm --prefix plugin/cursor-native-extension test",
+    "npm --prefix plugin/cursor-native-extension run package",
+]
+for name, block in [
+    ("Linux/macOS test matrix", job_block(ci, "test")),
+    ("Windows platform acceptance", job_block(ci, "windows-platform-acceptance")),
+]:
+    for required in platform_cursor_commands:
+        if required not in block:
+            raise SystemExit(f"{name} must preserve Cursor extension command {required!r}")
+    if "npm publish" in block:
+        raise SystemExit(f"{name} must package the Cursor extension without publishing")
 for required in ["npm ci", "npm run check", "npm test", "npm run package"]:
     if required not in cursor_job:
-        raise SystemExit(f"Cursor extension job must preserve {required!r}")
+        raise SystemExit(f"plugin validation must preserve Cursor extension command {required!r}")
+if "npm publish" in cursor_job:
+    raise SystemExit("plugin validation must package the Cursor extension without publishing")
+for required in ["name: Linux", "name: macOS"]:
+    if required not in job_block(ci, "test"):
+        raise SystemExit(f"CI test matrix must preserve Cursor coverage for {required!r}")
 
 # A boundary step wired to an empty rule set passes every time and proves
 # nothing, so the gate's contents are part of the contract, not just its

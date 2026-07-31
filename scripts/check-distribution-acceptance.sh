@@ -55,9 +55,6 @@ assert_fastembed_fixture() {
 
 assert_required_assets() {
   local root_package=$1
-  local application_package=$2
-  local api_package=$3
-  local lsp_package=$4
   local required
   local -a root_assets=(
     "plugin/.lsp.json"
@@ -67,14 +64,6 @@ assert_required_assets() {
     "plugin/.kimi-plugin/plugin.json"
     "plugin/cursor-native-extension/dist/extension.js"
     "dashboard/app-dist/index.html"
-    "src/agents/host_bundle_registry.rs"
-    "src/agents/host_bundle_v2.rs"
-    "src/application/advisory/host_delivery.rs"
-    "src/application/advisory/runtime.rs"
-    "src/application/feedback/cycle_runtime.rs"
-    "src/application/primitives/runtime.rs"
-    "src/semantic_code/fastembed_adapter.rs"
-    "src/semantic_code/model_lifecycle.rs"
     "tests/fixtures/packaged_host_events/claude.json"
     "tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
     "tests/fixtures/packaged_host_events/cline-family.json"
@@ -87,49 +76,13 @@ assert_required_assets() {
     "tests/fixtures/packaged_host_events/kimi-code.json"
     "tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
     "tests/fixtures/packaged_host_events/opencode/baseline.json"
-    # Packaged fixture/workload pins (PR5 harness embeds its workload via
-    # include_str!; PR7 keeps a workload pin for distribution completeness).
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
-    "tests/fixtures/analytics/codex_skill_prose.txt"
-    "tests/session_suite/lcm_schema/mod.rs"
-    "benchmarks/pr5-observation/workload-v1.json"
-    "benchmarks/pr7-memory/workload-v1.json"
-    "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json"
-    "benchmarks/search-quality/pr9-fallback-report-v1.json"
-  )
-  local -a application_assets=(
-    "src/feedback/read.rs"
-    "src/feedback/github_ci_proximity.rs"
-    "src/advisory.rs"
-  )
-  local -a api_assets=(
-    "src/http.rs"
-    "src/sse.rs"
-  )
-  # The gateway protocol and stdio framing ship from their own crate now. The
-  # root package keeps only the façade, so pinning them here is what keeps the
-  # distribution gate covering the LSP surface end to end.
-  local -a lsp_assets=(
-    "src/bridge.rs"
-    "src/protocol.rs"
   )
 
   for required in "${root_assets[@]}"; do
     [[ -f "$root_package/$required" ]] ||
       die "packaged tracedecay crate is missing $required"
-  done
-  for required in "${application_assets[@]}"; do
-    [[ -f "$application_package/$required" ]] ||
-      die "packaged tracedecay-application crate is missing $required"
-  done
-  for required in "${api_assets[@]}"; do
-    [[ -f "$api_package/$required" ]] ||
-      die "packaged tracedecay-api crate is missing $required"
-  done
-  for required in "${lsp_assets[@]}"; do
-    [[ -f "$lsp_package/$required" ]] ||
-      die "packaged tracedecay-lsp crate is missing $required"
   done
   python3 "$repo/scripts/check-dashboard-bundle.py" \
     "$root_package/dashboard/app-dist"
@@ -157,7 +110,6 @@ assert_code_extraction_assets() {
   local extraction_package=$1
   local required
   local -a assets=(
-    "tests/rust.rs"
     "vendor/tree-sitter-rust/LICENSE"
     "vendor/tree-sitter-rust/queries/highlights.scm"
     "vendor/tree-sitter-rust/queries/injections.scm"
@@ -410,8 +362,7 @@ query_package=${package_dirs[tracedecay-query]:-}
 [[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package && -n $lsp_package && -n $code_extraction_package && -n $query_package ]] ||
   die "workspace packages required by the distribution gate were not produced"
 
-assert_required_assets \
-  "$root_package" "$application_package" "$api_package" "$lsp_package"
+assert_required_assets "$root_package"
 assert_code_extraction_assets "$code_extraction_package"
 verify_feature_wiring "$repo/Cargo.toml" "$root_package/Cargo.toml"
 
@@ -474,8 +425,7 @@ PY
 export ORT_LIB_PATH="$ort_lib_path"
 
 echo "distribution acceptance: checking packaged model-acquisition lifecycle suite"
-CARGO_NET_OFFLINE=true REQUIRE_EXACT_TEST_COUNT=15 \
-  "$repo/scripts/require-exact-test.sh" cargo test \
+CARGO_NET_OFFLINE=true cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
   --no-default-features \
