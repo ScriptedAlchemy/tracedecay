@@ -1,4 +1,12 @@
-use super::*;
+use std::collections::VecDeque;
+
+use super::{
+    DaemonLspProtocolSession, DaemonLspSessionTransport, DiagnosticSnapshotPort, FeedbackCyclePort,
+    FramePoll, FrameSend, Infallible, LspFrame, LspRequestFailure, LspRequestId,
+    MAX_LSP_FRAME_BYTES, MAX_PUBLICATION_BYTES, MAX_QUEUED_OUTBOUND_BYTES,
+    MAX_QUEUED_OUTBOUND_MESSAGES, PublicationAdmission, RpcFailure, SemanticProviderPort,
+    SessionLifecycle, Value, error_response, request_id,
+};
 
 const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
 
@@ -385,7 +393,7 @@ where
 
 #[cfg(test)]
 mod controller_tests {
-    use super::*;
+    use serde_json::json;
 
     #[test]
     fn queue_serializes_one_exact_json_rpc_frame() {

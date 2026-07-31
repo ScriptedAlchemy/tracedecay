@@ -5,7 +5,7 @@
 //! is parsed, lifecycle-gated, root-gated, bounded, and dispatched through a
 //! typed gateway/provider port.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 

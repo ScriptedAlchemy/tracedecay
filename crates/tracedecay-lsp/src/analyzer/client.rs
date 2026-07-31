@@ -147,10 +147,10 @@ pub fn encode_semantic_request(
 ) -> std::result::Result<crate::LspSemanticRequest, LspSemanticRequestError> {
     let method = request.method();
     let params = match request {
-        LspSemanticRequest::Declaration(params) => serde_json::to_value(params),
-        LspSemanticRequest::Definition(params) => serde_json::to_value(params),
-        LspSemanticRequest::TypeDefinition(params) => serde_json::to_value(params),
-        LspSemanticRequest::Implementation(params) => serde_json::to_value(params),
+        LspSemanticRequest::Declaration(params)
+        | LspSemanticRequest::Definition(params)
+        | LspSemanticRequest::TypeDefinition(params)
+        | LspSemanticRequest::Implementation(params) => serde_json::to_value(params),
         LspSemanticRequest::References(params) => serde_json::to_value(params),
         LspSemanticRequest::Hover(params) => serde_json::to_value(params),
         LspSemanticRequest::DocumentSymbols(params) => serde_json::to_value(params),
