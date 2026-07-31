@@ -344,17 +344,16 @@ mod tests {
     }
 
     fn install(connection: &rusqlite::Connection) {
+        // The anchors table comes from the canonical production DDL so this
+        // executor is exercised against the constraints the live table has,
+        // rather than a relaxed local restatement of its columns.
+        connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        connection
+            .execute_batch(tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL)
+            .unwrap();
         connection
             .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 CREATE TABLE retrieval_anchors (
-                    anchor_id TEXT PRIMARY KEY,
-                    anchor_json TEXT NOT NULL,
-                    owner_json TEXT NOT NULL,
-                    projection_generation TEXT NOT NULL,
-                    UNIQUE(anchor_id, owner_json)
-                 );
-                 CREATE TABLE retrieval_anchor_dispositions (
+                "CREATE TABLE retrieval_anchor_dispositions (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     disposition_id TEXT NOT NULL UNIQUE,
                     anchor_id TEXT NOT NULL,

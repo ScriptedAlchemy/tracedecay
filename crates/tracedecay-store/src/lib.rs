@@ -24,6 +24,7 @@ pub mod projection;
 pub mod remote_recovery;
 pub mod retrieval_anchor;
 pub mod runtime;
+pub mod schema;
 pub mod session;
 pub mod transcript;
 
@@ -158,6 +159,7 @@ pub use retrieval_anchor::{
     RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1, StoredRetrievalAnchorRecordV1,
 };
 pub use runtime::*;
+pub use schema::{GENERATION_DIAGNOSTICS_SCHEMA_DDL, RETRIEVAL_ANCHORS_SCHEMA_DDL};
 pub use session::{
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1,

@@ -30,59 +30,12 @@ use crate::db::engine::{Row, Rows, TransactionBehavior, Value, params};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
 
-/// Durable table for generation-bound diagnostic records.
-pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS generation_diagnostics (
-        diagnostic_anchor TEXT PRIMARY KEY,
-        generation_id TEXT NOT NULL,
-        repository TEXT NOT NULL,
-        worktree TEXT,
-        reference TEXT,
-        source_revision TEXT,
-        file_occurrence_id TEXT NOT NULL,
-        content_digest TEXT NOT NULL,
-        symbol_occurrence_id TEXT,
-        span_start INTEGER NOT NULL,
-        span_end INTEGER NOT NULL,
-        code TEXT NOT NULL,
-        severity TEXT NOT NULL,
-        message TEXT NOT NULL,
-        message_digest TEXT NOT NULL,
-        producer_kind TEXT NOT NULL,
-        producer TEXT NOT NULL,
-        analyzer_revision TEXT NOT NULL,
-        configuration_revision TEXT NOT NULL,
-        sanitization_receipt TEXT,
-        evidence_class TEXT NOT NULL,
-        collected_at INTEGER NOT NULL,
-        record_state TEXT NOT NULL DEFAULT 'current',
-        state_generation TEXT,
-        persisted_at INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state
-        ON generation_diagnostics (generation_id, record_state);
-
-    CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_generation_state_anchor
-        ON generation_diagnostics (generation_id, record_state, diagnostic_anchor);
-
-    CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_file
-        ON generation_diagnostics (file_occurrence_id, generation_id);
-
-    CREATE INDEX IF NOT EXISTS idx_generation_diagnostics_file_generation_state_anchor
-        ON generation_diagnostics (
-            file_occurrence_id, generation_id, record_state, diagnostic_anchor
-        );
-
-    CREATE TABLE IF NOT EXISTS diagnostic_generation_publications (
-        generation_id TEXT PRIMARY KEY,
-        record_state TEXT NOT NULL,
-        state_generation TEXT,
-        published_at INTEGER NOT NULL
-    );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_diagnostic_generation_current
-        ON diagnostic_generation_publications (record_state)
-        WHERE record_state = 'current';";
+/// Durable tables for generation-bound diagnostic records.
+///
+/// The DDL lives in `tracedecay-store` because the rusqlite-runtime
+/// `DiagnosticExecutor` writes the same tables and its fixtures must not be
+/// weaker than what this engine installs.
+pub(crate) const SCHEMA: &str = tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL;
 
 // The stored column text is owned by `tracedecay_store::diagnostics::codec` so
 // this engine and the rusqlite-runtime `DiagnosticExecutor` cannot drift apart

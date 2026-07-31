@@ -1344,15 +1344,16 @@ pub mod tests {
 
     #[cfg(test)]
     fn install(connection: &rusqlite::Connection) {
+        // The anchors table is installed from the canonical production DDL, not
+        // a relaxed local copy: this executor writes anchors in production, so
+        // a fixture without the real CHECK and UNIQUE clauses would accept rows
+        // the live table rejects.
+        connection
+            .execute_batch(tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL)
+            .unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE retrieval_anchors (
-                    anchor_id TEXT PRIMARY KEY, anchor_json TEXT NOT NULL,
-                    owner_json TEXT NOT NULL, projection_generation TEXT NOT NULL
-                 );
-                 CREATE UNIQUE INDEX idx_retrieval_anchors_owner
-                   ON retrieval_anchors(anchor_id, owner_json);
-                 CREATE TABLE retrieval_anchor_dispositions (
+                "CREATE TABLE retrieval_anchor_dispositions (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT, disposition_id TEXT UNIQUE,
                     anchor_id TEXT, owner_json TEXT, state TEXT, superseded_by TEXT,
                     reason_class TEXT, effective_at INTEGER, record_json TEXT
