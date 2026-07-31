@@ -4,8 +4,8 @@ use serde_json::{Map, Value, json};
 
 use super::super::DashboardState;
 use super::projection::PROJECTION_POINT_CAP;
+use crate::memory::types::MemoryCategory;
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_domain::FactCategoryV1;
 use tracedecay_store::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactSummaryV1,
     CompatibilityDashboardHrrStateV1, CompatibilityDashboardMemoryOverviewV1,
@@ -26,17 +26,6 @@ pub(crate) fn providers_payload() -> Value {
         "plugin_context_engine": null,
         "curator_tools": { "enabled": false, "count": 0, "available": 0, "tools": [] },
     })
-}
-
-const fn fact_category_label(category: FactCategoryV1) -> &'static str {
-    match category {
-        FactCategoryV1::General => "general",
-        FactCategoryV1::UserPref => "user_pref",
-        FactCategoryV1::Project => "project",
-        FactCategoryV1::Tool => "tool",
-        FactCategoryV1::Decision => "decision",
-        FactCategoryV1::CodeArea => "code_area",
-    }
 }
 
 fn legacy_fact_id(projection: &CompatibilityFactProjectionV1) -> Option<i64> {
@@ -78,7 +67,10 @@ pub(super) fn fact_summary_json(summary: &CompatibilityDashboardFactSummaryV1) -
         row.insert("content".into(), json!(content));
     }
     if let Some(category) = fact.category() {
-        row.insert("category".into(), json!(fact_category_label(category)));
+        row.insert(
+            "category".into(),
+            json!(MemoryCategory::from(category).as_str()),
+        );
     }
     if let Some(tags) = fact.tags() {
         row.insert("tags".into(), json!(tags));

@@ -2644,16 +2644,6 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
-    pub(crate) fn evidence_assembly_service_for_test(
-        &self,
-        project_database: crate::db::Database,
-    ) -> crate::application::evidence_assembly::EvidenceAssemblyService {
-        crate::application::evidence_assembly::EvidenceAssemblyService::new(
-            project_database,
-            Arc::clone(&self.profile_registered),
-        )
-    }
-
     pub(crate) fn project_configuration_control_store_for_test(
         &self,
     ) -> crate::errors::Result<

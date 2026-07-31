@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_domain::FactCategoryV1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +25,25 @@ impl MemoryCategory {
             Self::Tool => "tool",
             Self::Decision => "decision",
             Self::CodeArea => "code_area",
+        }
+    }
+
+    /// Strict inverse of [`MemoryCategory::as_str`].
+    ///
+    /// Unlike the [`FromStr`] implementation this accepts only the exact
+    /// canonical labels: no aliases, no case folding, no separator rewriting.
+    /// Durable projections that round-trip a stored label must use this so a
+    /// non-canonical spelling stays a parse failure rather than becoming a
+    /// silently reinterpreted category.
+    pub fn from_canonical_label(value: &str) -> Option<Self> {
+        match value {
+            "general" => Some(Self::General),
+            "user_pref" => Some(Self::UserPref),
+            "project" => Some(Self::Project),
+            "tool" => Some(Self::Tool),
+            "decision" => Some(Self::Decision),
+            "code_area" => Some(Self::CodeArea),
+            _ => None,
         }
     }
 
@@ -51,6 +71,39 @@ impl MemoryCategory {
 impl fmt::Display for MemoryCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// The V1 compatibility projection of a canonical fact category.
+///
+/// `MemoryCategory` is the permanent V1 surface for the canonical
+/// [`FactCategoryV1`]; the two enums are kept variant-for-variant identical on
+/// purpose. This pair of conversions is the only mapping between them, so a
+/// new canonical variant fails to compile here instead of drifting across
+/// hand-written tables in the automation, dashboard, and storage paths.
+impl From<FactCategoryV1> for MemoryCategory {
+    fn from(category: FactCategoryV1) -> Self {
+        match category {
+            FactCategoryV1::General => Self::General,
+            FactCategoryV1::UserPref => Self::UserPref,
+            FactCategoryV1::Project => Self::Project,
+            FactCategoryV1::Tool => Self::Tool,
+            FactCategoryV1::Decision => Self::Decision,
+            FactCategoryV1::CodeArea => Self::CodeArea,
+        }
+    }
+}
+
+impl From<MemoryCategory> for FactCategoryV1 {
+    fn from(category: MemoryCategory) -> Self {
+        match category {
+            MemoryCategory::General => Self::General,
+            MemoryCategory::UserPref => Self::UserPref,
+            MemoryCategory::Project => Self::Project,
+            MemoryCategory::Tool => Self::Tool,
+            MemoryCategory::Decision => Self::Decision,
+            MemoryCategory::CodeArea => Self::CodeArea,
+        }
     }
 }
 
