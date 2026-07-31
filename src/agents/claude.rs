@@ -196,19 +196,6 @@ impl AgentIntegration for ClaudeIntegration {
 
         let deploy_dir = plugin_deploy_dir(&ctx.home);
         let manifest_path = plugin_marketplace_manifest_path(&ctx.home);
-        let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
-            return State::Missing;
-        };
-        let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) else {
-            return State::Corrupt;
-        };
-        if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
-            return State::Corrupt;
-        }
-        let mcp_current = load_json_file(&deploy_dir.join(".mcp.json"))
-            .get("mcpServers")
-            .and_then(|servers| servers.get("graph"))
-            .is_some();
         let settings = load_json_file(&ctx.home.join(".claude/settings.json"));
         let enabled = settings
             .pointer("/enabledPlugins/tracedecay@tracedecay")
@@ -228,6 +215,27 @@ impl AgentIntegration for ClaudeIntegration {
                         .any(|value| value.as_str() == Some(expected.as_str()))
                 })
             });
+        let manifest_bytes = match std::fs::read(&manifest_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return if marketplace_registered || enabled || permissions {
+                    State::Repairable
+                } else {
+                    State::Missing
+                };
+            }
+            Err(_) => return State::Corrupt,
+        };
+        let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) else {
+            return State::Corrupt;
+        };
+        if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
+            return State::Corrupt;
+        }
+        let mcp_current = load_json_file(&deploy_dir.join(".mcp.json"))
+            .get("mcpServers")
+            .and_then(|servers| servers.get("graph"))
+            .is_some();
         if matches!(
             component,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
@@ -750,7 +758,9 @@ fn unregister_marketplace(home: &Path) -> Result<()> {
     }
     let is_empty = known.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
-        std::fs::remove_file(&path).ok();
+        super::safe_remove_host_file(&path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to remove {}: {error}", path.display()),
+        })?;
         eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
     } else {
         safe_write_json_file(&path, &known, None)?;

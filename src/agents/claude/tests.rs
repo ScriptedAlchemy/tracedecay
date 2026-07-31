@@ -1,6 +1,35 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn missing_manifest_with_stale_registration_is_repairable() {
+    use crate::agents::AgentIntegration;
+    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+
+    let home = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    let marketplace = known_marketplaces_path(home.path());
+    std::fs::create_dir_all(marketplace.parent().unwrap()).unwrap();
+    safe_write_json_file(
+        &marketplace,
+        &json!({
+            "tracedecay": {
+                "source": { "source": "directory", "path": "/stale" }
+            }
+        }),
+        None,
+    )
+    .unwrap();
+    let state = ClaudeIntegration.host_component_registration(
+        HostBundleComponentV1::Core,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: project.path().to_path_buf(),
+        },
+    );
+    assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
+}
+
 fn plugin_subdir_names(rel: &str) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("plugin")
