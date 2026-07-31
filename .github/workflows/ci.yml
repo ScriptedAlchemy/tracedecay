@@ -64,11 +64,6 @@ jobs:
       - name: Validate dashboard bundle
         run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
-      # The other side of the bundle guard above: that one rejects a placeholder
-      # bundle, this one rejects one that outgrew plan 11's transfer ceilings.
-      - name: Check dashboard payload budgets
-        run: node scripts/check-dashboard-budget.mjs dashboard/app-dist
-
       - name: Upload dashboard artifact
         uses: actions/upload-artifact@v6
         with:

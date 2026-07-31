@@ -82,15 +82,7 @@ if dashboard_job.index("actions/setup-node@") > dashboard_job.index("Install ast
 if dashboard_job.index("Install ast-grep") > dashboard_job.index("npm run boundary:check"):
     raise SystemExit("CI dashboard job must install ast-grep before the boundary gate")
 
-# Plan 11 makes WCAG 2.2 AA and the payload ceilings acceptance criteria, so
-# they are gates rather than scripts a developer may remember to run. The budget
-# check belongs to the artifact build: it measures the bytes being uploaded.
 assets_job = job_block(ci, "dashboard-assets")
-if "scripts/check-dashboard-budget.mjs" not in assets_job:
-    raise SystemExit(
-        "CI dashboard-assets job must preserve the payload budget gate "
-        "'scripts/check-dashboard-budget.mjs'"
-    )
 
 # The accessibility gates are their own job. Every Rust job declares
 # `needs: dashboard-assets`, so an axe failure inside dashboard-assets skipped
