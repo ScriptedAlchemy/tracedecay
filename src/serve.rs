@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use tracedecay_lsp::percent_hex_nibble;
+
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -133,7 +135,7 @@ fn percent_decode_path(path: &str) -> Option<String> {
         if bytes[i] == b'%' {
             let hi = *bytes.get(i + 1)?;
             let lo = *bytes.get(i + 2)?;
-            decoded.push((hex_value(hi)? << 4) | hex_value(lo)?);
+            decoded.push((percent_hex_nibble(hi)? << 4) | percent_hex_nibble(lo)?);
             i += 3;
         } else {
             decoded.push(bytes[i]);
@@ -141,15 +143,6 @@ fn percent_decode_path(path: &str) -> Option<String> {
         }
     }
     String::from_utf8(decoded).ok()
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
