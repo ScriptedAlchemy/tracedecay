@@ -7,7 +7,7 @@ use tracedecay_domain::{
     TemporalModeV1,
 };
 
-use super::ports::RetrievalPortError;
+use super::ports::{RetrievalPortError, contract_error};
 
 /// Transport-boundary request. Raw query text exists only in this consumed
 /// DTO and is converted immediately into request-local sanitized execution
@@ -79,7 +79,7 @@ impl RawRetrievalRequestV1 {
             sanitizer_revision,
             normalization_revision,
         )
-        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+        .map_err(contract_error)?;
         let request = RetrievalRequest {
             principal: self.principal,
             scope: self.scope,
@@ -91,7 +91,7 @@ impl RawRetrievalRequestV1 {
         request
             .budget
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         Ok(SanitizedRetrievalRequestV1 {
             request,
             query_view,

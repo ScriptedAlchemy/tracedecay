@@ -17,7 +17,7 @@ use super::{
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
-    RetrievalPortError,
+    RetrievalPortError, contract_error,
 };
 
 mod postings;
@@ -47,15 +47,15 @@ impl CodeLexicalProjectionMetadataV1 {
     fn validate(&self) -> Result<(), RetrievalPortError> {
         self.generation
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         if let Some(repository_id) = &self.repository_id {
             repository_id
                 .validate()
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+                .map_err(contract_error)?;
         }
         for (file, path) in &self.logical_paths {
             file.validate()
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+                .map_err(contract_error)?;
             if path.is_empty() {
                 return Err(RetrievalPortError::Contract(
                     "lexical projection logical paths must not be empty".to_owned(),
@@ -65,24 +65,24 @@ impl CodeLexicalProjectionMetadataV1 {
         self.freshness
             .source_namespace
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.freshness
             .source_instance
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.freshness
             .policy_revision
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.exact_retriever_revision
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.lexical_retriever_revision
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.exact_score_domain
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))
+            .map_err(contract_error)
     }
 }
 
@@ -397,7 +397,7 @@ impl CodeLexicalProjectionAdapterV1 {
         for chunk in chunks {
             chunk
                 .validate()
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+                .map_err(contract_error)?;
             if !extraction_admitted
                 && chunk
                     .exact_terms
@@ -756,11 +756,11 @@ impl CodeLexicalProjectionAdapterV1 {
         Ok(CompactCandidate {
             anchor_id: retrieval_anchor(evidence_id.clone())?,
             logical_evidence_id: LogicalEvidenceId::new(evidence_id)
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+                .map_err(contract_error)?,
             source_occurrence_id: SourceOccurrenceId::new(format!(
                 "code-chunk:{generation}:{chunk_id}"
             ))
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            .map_err(contract_error)?,
             file_occurrence_id: Some(row.chunk.anchor.file_occurrence_id.clone()),
             source_namespace: self.metadata.freshness.source_namespace.clone(),
             repository_id: self.metadata.repository_id.clone(),
@@ -854,7 +854,7 @@ where
                         .map(|result| result.map(|proof| (literal, proof)))
                 })
                 .transpose()
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?
+                .map_err(contract_error)?
                 .ok_or_else(|| {
                     RetrievalPortError::Contract(
                         "central authority rejected every projected exact match".to_owned(),
@@ -1024,7 +1024,7 @@ fn collect_term_kinds(
 }
 
 fn retrieval_anchor(value: String) -> Result<RetrievalAnchorId, RetrievalPortError> {
-    RetrievalAnchorId::new(value).map_err(|error| RetrievalPortError::Contract(error.to_string()))
+    RetrievalAnchorId::new(value).map_err(contract_error)
 }
 
 fn normalize_lexical(value: &str) -> String {
