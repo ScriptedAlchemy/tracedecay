@@ -4,22 +4,24 @@ use std::pin::Pin;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_application::{
-    ApplicationOutcome, CancellationContext, Deadline, MultiRootExecuteRequestV1,
-    MultiRootOperationV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
-    WorkProjectionSnapshotRequestV1,
+    ApplicationOutcome, AuthorizedScopeSet, CancellationContext, Deadline,
+    MultiRootExecuteRequestV1, MultiRootOperationV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasStatusV1, WorkProjectionSnapshotRequestV1,
 };
-use tracedecay_domain::{ScopeOutcome, ScopeSetId, UtcMicros};
+use tracedecay_domain::{ManifestDigest, ScopeOutcome, ScopeSetId, UtcMicros};
 
 use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
     test_handshake_defaults,
 };
 use crate::daemon::service::invocation::{
-    DaemonInvocationOutcome, DaemonInvocationRequest, WorkApplicationInvocationV1,
+    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
+    WorkApplicationInvocationV1,
 };
-use crate::daemon::{DaemonHandshake, execute_daemon_invocation};
+use crate::daemon::{DaemonEngine, DaemonHandshake, execute_daemon_invocation};
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -316,12 +318,6 @@ async fn two_registered_roots_survive_cas_partial_query_and_restart() {
 
     let missing_root = second.path().with_extension("unavailable");
     std::fs::rename(second.path(), &missing_root).expect("withdraw second root");
-    let operation = MultiRootOperationV1::Work {
-        request: serde_json::to_value(WorkApplicationInvocationV1::Snapshot(
-            WorkProjectionSnapshotRequestV1 { page_size: 100 },
-        ))
-        .expect("snapshot request"),
-    };
     let observed_at = now();
     let (deadline, cancellation) = controls("query", observed_at);
     let query = execute_daemon_invocation(
@@ -333,7 +329,7 @@ async fn two_registered_roots_survive_cas_partial_query_and_restart() {
                 scope_set_id.clone(),
                 scope_set.revision(),
                 scope_set.digest().clone(),
-                operation.clone(),
+                work_operation.clone(),
                 0,
                 None,
             )
@@ -382,7 +378,7 @@ async fn two_registered_roots_survive_cas_partial_query_and_restart() {
                 scope_set_id,
                 scope_set.revision(),
                 scope_set.digest().clone(),
-                operation,
+                work_operation,
                 1,
                 Some(first_page.continuation),
             )
