@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::research::DomainError;
+use crate::research::id::digest_id;
 
 /// Whether a canonical repository-relative path is exactly the requested
 /// scope or one of its descendants.
@@ -26,6 +27,19 @@ pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> 
     })
 }
 
+/// Reject code identities that are empty, untrimmed, over 512 bytes, or carry
+/// control characters.
+fn validate_code_identity(value: &str, field: &'static str) -> Result<(), DomainError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(DomainError::NonCanonical { field });
+    }
+    Ok(())
+}
+
 macro_rules! code_id {
     ($($name:ident),+ $(,)?) => {$(
         #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
@@ -36,15 +50,7 @@ macro_rules! code_id {
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
                 let value = value.into();
-                if value.is_empty()
-                    || value.trim() != value
-                    || value.len() > 512
-                    || value.chars().any(char::is_control)
-                {
-                    return Err(DomainError::NonCanonical {
-                        field: stringify!($name),
-                    });
-                }
+                validate_code_identity(&value, stringify!($name))?;
                 Ok(Self(value))
             }
 
@@ -53,82 +59,7 @@ macro_rules! code_id {
             }
 
             pub fn validate(&self) -> Result<(), DomainError> {
-                Self::new(self.0.clone()).map(|_| ())
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?)
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = DomainError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
-}
-
-fn validate_code_digest(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty() {
-        return Err(DomainError::Empty { field });
-    }
-    let valid = value
-        .split_once(':')
-        .and_then(|(algorithm, encoded)| {
-            let expected_len = match algorithm {
-                "sha256" | "blake3" => 64,
-                "sha512" => 128,
-                _ => return None,
-            };
-            Some(
-                encoded.len() == expected_len
-                    && encoded
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            )
-        })
-        .unwrap_or(false);
-    if !valid {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
-
-macro_rules! code_digest_id {
-    ($($name:ident),+ $(,)?) => {$(
-        #[doc = concat!("Strongly typed algorithm-tagged integrity digest: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-                let value = value.into();
-                validate_code_digest(&value, stringify!($name))?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                validate_code_digest(&self.0, stringify!($name))
+                validate_code_identity(&self.0, stringify!($name))
             }
         }
 
@@ -174,7 +105,12 @@ code_id!(
     PolicyRevisionId,
 );
 
-code_digest_id!(ContentDigest, FileIdentityDigest, SymbolIdentityDigest,);
+digest_id!(
+    DomainError, std::convert::identity;
+    ContentDigest,
+    FileIdentityDigest,
+    SymbolIdentityDigest,
+);
 
 impl ContentDigest {
     /// Canonical content identity over byte-exact source.
@@ -219,17 +155,6 @@ impl SourceSpan {
     pub const fn is_empty(&self) -> bool {
         self.start_byte == self.end_byte
     }
-}
-
-/// The exact occurrence key for a chunk within one code generation
-/// (Plan 25: `(CodeGenerationId, CodeSearchChunkId)` is the exact occurrence
-/// key; a digest change classifies an upsert and a move/rename or
-/// structural-boundary change classifies delete-plus-add).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct ChunkOccurrenceKeyV1 {
-    pub generation_id: CodeGenerationId,
-    pub chunk_id: CodeSearchChunkId,
 }
 
 /// The logical inputs that define chunk identity. Two chunks share one

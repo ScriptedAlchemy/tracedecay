@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use crate::RequestContext;
 use crate::error::ApplicationContractError;
+use crate::storage::findings::truncate_at_char_boundary;
 
 use super::sources::{
     AdvisoryFeedbackDoctorPort, CodeIndexMountDoctorPort, ConfigurationAuthorityDoctorPort,
@@ -771,18 +772,5 @@ fn build_statement(families: &[DoctorFamilyCoverageV1], consulted: usize, total:
     }
     // The family/reason vocabulary is closed and small, so the composed
     // statement is well within the 512-byte budget; guard defensively anyway.
-    if statement.len() > 512 {
-        statement.truncate(family_statement_truncation_boundary(&statement));
-    }
-    statement
-}
-
-/// Largest char boundary at or below 512 bytes, so truncation never splits a
-/// multi-byte character.
-fn family_statement_truncation_boundary(statement: &str) -> usize {
-    let mut end = 512;
-    while end > 0 && !statement.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
+    truncate_at_char_boundary(&statement, 512)
 }

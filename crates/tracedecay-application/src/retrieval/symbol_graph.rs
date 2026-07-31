@@ -175,16 +175,6 @@ impl<T> SymbolGraphPage<T> {
             support_gaps: Vec::new(),
         }
     }
-
-    pub fn with_related_edge_count(mut self, edge_count: u64) -> Self {
-        self.related_edge_count = Some(edge_count);
-        self
-    }
-
-    pub fn with_support_gap(mut self, gap: PrimitiveSupportGap) -> Self {
-        self.support_gaps.push(gap);
-        self
-    }
 }
 
 #[derive(Debug)]

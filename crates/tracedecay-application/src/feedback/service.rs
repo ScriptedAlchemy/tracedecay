@@ -5,6 +5,7 @@ use crate::diagnostics::{
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{ApplicationProblem, ApplicationProblemKind, AuthorityReceipt};
+use crate::storage::findings::truncate_at_char_boundary;
 use tracedecay_domain::feedback::{
     FeedbackBaselineStateV1, FeedbackContentIdentityV1, FeedbackCycleObservationV1,
     FeedbackCycleResultV1, FeedbackCycleTerminationV1, FeedbackDedupeKeyV1,
@@ -1715,7 +1716,10 @@ fn collect_diagnostics(
                             lifecycle: finding_lifecycle(diagnostic),
                             retrieval_anchor_id: Some(diagnostic.diagnostic_anchor.clone()),
                             provider_state: result.state.feedback_state(),
-                            safe_bounded_preview: Some(bounded_preview(&diagnostic.message)),
+                            safe_bounded_preview: Some(truncate_at_char_boundary(
+                                &diagnostic.message,
+                                512,
+                            )),
                             diagnostic_projection: None,
                         });
                     }
@@ -1833,17 +1837,6 @@ fn finding_lifecycle(diagnostic: &GenerationDiagnosticV1) -> FeedbackFindingLife
     }
 }
 
-fn bounded_preview(message: &str) -> String {
-    if message.len() <= 512 {
-        return message.to_owned();
-    }
-    let mut end = 512;
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    message[..end].to_owned()
-}
-
 fn determine_termination(
     provider_states: &[ProviderEvaluationStateV1],
     baseline_states: &[FeedbackBaselineStateV1],
@@ -1910,11 +1903,13 @@ fn terminal_before_impact(
     }
 }
 
-fn after_runtime_terminal(
+/// The shape every early terminal shares: the cycle stopped before it could
+/// produce impact or findings, so only the termination, the provider states,
+/// and how far the cycle got are known.
+fn early_terminal(
     termination: FeedbackCycleTerminationV1,
     provider_states: Vec<ProviderEvaluationStateV1>,
-    runtime: Option<FeedbackRuntimeStateV1>,
-    stage_emission: FeedbackCycleStageEmission,
+    finish_path: FeedbackCycleFinishPath,
 ) -> FeedbackCycleTerminal {
     FeedbackCycleTerminal {
         termination,
@@ -1924,11 +1919,24 @@ fn after_runtime_terminal(
         impact_state: None,
         findings: Vec::new(),
         dedupe_key: None,
-        finish_path: FeedbackCycleFinishPath::AfterRuntime {
+        finish_path,
+    }
+}
+
+fn after_runtime_terminal(
+    termination: FeedbackCycleTerminationV1,
+    provider_states: Vec<ProviderEvaluationStateV1>,
+    runtime: Option<FeedbackRuntimeStateV1>,
+    stage_emission: FeedbackCycleStageEmission,
+) -> FeedbackCycleTerminal {
+    early_terminal(
+        termination,
+        provider_states,
+        FeedbackCycleFinishPath::AfterRuntime {
             runtime,
             stage_emission,
         },
-    }
+    )
 }
 
 fn after_checked_runtime_terminal(
@@ -1939,17 +1947,15 @@ fn after_checked_runtime_terminal(
     stage_emission: FeedbackCycleStageEmission,
 ) -> FeedbackCycleTerminal {
     FeedbackCycleTerminal {
-        termination,
-        provider_states,
         baseline_states,
-        impact: None,
-        impact_state: None,
-        findings: Vec::new(),
-        dedupe_key: None,
-        finish_path: FeedbackCycleFinishPath::AfterCheckedRuntime {
-            runtime,
-            stage_emission,
-        },
+        ..early_terminal(
+            termination,
+            provider_states,
+            FeedbackCycleFinishPath::AfterCheckedRuntime {
+                runtime,
+                stage_emission,
+            },
+        )
     }
 }
 
@@ -1961,17 +1967,15 @@ fn after_checked_runtime_terminal_with_dedupe(
     stage_emission: FeedbackCycleStageEmission,
 ) -> FeedbackCycleTerminal {
     FeedbackCycleTerminal {
-        termination,
-        provider_states,
-        baseline_states: Vec::new(),
-        impact: None,
-        impact_state: None,
-        findings: Vec::new(),
         dedupe_key,
-        finish_path: FeedbackCycleFinishPath::AfterCheckedRuntime {
-            runtime,
-            stage_emission,
-        },
+        ..early_terminal(
+            termination,
+            provider_states,
+            FeedbackCycleFinishPath::AfterCheckedRuntime {
+                runtime,
+                stage_emission,
+            },
+        )
     }
 }
 

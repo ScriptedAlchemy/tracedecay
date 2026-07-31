@@ -32,10 +32,6 @@ impl AuthorizationAdmission {
     pub fn source_proof(&self) -> &SourceAuthorizationProofV1 {
         &self.source_proof
     }
-
-    pub fn into_receipt(self) -> AuthorityReceipt {
-        self.receipt
-    }
 }
 
 /// Application-owned authorization boundary. It validates immutable context

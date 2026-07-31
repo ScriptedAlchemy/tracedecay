@@ -15,100 +15,60 @@ use crate::research::{
 
 pub const MAX_SOURCE_PARTITIONS_V1: u16 = 64;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct SourcePartitionIdV1(ManifestDigest);
+/// Declare an external-source identity that is exactly one [`ManifestDigest`]
+/// under a distinct type. The `@unordered` arm omits `PartialOrd`/`Ord`.
+macro_rules! source_digest_id {
+    ($($(#[$meta:meta])* $name:ident),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(ManifestDigest);
 
-impl SourcePartitionIdV1 {
-    pub fn new(digest: ManifestDigest) -> Self {
-        Self(digest)
-    }
+        source_digest_id!(@body $name);
+    )+};
 
-    pub fn digest(&self) -> &ManifestDigest {
-        &self.0
-    }
+    (@unordered $($(#[$meta:meta])* $name:ident),+ $(,)?) => {$(
+        $(#[$meta])*
+        #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+        #[serde(transparent)]
+        pub struct $name(ManifestDigest);
 
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.0.validate()
-    }
+        source_digest_id!(@body $name);
+    )+};
+
+    (@body $name:ident) => {
+        impl $name {
+            pub fn new(digest: ManifestDigest) -> Self {
+                Self(digest)
+            }
+
+            pub fn digest(&self) -> &ManifestDigest {
+                &self.0
+            }
+
+            pub fn validate(&self) -> Result<(), DomainError> {
+                self.0.validate()
+            }
+        }
+    };
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct SourceCursorV1(ManifestDigest);
+source_digest_id!(
+    SourcePartitionIdV1,
+    SourceCursorV1,
+    SourceSnapshotIdV1,
+    SourceNativeObjectIdV1,
+);
 
-impl SourceCursorV1 {
-    pub fn new(digest: ManifestDigest) -> Self {
-        Self(digest)
-    }
-
-    pub fn digest(&self) -> &ManifestDigest {
-        &self.0
-    }
-
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.0.validate()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct SourceSnapshotIdV1(ManifestDigest);
-
-impl SourceSnapshotIdV1 {
-    pub fn new(digest: ManifestDigest) -> Self {
-        Self(digest)
-    }
-
-    pub fn digest(&self) -> &ManifestDigest {
-        &self.0
-    }
-
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.0.validate()
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct SourceNativeObjectIdV1(ManifestDigest);
-
-impl SourceNativeObjectIdV1 {
-    pub fn new(digest: ManifestDigest) -> Self {
-        Self(digest)
-    }
-
-    pub fn digest(&self) -> &ManifestDigest {
-        &self.0
-    }
-
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.0.validate()
-    }
-}
-
-/// Stable provider revision identity for one native object.
-///
-/// This intentionally does not derive an ordering relation: object revisions
-/// are comparable only by equality unless a provider-specific contract says
-/// otherwise.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(transparent)]
-pub struct SourceObjectRevisionV1(ManifestDigest);
-
-impl SourceObjectRevisionV1 {
-    pub fn new(digest: ManifestDigest) -> Self {
-        Self(digest)
-    }
-
-    pub fn digest(&self) -> &ManifestDigest {
-        &self.0
-    }
-
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.0.validate()
-    }
-}
+source_digest_id!(
+    @unordered
+    /// Stable provider revision identity for one native object.
+    ///
+    /// This intentionally does not derive an ordering relation: object revisions
+    /// are comparable only by equality unless a provider-specific contract says
+    /// otherwise.
+    SourceObjectRevisionV1,
+);
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]

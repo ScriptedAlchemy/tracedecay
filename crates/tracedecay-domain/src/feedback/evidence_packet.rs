@@ -17,18 +17,23 @@ const FEEDBACK_PACKET_ID_DOMAIN: &str = "tracedecay.feedback.packet.v1";
 #[serde(transparent)]
 pub struct FeedbackPacketId(String);
 
+fn validate_feedback_packet_id(value: &str) -> Result<(), DomainError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(DomainError::NonCanonical {
+            field: "feedback packet id",
+        });
+    }
+    Ok(())
+}
+
 impl FeedbackPacketId {
     pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
         let value = value.into();
-        if value.is_empty()
-            || value.trim() != value
-            || value.len() > 512
-            || value.chars().any(char::is_control)
-        {
-            return Err(DomainError::NonCanonical {
-                field: "feedback packet id",
-            });
-        }
+        validate_feedback_packet_id(&value)?;
         Ok(Self(value))
     }
 
@@ -37,7 +42,7 @@ impl FeedbackPacketId {
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
-        Self::new(self.0.clone()).map(|_| ())
+        validate_feedback_packet_id(&self.0)
     }
 }
 

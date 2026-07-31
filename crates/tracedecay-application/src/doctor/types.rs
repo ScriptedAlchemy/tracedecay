@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ApplicationContractError;
+use crate::identity::application_identifier;
 
 /// Stable Doctor finding families.
 ///
@@ -158,46 +159,8 @@ pub enum DoctorRemediationKindV1 {
     Action,
 }
 
-macro_rules! doctor_identifier {
-    ($($(#[$meta:meta])* $name:ident => ($field:literal, $maximum_bytes:expr)),+ $(,)?) => {$(
-        $(#[$meta])*
-        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            /// Validate and construct the identifier. It must be non-empty,
-            /// trimmed, bounded, and free of control characters.
-            pub fn new(value: impl Into<String>) -> Result<Self, ApplicationContractError> {
-                let value = value.into();
-                if value.is_empty()
-                    || value.trim() != value
-                    || value.len() > $maximum_bytes
-                    || value.chars().any(char::is_control)
-                {
-                    return Err(ApplicationContractError::InvalidIdentifier { field: $field });
-                }
-                Ok(Self(value))
-            }
-
-            #[must_use]
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-    )+};
-}
-
-doctor_identifier!(
+application_identifier!(
+    @no_conversions
     /// Durable, non-disclosing reference to one owning-authority evidence
     /// record (for example a `FeedbackFindingId`, configuration revision, or
     /// runtime read coverage anchor). Doctor stores the reference only; the

@@ -7,14 +7,13 @@ use tracedecay_domain::{
     ManifestDigest, PrivacyDomainId, RetrievalAnchorId, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract,
-    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1,
-    SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
+    AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
+    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
+    PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
+    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
+    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::api_migration::ApiMigrationPlanV1;
@@ -24,7 +23,9 @@ use crate::result::{
     ApplicationProblem, AuthorityReceipt, EffectId, IdempotencyKey, ResultContractRef,
 };
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
-use crate::{RequestAdmission, RequestContext, ResolvedScope};
+use crate::{
+    RequestAdmission, RequestContext, ResolvedScope, current_bindings, current_bindings_with_slug,
+};
 
 const SOURCE_EDIT_EFFECT_REQUEST_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.source-edit-effect-request.v1";
@@ -663,24 +664,9 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             "capability.application.source-edit.{}",
             operation_name.replace('_', "-")
         ))?;
-        let mut binding_ids = Vec::with_capacity(SOURCE_EDIT_SURFACES.len());
-        for surface in SOURCE_EDIT_SURFACES {
-            let binding_id = BindingId::new(format!(
-                "binding.{}.{operation_name}.v1",
-                source_edit_surface_name(surface)
-            ))?;
-            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-                binding_id: binding_id.clone(),
-                capability_id: capability_id.clone(),
-                surface,
-                operation: SurfaceOperationName::new(operation_name)?,
-                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-                required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
-            })?);
-            binding_ids.push(binding_id);
-        }
+        let (kind_bindings, binding_ids) =
+            current_bindings(&capability_id, operation_name, SOURCE_EDIT_SURFACES)?;
+        bindings.extend(kind_bindings);
         capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
             capability_id,
             use_case_id: UseCaseId::new(format!(
@@ -739,24 +725,13 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         })?);
     }
     let reconciliation_operation = source_edit_reconciliation_operation()?;
-    let mut reconciliation_binding_ids = Vec::with_capacity(SOURCE_EDIT_SURFACES.len());
-    for surface in SOURCE_EDIT_SURFACES {
-        let binding_id = BindingId::new(format!(
-            "binding.{}.source-edit-reconcile.v1",
-            source_edit_surface_name(surface)
-        ))?;
-        bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-            binding_id: binding_id.clone(),
-            capability_id: reconciliation_operation.capability_id().clone(),
-            surface,
-            operation: SurfaceOperationName::new("source_edit_reconcile")?,
-            protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-            required_features: Vec::new(),
-            status: BindingStatus::Current,
-            alias_of: None,
-        })?);
-        reconciliation_binding_ids.push(binding_id);
-    }
+    let (reconciliation_bindings, reconciliation_binding_ids) = current_bindings_with_slug(
+        reconciliation_operation.capability_id(),
+        "source_edit_reconcile",
+        "source-edit-reconcile",
+        SOURCE_EDIT_SURFACES,
+    )?;
+    bindings.extend(reconciliation_bindings);
     capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id: reconciliation_operation.capability_id().clone(),
         use_case_id: reconciliation_operation.use_case_id().clone(),
@@ -817,14 +792,6 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         retrieval_primitives: Vec::new(),
         bindings,
     })?)
-}
-
-fn source_edit_surface_name(surface: BindingSurface) -> &'static str {
-    match surface {
-        BindingSurface::Cli => "cli",
-        BindingSurface::Mcp => "mcp",
-        _ => unreachable!("source edits bind only CLI and MCP"),
-    }
 }
 
 pub fn source_edit_reconciliation_operation()

@@ -7,62 +7,14 @@ use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use crate::context::{Deadline, RequestId, ResolvedScope};
 use crate::error::ApplicationContractError;
+use crate::identity::application_identifier;
 
 use super::AuthorityReceipt;
 
-macro_rules! receipt_id {
-    ($($name:ident => $field:literal),+ $(,)?) => {$(
-        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, ApplicationContractError> {
-                let value = value.into();
-                if value.is_empty()
-                    || value.trim() != value
-                    || value.len() > 512
-                    || value.chars().any(char::is_control)
-                {
-                    return Err(ApplicationContractError::InvalidIdentifier { field: $field });
-                }
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = ApplicationContractError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
-}
-
-receipt_id!(
-    PreviewId => "preview id",
-    EffectId => "effect id",
-    IdempotencyKey => "idempotency key",
+application_identifier!(
+    PreviewId => ("preview id", 512),
+    EffectId => ("effect id", 512),
+    IdempotencyKey => ("idempotency key", 512),
 );
 
 /// Exact stage at which cancellation or deadline state was observed.

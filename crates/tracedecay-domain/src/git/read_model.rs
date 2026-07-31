@@ -16,9 +16,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::research::time::UtcMicros;
 use crate::research::{DomainError, ManifestDigest, RepositoryId};
 
-/// Schema version label for the typed read-only Git intelligence payloads.
-pub const GIT_INTELLIGENCE_SCHEMA_VERSION_V1: &str = "tracedecay.git-intelligence.v1";
-
 /// Schema/domain separator for the independently hashed `HunkRefV1` identity
 /// (Plan 36, "`HunkRef` compare-and-swap contract").
 pub const HUNK_REF_DIGEST_DOMAIN: &str = "tracedecay.git.hunkref.v1";

@@ -19,6 +19,7 @@ pub mod framed_log;
 pub mod git;
 pub mod handlers;
 pub mod historical_query;
+mod identity;
 pub mod invocation;
 pub mod lsp_context_catalog;
 pub mod memory;
@@ -42,6 +43,9 @@ pub mod workflow_coordination;
 pub mod workflow_runtime;
 
 mod error;
+mod surface_binding;
+
+pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
 
 pub use advisory::*;
 pub use api_migration::*;
