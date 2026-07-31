@@ -21,8 +21,7 @@ use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
 
 pub use tracedecay_application::{
-    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1,
-    DerivedMemoryFeedbackHistoryRepairV1,
+    DerivedMemoryConvergenceReportV1, DerivedMemoryFeedbackHistoryRepairV1,
 };
 
 const fn feedback_history_repair(
@@ -73,8 +72,9 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     ///
     /// `action` names the trigger (e.g. `"dashboard-startup-repair"`) used
     /// for the pass's generated operation identity. Saturation is reported as
-    /// [`DerivedMemoryConvergenceStateV1::Pending`]; the caller proceeds while
-    /// the existing daemon scheduler owns the remaining durable backlog.
+    /// [`tracedecay_application::DerivedMemoryConvergenceStateV1::Pending`];
+    /// the caller proceeds while the existing daemon scheduler owns the
+    /// remaining durable backlog.
     pub async fn converge_derived_memory(
         &self,
         action: &str,

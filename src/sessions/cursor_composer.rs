@@ -54,7 +54,6 @@ pub use capture::{
     capture_cursor_composer_observation,
 };
 pub use ingest::{CursorComposerSource, CursorComposerSweepOutcome, DEFAULT_COMPOSER_ENVELOPE_CAP};
-pub(crate) use sqlite::{bubble_epoch, epoch_ms_to_secs};
 #[cfg(test)]
 pub(crate) use tracedecay_capture::cursor_composer::{
     normalize_cursor_composer_observation,
