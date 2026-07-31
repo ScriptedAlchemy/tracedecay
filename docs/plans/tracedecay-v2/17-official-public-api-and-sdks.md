@@ -17,10 +17,12 @@ lifecycle, platform, and regression behavior below.
 
 PR18's first Rust, TypeScript, and Python package shapes are not yet published;
 branch acceptance and generated schemas do not create an older supported SDK
-contract. Those initial APIs change to their final shape in place until a
-package/release, `origin/master`, or live persisted cursor/receipt proves a
-predecessor. Protocol negotiation remains required for independently deployed
-clients, and compatibility starts at the first evidenced publication.
+contract. Pure request/response APIs change to their final shape in place until
+publication. Persisted cursors, idempotency keys, journals, checkpoints, and
+receipts may already exist through dogfood and retain backward-read/recovery
+until a separately authorized registered-store/profile census proves absence.
+Protocol negotiation remains required for independently deployed clients, and
+public API compatibility starts at the first evidenced publication.
 
 ## User outcome
 
@@ -110,7 +112,9 @@ requirement or acceptance artifact.
 After the first evidenced publication, additive changes within a major
 protocol version preserve compatibility and breaking changes negotiate a new
 major version with an actionable error. Before that publication, the
-unreleased initial contract changes in place.
+unreleased transient request/response API changes in place; the potentially
+persisted cursors, keys, journals, checkpoints, and receipts remain governed by
+the census-gated backward-read rule above.
 The policy retains the full required/optional field, default, nullability, open
 object, union/enum, numeric narrowing, identifier, error, stream-event, cursor,
 operation rename/removal, retry-class, and capability-removal behavior.

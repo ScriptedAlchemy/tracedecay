@@ -12,10 +12,12 @@ and protocol fixture inventories are not milestones.
 
 Standard LSP 3.17 compatibility and explicit negotiation with independently
 deployed clients remain real external protocol obligations. The TraceDecay
-context-extension schemas themselves are unreleased and absent from
-`origin/master` and established live persistence, so PR12/PR13 revise their
-final shape in place; experimental version tags, branch fixtures, and planned
-SDK consumers do not require parallel readers or a version bump.
+context-extension's transient request/response schemas are unreleased and
+absent from `origin/master`, so PR12/PR13 revise their final shape in place;
+experimental version tags, branch fixtures, and planned SDK consumers do not
+require parallel readers or a version bump. Durable diagnostic snapshots,
+cursors, journals, checkpoints, and receipts remain backward-readable until a
+separately authorized registered-store/profile census proves absence.
 
 The daemon gateway/session/broker and the application LSP runtime are the
 canonical implementation path. Existing structs, files, protocol fixtures, and
@@ -273,8 +275,9 @@ review, CI, proximity, or evidence data.
   are replaced in place.
 - Remove reserved future fields and predeclared PR17/PR18 variants from PR13
   wire schemas. Later callable features revise the unreleased schema in place;
-  a new contract revision is required only after release or live-persistence
-  evidence establishes a predecessor.
+  a new transient contract revision is required only after release or
+  independently deployed-client evidence establishes a predecessor. Persisted
+  diagnostics remain governed by the census-gated reader rule above.
 - Remove duplicate architecture/ownership prose, exact source-file and
   fixture inventories, standalone worktree milestone gates, generated protocol
   matrices that restate negotiation code, and placeholder benchmark packets.

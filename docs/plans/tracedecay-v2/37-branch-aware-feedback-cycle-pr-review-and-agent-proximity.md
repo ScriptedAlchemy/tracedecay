@@ -28,12 +28,14 @@ contract without establishing milestone status. Historical packet/type names,
 exact source layouts, schema registries, and fixture matrices are evidence only
 unless separately declared public or persisted API.
 
-The PR12 feedback-read and TraceDecay LSP extension shapes are branch-local and
-have no predecessor on `origin/master`, in a published package/release, or in
-live persisted data. They change to their final schemas in place. LSP revision
-negotiation remains required for independently deployed clients, but branch
-history, an experimental version tag, or a test fixture does not create a
-compatibility reader or migration obligation.
+The PR12 transient feedback-read requests/responses and TraceDecay LSP
+extension payloads have no predecessor on `origin/master` or in a published
+package/release, so they change to their final schemas in place. LSP revision
+negotiation remains required for independently deployed clients. Durable
+feedback findings, review snapshots, cursors, journals, checkpoints, and
+receipts remain backward-readable/recoverable until a separately authorized
+registered-store/profile census proves absence; branch history, an
+experimental version tag, or a fixture alone is not release evidence.
 
 ## PR12 baseline reader and LSP context contract
 

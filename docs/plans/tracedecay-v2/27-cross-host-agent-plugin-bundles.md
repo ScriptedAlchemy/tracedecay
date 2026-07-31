@@ -32,12 +32,15 @@ Cursor Core component-ownership conflict. Exact test names, counts, generated
 matrices, and intermediate registration scaffolding are historical evidence,
 not acceptance requirements.
 
-Installed host/provider formats and names retain compatibility only when a
-released bundle/package or live host installation proves them. Kimi Code,
-OpenCode, and other PR13 branch-local bundle shapes change in place; fixture
-versions and PR6/PR13 sequencing alone require no alias, deprecation, dual
-reader, or migration. Bundle/protocol negotiation remains required for actual
-installed-version skew.
+Installed host/provider formats and names retain compatibility when a released
+bundle/package or live host installation proves them. Pure transient PR13
+request DTOs may change in place, but Kimi Code, OpenCode, and other dogfood
+install manifests, generated host files, local queues, checkpoints, and
+receipts are potentially live formats. Their readers and migration/rollback
+remain until a separately authorized installed-profile census proves absence;
+fixture versions and PR sequencing alone remain insufficient evidence.
+Bundle/protocol negotiation remains required for actual installed-version
+skew.
 
 ## PR13 user outcome
 

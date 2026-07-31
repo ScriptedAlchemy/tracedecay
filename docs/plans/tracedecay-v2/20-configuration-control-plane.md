@@ -16,10 +16,11 @@ fixture inventories are not. Missing effective behavior or an unreachable
 mutation is a gap; a renamed/deleted declaration scaffold is not.
 
 The existing config files and stored settings/revisions on `origin/master` and
-in live profiles are persistence evidence for the migration below. New
-branch-local setting DTOs, fields, and registry shapes change in place; a
-deprecation, alias, or schema version is added only for an evidenced released
-or live predecessor.
+in live profiles are persistence evidence for the migration below. New pure
+request DTOs and source registry declarations change in place. Any branch-
+written config field, stored setting/revision, snapshot, journal, checkpoint,
+or receipt remains readable/migratable until a separately authorized profile
+census proves absence.
 
 **Reachability correction (updated 2026-07-27).** The former production-write
 gap is closed. `ProductionConfigurationDaemonClient::mutate_direct` now rejects

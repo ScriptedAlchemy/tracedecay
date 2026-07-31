@@ -9,8 +9,10 @@
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
-> branch-only scaffolding; without released or live predecessor evidence, the
-> current numbered plan changes the contract in place.
+> branch-only transient scaffolding. Potentially persisted collection/stack
+> records, scope snapshots, journals, checkpoints, and receipts keep
+> backward-read/recovery until a separately authorized registered-store/profile
+> census proves absence.
 
 **Goal:** Add explicit scope-set federation across query, LSP, Git, feedback,
 Work, and dashboard without CWD/path fallback or identity aliasing.

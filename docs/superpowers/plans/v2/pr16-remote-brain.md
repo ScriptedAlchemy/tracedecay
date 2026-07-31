@@ -9,8 +9,10 @@
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
-> branch-only scaffolding; without released or live predecessor evidence, the
-> current numbered plan changes the contract in place.
+> branch-only transient scaffolding. Potentially persisted enrollment files,
+> spools, replica journals, backups, checkpoints, and receipts keep
+> backward-read/replay/recovery until a separately authorized machine/profile
+> census proves absence.
 
 **Goal:** Add enrolled, offline-capable, fenced remote Brain operation with one
 writer per mutable shard and verified backup/failover.

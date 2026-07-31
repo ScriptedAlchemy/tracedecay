@@ -40,11 +40,12 @@ Published event/metric names and persisted observability records remain
 compatibility contracts; all other retention is judged by the direct
 measurement, privacy, lifecycle, platform, and regression behavior below.
 
-The Plan 26 Work/topology event family is unreleased and absent from
-`origin/master` and established live persistence. Its `V1` suffixes identify
-the initial final wire format; they do not imply a V2 sibling, compatibility
-reader, or migration. Until publication or live persistence supplies contrary
-evidence, those records change in place with their consuming PR14/PR17 path.
+The Plan 26 Work/topology event family is absent from `origin/master` and a
+published release. Its `V1` suffixes alone do not imply a V2 sibling. Transient
+emission DTOs may change in place, but event files, stored observability rows,
+accounting projections, checkpoints, and receipts may exist through dogfood;
+their compatibility reader and migration/recovery obligations remain until a
+separately authorized registered-store/profile census proves absence.
 
 ## Outcome
 

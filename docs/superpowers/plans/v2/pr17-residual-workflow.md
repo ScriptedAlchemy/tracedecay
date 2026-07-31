@@ -9,8 +9,10 @@
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
-> branch-only scaffolding; without released or live predecessor evidence, the
-> current numbered plan changes the contract in place.
+> branch-only transient scaffolding. Potentially persisted workflow
+> definitions, runs, attempts, effects, journals, checkpoints, and receipts
+> keep backward-read/recovery until a separately authorized
+> registered-store/profile census proves absence.
 
 **Goal:** Extend PR14's single graph/runtime authorities with advanced workflow
 definition, fan-out/synthesis/recovery, placement, expertise, automation, and

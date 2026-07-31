@@ -57,10 +57,12 @@ consumer.
 - PR5 source positions and cursors are provider-safe opaque values; numeric and
   content-hash cursors cannot be compared under the wrong ordering rule.
 - Each later vertical PR adds the smallest final contract it consumes.
-  Branch-local predecessors change in place. An old version remains readable
-  or receives an explicit migration only after `origin/master`, a published
-  package/release, or live persisted data proves that predecessor shipped; a
-  version suffix or test fixture alone is not such evidence.
+  Pure branch-local request DTOs change in place. Once a domain value can be
+  written to a store, spool, file, journal, checkpoint, receipt, or persisted
+  projection, its old version remains readable or receives an explicit
+  migration until a separately authorized registered-store/profile census
+  proves absence; a version suffix or test fixture alone is not release
+  evidence.
 - Provider-exposed reasoning may be represented with visibility and retention;
   hidden reasoning is never inferred or reconstructed.
 
@@ -142,7 +144,10 @@ profile/project observations to bindings without changing observation or
 anchor identity. It hashes legacy native identity in the existing privacy
 domain, records `Unknown` coverage when an exact predecessor frontier cannot be
 proven, and returns the same receipt on rerun. Unreleased source-definition
-shapes are finalized in place and do not enter this migration.
+request DTOs are finalized in place. Any source definition, binding, cursor,
+frontier, journal, checkpoint, or receipt written by dogfood remains in this
+migration until a separately authorized registered-store/profile census proves
+absence.
 
 Direct regression evidence must prove canonical encoding and unknown-field
 handling; digest tamper, raw-identifier, ambiguous-scope, and invalid-capability

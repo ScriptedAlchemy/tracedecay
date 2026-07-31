@@ -8,8 +8,10 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
-> Historical compatibility/migration language applies only to evidenced
-> released names or formats; branch-local extraction shapes change in place.
+> Pure branch-local extraction APIs/source shapes change in place. Any index
+> manifest, generation, journal, checkpoint, or receipt potentially written by
+> dogfood keeps backward-read/migration or rebuild recovery until a separately
+> authorized registered-store/profile census proves absence.
 
 **Goal:** Isolate extraction/index compilation, grammar/WGSL build ownership,
 and focused search tests from unrelated root edits.

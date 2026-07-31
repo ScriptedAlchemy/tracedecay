@@ -16,9 +16,13 @@ tracks current outcomes and blockers only. `GAP-LEDGER-PR8-PR14.md` and
 The `TraceDecay V2` roadmap name is independent of contract/schema versioning.
 Only a predecessor proven on `origin/master`, in a published package/release,
 or in a live persisted format can require a compatibility alias, deprecation,
-dual reader/writer, V2/V3 contract, or migration. Unreleased shapes change in
-place to the final contract; PR sequence, branch history, tests, historical
-plans, and a `V1` suffix alone do not establish a compatibility boundary.
+dual reader/writer, V2/V3 contract, or migration. Pure transient wire/request
+DTOs and source-only contracts change in place to the final contract; PR
+sequence, branch history, tests, historical plans, and a `V1` suffix alone do
+not establish a compatibility boundary. Anything written to a store, spool,
+file, installed host surface, or persisted projection remains potentially
+live and keeps backward-read/migration recovery until a separately authorized
+census proves absence.
 
 Core Work and the minimal Plan 24/32 runtime ship in PR14; PR17 retains
 residual advanced workflow capability.
@@ -812,8 +816,9 @@ window, superseded V1 and migration-only paths are deleted.
 
 - Record explicit compatibility dispositions for every API proven published
   and every stored datum proven present in a released or live format that
-  crosses the cutover. Branch-local shapes change in place and do not enter the
-  migration inventory.
+  crosses the cutover. Branch-local transient API shapes change in place;
+  branch-written stores, spools, files, and projections remain in the
+  migration inventory until an authorized live/profile census proves absence.
 - Do not retain reverse cutover, long-lived dual write, lazy read migration,
   production shadow reads, or V1 as renewed authority.
 - Remove superseded V1 implementations, adapters, flags, branches, and
