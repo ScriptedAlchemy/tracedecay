@@ -124,12 +124,11 @@ impl WorkflowExecutionAuthorityPort for FakeAuthority {
         if let Some(terminal) = &state.terminal {
             return Ok(WorkflowExecutionAdmissionV1::Replay(terminal.clone()));
         }
-        if let Some(active) = &state.active_fence {
-            if active.lease.lease_id() != fence.lease.lease_id()
-                || active.lease.epoch() >= fence.lease.epoch()
-            {
-                return Ok(WorkflowExecutionAdmissionV1::StaleFence);
-            }
+        if let Some(active) = &state.active_fence
+            && (active.lease.lease_id() != fence.lease.lease_id()
+                || active.lease.epoch() >= fence.lease.epoch())
+        {
+            return Ok(WorkflowExecutionAdmissionV1::StaleFence);
         }
         state.active_fence = Some(fence.clone());
         state.executing = true;

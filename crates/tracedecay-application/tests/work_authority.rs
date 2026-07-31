@@ -14,6 +14,9 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+type WorkHistoryKey = (WorkAuthority, TaskId);
+type WorkHistories = Arc<Mutex<BTreeMap<WorkHistoryKey, Vec<WorkEvent>>>>;
+
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -62,7 +65,7 @@ fn context(project: &str, actor: &str) -> RequestContext {
 
 #[derive(Clone, Default)]
 struct TestStore {
-    histories: Arc<Mutex<BTreeMap<(WorkAuthority, TaskId), Vec<WorkEvent>>>>,
+    histories: WorkHistories,
 }
 
 impl WorkStoragePort for TestStore {

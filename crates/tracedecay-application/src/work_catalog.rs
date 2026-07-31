@@ -341,10 +341,11 @@ fn terminal_states(read_only: bool) -> Vec<TerminalState> {
 }
 
 fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
-    Ok(SchemaRef::new(
-        SchemaId::new(id).expect("static Work schema ID is valid"),
-        1,
-    )?)
+    let schema_id = SchemaId::new(id).map_err(|_| CatalogValidationError::InvalidValue {
+        field: "work schema ID",
+        reason: "must be a canonical catalog identifier",
+    })?;
+    SchemaRef::new(schema_id, 1)
 }
 
 #[cfg(test)]
