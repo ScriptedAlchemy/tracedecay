@@ -8,6 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical version/compatibility/migration language applies only to APIs or
+> data proven on `origin/master`, in a published release, or in live
+> persistence; branch-local shapes change in place.
 
 **Goal:** After dependency inversion, extract rusqlite, MCP/LSP, daemon, and
 remaining root adapters without changing product authority.
