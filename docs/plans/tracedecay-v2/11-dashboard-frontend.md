@@ -65,11 +65,10 @@ and route matrices are run evidence rather than plan invariants.
 Acceptance remains open on the product gaps below. Unavailable data must stay
 truthful rather than being replaced with fabricated values.
 
-- **Plan 11 owner:** the runtime performance budgets — LCP, frame p95, input
-  latency, heap retention, and SSE sustain rates — are withdrawn as acceptance
-  criteria by owner decision 2026-07-31 ("dont care about heap or other fe
-  perf stuff"). Performance problems are ordinary bugs, not gates. HTTP fault
-  coverage and renderer semantic separation remain delivered behavior.
+- **Plan 11 owner:** the runtime performance and payload budgets are
+  withdrawn as acceptance criteria by owner decision 2026-07-31 (see the two
+  withdrawal sections below). HTTP fault coverage and renderer semantic
+  separation remain delivered behavior.
 - **Plan 11 owner:** Code still lacks diagnostics, affected tests, code
   health, and branch-aware freshness; Agents lacks its PR14 subagent/handoff
   context; Sessions lacks raw-message drill-down, compaction boundaries, and
@@ -920,7 +919,7 @@ not mandatory recreation.
   and PR17 Work.
 - Unit, DOM, accessibility, and smoke tests cover critical journeys and all state classes.
 - Performance and payload acceptance criteria are withdrawn (owner decision,
-  2026-07-31); performance problems are ordinary bugs, not gates.
+  2026-07-31).
 - Direct frontend journeys exercise contract, DOM, accessibility, responsive,
   renderer/semantic parity, authority-negative, SSE, and
   end-to-end behavior. Missing, skipped, or unvisited required states remain
