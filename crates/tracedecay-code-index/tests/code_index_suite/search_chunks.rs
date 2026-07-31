@@ -100,7 +100,7 @@ fn partial_extraction_never_chunks_unsupported_tail_bytes() {
 }
 
 #[test]
-fn exact_term_kinds_cover_the_frozen_plan25_contract() {
+fn exact_term_kinds_cover_the_supported_search_contract() {
     let source = "// compiler error: mismatched types\n\
                   // runtime error: module not found\n\
                   // cargo E0308 ERR_MODULE_NOT_FOUND commit:deadbeef\n\

@@ -910,8 +910,8 @@ mod tests {
             },
             vec![SanitizationReceiptId::new("receipt.a").expect("valid id")],
         );
-        // The capability emitter's seal verification is the acceptance gate:
-        // it emits only for a correctly sealed generation.
+        // Capability emission is the runtime seal boundary: an incorrectly
+        // sealed generation cannot be advertised.
         let manifest = emitter.emit(&generation).expect("emission succeeds");
         assert_eq!(manifest.generation_id, generation.generation_id);
         assert_eq!(manifest.chunker_revision, generation.chunker_revision);
