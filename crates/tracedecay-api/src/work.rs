@@ -3,9 +3,10 @@
 //! Every Work adapter — the daemon's application router, the dashboard's public
 //! `/api/work` mount, the catalog registry, and the generated SDKs — is derived
 //! from the single [`WorkOperation`] descriptor in this module. Adding an
-//! operation is one enum variant plus one row in each `match`; there is no
-//! second route table to keep in step, and no adapter that can drift from the
-//! catalog without failing to compile.
+//! operation is one enum variant plus one row in the `work_operations!` table,
+//! which derives every key, id, segment, and path; there is no second route
+//! table to keep in step, and no adapter that can drift from the catalog
+//! without failing to compile.
 //!
 //! The owner supplies dispatch. This module owns only what HTTP owns: which
 //! paths exist, which segment names them, whether the body was well-formed, and
@@ -77,6 +78,109 @@ pub enum WorkOperation {
     AttemptTerminalize,
 }
 
+/// The router prefix each family mounts its segments under.
+macro_rules! work_family_route_prefix {
+    (Core) => {
+        "/work/"
+    };
+    (Attempt) => {
+        "/work/attempt/"
+    };
+}
+
+/// The dashboard path, which exists only for the core family.
+macro_rules! work_dashboard_route_path {
+    (Core, $segment:literal) => {
+        Some(concat!("/api/work/", $segment))
+    };
+    (Attempt, $segment:literal) => {
+        None
+    };
+}
+
+/// Derive every Work operation projection from one `(variant, family, key,
+/// segment)` table.
+///
+/// The catalog id, router path, catalog path, and dashboard path are all
+/// mechanical compositions of the key and segment, so the table is the single
+/// place an operation is described. A row cannot disagree with itself.
+macro_rules! work_operations {
+    ($($variant:ident: $family:ident, $key:literal, $segment:literal;)+) => {
+        impl WorkOperation {
+            /// The catalog operation key, as it appears in `operation.work.{key}`.
+            pub const fn operation_key(self) -> &'static str {
+                match self { $(Self::$variant => $key,)+ }
+            }
+
+            /// The catalog operation id, as a literal the route documents can hold.
+            pub const fn operation_id_str(self) -> &'static str {
+                match self { $(Self::$variant => concat!("operation.work.", $key),)+ }
+            }
+
+            /// The final path segment that names this operation on its router.
+            pub const fn route_segment(self) -> &'static str {
+                match self { $(Self::$variant => $segment,)+ }
+            }
+
+            /// Which router family mounts this operation.
+            pub const fn family(self) -> WorkOperationFamily {
+                match self { $(Self::$variant => WorkOperationFamily::$family,)+ }
+            }
+
+            /// The path this operation answers on the application router.
+            pub const fn route_path(self) -> &'static str {
+                match self {
+                    $(Self::$variant => concat!(
+                        work_family_route_prefix!($family),
+                        $segment
+                    ),)+
+                }
+            }
+
+            /// The path the catalog advertises, which the executable nests
+            /// under its `/application` prefix.
+            pub const fn application_route_path(self) -> &'static str {
+                match self {
+                    $(Self::$variant => concat!(
+                        "/application",
+                        work_family_route_prefix!($family),
+                        $segment
+                    ),)+
+                }
+            }
+
+            /// The public dashboard path, for the core operations the
+            /// dashboard mounts.
+            pub const fn dashboard_route_path(self) -> Option<&'static str> {
+                match self {
+                    $(Self::$variant => work_dashboard_route_path!($family, $segment),)+
+                }
+            }
+        }
+    };
+}
+
+work_operations! {
+    Snapshot: Core, "snapshot", "snapshot";
+    Delta: Core, "delta", "delta";
+    Create: Core, "create", "create";
+    ReplanDependencies: Core, "replan_dependencies", "replan-dependencies";
+    ReviewProposal: Core, "review_proposal", "review-proposal";
+    AcceptProposal: Core, "accept_proposal", "accept-proposal";
+    AdmitExecution: Core, "admit_execution", "admit-execution";
+    AttachRuntimeEvidence: Core, "attach_runtime_evidence", "attach-runtime-evidence";
+    AcceptTask: Core, "accept_task", "accept-task";
+    AttemptAcquireLease: Attempt, "attempt_acquire_lease", "acquire-lease";
+    AttemptRenewLease: Attempt, "attempt_renew_lease", "renew-lease";
+    AttemptStart: Attempt, "attempt_start", "start";
+    AttemptPublishProgress: Attempt, "attempt_publish_progress", "publish-progress";
+    AttemptPublishArtifact: Attempt, "attempt_publish_artifact", "publish-artifact";
+    AttemptCancel: Attempt, "attempt_cancel", "cancel";
+    AttemptRecover: Attempt, "attempt_recover", "recover";
+    AttemptFinish: Attempt, "attempt_finish", "finish";
+    AttemptTerminalize: Attempt, "attempt_terminalize", "terminalize";
+}
+
 impl WorkOperation {
     /// The core operations, in mounted order.
     pub const CORE: [Self; 9] = [
@@ -126,180 +230,14 @@ impl WorkOperation {
         Self::AttemptTerminalize,
     ];
 
-    /// The catalog operation key, as it appears in `operation.work.{key}`.
-    pub const fn operation_key(self) -> &'static str {
-        match self {
-            Self::Snapshot => "snapshot",
-            Self::Delta => "delta",
-            Self::Create => "create",
-            Self::ReplanDependencies => "replan_dependencies",
-            Self::ReviewProposal => "review_proposal",
-            Self::AcceptProposal => "accept_proposal",
-            Self::AdmitExecution => "admit_execution",
-            Self::AttachRuntimeEvidence => "attach_runtime_evidence",
-            Self::AcceptTask => "accept_task",
-            Self::AttemptAcquireLease => "attempt_acquire_lease",
-            Self::AttemptRenewLease => "attempt_renew_lease",
-            Self::AttemptStart => "attempt_start",
-            Self::AttemptPublishProgress => "attempt_publish_progress",
-            Self::AttemptPublishArtifact => "attempt_publish_artifact",
-            Self::AttemptCancel => "attempt_cancel",
-            Self::AttemptRecover => "attempt_recover",
-            Self::AttemptFinish => "attempt_finish",
-            Self::AttemptTerminalize => "attempt_terminalize",
-        }
-    }
-
     /// The catalog operation id.
     pub fn operation_id(self) -> String {
         self.operation_id_str().to_owned()
     }
 
-    /// The catalog operation id, as a literal the route documents can hold.
-    pub const fn operation_id_str(self) -> &'static str {
-        match self {
-            Self::Snapshot => "operation.work.snapshot",
-            Self::Delta => "operation.work.delta",
-            Self::Create => "operation.work.create",
-            Self::ReplanDependencies => "operation.work.replan_dependencies",
-            Self::ReviewProposal => "operation.work.review_proposal",
-            Self::AcceptProposal => "operation.work.accept_proposal",
-            Self::AdmitExecution => "operation.work.admit_execution",
-            Self::AttachRuntimeEvidence => "operation.work.attach_runtime_evidence",
-            Self::AcceptTask => "operation.work.accept_task",
-            Self::AttemptAcquireLease => "operation.work.attempt_acquire_lease",
-            Self::AttemptRenewLease => "operation.work.attempt_renew_lease",
-            Self::AttemptStart => "operation.work.attempt_start",
-            Self::AttemptPublishProgress => "operation.work.attempt_publish_progress",
-            Self::AttemptPublishArtifact => "operation.work.attempt_publish_artifact",
-            Self::AttemptCancel => "operation.work.attempt_cancel",
-            Self::AttemptRecover => "operation.work.attempt_recover",
-            Self::AttemptFinish => "operation.work.attempt_finish",
-            Self::AttemptTerminalize => "operation.work.attempt_terminalize",
-        }
-    }
-
-    /// The final path segment that names this operation on its router.
-    pub const fn route_segment(self) -> &'static str {
-        match self {
-            Self::Snapshot => "snapshot",
-            Self::Delta => "delta",
-            Self::Create => "create",
-            Self::ReplanDependencies => "replan-dependencies",
-            Self::ReviewProposal => "review-proposal",
-            Self::AcceptProposal => "accept-proposal",
-            Self::AdmitExecution => "admit-execution",
-            Self::AttachRuntimeEvidence => "attach-runtime-evidence",
-            Self::AcceptTask => "accept-task",
-            Self::AttemptAcquireLease => "acquire-lease",
-            Self::AttemptRenewLease => "renew-lease",
-            Self::AttemptStart => "start",
-            Self::AttemptPublishProgress => "publish-progress",
-            Self::AttemptPublishArtifact => "publish-artifact",
-            Self::AttemptCancel => "cancel",
-            Self::AttemptRecover => "recover",
-            Self::AttemptFinish => "finish",
-            Self::AttemptTerminalize => "terminalize",
-        }
-    }
-
-    pub const fn family(self) -> WorkOperationFamily {
-        match self {
-            Self::Snapshot
-            | Self::Delta
-            | Self::Create
-            | Self::ReplanDependencies
-            | Self::ReviewProposal
-            | Self::AcceptProposal
-            | Self::AdmitExecution
-            | Self::AttachRuntimeEvidence
-            | Self::AcceptTask => WorkOperationFamily::Core,
-            Self::AttemptAcquireLease
-            | Self::AttemptRenewLease
-            | Self::AttemptStart
-            | Self::AttemptPublishProgress
-            | Self::AttemptPublishArtifact
-            | Self::AttemptCancel
-            | Self::AttemptRecover
-            | Self::AttemptFinish
-            | Self::AttemptTerminalize => WorkOperationFamily::Attempt,
-        }
-    }
-
     /// Whether the operation reads without producing a durable effect.
     pub const fn is_read_only(self) -> bool {
         matches!(self, Self::Snapshot | Self::Delta)
-    }
-
-    /// The path this operation answers on the application router.
-    pub const fn route_path(self) -> &'static str {
-        match self.family() {
-            WorkOperationFamily::Core => match self {
-                Self::Snapshot => "/work/snapshot",
-                Self::Delta => "/work/delta",
-                Self::Create => "/work/create",
-                Self::ReplanDependencies => "/work/replan-dependencies",
-                Self::ReviewProposal => "/work/review-proposal",
-                Self::AcceptProposal => "/work/accept-proposal",
-                Self::AdmitExecution => "/work/admit-execution",
-                Self::AttachRuntimeEvidence => "/work/attach-runtime-evidence",
-                Self::AcceptTask => "/work/accept-task",
-                _ => unreachable!(),
-            },
-            WorkOperationFamily::Attempt => match self {
-                Self::AttemptAcquireLease => "/work/attempt/acquire-lease",
-                Self::AttemptRenewLease => "/work/attempt/renew-lease",
-                Self::AttemptStart => "/work/attempt/start",
-                Self::AttemptPublishProgress => "/work/attempt/publish-progress",
-                Self::AttemptPublishArtifact => "/work/attempt/publish-artifact",
-                Self::AttemptCancel => "/work/attempt/cancel",
-                Self::AttemptRecover => "/work/attempt/recover",
-                Self::AttemptFinish => "/work/attempt/finish",
-                Self::AttemptTerminalize => "/work/attempt/terminalize",
-                _ => unreachable!(),
-            },
-        }
-    }
-
-    /// The path the catalog advertises, which the executable nests under its
-    /// `/application` prefix.
-    pub const fn application_route_path(self) -> &'static str {
-        match self {
-            Self::Snapshot => "/application/work/snapshot",
-            Self::Delta => "/application/work/delta",
-            Self::Create => "/application/work/create",
-            Self::ReplanDependencies => "/application/work/replan-dependencies",
-            Self::ReviewProposal => "/application/work/review-proposal",
-            Self::AcceptProposal => "/application/work/accept-proposal",
-            Self::AdmitExecution => "/application/work/admit-execution",
-            Self::AttachRuntimeEvidence => "/application/work/attach-runtime-evidence",
-            Self::AcceptTask => "/application/work/accept-task",
-            Self::AttemptAcquireLease => "/application/work/attempt/acquire-lease",
-            Self::AttemptRenewLease => "/application/work/attempt/renew-lease",
-            Self::AttemptStart => "/application/work/attempt/start",
-            Self::AttemptPublishProgress => "/application/work/attempt/publish-progress",
-            Self::AttemptPublishArtifact => "/application/work/attempt/publish-artifact",
-            Self::AttemptCancel => "/application/work/attempt/cancel",
-            Self::AttemptRecover => "/application/work/attempt/recover",
-            Self::AttemptFinish => "/application/work/attempt/finish",
-            Self::AttemptTerminalize => "/application/work/attempt/terminalize",
-        }
-    }
-
-    /// The public dashboard path, for the core operations the dashboard mounts.
-    pub const fn dashboard_route_path(self) -> Option<&'static str> {
-        match self {
-            Self::Snapshot => Some("/api/work/snapshot"),
-            Self::Delta => Some("/api/work/delta"),
-            Self::Create => Some("/api/work/create"),
-            Self::ReplanDependencies => Some("/api/work/replan-dependencies"),
-            Self::ReviewProposal => Some("/api/work/review-proposal"),
-            Self::AcceptProposal => Some("/api/work/accept-proposal"),
-            Self::AdmitExecution => Some("/api/work/admit-execution"),
-            Self::AttachRuntimeEvidence => Some("/api/work/attach-runtime-evidence"),
-            Self::AcceptTask => Some("/api/work/accept-task"),
-            _ => None,
-        }
     }
 
     /// The generated name of the schema this operation's request satisfies.

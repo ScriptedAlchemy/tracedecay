@@ -12,7 +12,8 @@ use serde_json::Value;
 use tracedecay_application::RequestId;
 
 use crate::http::{
-    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, invalid_request_response,
+    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, constant_operation_handlers,
+    invalid_request_response,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,25 +24,11 @@ pub enum MultiRootHttpOperation {
 }
 
 impl MultiRootHttpOperation {
-    pub const ALL: [Self; 3] = [
-        Self::ScopeSetRead,
-        Self::ScopeSetCompareAndSwap,
-        Self::Execute,
-    ];
-
     pub const fn operation_id(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "operation.multi_root.scope_set_read",
             Self::ScopeSetCompareAndSwap => "operation.multi_root.scope_set_compare_and_swap",
             Self::Execute => "operation.multi_root.execute",
-        }
-    }
-
-    pub const fn application_route_path(self) -> &'static str {
-        match self {
-            Self::ScopeSetRead => "/application/multi-root/scope-set/read",
-            Self::ScopeSetCompareAndSwap => "/application/multi-root/scope-set/compare-and-swap",
-            Self::Execute => "/application/multi-root/execute",
         }
     }
 }
@@ -85,61 +72,18 @@ where
         .with_state(owner)
 }
 
-async fn scope_set_read<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    controls: Extension<HttpApplicationControls>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: MultiRootApplicationOwner,
-{
-    dispatch(
-        MultiRootHttpOperation::ScopeSetRead,
-        state,
-        request_id,
-        controls,
-        body,
-    )
-    .await
-}
-
-async fn scope_set_compare_and_swap<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    controls: Extension<HttpApplicationControls>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: MultiRootApplicationOwner,
-{
-    dispatch(
-        MultiRootHttpOperation::ScopeSetCompareAndSwap,
-        state,
-        request_id,
-        controls,
-        body,
-    )
-    .await
-}
-
-async fn execute<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    controls: Extension<HttpApplicationControls>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: MultiRootApplicationOwner,
-{
-    dispatch(
-        MultiRootHttpOperation::Execute,
-        state,
-        request_id,
-        controls,
-        body,
-    )
-    .await
+constant_operation_handlers! {
+    owner: O = MultiRootApplicationOwner,
+    dispatch = dispatch,
+    extractors = {
+        state: State<O>,
+        request_id: Extension<RequestId>,
+        controls: Extension<HttpApplicationControls>,
+        body: Result<Json<Value>, JsonRejection>,
+    },
+    scope_set_read => MultiRootHttpOperation::ScopeSetRead;
+    scope_set_compare_and_swap => MultiRootHttpOperation::ScopeSetCompareAndSwap;
+    execute => MultiRootHttpOperation::Execute;
 }
 
 async fn dispatch<O>(

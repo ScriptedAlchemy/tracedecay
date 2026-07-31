@@ -32,7 +32,7 @@ pub mod work {
     pub use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 }
 
-/// PR17 workflow definition, activation, placement, and task-handoff
+/// Workflow definition, activation, placement, and task-handoff
 /// commands, plus their executable capability inventory.
 pub mod workflow {
     pub use tracedecay_application::{
