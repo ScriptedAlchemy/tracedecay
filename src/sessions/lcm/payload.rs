@@ -11,7 +11,7 @@ mod filesystem_authority;
 mod rollback;
 
 #[cfg(test)]
-pub use delete_recovery::delete_external_payload;
+pub(crate) use delete_recovery::delete_external_payload;
 pub(crate) use delete_recovery::{
     CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
     remove_committed_payload_file,

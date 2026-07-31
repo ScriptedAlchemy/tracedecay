@@ -2,7 +2,7 @@
 //!
 //! These ports own the `daemon_hook_action` JSON. The Hook V2 dispatch core
 //! consumes typed ports ([`AsyncHookAdmissionPortV1`],
-//! [`AsyncHookFeedbackDeliveryPortV1`], and the OpenCode LSP submit port) and
+//! [`AsyncHookFeedbackDeliveryPortV1`], and the `OpenCode` LSP submit port) and
 //! never issues those action strings itself.
 
 use std::path::Path;
@@ -307,6 +307,7 @@ impl AsyncHookFeedbackDeliveryPortV1<crate::agents::context_scout_v2::ContextSco
 }
 
 /// Typed Context Scout explicit-feedback payload for envelope-bound delivery.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ContextScoutFeedbackCommitV1 {
     pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
@@ -314,10 +315,12 @@ pub(crate) struct ContextScoutFeedbackCommitV1 {
 }
 
 /// Daemon-backed Context Scout explicit-feedback commit.
+#[cfg(test)]
 pub(crate) struct DaemonContextScoutFeedbackPort<'a> {
     project_root: &'a Path,
 }
 
+#[cfg(test)]
 impl<'a> DaemonContextScoutFeedbackPort<'a> {
     pub(crate) fn new(project_root: &'a Path) -> Self {
         Self { project_root }
@@ -343,6 +346,7 @@ impl<'a> DaemonContextScoutFeedbackPort<'a> {
     }
 }
 
+#[cfg(test)]
 impl AsyncHookFeedbackDeliveryPortV1<ContextScoutFeedbackCommitV1>
     for DaemonContextScoutFeedbackPort<'_>
 {
@@ -368,7 +372,7 @@ impl AsyncHookFeedbackDeliveryPortV1<ContextScoutFeedbackCommitV1>
     }
 }
 
-/// Daemon-backed OpenCode LSP update submission.
+/// Daemon-backed `OpenCode` LSP update submission.
 pub(crate) struct DaemonOpenCodeLspUpdatePort<'a> {
     project_root: &'a Path,
     telemetry: Option<&'a HookTimingSpan>,
@@ -404,6 +408,7 @@ impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn outcome_is_committed(outcome: HookFeedbackDeliveryOutcomeV1) -> bool {
     matches!(
         outcome,

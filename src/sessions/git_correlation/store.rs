@@ -41,7 +41,7 @@ pub(crate) trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send
 
 /// Project-session store authority used by git-correlation backfill and reads.
 ///
-/// Implementations must preserve ProjectSessions authority checks, watermark
+/// Implementations must preserve `ProjectSessions` authority checks, watermark
 /// ordering, idempotent span/commit writes, and fail-open-per-session skip
 /// semantics owned by the backfill loop.
 ///

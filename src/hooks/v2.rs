@@ -5,22 +5,27 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
+#[cfg(test)]
+use tracedecay_hooks::HookImmediateAdmissionStateV1;
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
     HookFeedbackDeliveryRouteV1, HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1,
-    HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionStateV1, HookImmediateAdmissionV1,
-    HookRuntimeControlV1, HookScopeBindingV1, HookScopedFeedbackV1, HookSpoolConfigV1,
-    HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1, HookTransportDispositionV1,
-    NativeEnvelopeMaterialV1, NativeHookDecodeError, SpoolAppendOutcomeV1, admit_async_exact_scope,
+    HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionV1, HookRuntimeControlV1,
+    HookScopeBindingV1, HookScopedFeedbackV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1,
+    HookSynchronousDeadlineV1, HookTransportDispositionV1, NativeEnvelopeMaterialV1,
+    NativeHookDecodeError, SpoolAppendOutcomeV1, admit_async_exact_scope,
     decode_bound_native_hook_event, deliver_hook_feedback, finish_synchronous_hook,
 };
 
 use super::analytics::{HookTimingSpan, elapsed_us};
+#[cfg(test)]
 use super::daemon_ports::{
-    ContextScoutFeedbackCommitV1, DaemonAdmissionPort, DaemonContextScoutFeedbackPort,
-    DaemonDeliveryReceiptPort, DaemonFeedbackNoticeDeliveryPort, DaemonOpenCodeLspUpdatePort,
-    now_utc, outcome_is_committed,
+    ContextScoutFeedbackCommitV1, DaemonContextScoutFeedbackPort, outcome_is_committed,
+};
+use super::daemon_ports::{
+    DaemonAdmissionPort, DaemonDeliveryReceiptPort, DaemonFeedbackNoticeDeliveryPort,
+    DaemonOpenCodeLspUpdatePort, now_utc,
 };
 
 pub(crate) enum HookV2Dispatch {
@@ -182,14 +187,9 @@ struct NativeIdentityFields {
     tool_call_id: Option<String>,
     #[serde(alias = "callID")]
     call_id: Option<String>,
-    #[serde(alias = "filePath")]
-    file_path: Option<String>,
-    #[serde(alias = "toolName")]
-    tool_name: Option<String>,
     edits: Option<Vec<serde_json::Value>>,
     properties: Option<NativeIdentityProperties>,
     input: Option<NativeIdentityInput>,
-    output: Option<NativeIdentityOutput>,
     extra: Option<NativeIdentityExtra>,
     route: Option<NativeIdentityRoute>,
     receipt: Option<NativeIdentityReceipt>,
@@ -199,7 +199,6 @@ struct NativeIdentityFields {
 struct NativeIdentityProperties {
     #[serde(alias = "sessionID")]
     session_id: Option<String>,
-    file: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -208,20 +207,6 @@ struct NativeIdentityInput {
     session_id: Option<String>,
     #[serde(alias = "callID")]
     call_id: Option<String>,
-    tool: Option<String>,
-    #[serde(alias = "filePath")]
-    file_path: Option<String>,
-}
-
-#[derive(Default, Deserialize)]
-struct NativeIdentityOutput {
-    metadata: Option<NativeIdentityOutputMetadata>,
-}
-
-#[derive(Default, Deserialize)]
-struct NativeIdentityOutputMetadata {
-    #[serde(default)]
-    files: Vec<NativeIdentityFile>,
 }
 
 #[derive(Default, Deserialize)]
@@ -270,12 +255,6 @@ impl NativeContextScoutLifecycleV1 {
                     | tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
             )
     }
-}
-
-#[derive(Deserialize)]
-struct NativeIdentityFile {
-    #[serde(alias = "filePath")]
-    file_path: String,
 }
 
 impl NativeIdentityFields {
@@ -346,34 +325,6 @@ impl NativeIdentityFields {
                     .as_ref()
                     .and_then(|receipt| receipt.tool_call_id.as_deref())
             })
-    }
-
-    fn file_path(&self) -> Option<&str> {
-        self.file_path
-            .as_deref()
-            .or_else(|| {
-                self.properties
-                    .as_ref()
-                    .and_then(|properties| properties.file.as_deref())
-            })
-            .or_else(|| {
-                self.input
-                    .as_ref()
-                    .and_then(|input| input.file_path.as_deref())
-            })
-            .or_else(|| {
-                self.output
-                    .as_ref()
-                    .and_then(|output| output.metadata.as_ref())
-                    .and_then(|metadata| metadata.files.first())
-                    .map(|file| file.file_path.as_str())
-            })
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        self.tool_name
-            .as_deref()
-            .or_else(|| self.input.as_ref().and_then(|input| input.tool.as_deref()))
     }
 }
 
@@ -668,6 +619,7 @@ impl HookScopedFeedbackV1 for crate::agents::context_scout_v2::ContextScoutDeliv
     }
 }
 
+#[cfg(test)]
 impl HookScopedFeedbackV1 for ContextScoutFeedbackCommitV1 {
     fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
         self.feedback.receipt_id == self.receipt.receipt_id
@@ -693,6 +645,7 @@ fn context_scout_delivery_receipt_id(event_id: [u8; 16], envelope_id: [u8; 16]) 
     hash16(&material)
 }
 
+#[cfg(test)]
 pub(crate) async fn record_context_scout_delivery(
     project_root: &Path,
     receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
@@ -707,6 +660,7 @@ pub(crate) async fn record_context_scout_delivery(
     )
 }
 
+#[cfg(test)]
 pub(crate) async fn commit_context_scout_feedback(
     project_root: &Path,
     receipt: &crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,

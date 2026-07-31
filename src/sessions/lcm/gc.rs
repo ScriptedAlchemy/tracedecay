@@ -462,7 +462,7 @@ async fn run_payload_gc_preview(
 }
 
 #[cfg(test)]
-pub async fn run_payload_gc_with_apply(
+pub(crate) async fn run_payload_gc_with_apply(
     conn: &Connection,
     storage_root: &Path,
     provider: &str,
