@@ -659,6 +659,8 @@ mod authority_tests {
     use tracedecay_store::StoreShardIdV1;
 
     use super::*;
+    use crate::daemon::profile_identity::load_or_create;
+    use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 
     #[test]
     fn registered_automation_scope_rejects_profile_and_project_mismatches() {
@@ -750,15 +752,117 @@ mod authority_tests {
         ));
     }
 
-    #[test]
-    fn automation_retrieval_contains_no_path_open_fallback() {
-        let source = include_str!("retrieval.rs");
-        let production = source
-            .split_once("#[cfg(test)]")
-            .map_or(source, |(production, _)| production);
-        assert!(!production.contains("open_read_only_at"));
-        assert!(!production.contains("open_project_automation_retrieval"));
-        assert!(!production.contains("open_user_automation_retrieval"));
-        assert!(!production.contains("\"profile.primary\""));
+    #[tokio::test]
+    async fn project_retrieval_rejects_profile_scope_without_fallback() {
+        let directory = tempdir().expect("temporary profile");
+        let identity = load_or_create(directory.path()).expect("profile identity");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session registry");
+        let profile_sessions = registry.profile_sessions().await.expect("profile sessions");
+        let project_id = ProjectId::new("project.automation.wrong-scope").expect("project id");
+
+        let error = registered_project_automation_retrieval(
+            profile_sessions,
+            registry.profile_identity(),
+            &project_id,
+        )
+        .await
+        .err()
+        .expect("profile authority must not become project retrieval");
+
+        assert!(
+            error
+                .to_string()
+                .contains("registered project session runtime authority mismatch")
+        );
+    }
+
+    async fn typed_reject_reason(retrieval: &dyn AutomationSessionRetrieval) -> &'static str {
+        let query = SessionTemporalQuery::new(
+            SessionId::new("session.automation.parity").expect("session id"),
+            None,
+            "parity",
+            None,
+            TemporalModeV1::Forensic,
+            RetrievalGrainV1::LogicalMessage,
+            1,
+            DiversityLimits {
+                per_logical_message: 1,
+                per_turn: 1,
+                per_session: 1,
+                per_source: 1,
+                per_evidence_role: 1,
+            },
+            ContextBudget {
+                max_bytes: 1024,
+                max_tokens: 256,
+                estimator_version: AUTOMATION_SESSION_ESTIMATOR_VERSION.to_string(),
+            },
+        )
+        .expect("bounded query");
+        match retrieval.retrieve(query).await {
+            AutomationTemporalRetrieval::Rejected(reason) => reason,
+            AutomationTemporalRetrieval::Complete(_) => {
+                panic!("expected typed rejection, got Complete")
+            }
+            AutomationTemporalRetrieval::CompleteZero => {
+                panic!("expected typed rejection, got CompleteZero")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_profile_and_project_keep_typed_unavailable_without_active_anchor() {
+        let directory = tempdir().expect("temporary profile");
+        let identity = load_or_create(directory.path()).expect("profile identity");
+        let registry = std::sync::Arc::new(
+            DaemonSessionRuntimeRegistryV1::open(identity.clone())
+                .await
+                .expect("session registry"),
+        );
+
+        let profile_sessions = registry.profile_sessions().await.expect("profile sessions");
+        let profile_retrieval = registered_profile_automation_retrieval(
+            profile_sessions,
+            registry.profile_identity(),
+        )
+        .await
+        .expect("profile retrieval");
+        assert_eq!(
+            typed_reject_reason(profile_retrieval.as_ref()).await,
+            "session_evidence_retrieval_unavailable"
+        );
+
+        let project_id = ProjectId::new("project.automation.parity").expect("project id");
+        let project_sessions = registry
+            .project_sessions(project_id.clone(), [directory.path().join("project")])
+            .await
+            .expect("project sessions");
+        let project_retrieval = registered_project_automation_retrieval(
+            project_sessions,
+            registry.profile_identity(),
+            &project_id,
+        )
+        .await
+        .expect("project retrieval");
+        assert_eq!(
+            typed_reject_reason(project_retrieval.as_ref()).await,
+            "session_evidence_retrieval_unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn path_only_user_convenience_never_fabricates_empty_hits() {
+        let directory = tempdir().expect("temporary profile");
+        let retrieval = production_user_automation_retrieval(directory.path()).await;
+        assert_eq!(
+            typed_reject_reason(retrieval.as_ref()).await,
+            "session_evidence_retrieval_unavailable"
+        );
+        assert!(
+            !directory.path().join("user-sessions.db").exists(),
+            "path-only convenience must not invent a session database"
+        );
     }
 }

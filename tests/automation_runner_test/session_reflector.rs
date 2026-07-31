@@ -13,39 +13,6 @@ fn session_reflector_options_have_no_storage_selector() {
     );
 }
 
-#[test]
-fn session_reflector_evidence_uses_fresh_authorized_forensic_retrieval() {
-    let source = concat!(
-        include_str!("../../src/automation/runner/evidence.rs"),
-        include_str!("../../src/automation/runner/retrieval.rs"),
-        include_str!("../../src/automation/runner/session_reflector.rs")
-    );
-    let start = source
-        .find("async fn build_session_reflector_evidence")
-        .expect("session reflector evidence builder");
-    let end = source[start..]
-        .find("async fn build_skill_writer_evidence")
-        .map(|offset| start + offset)
-        .expect("skill writer evidence builder");
-    let builder = &source[start..end];
-
-    assert!(!builder.contains(".lcm_grep("));
-    assert!(!builder.contains(".lcm_recent_sessions("));
-    assert!(!builder.contains(".lcm_session_replay_slice("));
-    assert!(builder.contains("retrieve_automation_session_evidence("));
-    assert!(builder.contains("validate_complete_evidence("));
-    assert!(source.contains("SessionFreshnessPolicy::RequireFresh"));
-    assert!(source.contains("TemporalModeV1::Forensic"));
-    assert!(source.contains("production_project_automation_retrieval(cg).await"));
-    assert!(source.contains("production_user_automation_retrieval(profile_root).await"));
-    assert!(source.contains("registered_project_automation_retrieval("));
-    assert!(source.contains("registered_profile_automation_retrieval("));
-    assert!(!source.contains("project_registry_db_path(cg)"));
-    assert!(!source.contains("open_read_only_at("));
-    assert!(source.contains("RequireFresh.accepts(freshness)"));
-    assert!(!include_str!("support.rs").contains(".lcm_grep("));
-    assert!(!include_str!("support.rs").contains("LcmGrepRequest"));
-}
 use tracedecay::automation::fact_proposals::record_session_fact_proposals;
 
 #[tokio::test]

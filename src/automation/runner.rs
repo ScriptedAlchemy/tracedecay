@@ -2,6 +2,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,7 +15,8 @@ use tracedecay_application::{
 use tracedecay_domain::FactOwnerV1;
 #[cfg(test)]
 use tracedecay_domain::{
-    ActorId, ProjectId, RepositoryId, SessionId, TemporalCoverageCountsV1, UtcMicros, WorktreeId,
+    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
+    UtcMicros, WorktreeId,
 };
 #[cfg(test)]
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -43,9 +46,10 @@ use crate::application::context::{
 use crate::application::memory::MemoryApplication;
 #[cfg(test)]
 use crate::application::session::{
-    SessionAuthorizationError, SessionAuthorizationGrant, SessionRequestBinding,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionPort,
+    SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant, SessionFreshnessPolicy,
+    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalExecutionPort, SessionTemporalQuery,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
@@ -1032,15 +1036,18 @@ mod tests {
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use std::path::PathBuf;
 
-    struct DenyAutomationAuthorizer;
+    struct RecordingDenyAutomationAuthorizer {
+        requests: Arc<Mutex<Vec<SessionScopeAuthorizationRequest>>>,
+    }
 
-    impl SessionScopeAuthorizer for DenyAutomationAuthorizer {
+    impl SessionScopeAuthorizer for RecordingDenyAutomationAuthorizer {
         fn authorize(
             &self,
             _context: &RequestContext,
             _binding: &SessionRequestBinding,
-            _request: &SessionScopeAuthorizationRequest,
+            request: &SessionScopeAuthorizationRequest,
         ) -> std::result::Result<SessionAuthorizationGrant, SessionAuthorizationError> {
+            self.requests.lock().unwrap().push(request.clone());
             Err(SessionAuthorizationError::Denied)
         }
     }
@@ -1122,8 +1129,11 @@ mod tests {
 
     #[tokio::test]
     async fn real_authorized_service_path_denies_before_execution() {
+        let authorization_requests = Arc::new(Mutex::new(Vec::new()));
         let service = SessionRetrievalService::new(
-            DenyAutomationAuthorizer,
+            RecordingDenyAutomationAuthorizer {
+                requests: Arc::clone(&authorization_requests),
+            },
             NeverAutomationExecution,
             AutomationWordEstimator,
             SessionRetrievalConfiguration::new(1, 1).unwrap(),
@@ -1159,6 +1169,14 @@ mod tests {
             outcome,
             AutomationTemporalRetrieval::Rejected("session_evidence_denied")
         ));
+        let requests = authorization_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
+        );
+        assert_eq!(requests[0].grain(), RetrievalGrainV1::LogicalMessage);
+        assert_eq!(requests[0].access(), SessionAccess::Hydrate);
     }
 
     #[test]
@@ -1229,25 +1247,63 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn private_tests_do_not_accept_lcm_grep_evidence_paths() {
-        let source = include_str!("runner.rs");
-        let tests_start = source
-            .rfind("#[cfg(test)]\nmod tests {")
-            .expect("private automation runner tests");
-        let private_tests = &source[tests_start..];
-        assert!(
-            !private_tests.contains(concat!(".lcm_", "grep(")),
-            "private runner tests must not accept legacy lcm_grep evidence"
+    struct RecordingRejectedAutomationRetrieval {
+        anchor_session_id: SessionId,
+        queries: Mutex<Vec<SessionTemporalQuery>>,
+    }
+
+    impl AutomationSessionRetrieval for RecordingRejectedAutomationRetrieval {
+        fn anchor_session_id(&self) -> &SessionId {
+            &self.anchor_session_id
+        }
+
+        fn retrieve(&self, query: SessionTemporalQuery) -> AutomationSessionRetrievalFuture<'_> {
+            self.queries.lock().unwrap().push(query);
+            Box::pin(async { AutomationTemporalRetrieval::Rejected("session_evidence_denied") })
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_retrieval_requests_fresh_forensic_evidence_and_preserves_rejection() {
+        let retrieval = RecordingRejectedAutomationRetrieval {
+            anchor_session_id: SessionId::new("session.automation.recording").unwrap(),
+            queries: Mutex::new(Vec::new()),
+        };
+        let outcome = retrieve_automation_session_evidence(
+            &retrieval,
+            "record the canonical request",
+            LcmScope::All,
+            AutomationEvidenceFilters {
+                provider: "cursor",
+                session_id: None,
+                include_summaries: true,
+                evidence_limit: 5,
+                include_recent_sessions: true,
+                recent_sessions_limit: 3,
+                role: None,
+                start_time: None,
+                end_time: None,
+                sort: LcmGrepSort::Relevance,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            AutomationTemporalRetrieval::Rejected("session_evidence_denied")
+        ));
+        let queries = retrieval.queries.lock().unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(
+            queries[0].temporal_mode(),
+            tracedecay_domain::TemporalModeV1::Forensic
         );
-        assert!(
-            !private_tests.contains(concat!("Lcm", "GrepRequest")),
-            "private runner tests must not construct legacy lcm_grep requests"
+        assert_eq!(
+            queries[0].freshness_policy(),
+            SessionFreshnessPolicy::RequireFresh
         );
-        assert!(
-            private_tests.contains("accept_automation_temporal_outcome"),
-            "private runner tests must exercise temporal acceptance"
-        );
+        assert_eq!(queries[0].grain(), RetrievalGrainV1::LogicalMessage);
     }
 
     #[test]
@@ -1342,6 +1398,9 @@ mod tests {
         assert_eq!(serialized.hits[0].kind, "raw_message");
         assert_eq!(serialized.hits[0].session_id, "session-1");
         assert_eq!(serialized.hits[0].message_id.as_deref(), Some("message-1"));
+        assert_eq!(serialized.hits[0].node_id.as_deref(), Some("occurrence-1"));
+        assert_eq!(serialized.hits[0].anchor_id, "anchor-1");
+        assert_eq!(serialized.hits[0].stable_id, "stable-1");
         assert_eq!(
             serialized.hits[0].snippet.chars().count(),
             SESSION_REPLAY_SNIPPET_CHARS
