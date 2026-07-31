@@ -36,48 +36,6 @@ pub(super) async fn raw_message_overviews(
     Ok(overviews)
 }
 
-pub(super) async fn raw_message_overviews_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-) -> Result<Vec<LcmRawMessageOverview>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT message_id, store_id, role, storage_kind, payload_ref,
-                    LENGTH(snippet_text)
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2
-             ORDER BY store_id
-             LIMIT 20",
-            params![provider, session_id],
-        )
-        .await?;
-
-    let mut overviews = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let storage_kind_text: String = row.get(3)?;
-        let total_chars = row.get::<i64>(5)?.max(0) as u64;
-        overviews.push(LcmRawMessageOverview {
-            message_id: row.get(0)?,
-            store_id: row.get(1)?,
-            role: row.get(2)?,
-            storage_kind: LcmStorageKind::from_db(&storage_kind_text).ok_or_else(|| {
-                LcmError::Db(format!("invalid storage_kind: {storage_kind_text}"))
-            })?,
-            payload_ref: row.get(4)?,
-            content_preview: String::new(),
-            content_range: LcmContentRange {
-                offset: 0,
-                limit: 0,
-                returned_chars: 0,
-                total_chars,
-                truncated: total_chars > 0,
-            },
-        });
-    }
-    Ok(overviews)
-}
-
 pub(super) async fn summary_overviews(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
@@ -108,40 +66,6 @@ pub(super) async fn summary_overviews(
             summary_preview: raw::derived_text_for_snippet(&summary_text),
             source_count: source_count.max(0) as usize,
             created_at: row.get(4)?,
-        });
-    }
-    Ok(overviews)
-}
-
-pub(super) async fn summary_overviews_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-) -> Result<Vec<LcmSummaryNodeOverview>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT n.node_id, n.conversation_id, n.depth, n.created_at,
-                    COUNT(s.source_id)
-             FROM lcm_summary_nodes n
-             LEFT JOIN lcm_summary_sources s ON s.node_id = n.node_id
-             WHERE n.provider = ?1 AND n.session_id = ?2
-             GROUP BY n.node_id, n.conversation_id, n.depth, n.created_at
-             ORDER BY n.depth, n.created_at, n.node_id
-             LIMIT 20",
-            params![provider, session_id],
-        )
-        .await?;
-
-    let mut overviews = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_count: i64 = row.get(4)?;
-        overviews.push(LcmSummaryNodeOverview {
-            node_id: row.get(0)?,
-            conversation_id: row.get(1)?,
-            depth: row.get(2)?,
-            summary_preview: String::new(),
-            source_count: source_count.max(0) as usize,
-            created_at: row.get(3)?,
         });
     }
     Ok(overviews)
@@ -291,32 +215,6 @@ pub(super) async fn describe_external_payload(
             payload_ref,
         )
         .await?,
-    })
-}
-
-pub(super) async fn describe_external_payload_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-    payload_ref: &str,
-) -> Result<LcmDescribeExternalPayload, LcmError> {
-    payload::validate_payload_ref(payload_ref)?;
-    let payload = payload::load_payload_metadata(conn, payload_ref).await?;
-    if payload.provider != provider || payload.session_id != session_id {
-        return Err(LcmError::PayloadNotFound);
-    }
-    Ok(LcmDescribeExternalPayload {
-        payload_ref: payload.payload_ref,
-        provider: payload.provider,
-        session_id: payload.session_id,
-        message_id: payload.message_id,
-        kind: payload.kind,
-        content_hash: payload.content_hash,
-        byte_count: payload.byte_count,
-        char_count: payload.char_count,
-        created_at: payload.created_at,
-        metadata_json: payload.metadata_json,
-        content_preview: String::new(),
     })
 }
 

@@ -69,23 +69,6 @@ pub(crate) async fn load_raw_message_by_store_id(
     raw_message_from_row(&row)
 }
 
-pub(crate) async fn load_raw_message_metadata_by_store_id(
-    conn: &(impl QueryExecutor + ?Sized),
-    store_id: i64,
-) -> Result<LcmRawMessage, LcmError> {
-    let sql = format!(
-        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
-         FROM lcm_raw_messages
-         WHERE store_id = ?1"
-    );
-    let mut rows = conn.query(&sql, params![store_id]).await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    raw_message_from_row(&row)
-}
-
 pub(crate) struct RawMessageUpsert {
     pub projection_text: String,
     pub projection_metadata_json: Option<String>,

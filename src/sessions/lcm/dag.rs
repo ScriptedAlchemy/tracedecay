@@ -51,15 +51,6 @@ pub(crate) async fn expand_summary_node(
     expand_summary_node_with_content(conn, provider, session_id, node_id, true).await
 }
 
-pub(crate) async fn expand_summary_node_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-    node_id: &str,
-) -> Result<LcmSummaryExpansion, LcmError> {
-    expand_summary_node_with_content(conn, provider, session_id, node_id, false).await
-}
-
 async fn expand_summary_node_with_content(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
