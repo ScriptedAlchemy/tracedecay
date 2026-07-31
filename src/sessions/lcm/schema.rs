@@ -1,5 +1,7 @@
 use crate::application::session::compatibility::projected_content_hash;
-use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+#[cfg(test)]
+use crate::db::engine::{Connection, TransactionBehavior};
+use crate::db::engine::{Executor, QueryExecutor, params};
 
 use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
 
@@ -144,6 +146,9 @@ pub(crate) async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<(
     Some(())
 }
 
+/// Test-only convenience wrapper: production schema creation runs through
+/// [`ensure_lcm_schema_in_transaction`] inside the callers' own transactions.
+#[cfg(test)]
 pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)

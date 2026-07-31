@@ -299,17 +299,6 @@ pub(crate) fn read_verified_payload_content(
     String::from_utf8(content).map_err(|_| LcmError::PayloadIntegrityMismatch)
 }
 
-pub(crate) async fn load_expand_payload_metadata(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-    payload_ref: &str,
-) -> Result<LcmPayloadRef, LcmError> {
-    validate_payload_ref(payload_ref)?;
-    let payload = load_payload_metadata(conn, payload_ref).await?;
-    validate_expand_payload_owner(conn, provider, session_id, payload).await
-}
-
 async fn validate_expand_payload_owner(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
