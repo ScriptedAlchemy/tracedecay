@@ -194,7 +194,11 @@ Every product surface can run the same bounded query use case and receive determ
   explicit evidence inputs; the query crate validates and merges only those
   typed inputs and never opens analyzer sessions or depends on live provider
   availability. Rename candidates are not durable clean-generation evidence.
-- **PR9 — lexical ranking:** centralize tokenizer/profile versions, lexical normalization, deterministic fusion, diversity, and explanations. Preserve a named V1 compatibility profile only where direct fixtures require it.
+- **PR9 — lexical ranking:** centralize tokenizer/profile versions, lexical
+  normalization, deterministic fusion, diversity, and explanations. `V1` may
+  name the initial final profile. Preserve a predecessor compatibility profile
+  only when `origin/master`, a published release, or a live persisted index
+  proves it shipped; fixtures alone do not.
 - **PR10 — semantic:** add local semantic candidate and bounded rerank channels only with exact model, tokenizer, dimension, metric, normalization, runtime, index-generation, privacy, and watermark compatibility.
 - **PR10 — fallback:** when semantic or rerank execution is unavailable, preserve the pre-stage lexical result bytes and order when the selected profile permits fallback; otherwise fail explicitly.
 - **PR11 — composition:** expose typed query services to application and pure policy evaluators without importing application or policy into this crate.

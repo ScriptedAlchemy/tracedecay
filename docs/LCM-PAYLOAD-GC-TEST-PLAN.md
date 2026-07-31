@@ -6,6 +6,9 @@
 > integrity and deletion boundaries remain product safety constraints. Exact
 > test names/counts, hooks, file/line anchors, receipts, and gate matrices below
 > are not rebuild instructions; validate current GC behavior directly.
+> The recorded schema-v5 marker behavior applies to the then-live persisted
+> payload format; this archive creates no later version bump, compatibility
+> reader, or migration obligation for branch-local shapes.
 
 Status: **historical test plan**. The implementation now lives in the runtime;
 its observable behavior, not the pre-implementation source shape below, is

@@ -105,11 +105,13 @@ duplicating business logic.
 - **PR11 — policy:** expose read-only capability metadata to policy routing. Availability and effect metadata inform a decision but never execute it.
 - **PR11 — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **PR11 — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
-- **PR11 — compatibility:** retain a supported deprecated name only as a
-  `SurfaceBinding` when a direct compatibility test requires it. Once removed,
-  it returns the same unknown-operation problem as any unknown name; authorized
-  callers may separately use ordinary discovery guidance. No retired-name
-  tombstone registry or compatibility ledger exists.
+- **PR11 — compatibility:** retain a deprecated name as a `SurfaceBinding`
+  only when `origin/master` or a published package/release proves a supported
+  caller; a direct compatibility test alone is not release evidence.
+  Branch-local names are replaced in place. Once an evidence-backed name is
+  removed under policy, it returns the same unknown-operation problem as any
+  unknown name; authorized callers may separately use ordinary discovery
+  guidance. No retired-name tombstone registry or compatibility ledger exists.
 - **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
   methods to the same CapabilityId and typed application handler where the
   protocol exposes a callable product operation. Dashboard binding, dashboard

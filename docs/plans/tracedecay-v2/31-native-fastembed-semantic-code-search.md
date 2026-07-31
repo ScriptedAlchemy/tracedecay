@@ -8,6 +8,12 @@ pass. PR9 must still ship and test the exact/lexical/graph fallback and
 exact-tier behavior before PR10 can activate semantics. Those versioned PR9
 results become immutable runtime prerequisites for semantic composition.
 
+PR9 baseline/profile and generation versions are reproducibility identities,
+not evidence that a predecessor wire contract shipped. PR9/PR10 contracts are
+unreleased and change in place; only an index/profile proven on
+`origin/master`, in a published release, or in live persisted generations can
+require a compatibility reader or migration.
+
 **Operational qualification (2026-07-27).** The callable semantic machinery
 does not mean the live profile is currently serving semantic results. Semantic
 search is disabled because the admitted configuration snapshot is invalid.

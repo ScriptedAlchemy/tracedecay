@@ -5,6 +5,10 @@
 > only from the `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts,
 > source-string checks, snapshots, receipts, PR packets, and task ordering below
 > are not rebuild instructions; validate current memory behavior directly.
+> The schema/backfill items below are evidence-backed only for the audited live
+> `.tracedecay.db` memory tables described in this record. Branch-local future
+> shapes change in place and do not acquire a migration or deprecation path
+> from this archive.
 
 Status: synthesis of four upstream audits on the `master` working tree. This is
 the single actionable summary the root triage (`t_fd962a8a`) consumes. Every
