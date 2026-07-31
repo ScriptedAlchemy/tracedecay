@@ -126,7 +126,7 @@ pub struct MaintenanceDatabaseScope<'lease> {
 pub(crate) struct OwnedMaintenanceDatabaseScope {
     profile_root: PathBuf,
     token: String,
-    lifecycle: crate::lifecycle_lease::LifecycleLease,
+    _lifecycle: crate::lifecycle_lease::LifecycleLease,
 }
 
 impl MaintenanceDatabaseScope<'_> {
@@ -162,8 +162,9 @@ impl MaintenanceDatabaseScope<'_> {
 }
 
 impl OwnedMaintenanceDatabaseScope {
+    #[cfg(not(any(test, feature = "test-transport")))]
     pub(crate) fn lifecycle(&self) -> &crate::lifecycle_lease::LifecycleLease {
-        &self.lifecycle
+        &self._lifecycle
     }
 }
 
