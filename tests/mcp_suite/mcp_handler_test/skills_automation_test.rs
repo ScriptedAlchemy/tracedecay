@@ -68,6 +68,8 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             error: None,
             error_classification: None,
             error_retryable: None,
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
             fallback_status: None,
             report_ref: None,
             artifacts: vec![artifact],

@@ -1041,11 +1041,14 @@ where
 
     let effect_id = effect_id(&request.idempotency_key, &input_digest)?;
     let durable_request = durable_request(operation, &request, &current_authority);
-    let recovery_files = planned_files
+    let recovery_files = if planned_files
         .iter()
         .all(|file| file.expected.is_some() && file.intended.is_some())
-        .then(|| planned_files.clone())
-        .unwrap_or_default();
+    {
+        planned_files.clone()
+    } else {
+        Vec::new()
+    };
     let recovery_digest = (!recovery_files.is_empty())
         .then(|| source_edit_recovery_digest(&recovery_files))
         .transpose()?;
