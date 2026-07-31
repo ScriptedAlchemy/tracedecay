@@ -860,6 +860,34 @@ mod tests {
             .expect("other repository genesis");
         assert!(other_genesis.generation_id.as_str().contains(".00000001."));
         assert_ne!(other_genesis.generation_id, genesis.generation_id);
+
+        let foreign_project_planner = GenerationPlanner::new(
+            id("project.foreign"),
+            repository(),
+            registry(),
+            id("chunker.v1"),
+            id("privacy.fixture"),
+            7,
+        );
+        let foreign_project_genesis = foreign_project_planner
+            .plan_generation(&snapshot, None, UtcMicros(3_000))
+            .expect("foreign project genesis");
+        assert_ne!(
+            foreign_project_genesis.invalidation_digest,
+            genesis.invalidation_digest
+        );
+        assert_ne!(
+            foreign_project_genesis.generation_id,
+            genesis.generation_id
+        );
+        assert_eq!(
+            foreign_project_planner.plan_generation(
+                &snapshot,
+                Some(&genesis),
+                UtcMicros(4_000)
+            ),
+            Err(GenerationPlanningErrorV1::ForeignParentIdentity)
+        );
     }
 
     #[test]
