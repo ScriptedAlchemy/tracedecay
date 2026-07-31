@@ -13,7 +13,7 @@ use tracedecay_tool_catalog::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::surface_name;
+use crate::current_bindings;
 
 use super::callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
@@ -94,28 +94,18 @@ pub fn callable_code_catalog_contribution()
         .into_iter()
         .filter(|kind| canonical_surface_equivalent(*kind).is_none())
     {
-        let mut binding_ids = Vec::new();
         let operation = reachable_surface_operation(kind)
             .expect("non-equivalent callable operations have production bindings");
-        for surface in [
-            BindingSurface::Cli,
-            BindingSurface::Mcp,
-            BindingSurface::Http,
-        ] {
-            let binding_id =
-                BindingId::new(format!("binding.{}.{operation}.v1", surface_name(surface)))?;
-            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-                binding_id: binding_id.clone(),
-                capability_id: code_query_capability_id(kind)?,
-                surface,
-                operation: SurfaceOperationName::new(operation)?,
-                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-                required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
-            })?);
-            binding_ids.push(binding_id);
-        }
+        let (surface_bindings, mut binding_ids) = current_bindings(
+            &code_query_capability_id(kind)?,
+            operation,
+            [
+                BindingSurface::Cli,
+                BindingSurface::Mcp,
+                BindingSurface::Http,
+            ],
+        )?;
+        bindings.extend(surface_bindings);
         for method in lsp_methods(kind) {
             let method_id = method.to_ascii_lowercase().replace('/', "-");
             let binding_id = BindingId::new(format!("binding.lsp.{operation}.{method_id}.v1"))?;

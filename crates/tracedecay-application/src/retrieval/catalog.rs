@@ -15,7 +15,7 @@ use tracedecay_tool_catalog::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::surface_name;
+use crate::current_bindings;
 
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";
@@ -219,26 +219,10 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             spec.capability.replace('_', "-")
         ))?;
         let surfaces = primitive_read_surfaces(spec);
-        let mut binding_ids =
-            Vec::with_capacity(surfaces.len() + primitive_lsp_methods(spec.operation).len());
-        for &surface in surfaces {
-            let binding_id = BindingId::new(format!(
-                "binding.{}.{}.v1",
-                surface_name(surface),
-                spec.operation
-            ))?;
-            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-                binding_id: binding_id.clone(),
-                capability_id: capability_id.clone(),
-                surface,
-                operation: SurfaceOperationName::new(spec.operation)?,
-                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-                required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
-            })?);
-            binding_ids.push(binding_id);
-        }
+        let (surface_bindings, mut binding_ids) =
+            current_bindings(&capability_id, spec.operation, surfaces.iter().copied())?;
+        bindings.extend(surface_bindings);
+        binding_ids.reserve(primitive_lsp_methods(spec.operation).len());
         for method in primitive_lsp_methods(spec.operation) {
             let method_id = method.to_ascii_lowercase().replace('/', "-");
             let binding_id =
@@ -355,29 +339,15 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;
     let result_schema = symbol_search_result_schema()?;
-    let mut bindings = Vec::with_capacity(4);
-    let mut binding_ids = Vec::with_capacity(4);
-    for surface in [
-        BindingSurface::Cli,
-        BindingSurface::Mcp,
-        BindingSurface::Http,
-    ] {
-        let binding_id = BindingId::new(format!(
-            "binding.{}.code_symbol_search.v1",
-            surface_name(surface)
-        ))?;
-        bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-            binding_id: binding_id.clone(),
-            capability_id: capability_id.clone(),
-            surface,
-            operation: SurfaceOperationName::new("code_symbol_search")?,
-            protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-            required_features: Vec::new(),
-            status: BindingStatus::Current,
-            alias_of: None,
-        })?);
-        binding_ids.push(binding_id);
-    }
+    let (mut bindings, mut binding_ids) = current_bindings(
+        &capability_id,
+        "code_symbol_search",
+        [
+            BindingSurface::Cli,
+            BindingSurface::Mcp,
+            BindingSurface::Http,
+        ],
+    )?;
     let lsp_binding_id = BindingId::new("binding.lsp.symbol-search.workspace-symbol.v1")?;
     bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
         binding_id: lsp_binding_id.clone(),
