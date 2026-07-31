@@ -288,7 +288,7 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
             "request.multi-root.lsp",
             "client.multi-root",
             Some(first_uri.clone()),
-            vec![second_uri, first_uri],
+            vec![second_uri.clone(), first_uri.clone()],
         ),
     )
     .await;
