@@ -20,7 +20,9 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
     let (cg, _dir, _authority) = init_indexed_repo().await;
     let project_root = cg.project_root().to_path_buf();
     let context = registered_context(cg).await;
-    let server = McpServer::new_with_registered_test_context(context, Vec::new()).await;
+    let server = McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server");
 
     let arguments = json!({
         "project_selector": { "path": project_root.to_string_lossy() }
@@ -92,7 +94,9 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
 async fn unregistered_selector_still_fails_closed_without_substitution() {
     let (cg, _dir, _authority) = init_indexed_repo().await;
     let context = registered_context(cg).await;
-    let server = McpServer::new_with_registered_test_context(context, Vec::new()).await;
+    let server = McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server");
 
     // The unregistered root must live OUTSIDE the registered repository: a
     // path inside it legitimately converges to the registered worktree.
@@ -140,7 +144,9 @@ async fn registered_but_unmounted_project_still_reports_unavailable() {
     let context = runtime
         .into_mcp_server_context_for_test(cg, None)
         .expect("registered MCP server context");
-    let server = McpServer::new_with_registered_test_context(context, Vec::new()).await;
+    let server = McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server");
 
     let error = selected_registered_project_reader(
         "tracedecay_files".to_owned(),

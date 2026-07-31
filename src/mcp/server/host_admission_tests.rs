@@ -53,7 +53,9 @@ async fn server_with_broker(
     writer: HookBranchWriter,
 ) -> Arc<McpServer> {
     let context = with_broker(registered_context(cg).await, broker, writer);
-    McpServer::new_with_registered_test_context(context, Vec::new()).await
+    McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server")
 }
 
 async fn server_with_owned_project_replay_worker(
@@ -63,7 +65,9 @@ async fn server_with_owned_project_replay_worker(
 ) -> Arc<McpServer> {
     let context = with_broker(registered_context(cg).await, broker, writer)
         .with_owned_project_host_admission_replay();
-    McpServer::new_with_registered_test_context(context, Vec::new()).await
+    McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server")
 }
 
 fn with_broker(
@@ -1096,7 +1100,9 @@ async fn server_with_broker_and_runtime(
         broker,
         writer,
     );
-    McpServer::new_with_registered_test_context(context, Vec::new()).await
+    McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server")
 }
 
 #[tokio::test]

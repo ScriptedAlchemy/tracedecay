@@ -298,7 +298,7 @@ pub(crate) async fn handle_tool_call(
             None,
             runtime,
         )
-        .await;
+        .await?;
         if !server.has_project_session_retrieval_service_for_test() {
             return Err(TraceDecayError::Config {
                 message: format!("{tool_name} project retrieval service was not constructed"),
@@ -721,7 +721,9 @@ pub(crate) async fn real_mcp_server(cg: TestTraceDecay) -> Arc<McpServer> {
         .upsert_code_project(&project_id, &project_root, None, None, None)
         .await
         .expect("register test project");
-    McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime).await
+    McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
+        .await
+        .expect("registered test server")
 }
 
 /// Creates a temporary Rust project with cross-file calls, structs, impls,

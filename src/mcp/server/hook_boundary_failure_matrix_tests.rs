@@ -33,7 +33,9 @@ async fn server_with_broker(
 ) -> Arc<McpServer> {
     let mut context = registered_context(cg).await.with_hook_branch_writer(writer);
     context.host_admission_broker = Some(broker);
-    McpServer::new_with_registered_test_context(context, Vec::new()).await
+    McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server")
 }
 
 async fn server_without_broker(
@@ -41,7 +43,9 @@ async fn server_without_broker(
     writer: HookBranchWriter,
 ) -> Arc<McpServer> {
     let context = registered_context(cg).await.with_hook_branch_writer(writer);
-    McpServer::new_with_registered_test_context(context, Vec::new()).await
+    McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server")
 }
 
 fn failing_writer(message: &'static str) -> HookBranchWriter {
@@ -346,7 +350,9 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
         })
     });
     let context = registered_context(cg).await.with_code_index_hook_sink(sink);
-    let server = McpServer::new_with_registered_test_context(context, Vec::new()).await;
+    let server = McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server");
     let mut routes = HookProjectRouteCache::default();
     let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
         HookAgent::Codex,

@@ -284,14 +284,16 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
         None,
         runtime,
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let response = handle_real_server_tool_call_raw(
         &server,
         "tracedecay_project_context",
         json!({"path": "registered-alias", "format": "json"}),
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let message = response["error"]["message"]
         .as_str()
@@ -339,14 +341,16 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
         None,
         runtime,
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let response = handle_real_server_tool_call_raw(
         &server,
         "tracedecay_project_search",
         json!({"query": "broken", "format": "json"}),
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let message = response["error"]["message"].as_str().unwrap_or_else(|| {
         panic!("registry read failure must not become a successful empty search: {response}")
@@ -402,7 +406,8 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
         None,
         client_runtime,
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let list = handle_real_server_tool_call(
         &server,
@@ -537,7 +542,8 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         registry,
         vec![std::sync::Arc::new(target_graph)],
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let read_args = json!({
         "project_id": target_project_key,

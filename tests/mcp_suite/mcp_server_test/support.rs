@@ -71,7 +71,9 @@ pub(crate) async fn server_with_session_authority(project: &std::path::Path) -> 
     let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
         .await
         .expect("registered project runtime opens for the isolated profile");
-    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime).await
+    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
+        .await
+        .expect("registered test server")
 }
 
 /// As [`setup_server`], but the returned server retains the project's
@@ -339,7 +341,9 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
         .await
         .expect("registered project runtime opens for the savings profile");
-    let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime).await;
+    let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
+        .await
+        .expect("registered test server");
     server
         .install_project_open_source_edit_authority_for_test()
         .await
