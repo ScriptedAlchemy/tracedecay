@@ -9,6 +9,11 @@ use tracedecay_domain::{
     canonical_json_bytes, host_integration_catalog_v1, stock_host_capabilities,
 };
 
+const GOLDEN_CATALOG: &[u8] = include_bytes!("fixtures/integration_catalog_v1.json");
+const GOLDEN_CATALOG_AUTHORITY_DIGEST: [u8; 32] = [
+    0x93, 0xad, 0xa6, 0x07, 0x56, 0x22, 0x48, 0xdf, 0xe6, 0xfb, 0xa8, 0xa1, 0xb5, 0xa0, 0x22, 0x38,
+    0x08, 0xcb, 0x4d, 0xf5, 0x89, 0x8f, 0x4e, 0x39, 0x77, 0x56, 0x7c, 0x53, 0xcf, 0xc8, 0x6d, 0x9b,
+];
 const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     (
         "claude",
@@ -52,24 +57,35 @@ enum FixtureAdmissionState {
     Unavailable(FixtureAdmissionReason),
 }
 
-fn catalog_json() -> Value {
-    serde_json::to_value(host_integration_catalog_v1()).expect("catalog JSON")
+fn golden_catalog_json() -> Value {
+    serde_json::from_slice(GOLDEN_CATALOG).expect("valid persisted catalog golden")
 }
 
 #[test]
-fn catalog_wire_round_trips_without_changing_canonical_bytes() {
+fn catalog_serialization_and_digest_match_persisted_golden() {
     let catalog = host_integration_catalog_v1();
     catalog.validate().expect("built-in catalog is valid");
 
-    let encoded = serde_json::to_vec(&catalog).expect("catalog serialization");
-    let decoded: HostIntegrationCatalogV1 =
-        serde_json::from_slice(&encoded).expect("catalog schema round trip");
-    decoded.validate().expect("decoded catalog is valid");
-    assert_eq!(decoded, catalog);
+    let expected =
+        canonical_json_bytes(&golden_catalog_json()).expect("canonical persisted catalog golden");
+    let actual = canonical_json_bytes(&catalog).expect("canonical current catalog");
+    assert_eq!(actual, expected, "persisted catalog format changed");
     assert_eq!(
-        canonical_json_bytes(&decoded).expect("decoded canonical bytes"),
-        canonical_json_bytes(&catalog).expect("catalog canonical bytes")
+        catalog
+            .canonical_authority_digest()
+            .expect("current catalog authority digest"),
+        GOLDEN_CATALOG_AUTHORITY_DIGEST,
+        "persisted catalog authority digest changed"
     );
+}
+
+#[test]
+fn persisted_catalog_golden_deserializes_and_validates() {
+    let decoded: HostIntegrationCatalogV1 =
+        serde_json::from_slice(GOLDEN_CATALOG).expect("persisted catalog golden deserializes");
+    decoded
+        .validate()
+        .expect("persisted catalog golden remains valid");
 }
 
 #[test]
@@ -176,11 +192,11 @@ fn typed_status_reasons_have_stable_encoding() {
 
 #[test]
 fn schema_rejects_unknown_fields() {
-    let mut unknown = catalog_json();
+    let mut unknown = golden_catalog_json();
     unknown["future_field"] = json!(true);
     assert!(serde_json::from_value::<HostIntegrationCatalogV1>(unknown).is_err());
 
-    let mut host_unknown = catalog_json();
+    let mut host_unknown = golden_catalog_json();
     host_unknown["capabilities"][0]["hosts"][0]["availability_states"] = json!([]);
     assert!(serde_json::from_value::<HostIntegrationCatalogV1>(host_unknown).is_err());
 }
@@ -197,7 +213,7 @@ fn catalog_validation_rejects_empty_catalog_and_duplicate_hosts() {
         Err(IntegrationCatalogError::EmptyCatalog)
     ));
 
-    let mut duplicate_capability = catalog_json();
+    let mut duplicate_capability = golden_catalog_json();
     let capability = duplicate_capability["capabilities"][0].clone();
     duplicate_capability["capabilities"]
         .as_array_mut()
@@ -209,7 +225,7 @@ fn catalog_validation_rejects_empty_catalog_and_duplicate_hosts() {
         Err(IntegrationCatalogError::DuplicateCapabilityId(_))
     ));
 
-    let mut duplicate_host = catalog_json();
+    let mut duplicate_host = golden_catalog_json();
     let host = duplicate_host["capabilities"][0]["hosts"][0].clone();
     duplicate_host["capabilities"][0]["hosts"]
         .as_array_mut()
@@ -224,7 +240,7 @@ fn catalog_validation_rejects_empty_catalog_and_duplicate_hosts() {
 
 #[test]
 fn catalog_validation_rejects_an_incomplete_host_matrix() {
-    let mut incomplete = catalog_json();
+    let mut incomplete = golden_catalog_json();
     incomplete["capabilities"][0]["hosts"]
         .as_array_mut()
         .unwrap()
