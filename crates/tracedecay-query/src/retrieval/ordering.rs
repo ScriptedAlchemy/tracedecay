@@ -1,8 +1,6 @@
 use std::cmp::Ordering;
 
-use tracedecay_domain::{
-    ExactClass, FreshnessCompatibilityV1, FusedCandidate, SourceOccurrenceId,
-};
+use tracedecay_domain::{ExactClass, FreshnessCompatibilityV1, FusedCandidate, SourceOccurrenceId};
 
 pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Ordering {
     exact_class_rank(left.exact_class)
