@@ -428,6 +428,8 @@ class OperationMultiRootScopeSetReadResultAuthorizedScopeSet(TypedDict):
     roots: list[OperationMultiRootScopeSetReadResultResolvedScope]
     scope_set_id: str
 
+OperationMultiRootScopeSetReadResult: TypeAlias = OperationMultiRootScopeSetReadResultAuthorizedScopeSet | None
+
 class OperationWorkAcceptProposalRequestReviewProposalCommand(TypedDict):
     command_id: str
     expected_version: int

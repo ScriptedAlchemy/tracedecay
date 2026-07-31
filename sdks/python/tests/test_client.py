@@ -165,20 +165,17 @@ class ClientTest(unittest.TestCase):
         self.assertIn("page_size=25&cursor=cursor.next", path)
         self.assertEqual(headers["Authorization"], "Bearer sdk-token")
 
-    def test_inventory_covers_server_and_every_work_capability(self) -> None:
+    def test_inventory_partitions_available_and_unavailable_operations(self) -> None:
         server_names = set(SERVER_OPERATIONS)
-        base_names = {name for name in server_names if not name.startswith("work_")}
-        available_work = {name for name in server_names if name.startswith("work_")}
-        unavailable_work = set(UNAVAILABLE_OPERATIONS)
+        available_operations = set(WORK_OPERATIONS)
+        unavailable_operations = set(UNAVAILABLE_OPERATIONS)
 
-        self.assertTrue(base_names)
-        self.assertEqual(available_work, set(WORK_OPERATIONS))
-        self.assertFalse(available_work & unavailable_work)
+        self.assertTrue(unavailable_operations)
+        self.assertEqual(server_names, available_operations | unavailable_operations)
+        self.assertFalse(available_operations & unavailable_operations)
         self.assertTrue(
             all(value == "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values())
         )
-        # No executable binding registry schema body exists for these base routes.
-        self.assertEqual(set(UNAVAILABLE_OPERATIONS), base_names)
         self.assertFalse(hasattr(self.client(), "call"))
 
     def test_work_attempt_finish_descriptor_matches_the_canonical_binding(self) -> None:
