@@ -845,6 +845,39 @@ async fn seed_project(
     transaction.commit().await.unwrap();
 }
 
+#[tokio::test]
+async fn registered_store_census_resumes_across_bounded_project_pages() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_registry, _scope, db) = open_registered_db(&profile_root).await;
+    for suffix in ["a", "b", "c"] {
+        seed_store(
+            db.as_ref(),
+            &profile_root,
+            &format!("project-{suffix}"),
+            &format!("store-{suffix}"),
+            &tmp.path().join(format!("missing-{suffix}")),
+            1_700_000_000,
+        )
+        .await;
+    }
+
+    let first = build_store_census_page(db.as_ref(), &profile_root, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(first.entries.len(), 2);
+    assert_eq!(first.next_cursor.as_deref(), Some("project-b"));
+
+    let second =
+        build_store_census_page(db.as_ref(), &profile_root, first.next_cursor.as_deref(), 2)
+            .await
+            .unwrap();
+    assert_eq!(second.entries.len(), 1);
+    assert_eq!(second.entries[0].project_id, "project-c");
+    assert!(second.next_cursor.is_none());
+}
+
 // === Durable-memory guard ===================================================
 
 /// A store whose graph database carries durable `memory_facts` rows must

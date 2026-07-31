@@ -1201,4 +1201,36 @@ mod tests {
         assert!(!transaction_path(store.path()).exists());
         assert!(!staged_root.exists());
     }
+
+    #[test]
+    fn plan_keeps_active_vector_pinned_and_rollback_generations() {
+        let (store, generations) = fixture_store(7);
+        let vector_readable_sources = [generations[0].id.clone()].into_iter().collect();
+
+        let plan = plan_code_generation_retention(
+            store.path(),
+            &vector_readable_sources,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("plan retention");
+
+        assert_eq!(plan.active_generation_id, generations[6].id);
+        assert!(
+            plan.collectable_generations
+                .iter()
+                .all(|generation| generation.generation_id != generations[0].id),
+            "a vector-readable generation remains pinned even outside the rollback floor"
+        );
+        let collectable_ids = plan
+            .collectable_generations
+            .iter()
+            .map(|generation| generation.generation_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            collectable_ids,
+            [generations[1].id.clone(), generations[2].id.clone()]
+                .into_iter()
+                .collect()
+        );
+    }
 }

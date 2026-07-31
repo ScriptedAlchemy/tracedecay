@@ -893,12 +893,48 @@ pub(crate) async fn build_store_census(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
 ) -> crate::errors::Result<Vec<StoreCensusEntry>> {
-    let mut census = Vec::new();
     let projects = db.list_code_projects(usize::MAX).await?;
+    build_store_census_for_projects(db, profile_root, &projects).await
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoreCensusPageV1 {
+    pub(crate) entries: Vec<StoreCensusEntry>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+pub(crate) async fn build_store_census_page(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    after_project_id: Option<&str>,
+    limit: usize,
+) -> crate::errors::Result<StoreCensusPageV1> {
+    let limit = limit.clamp(1, 64);
+    let mut projects = db
+        .list_code_projects_after(after_project_id, limit.saturating_add(1))
+        .await?;
+    let has_more = projects.len() > limit;
+    projects.truncate(limit);
+    let next_cursor = has_more
+        .then(|| projects.last().map(|project| project.project_id.clone()))
+        .flatten();
+    let entries = build_store_census_for_projects(db, profile_root, &projects).await?;
+    Ok(StoreCensusPageV1 {
+        entries,
+        next_cursor,
+    })
+}
+
+async fn build_store_census_for_projects(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    projects: &[crate::global_db::CodeProjectRecord],
+) -> crate::errors::Result<Vec<StoreCensusEntry>> {
+    let mut census = Vec::new();
     // Aliases and the git common directory are part of the identity: a linked
     // worktree or a second enrolled checkout keeps the store live even when
     // this row's canonical root is gone.
-    let contexts = db.project_registry_contexts_for_projects(&projects).await?;
+    let contexts = db.project_registry_contexts_for_projects(projects).await?;
     for context in contexts {
         let project = &context.project;
         let alias_roots = context

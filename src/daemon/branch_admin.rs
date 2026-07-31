@@ -900,7 +900,7 @@ impl StoreAdministration {
     /// Runs an operator-facing writer operation only when it can acquire the
     /// administration lane immediately. Destructive commands must report busy
     /// instead of silently queuing behind project warm-up.
-    async fn try_with_writer<Operation, OperationFuture, Output>(
+    pub(super) async fn try_with_writer<Operation, OperationFuture, Output>(
         &self,
         operation: Operation,
     ) -> Option<Output>
