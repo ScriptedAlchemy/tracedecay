@@ -253,15 +253,61 @@ fn mcp_search_request_termination(
         .then_some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::TimedOut)
 }
 
-fn code_index_scope_unavailable() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+/// Builds the `Unavailable` search outcome, optionally naming the code
+/// generation the caller had already resolved.
+fn code_index_search_unavailable_for_generation(
+    code_generation: Option<String>,
+    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1,
+    semantic_reason: &'static str,
+) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
     crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
         crate::mcp::server::CodeIndexSearchUnavailableV1 {
-            code_generation: None,
-            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+            code_generation,
+            reason,
             semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                reason: "scope_unavailable",
+                reason: semantic_reason,
             },
         },
+    )
+}
+
+/// [`code_index_search_unavailable_for_generation`] for the paths that fail
+/// before any generation is known.
+fn code_index_search_unavailable(
+    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1,
+    semantic_reason: &'static str,
+) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+    code_index_search_unavailable_for_generation(None, reason, semantic_reason)
+}
+
+/// The authority check repeated at every point a search may still be abandoned:
+/// the request itself may have been cancelled or timed out, or the MCP read
+/// route may have been revoked underneath it. `Some` means stop and return.
+fn search_terminated(
+    control: &McpSemanticExecutionControlV1,
+    admission_provider: &query_mcp_admission::QueryMcpReadAdmissionProviderV1,
+    code_generation: Option<&str>,
+) -> Option<crate::mcp::server::CodeIndexSearchOutcomeV1> {
+    if let Some(reason) = control.request_termination() {
+        return Some(code_index_search_unavailable_for_generation(
+            code_generation.map(str::to_owned),
+            reason,
+            reason.as_str(),
+        ));
+    }
+    (!admission_provider.route_is_registered()).then(|| {
+        code_index_search_unavailable_for_generation(
+            code_generation.map(str::to_owned),
+            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+            "route_revoked",
+        )
+    })
+}
+
+fn code_index_scope_unavailable() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+    code_index_search_unavailable(
+        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+        "scope_unavailable",
     )
 }
 
@@ -539,15 +585,9 @@ fn code_index_search_executor(
             let admission = match admission_provider.admit_current(&scope) {
                 Ok(admission) => admission,
                 Err(error) => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: None,
-                            reason:
-                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: error.reason(),
-                            },
-                        },
+                    return code_index_search_unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        error.reason(),
                     );
                 }
             };
@@ -555,15 +595,9 @@ fn code_index_search_executor(
             let authority = match admission.authorize(&scope, Some(&current_authority)) {
                 Ok(authority) => authority,
                 Err(error) => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: None,
-                            reason:
-                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: error.reason(),
-                            },
-                        },
+                    return code_index_search_unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        error.reason(),
                     );
                 }
             };
@@ -607,14 +641,9 @@ fn code_index_search_executor(
                     cursor: request.cursor,
                 },
                 _ => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: None,
-                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "invalid_request",
-                            },
-                        },
+                    return code_index_search_unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                        "invalid_request",
                     );
                 }
             };
@@ -636,40 +665,15 @@ fn code_index_search_executor(
                 deadline,
                 cancellation,
             });
-            if let Some(reason) = control.request_termination() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: None,
-                        reason,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: reason.as_str(),
-                        },
-                    },
-                );
-            }
-            if !admission_provider.route_is_registered() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: None,
-                        reason:
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "route_revoked",
-                        },
-                    },
-                );
+            if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
+                return outcome;
             }
             let execution_permit = match execution_admission.try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: None,
-                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "search_capacity_unavailable",
-                            },
-                        },
+                    return code_index_search_unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                        "search_capacity_unavailable",
                     );
                 }
             };
@@ -704,67 +708,24 @@ fn code_index_search_executor(
                     tokio::select! {
                         result = &mut execution => match result {
                             Ok(result) => break result,
-                            Err(_) => return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                                crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                                    code_generation: None,
-                                    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
-                                    semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                        reason: "search_task_failed",
-                                    },
-                                },
+                            Err(_) => return code_index_search_unavailable(
+                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
+                                "search_task_failed",
                             ),
                         },
                         _ = control_poll.tick() => {
-                            if let Some(reason) = control.request_termination() {
+                            if let Some(outcome) =
+                                search_terminated(&control, &admission_provider, None)
+                            {
                                 execution.abort();
-                                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                                        code_generation: None,
-                                        reason,
-                                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                            reason: reason.as_str(),
-                                        },
-                                    },
-                                );
-                            }
-                            if !admission_provider.route_is_registered() {
-                                execution.abort();
-                                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                                        code_generation: None,
-                                        reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                            reason: "route_revoked",
-                                        },
-                                    },
-                                );
+                                return outcome;
                             }
                         }
                     }
                 }
             };
-            if let Some(reason) = control.request_termination() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: None,
-                        reason,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: reason.as_str(),
-                        },
-                    },
-                );
-            }
-            if !admission_provider.route_is_registered() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: None,
-                        reason:
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "route_revoked",
-                        },
-                    },
-                );
+            if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
+                return outcome;
             }
             let executed = match execution_result {
                 Ok(executed) => executed,
@@ -781,14 +742,12 @@ fn code_index_search_executor(
                         abstention,
                     } = &error
                     {
-                        return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                            crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                                code_generation: Some(generation.as_str().to_owned()),
-                                reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
-                                semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                    reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(abstention),
-                                },
-                            },
+                        return code_index_search_unavailable_for_generation(
+                            Some(generation.as_str().to_owned()),
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
+                            code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
+                                abstention,
+                            ),
                         );
                     }
                     let reason = match error {
@@ -816,39 +775,15 @@ fn code_index_search_executor(
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable
                         }
                     };
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: None,
-                            reason,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "semantic_unavailable",
-                            },
-                        },
-                    );
+                    return code_index_search_unavailable(reason, "semantic_unavailable");
                 }
             };
-            if let Some(reason) = control.request_termination() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.query.generation.as_str().to_owned()),
-                        reason,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: reason.as_str(),
-                        },
-                    },
-                );
-            }
-            if !admission_provider.route_is_registered() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.query.generation.as_str().to_owned()),
-                        reason:
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "route_revoked",
-                        },
-                    },
-                );
+            if let Some(outcome) = search_terminated(
+                &control,
+                &admission_provider,
+                Some(executed.query.generation.as_str()),
+            ) {
+                return outcome;
             }
             let terminal_scope = match project_open_owners::resolved_scope_for_project(
                 &project_root,
@@ -856,30 +791,20 @@ fn code_index_search_executor(
             ) {
                 Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
                 _ => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.query.generation.as_str().to_owned()),
-                            reason:
-                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "scope_changed_before_publication",
-                            },
-                        },
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        "scope_changed_before_publication",
                     );
                 }
             };
             let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
                 Ok(admission) => admission,
                 Err(error) => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.query.generation.as_str().to_owned()),
-                            reason:
-                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: error.reason(),
-                            },
-                        },
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        error.reason(),
                     );
                 }
             };
@@ -889,15 +814,10 @@ fn code_index_search_executor(
                     .authorize(&terminal_scope, Some(&terminal_authority))
                     .is_err()
             {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.query.generation.as_str().to_owned()),
-                        reason:
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "authorization_changed_before_publication",
-                        },
-                    },
+                return code_index_search_unavailable_for_generation(
+                    Some(executed.query.generation.as_str().to_owned()),
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    "authorization_changed_before_publication",
                 );
             }
             let (semantic, ordered_candidates, next_cursor, accepted_semantic_budget) =
@@ -928,15 +848,10 @@ fn code_index_search_executor(
                 .generation_for(&terminal_scope, &executed.query.generation)
                 .await
             else {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.query.generation.as_str().to_owned()),
-                        reason:
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "generation_changed_before_hydration",
-                        },
-                    },
+                return code_index_search_unavailable_for_generation(
+                    Some(executed.query.generation.as_str().to_owned()),
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                    "generation_changed_before_hydration",
                 );
             };
             let mut hydration_request = executed.query.sanitized.request().clone();
@@ -1053,15 +968,10 @@ fn code_index_search_executor(
                         error = %error,
                         "code_index_search_hydration_failed"
                     );
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.query.generation.as_str().to_owned()),
-                            reason:
-                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "late_hydration_failed",
-                            },
-                        },
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
+                        "late_hydration_failed",
                     );
                 }
             };
@@ -1093,26 +1003,19 @@ fn code_index_search_executor(
             hydrated_candidates.extend(ordered_candidates.into_iter().skip(hydrated_prefix_len));
             let ordered_candidates = hydrated_candidates;
             if let Some(reason) = control.request_termination() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.query.generation.as_str().to_owned()),
-                        reason,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: reason.as_str(),
-                        },
-                    },
+                return code_index_search_unavailable_for_generation(
+                    Some(executed.query.generation.as_str().to_owned()),
+                    reason,
+                    reason.as_str(),
                 );
             }
+            // Not `search_terminated`: this guard reports a distinct revocation
+            // reason because the search already produced results by this point.
             if !admission_provider.route_is_registered() {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.query.generation.as_str().to_owned()),
-                        reason:
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "route_revoked_before_publication",
-                        },
-                    },
+                return code_index_search_unavailable_for_generation(
+                    Some(executed.query.generation.as_str().to_owned()),
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    "route_revoked_before_publication",
                 );
             }
             let publication_scope = match project_open_owners::resolved_scope_for_project(
@@ -1121,34 +1024,21 @@ fn code_index_search_executor(
             ) {
                 Ok(publication_scope) if publication_scope == terminal_scope => publication_scope,
                 _ => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.query.generation.as_str().to_owned()),
-                            reason:
-                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                reason: "scope_changed_during_publication",
-                            },
-                        },
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        "scope_changed_during_publication",
                     );
                 }
             };
             let publication_admission = match admission_provider.admit_current(&publication_scope) {
                 Ok(admission) => admission,
                 Err(error) => {
-                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                            crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                                code_generation: Some(
-                                    executed.query.generation.as_str().to_owned(),
-                                ),
-                                reason:
-                                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                                semantic:
-                                    crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                                        reason: error.reason(),
-                                    },
-                            },
-                        );
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        error.reason(),
+                    );
                 }
             };
             let publication_authority = publication_admission.search_authority();
@@ -1157,15 +1047,10 @@ fn code_index_search_executor(
                     .authorize(&publication_scope, Some(&publication_authority))
                     .is_err()
             {
-                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.query.generation.as_str().to_owned()),
-                        reason:
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                            reason: "authorization_changed_during_publication",
-                        },
-                    },
+                return code_index_search_unavailable_for_generation(
+                    Some(executed.query.generation.as_str().to_owned()),
+                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    "authorization_changed_during_publication",
                 );
             }
             crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(
