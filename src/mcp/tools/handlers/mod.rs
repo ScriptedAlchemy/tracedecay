@@ -146,29 +146,50 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     let context =
         session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service);
-    dispatch_lcm_tool(tool_name, args, context).await
+    let operation =
+        RetainedSurfaceOperation::from_name(tool_name).ok_or_else(|| TraceDecayError::Config {
+            message: format!("unknown user-scoped LCM tool: {tool_name}"),
+        })?;
+    dispatch_lcm_tool(operation, args, context).await
 }
 
 async fn dispatch_lcm_tool(
-    tool_name: &str,
+    operation: RetainedSurfaceOperation,
     args: Value,
     context: session::LcmHandlerContext<'_>,
 ) -> Result<crate::mcp::tools::ToolResult> {
-    match tool_name {
-        "tracedecay_lcm_status" => session::handle_lcm_status(context, args).await,
-        "tracedecay_lcm_doctor" => session::handle_lcm_doctor(context, args).await,
-        "tracedecay_lcm_load_session" => session::handle_lcm_load_session(context, args).await,
-        "tracedecay_lcm_grep" => session::handle_lcm_grep(context, args).await,
-        "tracedecay_lcm_describe" => session::handle_lcm_describe(context, args).await,
-        "tracedecay_lcm_expand" => session::handle_lcm_expand(context, args).await,
-        "tracedecay_lcm_expand_query" => session::handle_lcm_expand_query(context, args).await,
-        "tracedecay_lcm_preflight" => session::handle_lcm_preflight(context, args).await,
-        "tracedecay_lcm_compress" => session::handle_lcm_compress(context, args).await,
-        "tracedecay_lcm_session_boundary" => {
+    match operation {
+        RetainedSurfaceOperation::LcmStatus => session::handle_lcm_status(context, args).await,
+        RetainedSurfaceOperation::LcmDoctor => session::handle_lcm_doctor(context, args).await,
+        RetainedSurfaceOperation::LcmLoadSession => {
+            session::handle_lcm_load_session(context, args).await
+        }
+        RetainedSurfaceOperation::LcmGrep => session::handle_lcm_grep(context, args).await,
+        RetainedSurfaceOperation::LcmDescribe => session::handle_lcm_describe(context, args).await,
+        RetainedSurfaceOperation::LcmExpand => session::handle_lcm_expand(context, args).await,
+        RetainedSurfaceOperation::LcmExpandQuery => {
+            session::handle_lcm_expand_query(context, args).await
+        }
+        RetainedSurfaceOperation::LcmPreflight => {
+            session::handle_lcm_preflight(context, args).await
+        }
+        RetainedSurfaceOperation::LcmCompress => session::handle_lcm_compress(context, args).await,
+        RetainedSurfaceOperation::LcmSessionBoundary => {
             session::handle_lcm_session_boundary(context, args).await
         }
-        _ => Err(TraceDecayError::Config {
-            message: format!("unknown user-scoped LCM tool: {tool_name}"),
+        RetainedSurfaceOperation::FactStore
+        | RetainedSurfaceOperation::FactFeedback
+        | RetainedSurfaceOperation::MemoryStatus
+        | RetainedSurfaceOperation::SessionRefresh
+        | RetainedSurfaceOperation::MessageSearch
+        | RetainedSurfaceOperation::SessionsFor
+        | RetainedSurfaceOperation::Workflows
+        | RetainedSurfaceOperation::SessionStart
+        | RetainedSurfaceOperation::SessionEnd => Err(TraceDecayError::Config {
+            message: format!(
+                "internal: retained operation `{}` is not an LCM handler",
+                operation.as_str()
+            ),
         }),
     }
 }
@@ -680,7 +701,10 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
         // diagnostics_read without an executor falls through to analysis.
-        let dispatch_group = classify_mcp_tool_dispatch_group(tool_name, &options);
+        let dispatch_group = classify_mcp_tool_dispatch_group(
+            tool_name,
+            options.application_invocation_executor.is_some(),
+        );
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
             return expect_classified_dispatch(
                 tool_name,
@@ -779,9 +803,6 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 ))
                 .await,
             ),
-            Some(McpToolDispatchGroup::Lcm) => {
-                boxed_send(dispatch_lcm_tool(tool_name, args, active_lcm_context)).await
-            }
             Some(McpToolDispatchGroup::RetainedApplication) => expect_classified_dispatch(
                 tool_name,
                 boxed_send(dispatch_retained_application_tools(
@@ -829,7 +850,7 @@ fn expect_classified_dispatch(
 
 fn classify_mcp_tool_dispatch_group(
     tool_name: &str,
-    options: &ToolCallRegistryOptions<'_>,
+    application_invocation_executor_available: bool,
 ) -> Option<McpToolDispatchGroup> {
     if application_surface::MULTI_ROOT_TOOL_NAMES.contains(&tool_name) {
         return Some(McpToolDispatchGroup::ApplicationSurface);
@@ -837,7 +858,7 @@ fn classify_mcp_tool_dispatch_group(
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
         let defer_diagnostics_without_executor = operation
             == ApplicationSurfaceOperation::DiagnosticsRead
-            && options.application_invocation_executor.is_none();
+            && !application_invocation_executor_available;
         if !defer_diagnostics_without_executor {
             return Some(McpToolDispatchGroup::ApplicationSurface);
         }
@@ -1494,7 +1515,7 @@ async fn execute_project_retained_application_tool(
         | RetainedSurfaceOperation::LcmPreflight
         | RetainedSurfaceOperation::LcmCompress
         | RetainedSurfaceOperation::LcmSessionBoundary => {
-            dispatch_lcm_tool(tool_name, request.arguments, active_lcm_context).await
+            dispatch_lcm_tool(request.operation, request.arguments, active_lcm_context).await
         }
         RetainedSurfaceOperation::SessionStart => {
             let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
@@ -1707,8 +1728,74 @@ mod tests {
         }
     }
 
-    #[test]
-    fn advertised_tools_resolve_one_concrete_dispatch_entry() {
+    async fn concrete_dispatch_group_accepts(
+        group: McpToolDispatchGroup,
+        tool_name: &str,
+        cg: &TraceDecay,
+        options: ToolCallRegistryOptions<'_>,
+    ) -> bool {
+        let invalid_args = Value::String("dispatch-metadata-probe".to_owned());
+        match group {
+            McpToolDispatchGroup::ApplicationSurface
+            | McpToolDispatchGroup::RetainedApplication => false,
+            McpToolDispatchGroup::Graph => {
+                dispatch_graph_tools(tool_name, cg, invalid_args, None, None, None, None, None)
+                    .await
+                    .is_some()
+            }
+            McpToolDispatchGroup::Info => {
+                dispatch_info_tools(tool_name, cg, invalid_args, None, None, None, None, options)
+                    .await
+                    .is_some()
+            }
+            McpToolDispatchGroup::Admin => {
+                dispatch_admin_tools(tool_name, cg, invalid_args, options)
+                    .await
+                    .is_some()
+            }
+            McpToolDispatchGroup::Analysis => {
+                dispatch_analysis_tools(tool_name, cg, invalid_args, None, None, options)
+                    .await
+                    .is_some()
+            }
+            McpToolDispatchGroup::Git => dispatch_git_tools(tool_name, cg, invalid_args, options)
+                .await
+                .is_some(),
+            McpToolDispatchGroup::Edit => dispatch_edit_tools(tool_name, cg, invalid_args, options)
+                .await
+                .is_some(),
+            McpToolDispatchGroup::Health => {
+                dispatch_health_tools(tool_name, cg, invalid_args, None, None, options)
+                    .await
+                    .is_some()
+            }
+            McpToolDispatchGroup::Memory => {
+                dispatch_memory_tools(tool_name, cg, invalid_args, options)
+                    .await
+                    .is_some()
+            }
+            McpToolDispatchGroup::SessionWorkflow => {
+                dispatch_session_workflow_tools(tool_name, cg, invalid_args, options)
+                    .await
+                    .is_some()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().unwrap();
+        let _env = SelectorEnv::new(dir.path());
+        let project = dir.path().join("dispatch-registry");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(project.join("src/lib.rs"), "pub fn dispatch_probe() {}\n").unwrap();
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.mcp-dispatch-registry",
+        )
+        .await
+        .unwrap();
         let options = ToolCallRegistryOptions::default();
         let mut advertised = BTreeSet::new();
 
@@ -1718,7 +1805,7 @@ mod tests {
                 "{} is advertised more than once",
                 definition.name
             );
-            let group = classify_mcp_tool_dispatch_group(&definition.name, &options)
+            let group = classify_mcp_tool_dispatch_group(&definition.name, true)
                 .unwrap_or_else(|| panic!("{} has no production dispatch entry", definition.name));
 
             match group {
@@ -1749,6 +1836,9 @@ mod tests {
                         .unwrap_or_else(|| {
                             panic!("{} catalog binding is not callable", definition.name)
                         });
+                    let expected = retained_surface_application_operation(operation).unwrap();
+                    assert_eq!(capability.capability_id(), expected.capability_id());
+                    assert_eq!(capability.use_case_id(), expected.use_case_id());
                     assert!(
                         composition
                             .bind_handler(capability.use_case_id(), &())
@@ -1757,19 +1847,32 @@ mod tests {
                         definition.name
                     );
                 }
-                group => assert_eq!(
-                    dispatch_group_for_tool(&definition.name),
-                    Some(group),
-                    "{} does not resolve through the canonical MCP binding registry",
-                    definition.name
-                ),
+                group => {
+                    assert_eq!(
+                        dispatch_group_for_tool(&definition.name),
+                        Some(group),
+                        "{} does not resolve through the canonical MCP binding registry",
+                        definition.name
+                    );
+                    assert!(
+                        concrete_dispatch_group_accepts(
+                            group,
+                            &definition.name,
+                            &cg,
+                            options.clone()
+                        )
+                        .await,
+                        "{} has no concrete handler-family entry",
+                        definition.name
+                    );
+                }
             }
         }
 
         for tool_name in ["tracedecay_not_registered", "tracedecay_lcm_not_registered"] {
             assert!(!advertised.contains(tool_name));
             assert_eq!(
-                classify_mcp_tool_dispatch_group(tool_name, &options),
+                classify_mcp_tool_dispatch_group(tool_name, true),
                 None,
                 "{tool_name} must fail closed"
             );
