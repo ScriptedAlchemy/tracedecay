@@ -1,14 +1,24 @@
 # PR17 Residual Advanced Workflow Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Extend PR14's single graph/runtime authorities with advanced workflow
 definition, fan-out/synthesis/recovery, placement, expertise, automation, and
 host handoff behavior.
 
-**Dependency:** PR14 Work and minimal runtime are accepted. PR17 may not create
+**Historical dependency assumption:** PR14 supplied Work and a minimal runtime.
+The recorded PR17 cut did not create
 a second task store, scheduler, provider dispatcher, clock, receipt, or Kanban
 authority.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Extend Plan 24/32 domain/application/store/runtime authorities.
 - Add workflow definition lifecycle and advanced placement/topology adapters.
@@ -20,7 +30,7 @@ Interfaces: versioned `WorkflowDefinition`, `WorkflowRunPlan`,
 `PlacementProposal`, `ExpertiseGrant`, `CalibrationSnapshot`,
 `TaskHandoffToken`, and receipt-backed automation controls.
 
-## Ordered slices
+## Historical ordered slices
 
 1. Acceptance/replan policy over PR14 immutable events.
 2. Definition validation/activation and multi-step runtime.
@@ -31,19 +41,14 @@ Interfaces: versioned `WorkflowDefinition`, `WorkflowRunPlan`,
 7. Host task observations and LSP handoff.
 8. Aggregate residual workflow journey.
 
-## Tests
+## Product outcome contributed
 
-Direct: define/activate a workflow, admit multi-step work, fan out bounded
-independent attempts, synthesize without erasing minority evidence, recover a
-fenced attempt, inspect placement, use ephemeral expertise under consent,
-control it from Automations/Work, and hand off to a supported host/LSP client.
+The work contributed advanced workflow definition, bounded fan-out and
+synthesis, recovery, placement, consent-bound expertise, automation controls,
+and host/LSP handoff without introducing duplicate authorities. Current direct
+behavior and acceptance live in the applicable numbered V2 plan.
 
-Negative: recursive dispatch, unbounded fan-out, hidden model choice, expertise
-leak/durable ranking change, auto-replan/acceptance, stale definition/lease,
-ambiguous Git effect, minority loss, provider failure, revocation, and host
-capability mismatch fail closed.
-
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 All records reference PR14 `TaskId`/`RunId`; no data fork. Rollback disables
 advanced routes/capabilities while PR14 graph events and minimal runs remain

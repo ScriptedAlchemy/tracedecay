@@ -1,12 +1,22 @@
 # `tracedecay-code-index` Extraction Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Isolate extraction/index compilation, grammar/WGSL build ownership,
 and focused search tests from unrelated root edits.
 
-**Dependencies:** Domain DTO and query extraction gates pass. FastEmbed remains
-asynchronous and cannot block project admission or ordinary retrieval.
+**Historical dependency assumption:** Domain DTO and query extraction preceded
+this work. FastEmbed remained asynchronous and did not block project admission
+or ordinary retrieval.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Create `crates/tracedecay-code-index/{Cargo.toml,build.rs,src/lib.rs}`.
 - Move `src/code_index/**`, `src/extraction/**`, and matcher core from
@@ -31,7 +41,7 @@ does not own daemon admission, scheduling, MCP transport, or project routing.
 `semantic_code` moves only if dependency and timing evidence beats an explicit
 measured deferral.
 
-## Tasks
+## Historical task checklist
 
 - [ ] Add dependency-direction and root-inline-source architecture failures.
 - [ ] Create the minimal manifest/feature matrix and move build ownership.
@@ -41,27 +51,21 @@ measured deferral.
 - [ ] Verify all language features, lite grammar, package contents, benches,
       and no unexpected WGSL/grammar reruns on unrelated root edits.
 
-## Tests
+## Product outcome contributed
 
-Direct: unchanged fixture bytes produce identical extraction/index digests,
-symbol/edge rows, tombstones, lexical/graph/semantic results, and generation
-publication.
+Extraction/index compilation and grammar/WGSL ownership moved away from
+unrelated root edits while digest identity, query behavior, typed failures, and
+non-blocking semantic acquisition remained equivalent. Current direct behavior
+and acceptance live in the applicable numbered V2 plan.
 
-Negative: malformed grammar, unsupported language, cancellation, stale lease,
-deleted source, unavailable model, partial generation, and non-Git root remain
-typed and non-blocking.
-
-Run focused crate checks/tests, exact lite-grammar journeys, canonical digest
-tests, semantic fallback/activation tests, and root all-feature integration.
-
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 No persisted schema changes. Commit manifest/build ownership, extraction move,
 index move, semantic disposition, tests, and façade cleanup separately.
 Rollback each with `git revert`.
 
-Gate A-index uses the identical warm private index edit and requires at least
-20% or 8s improvement, focused test compile without full root, no unrelated
-WGSL/grammar rebuild, and byte-identical digests. Delete old root modules,
+The historical Gate A-index experiment used an identical warm private edit,
+focused compile, rebuild-unit, and digest comparison; those thresholds are not
+current acceptance. Delete old root modules,
 build inputs, feature aliases, and package entries only after callers and
 package/default/all/lite gates pass.

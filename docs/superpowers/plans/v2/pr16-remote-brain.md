@@ -1,9 +1,18 @@
 # PR16 Remote Shared Brain Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Add enrolled, offline-capable, fenced remote Brain operation with one
 writer per mutable shard and verified backup/failover.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Domain/application remote identity and epoch contracts.
 - Daemon enrollment, encrypted/offline spool, replay, query coverage, replica,
@@ -17,7 +26,7 @@ Writer key is exactly
 `(BrainId, shard, generation, placement_revision, epoch)`. Overlays remain
 node-local and never become shared mutable authority.
 
-## Ordered slices
+## Historical ordered slices
 
 1. Remote contracts and monotone epoch ledger.
 2. Enrollment, credential rotation, bounded encrypted offline spool.
@@ -25,17 +34,14 @@ node-local and never become shared mutable authority.
 4. Verified replica, backup, staged restore, and integrity receipts.
 5. Promotion/failover plus API, Doctor, dashboard, and direct journey.
 
-## Tests
+## Product outcome contributed
 
-Direct: enroll a node, capture offline, reconnect/replay idempotently, query
-local/remote coverage, create/verify backup, stage restore, fence the old
-writer, promote once, and continue from the exact watermark.
+The work contributed enrolled, offline-capable remote operation with fenced
+single-writer authority, duplicate-tolerant replay, query coverage, and
+verified backup/failover behavior. Current direct behavior and acceptance live
+in the applicable numbered V2 plan.
 
-Negative: stolen/expired grant, split brain, stale epoch/placement, duplicate
-replay, reordered envelope, spool overflow, corrupt backup, partial restore,
-network partition, old-writer recovery, and unavailable replica remain typed.
-
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 Enroll remote capability without changing local authority. Restore and verify
 before promotion; rollback occurs before promotion and never through

@@ -1,5 +1,12 @@
 # TraceDecay rebrand compatibility follow-up checklist
 
+> **Archived record — not implementation authority.** This checklist preserves
+> historical follow-up intent. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Exact touchpoint inventories, test
+> names/counts, source-string checks, PR packets, and “done when” matrices below
+> are not rebuild instructions; validate current compatibility behavior through
+> public inputs and outputs.
+
 Date: 2026-06-14
 Sources: `docs/REBRAND-COMPATIBILITY-POLICY.md`, `docs/TRACEDECAY-COMPATIBILITY-AUDIT.md`, `docs/TREESITTERS-RENAME-CONSTRAINTS.md`
 

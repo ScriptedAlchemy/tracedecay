@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "workload_id": "pr12-lsp-gateway-v1",
-  "measurement": {
-    "status": "pending_execution",
-    "reason": "The executable workload is defined, but no authorized telemetry run was performed for this acceptance update."
-  },
-  "samples": null
-}

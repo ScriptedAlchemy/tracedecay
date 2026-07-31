@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::remote::composition::{
-    AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalObservationsV1,
-    QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1, RemoteQueryCompositionV1,
-    ShardCoverageStateV1, ShardQueryContributionV1,
+    AuthenticityClaimV1, AuthorizationClaimV1, IntegrityClaimV1, PendingLocalEvidenceV1,
+    PendingLocalUnavailableReasonV1, QueryManifestBindingV1, RemoteCompletenessV1,
+    RemoteFreshnessV1, RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
 use tracedecay_application::remote::query::{
     RemoteExactObservationQueryCommandV1, RemoteExactObservationQueryErrorV1,
@@ -15,9 +15,8 @@ use tracedecay_application::remote::query::{
     RemoteSanitizedObservationV1, remote_exact_observation_query_result_contract_v1,
 };
 use tracedecay_application::{
-    ApplicationEnvelope, CancellationSignal, Deadline, EvidenceCoverage, EvidenceDomain,
-    EvidencePacket, OperationBudgetUsage, OperationReceipt, PageState, RetrievalEvidence,
-    TemporalState,
+    ApplicationEnvelope, Deadline, EvidenceCoverage, EvidenceDomain, EvidencePacket,
+    OperationBudgetUsage, OperationReceipt, PageState, RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 use tracedecay_store::{
@@ -42,11 +41,17 @@ impl RusqliteRemoteExactObservationQueryPortV1 {
     pub fn new(
         authority: Arc<RusqliteRemoteAuthorityStoreV1>,
         repository: Arc<RepositoryRuntimePhysicalAttachment>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, RemoteExactObservationQueryErrorV1> {
+        if !matches!(
+            repository.binding().shard_id.scope,
+            StoreShardScopeV1::ProjectSessions { .. }
+        ) {
+            return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
+        }
+        Ok(Self {
             authority,
             repository,
-        }
+        })
     }
 }
 
@@ -55,9 +60,6 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
         &self,
         command: &RemoteExactObservationQueryCommandV1,
     ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1> {
-        if command.cancellation.is_cancelled() {
-            return Err(RemoteExactObservationQueryErrorV1::Cancelled);
-        }
         if command
             .effective_deadline
             .is_elapsed_at(command.observed_at)
@@ -97,7 +99,9 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
         let control = runtime_control(command)?;
         let request = RuntimeReadRequestV1::new(
             binding.clone(),
-            ConsistencyModeV1::LatestAvailable,
+            ConsistencyModeV1::AtLeast {
+                commit_sequence: frontier.commit_sequence,
+            },
             RuntimeReadOperationV1::Repository {
                 op: RepositoryReadOperationV1::Project(ProjectReadOperationV1::Observation(
                     operation,
@@ -111,24 +115,39 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
         )
         .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
         let started = Instant::now();
+        let deadline_remaining = command
+            .effective_deadline
+            .expires_at
+            .0
+            .checked_sub(command.observed_at.0)
+            .and_then(|micros| u64::try_from(micros).ok())
+            .ok_or(RemoteExactObservationQueryErrorV1::DeadlineElapsed)?;
         let probe = QueryProbe {
             cancellation: control.cancellation,
             deadline: control.deadline,
-            application_cancellation: command.cancellation.clone(),
             started,
-            maximum_elapsed: Duration::from_micros(command.budget.maximum_elapsed_micros),
+            maximum_elapsed: Duration::from_micros(
+                command
+                    .budget
+                    .maximum_elapsed_micros
+                    .min(deadline_remaining),
+            ),
             decision: Mutex::new(None),
         };
         let outcome = self
             .repository
-            .dispatch_read(request, &probe)
+            .dispatch_read(request.clone(), &probe)
             .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        outcome
+            .validate_for(&request)
+            .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
         let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         if elapsed > command.budget.maximum_elapsed_micros {
             return Err(RemoteExactObservationQueryErrorV1::BudgetExceeded);
         }
         match outcome.coverage() {
-            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. } => {}
+            RuntimeReadCoverageV1::Complete { coverage }
+                if coverage.observed(&binding.shard_id) == Some(&frontier) => {}
             RuntimeReadCoverageV1::Unavailable {
                 reason: UnavailableReasonV1::Cancelled,
                 ..
@@ -137,7 +156,9 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
                 reason: UnavailableReasonV1::DeadlineExceeded,
                 ..
             } => return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed),
-            RuntimeReadCoverageV1::Partial { .. }
+            RuntimeReadCoverageV1::Latest { .. }
+            | RuntimeReadCoverageV1::Complete { .. }
+            | RuntimeReadCoverageV1::Partial { .. }
             | RuntimeReadCoverageV1::Stale { .. }
             | RuntimeReadCoverageV1::Unavailable { .. } => {
                 return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
@@ -182,6 +203,10 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
             }
             None => RemoteExactObservationResultV1::NotFound,
         };
+        let result_count = match &observation {
+            RemoteExactObservationResultV1::Found(_) => 1_u64,
+            RemoteExactObservationResultV1::NotFound => 0_u64,
+        };
         let schema_digest: [u8; 32] = Sha256::digest(
             serde_json::to_vec(&remote_exact_observation_query_result_contract_v1())
                 .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
@@ -205,20 +230,18 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
             completeness: RemoteCompletenessV1::Complete,
             authorization: AuthorizationClaimV1::Authorized,
             coverage: ShardCoverageStateV1::Complete,
-            authority_receipt: Some(command.caller_admission.admission.authority().clone()),
+            authority_receipt: Some(command.query_authorization.authority.clone()),
             value: Some(RemoteQueryCompleteValueV1 {
-                complete_value_present: true,
+                returned_observations: u8::try_from(result_count)
+                    .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
             }),
             reason_code: None,
         };
         let composition = RemoteQueryCompositionV1::compose(
             BTreeSet::from([command.expected_shard.clone()]),
             vec![contribution],
-            PendingLocalObservationsV1 {
-                count: 0,
-                oldest_age_millis: None,
-                has_sequence_gap: false,
-                has_quarantined: false,
+            PendingLocalEvidenceV1::Unavailable {
+                reason: PendingLocalUnavailableReasonV1::RequestingNodeSpoolNotSupplied,
             },
             1,
         )
@@ -259,8 +282,13 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
             payload: Some(result),
             temporal: TemporalState::current(ended_at),
             evidence_authorities: Vec::new(),
-            coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Anchor], 1, 1, 1)
-                .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
+            coverage: EvidenceCoverage::complete(
+                vec![EvidenceDomain::Anchor],
+                1,
+                result_count,
+                result_count,
+            )
+            .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
             omissions: Vec::new(),
             scores: Vec::new(),
             contributions: Vec::new(),
@@ -268,8 +296,8 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
                 SortContractId::new("sort.remote.exact-observation.v1")
                     .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
                 1,
-                Some(1),
-                1,
+                Some(result_count),
+                result_count,
             )
             .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?,
             finished_at: ended_at,
@@ -286,7 +314,7 @@ impl RemoteExactObservationQueryReadPortV1 for RusqliteRemoteExactObservationQue
         .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
         let packet = EvidencePacket::from_retrieval(
             evidence,
-            command.caller_admission.admission.authority().clone(),
+            command.query_authorization.authority.clone(),
             execution,
         )
         .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
@@ -363,7 +391,6 @@ fn runtime_control(
 struct QueryProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
-    application_cancellation: CancellationSignal,
     started: Instant,
     maximum_elapsed: Duration,
     decision: Mutex<Option<RuntimeInterruptionV1>>,
@@ -384,9 +411,7 @@ impl RuntimeRequestProbeV1 for QueryProbe {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if decision.is_none() {
-            *decision = if self.application_cancellation.is_cancelled() {
-                Some(RuntimeInterruptionV1::Cancelled)
-            } else if self.started.elapsed() >= self.maximum_elapsed {
+            *decision = if self.started.elapsed() >= self.maximum_elapsed {
                 Some(RuntimeInterruptionV1::DeadlineExceeded)
             } else {
                 None
@@ -400,10 +425,7 @@ impl RuntimeRequestProbeV1 for QueryProbe {
 mod tests {
     use super::*;
 
-    fn probe(
-        cancellation: CancellationSignal,
-        maximum_elapsed: Duration,
-    ) -> QueryProbe {
+    fn probe(maximum_elapsed: Duration) -> QueryProbe {
         QueryProbe {
             cancellation: RuntimeCancellationIdentityV1 {
                 cancellation_id: RuntimeCancellationIdV1::new("cancel.remote-query-test").unwrap(),
@@ -412,7 +434,6 @@ mod tests {
             deadline: RuntimeDeadlineV1 {
                 deadline_id: RuntimeDeadlineIdV1::new("deadline.remote-query-test").unwrap(),
             },
-            application_cancellation: cancellation,
             started: Instant::now(),
             maximum_elapsed,
             decision: Mutex::new(None),
@@ -420,26 +441,8 @@ mod tests {
     }
 
     #[test]
-    fn query_probe_reports_cancellation_monotonically() {
-        let cancellation = CancellationSignal::active("cancel.remote-query-test").unwrap();
-        cancellation.cancel(UtcMicros(1));
-        let probe = probe(cancellation, Duration::from_secs(1));
-        assert_eq!(
-            probe.interruption(),
-            Some(RuntimeInterruptionV1::Cancelled)
-        );
-        assert_eq!(
-            probe.interruption(),
-            Some(RuntimeInterruptionV1::Cancelled)
-        );
-    }
-
-    #[test]
     fn query_probe_reports_elapsed_deadline_monotonically() {
-        let probe = probe(
-            CancellationSignal::active("cancel.remote-query-timeout-test").unwrap(),
-            Duration::ZERO,
-        );
+        let probe = probe(Duration::ZERO);
         assert_eq!(
             probe.interruption(),
             Some(RuntimeInterruptionV1::DeadlineExceeded)

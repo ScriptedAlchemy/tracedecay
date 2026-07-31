@@ -1,5 +1,11 @@
 # LCM Compression Decomposition — Triage Report
 
+> **Archived completion record — not implementation authority.** This report
+> preserves the historical decomposition outcome. Current requirements come
+> only from the `docs/plans/tracedecay-v2/` hierarchy. Exact line numbers,
+> source seams, test names/counts, and verification receipts below are not
+> rebuild instructions; validate current compression behavior directly.
+
 **Task:** `t_bc5b8cbc` (Triage: decompose LCM compression state machine)
 **Scope:** `src/sessions/lcm/compression.rs` and the seams split out of it.
 **Status:** Decomposition complete and verified. All five identified seams are extracted, wired, and covered by LCM regression tests.

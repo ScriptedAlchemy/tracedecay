@@ -1,11 +1,11 @@
 # Historical Mobile Verification Checklist — Legacy Dashboards
 
-> Superseded checklist retained for the legacy plugin UI. Do not run the
-> removed `dashboard/smoke.mjs` commands or treat the shared shell below as the
-> product dashboard. The real single-app `dashboard/app-dist` bundle is served
-> at `/`; the placeholder shell and these plugin tabs are isolated at
-> `/legacy`. Current responsive and accessibility verification uses
-> `cd dashboard && npm run visual:audit`.
+> **Archived record — not implementation authority.** This checklist preserves
+> historical legacy-dashboard evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Do not run the removed
+> `dashboard/smoke.mjs` commands or recreate its viewport matrix, screenshots,
+> receipts, or pass counts. Validate responsive and accessibility behavior on
+> the current single-app dashboard through its supported product audit.
 
 This checklist records how the legacy **Code Graph**, **Holographic Memory**,
 and **LCM** plugin tabs were inspected on mobile viewports.

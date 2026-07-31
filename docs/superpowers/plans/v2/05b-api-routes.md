@@ -1,10 +1,19 @@
 # API Route Ownership Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Move HTTP/dashboard route families incrementally into
 `tracedecay-api` while preserving daemon-owned invocation and generated
 contracts.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Modify `crates/tracedecay-api/src/http.rs` and add focused route modules.
 - Migrate route wiring from `src/dashboard/**`, `src/daemon/**`, and root HTTP
@@ -17,7 +26,7 @@ mapping, and typed error/status rendering. It consumes
 `Arc<dyn DaemonInvocationExecutor>`; it owns no daemon, DB, policy, project
 registry, or business-use-case implementation.
 
-## Tasks and tests
+## Historical task checklist
 
 - [ ] Add architecture tests rejecting API-to-root daemon/store imports.
 - [ ] Move health/Doctor read routes, then configuration/remediation writes,
@@ -25,15 +34,14 @@ registry, or business-use-case implementation.
 - [ ] Regenerate and diff TypeScript contracts for every schema move.
 - [ ] Prove daemon-hosted construction and embedded-dashboard routing.
 
-Direct tests call the same route through in-process and real daemon-hosted
-composition and compare typed results/receipts. Negative tests cover missing
-authority, stale CAS, unavailable project, cancellation, SSE lag/overflow,
-unsupported operation, malformed payload, and response-size bounds.
+## Product outcome contributed
 
-Run API package checks/tests, `dashboard_api_test`, contracts checks, dashboard
-typecheck/Vitest, and root all-feature integration.
+HTTP/dashboard route ownership moved toward `tracedecay-api` while daemon
+invocation, generated contracts, typed failures, cancellation, and SSE behavior
+remained equivalent. Current direct behavior and acceptance live in the
+applicable numbered V2 plan.
 
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 Move one route family at a time; old routes delegate during migration and never
 own duplicate logic. Revert the family and regenerated contract together.

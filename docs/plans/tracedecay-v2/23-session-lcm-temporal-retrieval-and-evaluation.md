@@ -547,261 +547,37 @@ legacy tables only after zero production legacy reads/writes and validated
 parity. Compatibility tables never rank, hydrate, paginate, or report
 freshness.
 
-## PR8 delivery sequence (non-normative)
+## Direct production verification
 
-This sequence explains one intended way to deliver the active vertical. It is
-not an artifact-by-artifact implementation checklist or prerequisite spine.
+Acceptance follows callable behavior, not historical test names, suite counts,
+module registration, fixture paths, benchmark phases, or command inventories.
+Current direct tests and ordinary repository checks must exercise:
 
-1. Add and validate domain bitemporal, derived evidence, contribution,
-   freshness, and refresh-key types.
-2. Extend store capabilities, projection batches/receipts, frozen manifests,
-   member expansion, summary, migration, and refresh ports.
-3. Upgrade temporal schema v2 to v3; add generation-scoped derived
-   evidence/member storage, source manifests, receipt digests, and append-only
-   triggers; prove repeated upgrade idempotent.
-4. Project spans/bursts and complete anchor manifests from frozen sanitized
-   occurrence order; prove one-shot, incremental, migrated, and restart rebuild
-   byte identity.
-5. Implement exact-literal/span/burst candidate channels, stable
-   evidence-identity fusion, retriever provenance, bitemporal resolution,
-   contradiction-first dedupe, and source/thread/session diversity.
-6. Finalize the canonical root-wide cursor, freeze every participating source,
-   enforce 256-participant/65,536-byte bounds and the 24-hour key lifecycle,
-   and reject each independent binding/watermark drift.
-7. Enforce immutable-page late hydration, positional omissions, authorization
-   recheck, and lossless derived/summary drill-down.
-8. Carry source-specific coverage through query/application results and make
-   durable refresh key, progress, cancellation, terminal receipt, and restart
-   recovery source-aware.
-9. Forward-migrate eligible legacy sources and write compatibility projections
-   without introducing a second authority.
-10. Cut `message_search`, LCM describe/expand/query, direct-anchor lookup, and
-    workflow recovery over to the one application request; remove second
-    hydration and offset-only LCM cursor paths.
-11. Run the complete correctness, privacy, cursor, restart, side-effect, and
-    all-feature gates below.
+- independent knowledge and valid time in all temporal modes, immutable
+  occurrence/assertion/copy/derived/summary authority, and deterministic
+  one-shot, incremental, migrated, and restart rebuilds;
+- exact-literal retrieval, stable fusion/provenance, contradiction-first
+  dedupe, canonical diversity, rank-final hydration, and lossless authorized
+  expansion with positional typed omissions;
+- authenticated continuation across every participating source watermark,
+  precise rejection of tampering or semantic drift, bounded cursor size, key
+  rotation/expiry, and restart;
+- the same authorization, deletion, redaction, retention, lock, and privacy
+  behavior across search, direct lookup, expansion, hydration, replay, and
+  continuation, with no sensitive value entering indexes, summaries, receipts,
+  explanations, logs, or dynamic sinks;
+- source-aware refresh joining, atomic progress, cancellation, idempotent
+  runtime receipts, restart recovery, and truthful mixed freshness;
+- forward migration and compatibility delegation through the production
+  callers, including typed skip reasons, repeated-upgrade idempotency, and no
+  self-import from compatibility projections; and
+- side-effect-free public reads and one production temporal kernel, with no
+  writable fallback, alternate cursor/hydration path, project-registry fanout,
+  or copied external-evidence authority.
 
-## Historical evidence map and current regression audit
-
-The names below identify the original evidence locations. Current acceptance
-audits the same behavior through the callable session/LCM operations, current
-quality fixtures, and direct regressions. Renaming a test, consolidating a
-suite, replacing a fixture, changing a benchmark harness, or moving an
-implementation does not fail acceptance by itself. Acceptance fails when the
-behavioral coverage below is absent or regresses.
-
-### Temporal and derived evidence
-
-- `crates/tracedecay-domain/tests/session_contract.rs` round-trips every temporal
-  mode and derived ID, proves independent knowledge and valid time, rejects
-  unknown-valid representative `as_of`, and rejects malformed, duplicate,
-  noncontiguous, cross-session, or wrong-authority manifests. It also rejects
-  inverted/unbounded, duplicate, overlapping, unsorted, and mergeable-adjacent
-  source coverage intervals and proves `as_of` has exactly one cutoff field.
-- `src/query/temporal/resolution.rs` and `src/query/temporal/tests.rs` cover
-  current suppression/conflict, strict two-axis as-of, graph-ordered evolution,
-  forensic unknown validity/copies, unauthorized assertion exclusion, cycles,
-  source horizons, and summary leaf eligibility.
-- `tests/session_suite/temporal_derived_evidence.rs` proves one-shot,
-  incremental, migrated, and restart rebuilds produce identical IDs, order,
-  anchors, bytes, and receipt digests; paged drill-down reconstructs every
-  occurrence and preserves typed omission ordinals.
-- `tests/session_suite/main.rs` registers
-  `mod temporal_derived_evidence;`; the test-list gate below proves the module
-  is compiled before filtered execution.
-- `tests/session_suite/temporal_projection.rs` proves active occurrences,
-  assertions, copy edges, derived records/members, summary lineage, and receipts
-  reject direct UPDATE and DELETE.
-
-### Exact retrieval, ranking, and diversity
-
-- `src/query/temporal/tests.rs` proves one evidence item found by several
-  retrievers yields one candidate with every `RetrieverContributionV1`;
-  contribution input permutation does not change rank/explanation;
-  provider/source, thread, and session limits use canonical keys; contradiction
-  admission precedes dedupe.
-- `tests/session_suite/temporal_application.rs` proves punctuation-heavy errors,
-  paths, symbols, commands, embedded quoted text, CJK, and emoji return exact
-  ranges and outrank generic semantic neighbors; copied prompts collapse only
-  with origin evidence and independent repetitions remain distinct.
-- `benches/session_temporal.rs::PhaseSet` adds `CompactRank`, `LateHydrate`,
-  and `MemberExpand` beside `RebuildActivate` and `ExactReplay`.
-  `benchmarks/pr8-temporal/workload-v1.json` contains one nonempty case for
-  each phase. `result-provisional.json` records `sample_count`, p50, p95, and
-  maximum duration for each phase, and `evidence-index.json` binds every
-  result to workload/commit/toolchain hashes. These measurements are
-  informational resource evidence; correctness acceptance never depends on a
-  machine-local duration threshold.
-
-### Hydration and cursor
-
-- `src/query/temporal/hydration.rs` proves changing payload bytes or availability
-  cannot change rank, membership, or cursor; denied hydration keeps its rank as
-  a typed omission and no lower candidate is promoted.
-- `src/query/temporal/cursor.rs` independently rejects tampered MAC,
-  query/filter/scope/provider/session/grain/mode/cutoff,
-  ranking/diversity/projector/config/key-route, and every
-  store/source/projection/graph/index/summary/authorization watermark drift
-  with a precise typed mismatch.
-- `src/query/temporal/cursor.rs` also covers 256 accepted manifest entries, 257
-  rejected entries, 65,536 accepted canonical bytes, 65,537 rejected bytes,
-  issue/expiry boundaries, active-to-retired rotation, expired key removal, and
-  restart loading of active plus retained verification keys. Binding
-  diagnostics are absent before a valid MAC; participant and canonical-byte
-  overflow return their distinct `CursorManifestLimitKindV1` values.
-- `tests/session_suite/temporal_application.rs` proves root-wide continuation
-  rejects a non-anchor session/source change, resumes across service
-  reconstruction when the manifest is unchanged, and rejects CWD/store
-  switching.
-- `src/mcp/server/message_search_cutover_tests.rs` proves search, direct anchor,
-  describe, expand, expand-query, and continuation use the canonical cursor and
-  preserve identical ordering.
-
-### Privacy and authorization
-
-- `tests/session_suite/temporal_privacy.rs` applies the same authorization matrix
-  to search, direct anchor, describe, expansion, expand-query, hydration,
-  replay, and continuation.
-- Secret and prompt-injection canaries never enter FTS, snippets, derived
-  records, member indexes, summaries, receipts, explanations, logs, or dynamic
-  sinks.
-- Deletion, redaction, retention expiry, lock, and authorization revocation are
-  rechecked before candidate exposure and immediately before payload emission.
-  Stale indexes reveal no payload; expansion returns typed omissions; dependent
-  summaries become unavailable.
-- Quarantined or unsanitized legacy sources are never migrated. GitHub, CI,
-  diagnostic, Git, receipt, task, and `rh_` payloads never become LCM, summary,
-  or derived authority.
-
-### Refresh and restart
-
-- `tests/session_suite/temporal_refresh.rs` exercises
-  `current`, `as_of`, `evolution`, and `forensic` source receipts separately:
-  current frontier lag, historical cutoff isolation, evolution covered/missing
-  intervals, and forensic unknown-valid/unavailable intervals.
-- `tests/session_suite/temporal_refresh.rs` proves identical source-aware keys
-  join one durable operation and different source sets/frontiers/targets do not;
-  projection and source progress commit atomically.
-- `tests/session_suite/temporal_refresh_application.rs` proves concurrent
-  callers receive the same terminal receipt, cancellation preserves the last
-  committed frontier, restart resumes exactly that frontier, completed
-  receipts replay idempotently, and mixed source freshness remains visible.
-- `tests/session_suite/lcm_summary_lineage_review.rs` proves restart recovery
-  reopens summary and derived lineage and losslessly expands every authorized
-  leaf anchor.
-- `src/migrate/consolidate/tests.rs` uses nonempty fixtures to assert every
-  legacy field mapping, each typed skip reason, schema v2-to-v3 upgrade, and
-  migrate-to-compatibility-to-rerun exclusion. Imported rows, receipts, and
-  repeated output are byte-identical.
-
-### Side effects and boundaries
-
-- Every public read-surface test snapshots database bytes, row counts,
-  filesystem entries, cursor-key state, refresh rows/frontiers, and repair state
-  before and after the read; all snapshots remain identical.
-- Architecture-boundary tests prove PR8 modules contain no `TaskId`, project
-  registry fan-out, CWD store resolution, writable read fallback, second LCM
-  cursor, second payload lookup, or external evidence payload ownership.
-- PR8 proves a dependency-free typed application boundary for Plan 37.
-  Plan 37 consumes it without adding a second LCM engine, summary store,
-  ranking path, cursor, or hydration path.
-
-## PR8 command sketch (non-normative)
-
-These commands document proposed delivery evidence. Current implementation and
-later consumers use
-the current focused regressions and applicable feature gate; they do not have
-to restore an obsolete command, suite prefix, benchmark script, or test-module
-spine merely to satisfy this non-normative command sketch.
-
-```bash
-cargo test -p tracedecay-domain --test session_contract --all-features
-```
-
-Expected: all domain wire, bitemporal, derived-manifest, contribution, coverage,
-and malformed-input cases pass.
-
-```bash
-cargo test -p tracedecay-store --test session_contract --all-features
-```
-
-Expected: projection, retrieval/member expansion, summary, migration, refresh,
-snapshot, capability, and idempotent-receipt contracts pass.
-
-```bash
-cargo test --lib --all-features query::temporal::
-```
-
-Expected: candidate, exact-literal, temporal resolution, fusion/provenance,
-diversity, cursor, hydration, and context-budget cases pass with no rank change
-after hydration.
-
-```bash
-cargo test --test session_suite --all-features -- --list
-```
-
-Expected: the output contains at least one test name prefixed by each of
-`temporal_derived_evidence::`, `temporal_projection::`,
-`temporal_application::`, `temporal_privacy::`, `temporal_refresh::`, and
-`temporal_refresh_application::`; a missing prefix fails acceptance before
-filtered commands run.
-
-```bash
-cargo test --test session_suite --all-features temporal_derived_evidence::
-cargo test --test session_suite --all-features temporal_projection::
-cargo test --test session_suite --all-features temporal_application::
-```
-
-Expected: deterministic derived rebuild/drill-down, append-only active
-authority, exact literals, canonical diversity, root-wide pagination, and
-single-root/CWD isolation cases pass.
-
-```bash
-cargo test --test session_suite --all-features temporal_privacy::
-```
-
-Expected: every public surface fails closed, no canary appears in persisted or
-rendered output, stale derived indexes leak nothing, and typed omissions retain
-member/rank positions.
-
-```bash
-cargo test --test session_suite --all-features temporal_refresh::
-cargo test --test session_suite --all-features temporal_refresh_application::
-cargo test --test session_suite --all-features lcm_summary_lineage_review::
-```
-
-Expected: source-aware join/conflict, atomic progress, cancellation, terminal
-receipt replay, restart recovery, lossless lineage expansion, and distinct
-current/as-of/evolution/forensic source-coverage assertions pass.
-
-```bash
-cargo test --lib --all-features mcp::server::message_search_cutover_tests::
-cargo test --test mcp_suite --all-features
-cargo test --lib --all-features migrate::consolidate::tests::
-```
-
-Expected: all legacy session/LCM surfaces delegate to the kernel, use one
-cursor/hydration path, remain read-only across restart, and migration v2-to-v3
-plus legacy replay is idempotent.
-
-```bash
-scripts/run-pr8-temporal-benchmark.sh --dry-run
-cargo bench --bench session_temporal --all-features -- --run
-```
-
-Expected: dry-run lists `rebuild_activate`, `exact_replay`, `compact_rank`,
-`late_hydrate`, and `member_expand`; the benchmark emits at least one sample
-and p50/p95/maximum values for every phase, and the evidence index binds the
-result to the workload, commit, and toolchain. Duration values are reported,
-not used as a machine-independent pass/fail threshold.
-
-```bash
-cargo check --all-features
-cargo test --workspace --all-features
-```
-
-Expected: zero compiler errors and zero test failures across the all-feature
-workspace gate.
+Developer resource measurements may report rebuild, replay, ranking, hydration,
+and expansion cost from a simple Linux run. They are diagnostic evidence, not a
+machine-independent threshold or separate acceptance artifact.
 
 ## PR8 behavioral acceptance
 
@@ -836,5 +612,6 @@ workspace gate.
   binding cutover, and final migration owns physical legacy-table removal.
 - Current direct regressions exercise every behavior above through the
   callable temporal retrieval, compatibility, refresh, and expansion paths,
-  and the applicable feature gate passes. Obsolete artifact-name or command
-  parity is not an acceptance criterion.
+  with ordinary repository checks covering supported features. Obsolete
+  artifact-name, source-layout, command, or test-count parity is not an
+  acceptance criterion.

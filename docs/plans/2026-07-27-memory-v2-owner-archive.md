@@ -1,5 +1,12 @@
 # Memory V2 Owner Archive Implementation Plan
 
+> **Archived record — not implementation authority.** This document preserves
+> historical intent, migration safety decisions, and receipt evidence. Current
+> requirements come only from the `docs/plans/tracedecay-v2/` hierarchy. Exact
+> tests and counts, source-string checks, branch/commit/worktree choreography,
+> snapshots, receipts, attestations, PR packets, and gate matrices below are not
+> rebuild instructions; validate current migration and runtime behavior directly.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Preserve one owner's complete Memory V2 authority across branch retirement without changing stable identities or publishing a deletion receipt before durable project-wide proof.

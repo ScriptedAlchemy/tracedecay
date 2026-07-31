@@ -1,22 +1,25 @@
 # V2 Delivery and Root-Crate Breakup Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use
-> `superpowers:subagent-driven-development` or `superpowers:executing-plans`
-> task-by-task. Use TraceDecay graph/impact tools before source reads or edits.
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../plans/tracedecay-v2/NEXT.md), and the applicable numbered V2
+> plan. Do not recreate its task checklists, file inventories, branch/worktree/SHA
+> or commit protocol, Gate A/B, timing/JUnit receipts, exact test names/counts,
+> generated-byte/source-shape checks, PR closure gates, or platform gate lattice.
 
-**Goal:** Publish one reproducible V2 baseline, reduce root-crate rebuild cost
-through measured leaves-first extraction, and deliver PR14–PR20 as direct,
-truthful product journeys.
+**Outcome contributed:** This plan recorded a leaves-first root-crate breakup,
+measured iteration-cost experiments, and direct, truthful product-journey goals
+for the work later organized as PR14–PR20.
 
-**Architecture:** Plan 12 owns dependency direction and leaves-first extraction;
-Plan 33 owns same-host measurement and retain/revert decisions. Query and code
-index move first, then pure projectors, capture/application ports, the MCP
-daemon boundary, API routes, and finally PR19 adapter/runtime ownership.
+**Historical design summary:** Query and code index moved first, followed by pure
+projectors, capture/application ports, the MCP-daemon boundary, API routes, and
+adapter/runtime ownership.
 
 **Tech stack:** Rust 2024 workspace, Cargo/nextest, rusqlite, Axum/MCP/LSP,
 React/TypeScript/Rsbuild/Vitest/Playwright, generated schemars contracts.
 
-## Global constraints
+## Historical execution constraints (non-authoritative)
 
 - The integration branch is `codex/tracedecay-total-redesign-plan`; preserve
   its conventional commit history and never squash or restack peer commits.
@@ -33,25 +36,17 @@ React/TypeScript/Rsbuild/Vitest/Playwright, generated schemars contracts.
 - Every user-facing partial, unavailable, denied, stale, unsupported, or
   unmeasured state remains explicit; no surface converts it to success or zero.
 
-## Authority and approved decisions
+## Product outcomes contributed
 
-- [`00-plan-set-index.md`](../../plans/tracedecay-v2/00-plan-set-index.md) owns
-  delivery order; numbered V2 plans own requirements, not independent queues.
-- [`12-root-compatibility-migration.md`](../../plans/tracedecay-v2/12-root-compatibility-migration.md)
-  owns leaves-first extraction and compatibility deletion.
-- [`33-end-to-end-performance-optimization.md`](../../plans/tracedecay-v2/33-end-to-end-performance-optimization.md)
-  owns measurement validity and optimization retention.
-- [`34-workspace-refactoring-and-api-migration.md`](../../plans/tracedecay-v2/34-workspace-refactoring-and-api-migration.md)
-  apply is a PR12 product journey, not an extraction prerequisite.
-- Core Work and the minimal Plan 24/32 runtime ship in PR14. PR17 owns residual
-  workflow definition, fan-out/synthesis/recovery, advanced placement,
-  expertise/calibration, automation execution controls, and host/LSP handoff.
-- PR14 dashboard acceptance is desktop-first, not desktop-only: desktop visual
-  baselines are authoritative while functionality remains responsive,
-  keyboard-operable, zoom-safe, forced-colors-safe, and axe-clean.
-- Draft PR #421 remains the consolidated delivery vehicle through PR20.
+- Leaves-first extraction reduced root-crate coupling while preserving stable
+  compatibility entry points.
+- Work/runtime delivery separated core task authority from later advanced
+  workflow, placement, automation, and host-handoff behavior.
+- Dashboard work emphasized truthful state, responsive keyboard operation,
+  accessibility, and desktop visual evidence.
+- Draft PR #421 was the historical consolidated delivery vehicle.
 
-## Child-plan registry
+## Historical child-plan registry
 
 Extraction sequence:
 
@@ -75,7 +70,7 @@ Product sequence:
 6. [`v2/pr19-cutover-runtime.md`](v2/pr19-cutover-runtime.md)
 7. [`v2/pr20-performance.md`](v2/pr20-performance.md)
 
-## Phase 0: publish a reproducible baseline
+## Historical Phase 0: publish a reproducible baseline
 
 - [ ] Inventory `origin/codex/tracedecay-total-redesign-plan..HEAD`, commit
       owners, staged/unstaged/untracked paths, active worktrees, and Cargo jobs.
@@ -95,7 +90,7 @@ Product sequence:
       MCP/focused-test/root-leaf/domain-leaf timing receipts with host,
       toolchain, feature set, warmth, and rebuilt units.
 
-## Phase 0b: bootstrap exact-SHA worktree
+## Historical Phase 0b: bootstrap exact-SHA worktree
 
 - [ ] Fetch `origin`, verify `.worktrees` is ignored, and ensure neither
       `.worktrees/v2-root-breakup` nor `codex/v2-root-breakup` already exists.
@@ -108,7 +103,7 @@ Product sequence:
 - [ ] Report path, branch, HEAD, dashboard proof, exact command timing, and
       cleanliness. Leave the shared integration checkout untouched at handoff.
 
-## Gate A: query and code-index extraction
+## Historical Gate A: query and code-index extraction
 
 - Query and code-index private leaf edits each improve at least 20% or 8s on
   identical warm same-host checks; otherwise record `pending`/`fail` and revise
@@ -118,7 +113,7 @@ Product sequence:
   equivalent.
 - WGSL and grammar build ownership no longer reruns for unrelated root edits.
 
-## Gate B: cycle-break evidence before PR14 implementation
+## Historical Gate B: cycle-break evidence before PR14 implementation
 
 - Root all-feature leaf touch improves at least 10% or 12s versus 121.35s, or
   records a non-blocking `pending` disposition naming dominant rebuilt units.
@@ -126,7 +121,7 @@ Product sequence:
 - Default/all/no-default/lite/package/platform behavior remains equivalent,
   with no cycle, hidden production gap, duplicate façade, or widened visibility.
 
-## Slice protocol
+## Historical per-slice protocol
 
 For every child-plan slice:
 
@@ -140,10 +135,8 @@ For every child-plan slice:
 7. Measure the treatment on the same host and retain only valid evidence.
 8. Commit one compile-green/test-green logical slice; rollback is `git revert`.
 
-## Final acceptance
+## Current acceptance authority
 
-Each PR14–PR20 child plan must close its direct production journey, negative
-authority cases, migration and rollback, direct tests, normal CI, and deletion
-conditions. PR20 closes only after cross-platform/default/all/lite/package
-contracts, event-to-ready and storage evidence, accepted boundary measurements,
-and safe designated-worktree dogfood are complete.
+Current direct product behavior and acceptance are defined by the plan-set
+index, `NEXT.md`, and the applicable numbered V2 plans linked above. This
+historical plan contributes no independent PR closure or platform gate.

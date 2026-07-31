@@ -1,9 +1,12 @@
 # Holographic Memory Replacement Implementation Plan
 
-> Historical implementation plan, retained for provenance rather than
-> execution. Its Rust 2021 and `libsql` instructions describe the design-time
-> codebase and are superseded by Rust 2024 plus the
-> `tracedecay-rusqlite-runtime`; do not resurrect the unchecked libSQL tasks.
+> **Archived record — not implementation authority.** This document preserves
+> historical intent and evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Its Rust 2021 and `libsql`
+> instructions are superseded; exact tests and counts, source-string checks,
+> branch/commit/worktree choreography, snapshots, receipts, attestations, PR
+> packets, and gate matrices below are not rebuild instructions. Validate
+> current parser, runtime, and product behavior directly.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

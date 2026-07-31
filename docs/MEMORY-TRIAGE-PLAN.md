@@ -1,5 +1,11 @@
 # Holographic Memory — Prioritized Triage & Implementation Plan
 
+> **Archived record — not implementation authority.** This document preserves
+> historical audit synthesis and follow-up rationale. Current requirements come
+> only from the `docs/plans/tracedecay-v2/` hierarchy. Exact tests and counts,
+> source-string checks, snapshots, receipts, PR packets, and task ordering below
+> are not rebuild instructions; validate current memory behavior directly.
+
 Status: synthesis of four upstream audits on the `master` working tree. This is
 the single actionable summary the root triage (`t_fd962a8a`) consumes. Every
 recommendation is grounded in a source audit that carries its own `file:line`
@@ -117,9 +123,9 @@ subsystem).
   module-doc "aging" headline were rewritten to match the trust-decay audit's
   §8-B-1 wording.
 - **Depends on:** nothing.
-- **Acceptance:** grep for `temporal_decay` across `docs/` should show no
-  current-state claim that former `trust.rs::temporal_decay` affects scoring;
-  `trust.rs:1` no longer advertises "aging".
+- **Historical acceptance:** direct retrieval tests demonstrated that ranking
+  applies the current retrieval-time decay once and does not mutate persisted
+  trust through the removed aging path; documentation wording is not proof.
 - **Tier:** T1. **Done.**
 
 #### Q2 — Resolve the dead-code / name collision — **DONE**

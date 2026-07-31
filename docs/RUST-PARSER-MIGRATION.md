@@ -1,5 +1,12 @@
 # Rust Parser Migration
 
+> **Archived supporting design — not implementation authority.** This document
+> preserves historical parser-migration analysis. Current requirements come
+> only from the `docs/plans/tracedecay-v2/` hierarchy. Exact crate layouts,
+> source-shape checks, branch choreography, and staged gate lists below are not
+> rebuild instructions; validate parser compatibility through runtime parsing
+> behavior.
+
 Migrate tracedecay's tree-sitter grammar dependencies from C/C++ generated parsers to pure-Rust generated parsers, eliminating an entire class of `abort()`-based failures. Motivated by [issue #50](https://github.com/ScriptedAlchemy/tracedecay/issues/50), follow-up to [#49](https://github.com/ScriptedAlchemy/tracedecay/issues/49).
 
 ---
@@ -101,7 +108,7 @@ The conversion is non-trivial because the runtime's `Language` is a Rust struct 
 
 The bridge needs to solve four mechanical problems.
 
-**1. Memory layout.** `TSLanguage` is an internal C struct, not part of tree-sitter's public C API. Its field order and types are defined in `lib/src/parser.h` and may change between tree-sitter versions. We pin a specific tree-sitter version in `Cargo.toml`, and the bridge defines a `#[repr(C)]` Rust mirror of `TSLanguage` that matches that version exactly. A CI test runs `cargo doc --document-private-items` against the pinned tree-sitter and grep-asserts the field list to catch upstream drift.
+**1. Memory layout.** `TSLanguage` is an internal C struct, not part of tree-sitter's public C API. Its field order and types are defined in `lib/src/parser.h` and may change between tree-sitter versions. We pin a specific tree-sitter version in `Cargo.toml`, and the bridge defines a `#[repr(C)]` Rust mirror of `TSLanguage` that matches that version exactly. Compatibility validation must construct the bridged language, install it in a real parser, parse representative fixtures, and verify symbol names and syntax trees through the public runtime; generated documentation text is not proof of ABI compatibility.
 
 **2. Symbol names.** The C struct expects `*const *const c_char` (null-terminated). The runtime gives us `&'static [&'static str]` (length-prefixed Rust slices). At first call, the bridge allocates and leaks one `Vec<CString>` plus one `Vec<*const c_char>` per language and stores the latter behind a `OnceLock`. Leaked memory is fine: there is exactly one per supported language, the lifetime is the process lifetime, and the alternative (heap-managed C strings) needs lifetime gymnastics no extractor would benefit from.
 

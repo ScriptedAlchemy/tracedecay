@@ -1,9 +1,18 @@
 # Application Orchestration Convergence Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Move session, memory, feedback, and configuration use-case sequencing
 behind application ports while retaining root SQL/store adapters.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Modify `crates/tracedecay-application/src/**` for use cases and ports.
 - Migrate orchestration from `src/application/**`, `src/global_db/**`,
@@ -11,13 +20,13 @@ behind application ports while retaining root SQL/store adapters.
 - Keep database connections, transactions, native Git, process execution, and
   daemon lifecycle in root adapters.
 
-Every use case accepts `RequestContext`, explicit grants/revisions, an
-idempotency key, deadline/cancellation, and typed ports; it returns a typed
-result plus receipt. Required operation families are
+The historical design gave every use case `RequestContext`, explicit
+grants/revisions, an idempotency key, deadline/cancellation, and typed ports,
+returning a typed result plus receipt. The recorded operation families were
 `SessionApplication`, `MemoryApplication`, `FeedbackApplication`, and
 `ConfigurationApplication`.
 
-## Tasks
+## Historical task checklist
 
 - [ ] Add architecture tests rejecting root/global-DB/transport imports from
       application.
@@ -26,19 +35,14 @@ result plus receipt. Required operation families are
 - [ ] Bind CLI, MCP, HTTP/dashboard, and daemon callers to the same operation.
 - [ ] Remove handler-local sequencing and duplicate authorization.
 
-## Tests
+## Product outcome contributed
 
-Direct: each family executes through application plus production adapter and
-produces the same persisted result and surface rendering across CLI/MCP/HTTP.
+Session, memory, feedback, and configuration sequencing converged behind
+application ports while persisted effects, cross-surface rendering, typed
+failures, cancellation, and idempotency behavior remained equivalent. Current
+direct behavior and acceptance live in the applicable numbered V2 plan.
 
-Negative: missing registry, unavailable authority, stale CAS, wrong project,
-cancelled deadline, partial source, adapter failure, duplicate idempotency key,
-and changed-input replay remain typed and cannot commit partial effects.
-
-Run package checks/nextest, relevant integration suites, surface parity tests,
-and dependency-direction contracts.
-
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 Land one operation family at a time with compatibility delegation. Do not
 dual-write. Revert by family if its direct journey fails. Measure application

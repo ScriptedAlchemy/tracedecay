@@ -1,14 +1,23 @@
 # PR14 Work, Doctor, and Dashboard Plan
 
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
+
 **Goal:** Ship the core Plan 24 graph, minimal Plan 32 runtime, Work workspace,
 Doctor remediation, and all thirteen truthful dashboard workspaces.
 
-**Cut:** PR14 owns canonical work events/CAS/readiness/evidence, proposal review
+**Historical cut:** PR14 grouped Work events/CAS/readiness/evidence, proposal review
 and separate admission/accept-reject-replan commands, one real provider path,
 leases/attempts/progress/cancel-resume/restart fencing/terminal evidence, and
 core Work projections. PR17 owns advanced workflow capability.
 
-## Files and interfaces
+## Historical file and interface inventory
 
 - Domain/application/store: `crates/tracedecay-domain`,
   `crates/tracedecay-application`, `crates/tracedecay-store`, owner-shard root
@@ -24,7 +33,7 @@ Core interfaces: `TaskId`, immutable `WorkEvent`, expected-version
 `RunId`, `AttemptId`, `RunControl`, `TerminalEvidence`, and
 `task_activity` SSE. Runtime completion never auto-accepts work.
 
-## Ordered commit slices
+## Historical ordered commit slices
 
 1. Doctor authority and HTTP/remediation.
 2. Work domain identity/events/CAS/readiness.
@@ -40,25 +49,15 @@ Core interfaces: `TaskId`, immutable `WorkEvent`, expected-version
 12. Desktop-first visual/performance/a11y/usability acceptance.
 13. End-to-end migration, rollback, deletion, and aggregate journey.
 
-## Direct and negative acceptance
+## Product outcome contributed
 
-Direct: create work, inspect the same TaskId in every projection, expand exact
-evidence, review/accept a proposal, separately admit one supported native
-provider, watch/cancel/resume/restart, inspect sealed terminal evidence, and
-separately accept/reject/replan. Exercise Doctor diagnosis/remediation and all
-thirteen workspaces without fabricated state.
+The work contributed one truthful Work event/runtime authority, explicit
+proposal/admission/acceptance transitions, Doctor remediation, and dashboard
+views that did not fabricate unavailable or partial state. Current direct
+behavior, accessibility, visual, and acceptance requirements live in the
+applicable numbered V2 plans.
 
-Negative: cycle/stale CAS, wrong project/user, partial evidence, unavailable
-provider, budget/deadline/lease loss, duplicate effect, crash recovery, SSE
-overflow, denied remediation, unsupported data, no-Git work, and completion
-without acceptance remain truthful and fail closed.
-
-Desktop visual baselines are 1280×720 and 1440×900. Functionality remains
-axe-clean and keyboard-complete at 320/768/1024, 400% zoom, reduced motion,
-forced colors, and responsive layouts. Manual AT and the twelve-participant
-Plan 11 study remain acceptance evidence.
-
-## Migration, rollback, measurement, deletion
+## Historical migration, rollback, measurement, and deletion notes
 
 Migrate existing task/runtime-compatible records through versioned replay;
 verify deterministic projections before route activation. Rollback disables

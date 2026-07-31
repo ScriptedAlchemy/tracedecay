@@ -2,13 +2,13 @@
 
 ## Status and existing foundation
 
-Completion status is owned solely by `00-plan-set-index.md`. This plan requires
-generation-bound diagnostic identity, analyzer policy and configuration, and
-the single-project daemon LSP 3.17 gateway, stdio bridge, analyzer broker,
-typed routing operations, navigation/semantic methods, managed diagnostics,
-and the owned versioned TraceDecay LSP context extension. These are required PR12
-behavior, not a historical declaration milestone; currently callable pieces
-must remain intact and missing callable pieces remain gaps.
+Completion and acceptance are owned solely by `00-plan-set-index.md`. This plan
+owns portable protocol behavior and real negotiated client journeys:
+generation-bound diagnostic identity, analyzer policy/configuration, the
+single-project daemon LSP 3.17 gateway, transport bridge, analyzer broker,
+typed navigation/diagnostic operations, and the versioned TraceDecay context
+extension. Callable behavior must remain intact; declarations, file layouts,
+and protocol fixture inventories are not milestones.
 
 The daemon gateway/session/broker and the application LSP runtime are the
 canonical implementation path. Existing structs, files, protocol fixtures, and
@@ -165,7 +165,7 @@ remain typed unavailable and do not alter the PR12 reader transport. The
 gateway forwards no arbitrary method/payload and owns no graph, test, feedback,
 review, CI, proximity, or evidence data.
 
-## PR13 implementation slices
+## PR13 product delivery
 
 ### Prove real host protocol behavior
 
@@ -175,7 +175,8 @@ review, CI, proximity, or evidence data.
 - Detect extension claims that compete for the configured language set.
   Report exact conflict evidence to Plan 27; replacement requires explicit
   lifecycle confirmation, preserves third-party configuration, and rolls back.
-- Add conforming LSP hosts only after the same protocol gate. Do not lower the
+- Add conforming LSP hosts only after they satisfy the same portable protocol
+  contract. Do not lower the
   contract to accommodate a weaker host.
 
 ### Ship OpenCode custom LSP
@@ -271,16 +272,19 @@ review, CI, proximity, or evidence data.
 
 ## Direct acceptance
 
-- A real Claude Code session registers the one TraceDecay plugin for its
-  configured languages and receives analyzer navigation plus current upstream
-  and TraceDecay diagnostics through the daemon gateway.
-- A real OpenCode install registers the TraceDecay custom LSP and local JS/TS
-  plugin LSP events, receives the same authorized gateway projections, and
-  proves exactly one analyzer runs for each configured language with a
-  pre-existing analyzer, after repair, across rollback, and after uninstall.
+- Portable protocol tests exercise initialization, capability negotiation,
+  document synchronization, UTF-16 positions, request correlation,
+  cancellation, progress, push/pull diagnostics, navigation, shutdown,
+  reconnect, bounded framing, and typed protocol errors independently of any
+  one host package.
+- Real negotiated client journeys cover Claude Code through the packaged bridge
+  and OpenCode through its custom LSP configuration and local plugin events.
+  Both receive current authorized analyzer and TraceDecay results through the
+  same gateway; OpenCode retains exactly one analyzer per language through
+  install, repair, rollback, and uninstall.
 - Representative Rust, Python, and TypeScript workspaces match direct upstream
-  results for every retained semantic/navigation method, with deterministic
-  graph augmentation where current evidence permits it.
+  semantic/navigation results where the negotiated provider supports them,
+  with deterministic graph augmentation where current evidence permits it.
 - Concurrent clients with conflicting unsaved versions remain isolated; no
   overlay becomes durable or visible to another client.
 - Save, close, file removal, ref change, analyzer crash/restart, cancellation,
@@ -289,16 +293,16 @@ review, CI, proximity, or evidence data.
 - Missing analyzers degrade only their own capabilities. Graph-backed
   operations continue truthfully and unavailable/partial state never becomes
   fabricated semantic output.
-- A real PR12 client negotiates the TraceDecay experimental capability,
+- A real client negotiates the TraceDecay experimental capability,
   receives diagnostics, impact, affected-test, and test-result envelopes, and
   expands one omitted item through Plan 21. Scope/generation/coverage,
   cancellation, stale suppression, handle expiry/replay/revocation, and
   authorization are preserved; unnegotiated versions, arbitrary
   methods/payloads, and cross-scope handles are rejected.
-- PR13 provider tests prove GitHub review, CI localization, and proximity
+- Provider journeys prove GitHub review, CI localization, and proximity
   appear through the unchanged extension only when their typed application
   contributions are callable, with truthful unavailable state otherwise.
-- Real PR13 GitHub, CI, proximity, post-edit impact, affected-symbol, conflict,
+- Real GitHub, CI, proximity, post-edit impact, affected-symbol, conflict,
   and stale-epoch findings project and clear correctly; full evidence remains
   available only through authorized expansion.
 - Cursor desktop native diagnostics, OpenCode custom LSP, Kimi Code
@@ -308,12 +312,14 @@ review, CI, proximity, or evidence data.
 - Bridge/restart checks prove no bridge/client opens a writable store, no
   hidden peer/root is enumerated, no dirty overlay reaches a durable or remote
   sink, and no LSP action mutates source or external systems.
-- Linux, macOS, and Windows protocol runs preserve URI normalization, UTF-16
-  positions, path containment, process discovery/lifecycle, stdio/socket
-  behavior, cancellation, and shutdown compatibility.
-- Focused gateway/host integration tests and the repository all-feature gate
-  owned by the implementing PR replace exact fixture inventories and
-  placeholder benchmark artifacts.
+- Ordinary Linux, macOS, and Windows CI covers the platform substrate: URI/path
+  normalization, process and transport lifecycle, framing, cancellation, and
+  shutdown. Selected real client/platform combinations cover native packaging
+  differences without a Cartesian host-by-OS matrix.
+- Portable protocol tests, real negotiated client journeys, and ordinary
+  repository checks are the evidence. Exact fixture inventories, prescribed
+  test names/counts, implementing-PR ownership, and placeholder benchmarks are
+  not requirements.
 
 ## Later callable extensions
 

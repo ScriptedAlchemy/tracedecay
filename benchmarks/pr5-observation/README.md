@@ -1,5 +1,11 @@
 # Provider-observation pipeline benchmark
 
+> **Historical evidence only.** Preserve the authentic provider fixtures,
+> measurements, and provenance in this directory. Current requirements come
+> only from the `docs/plans/tracedecay-v2/` hierarchy; exact commands, counts,
+> snapshots, receipts, attestations, PR packets, and gate fields below are not
+> rebuild instructions. Validate current provider behavior directly.
+
 The directory keeps its PR5 name for artifact provenance. Workload schema 3 is
 the historical PR6 multi-provider Linux benchmark; the checked-in results are
 descriptive measurements, not PR acceptance authority.

@@ -1,10 +1,11 @@
 # Dashboard Port — Phase 2 Handoff
 
-> Historical handoff from 2026-06-10. The paths, libSQL connection, legacy
-> shell, and recorded verification results below describe that completed port,
-> not the current product. Today SQLite runs through the `rusqlite` runtime,
-> the real single-app `dashboard/app-dist` bundle is served at `/`, and the
-> legacy placeholder shell is isolated at `/legacy`.
+> **Archived record — not implementation authority.** This 2026-06-10 handoff
+> preserves historical port intent and evidence. Current requirements come only
+> from the `docs/plans/tracedecay-v2/` hierarchy. Its paths, libSQL connection,
+> worktree choreography, snapshots, receipts, and integration gates are not
+> rebuild instructions; validate the current rusqlite runtime and single-app
+> dashboard through observable product behavior.
 
 Status: integration gate passed (2026-06-10) — see "Final integration gate"
 at the end of this doc. Phase 3 complete (curation implemented; hard-delete

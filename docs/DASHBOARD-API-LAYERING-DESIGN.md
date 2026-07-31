@@ -1,13 +1,20 @@
 # Dashboard API Layering — Route / Service / Query Design
 
+> **Archived supporting design — not implementation authority.** This document
+> preserves the historical refactor analysis. Current requirements come only
+> from the `docs/plans/tracedecay-v2/` hierarchy. Its target file layout,
+> commit choreography, exact source shape, acceptance headings, and gate
+> sequence are not rebuild instructions; validate current route and payload
+> behavior directly.
+
 A concrete module layout for separating the `tracedecay dashboard` HTTP API into
 three concerns — **route handlers**, **service/domain logic**, and
 **query/repository helpers** — across the three audited domains
 (`memory_api`, `lcm_api`, `graph_api`).
 
-This is a **design note + implementation plan**, not a code change. The
-acceptance criteria (target files/modules, migration order, compatibility
-constraints, explicit non-goals) are the section headings below.
+This is a historical **design note + implementation plan**, not a code change.
+The headings below record the proposed target files, migration order,
+compatibility constraints, and non-goals at design time.
 
 It builds directly on [`DASHBOARD-API-AUDIT.md`](./DASHBOARD-API-AUDIT.md) (the
 audit): route inventory, SQL hotspots, fan-in/fan-out, and the 21

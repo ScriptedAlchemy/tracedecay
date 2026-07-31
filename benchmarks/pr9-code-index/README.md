@@ -1,5 +1,11 @@
 # PR9 code-index measurement packet
 
+> **Historical evidence only.** Preserve the workload and measurement
+> provenance in this directory. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy; exact commands, counts, snapshots,
+> receipts, attestations, PR packets, and gate fields below are not rebuild
+> instructions. Validate current indexing behavior directly.
+
 This packet measures the deterministic Plan 25 extraction, chunking,
 incremental-manifest, and in-memory projection-receipt path. It does not invoke
 semantic inference, tune retrieval, or define PR20 resource budgets.

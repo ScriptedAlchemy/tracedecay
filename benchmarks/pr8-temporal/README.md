@@ -1,5 +1,11 @@
 # PR8 session-temporal benchmark
 
+> **Historical evidence only.** Preserve the authentic provider fixtures,
+> sanitization provenance, and measurements in this directory. Current
+> requirements come only from the `docs/plans/tracedecay-v2/` hierarchy; exact
+> commands, test names/counts, snapshots, receipts, attestations, PR packets,
+> and gates below are not rebuild instructions. Validate current behavior directly.
+
 Linux measurement harness for PR8 temporal retrieval latency phases.
 This directory records descriptive sample quantiles and directly executed
 behavioral test outcomes only. It is not an acceptance snapshot, receipt,

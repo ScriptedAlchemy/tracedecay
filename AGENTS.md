@@ -4,6 +4,13 @@ TraceDecay is a code-intelligence tool (Rust workspace + TypeScript dashboard)
 that builds a semantic knowledge graph from many languages and serves it to
 agent hosts through MCP, hooks, LSP, and an embedded dashboard.
 
+## Overall Objective
+
+Deliver a fully integrated final-V2 product through real production journeys,
+truthful typed states, maintainable crate/module boundaries, and direct
+behavioral evidence—not PR choreography, gate scaffolding, or code that merely
+compiles.
+
 ## Layout
 
 - `src/` — main `tracedecay` crate (daemon, MCP tools, global DB, sessions,
@@ -31,9 +38,10 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   `npm test` (vitest) from `dashboard/`.
 - libtest `--exact` requires the full module path and exits 0 when a filter
   matches nothing — a vacuous "0 passed" green. For name-filtered runs prefer
-  `scripts/require-exact-test.sh`, which fails when nothing matched; otherwise
-  pass the full path (`module::path::test_name`) and confirm the reported
-  count is non-zero before treating a run as evidence.
+  the ad-hoc anti-vacuity helper `scripts/require-exact-test.sh`; it is not a
+  reason to ossify CI or test names. Otherwise pass the full path
+  (`module::path::test_name`) and confirm the reported count is non-zero before
+  treating a run as evidence.
 - `dashboard/app-dist/` is gitignored build output but required by `build.rs`;
   a fresh checkout/worktree must build the dashboard (or seed the directory)
   before Rust compiles. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` only skips a
@@ -52,6 +60,49 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
 - Keep changes minimal and scoped; match surrounding style; run the checks
   that cover your change before calling it done.
 
+## Engineering Hygiene
+
+- Reuse canonical TraceDecay authorities and maintained libraries first.
+  Custom parsers, cursors, caches, retries, transports, registries, schedulers,
+  crypto/auth/policy stores, or filesystem durability layers require a concrete
+  TraceDecay-specific boundary and must delete more complexity than they add;
+  otherwise skip the machinery. Prefer existing workspace dependencies, add a
+  maintained dependency only for clear deletion/complexity benefit, avoid
+  overlapping libraries, and remove a dependency with its last production
+  caller.
+- Do not create parallel or shadow authorities, contract-only phases,
+  test-only production ports, mountless features, or availability claims
+  without a real production caller and user journey.
+- Accept direct behavior, not bureaucracy. Do not use source-shape/string
+  scans, exact-test-name inventories, PR-specific
+  snapshots/receipts/manifests/attestations, synthetic provider lookalikes,
+  giant Cartesian matrices, or hard-coded gate counts as acceptance. Preserve
+  runtime receipts, migration journals, compare-and-swap, hosted release
+  provenance, and `--no-tests=fail`.
+- Complete cutovers in one delivery slice: migrate every caller and datum,
+  then delete compatibility façades, duplicate routes, old flags, dead aliases,
+  and superseded scaffolding.
+- Keep hand-written modules focused: no new hand-written source file over
+  1,000 lines and do not grow an existing oversized file. When safely possible,
+  touching one should extract a cohesive responsibility. Generated code and
+  checked-in fixtures/data are exempt.
+- Keep boundaries explicit: use top-level explicit imports/reexports, avoid
+  wildcard parent-child cycles and inline imports, maintain one generated wire
+  authority, and do not hand-write duplicate DTOs.
+- Keep production failures typed: add no `unwrap`, `expect`, `panic`, silent
+  fallback, fabricated timestamp/default, empty success, or swallowed error.
+  Tests may use assertions and unwraps where appropriate.
+- Do not stage dead code or fake readiness with `allow(dead_code)`,
+  placeholders, unreachable enum variants, or feature flags for unfinished
+  production behavior. Wire it now or omit it truthfully.
+- Comments and docs explain invariants and why; remove narration, stale PR
+  language, and superseded plan authority. `00-plan-set-index.md` is the sole
+  roadmap precedence; `NEXT.md` records current outcomes only, while historical
+  plans and benchmarks are archival.
+- Tests must be falsifiable and cover failure, denial, staleness, isolation,
+  cancellation, and rollback where relevant, without duplicating the same
+  substrate across every host × OS combination.
+
 ## Learned User Preferences
 
 - In shared checkouts, honor active file ownership: re-read before editing,
@@ -62,10 +113,6 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
 - Require measured, falsifiable verification and root-cause fixes; preserve
   byte-exact identity contracts, and never weaken assertions, raise timeouts,
   ignore tests, or mask gate failures.
-- Keep every user-facing state truthful: unavailable, unsupported, partial,
-  or failed data must never render as successful zero, empty, or complete.
-- Verify cutovers through real production callers and every exposed surface;
-  compiled, unit-tested, or source-mentioned code alone is insufficient.
 - Audit all supported host integrations when changing shared host behavior;
   do not treat one host as representative of the complete integration set.
 - Parallelize independent work aggressively, but inspect active agents first,
@@ -104,6 +151,3 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   the active graph.
 - Recovery may clear only the exact dirty marker adopted under its sync lease;
   compare-and-swap must preserve foreign or newer markers.
-- V2 planning authority flows from `00-plan-set-index.md` through `NEXT.md` and
-  the gap ledgers; numbered plans define requirements, not an implementation
-  queue, and historical checkpoints are not rebuild instructions.
