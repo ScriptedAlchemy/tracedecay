@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::DirectorySyncPolicy;
 
 use super::{config_error, io_error};
-use crate::errors::Result;
-use crate::storage;
+use crate::root_seam::errors::Result;
+use crate::root_seam::storage;
 
 pub(super) fn relative_file_map(root: &Path) -> Result<BTreeMap<PathBuf, PathBuf>> {
     let mut files = BTreeMap::new();
@@ -196,7 +196,7 @@ pub(super) fn remove_runtime_files(root: &Path) -> Result<()> {
 
 pub(super) fn excluded_source_artifact(relative: &Path) -> bool {
     let value = relative.to_string_lossy();
-    value == crate::config::DB_FILENAME
+    value == crate::root_seam::config::DB_FILENAME
         || value == storage::SESSIONS_DB_FILENAME
         || value == storage::BRANCH_META_FILENAME
         || value == storage::STORE_MANIFEST_FILENAME

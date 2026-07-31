@@ -5,7 +5,7 @@ pub(super) async fn verify_destination(
     session_offsets: &sqlite::SessionMergeOffsets,
 ) -> Result<()> {
     let destination = &resolved.report.destination_data_root;
-    let graph = destination.join(crate::config::DB_FILENAME);
+    let graph = destination.join(crate::root_seam::config::DB_FILENAME);
     let sessions = destination.join(storage::SESSIONS_DB_FILENAME);
     let meta = branch_meta::load_branch_meta(destination)
         .ok_or_else(|| config_error("consolidated branch metadata is invalid"))?;
@@ -23,7 +23,7 @@ pub(super) async fn verify_destination(
     let destination_graphs = graph_db_paths_for_root(destination, &meta)?;
     let mut destination_identities = sqlite::GraphLogicalIdentities::default();
     for path in &destination_graphs {
-        let snapshot = crate::sqlite_read_snapshot::open_in(path, resolved.scratch_root.path())
+        let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(path, resolved.scratch_root.path())
             .await
             .map_err(io_error)?;
         sqlite::quick_check_connection(snapshot.connection(), path).await?;
@@ -72,7 +72,7 @@ pub(super) async fn verify_destination(
             "destination external source state union differs from frozen inputs",
         ));
     }
-    let destination_snapshots = crate::sqlite_read_snapshot::SnapshotSet::capture_in(
+    let destination_snapshots = crate::root_seam::sqlite_read_snapshot::SnapshotSet::capture_in(
         std::slice::from_ref(&sessions),
         resolved.scratch_root.path(),
     )
@@ -82,7 +82,7 @@ pub(super) async fn verify_destination(
     let input_root = destination.join(INPUT_DIR);
     let source_input = input_root.join("source-sessions.db");
     let target_input = input_root.join("target-sessions.db");
-    let input_snapshots = crate::sqlite_read_snapshot::SnapshotSet::capture_in(
+    let input_snapshots = crate::root_seam::sqlite_read_snapshot::SnapshotSet::capture_in(
         &[source_input.clone(), target_input.clone()],
         resolved.scratch_root.path(),
     )
@@ -120,7 +120,7 @@ pub(super) async fn register_destination(
         .ok_or_else(|| config_error("could not register consolidated project alias"))?;
     let store_id = format!("store:{}:profile_sharded", project.project_id);
     let store_relpath = format!("projects/{}", project.project_id);
-    let now = crate::tracedecay::current_timestamp();
+    let now = crate::root_seam::tracedecay::current_timestamp();
     db.upsert_store_instance(StoreInstanceUpsert {
         store_id: store_id.clone(),
         project_id: project.project_id.clone(),
@@ -157,7 +157,7 @@ pub(super) async fn register_destination(
         .ok_or_else(|| config_error("could not register consolidated graph scope"))?;
     }
     for (kind, relative) in [
-        ("graph_db", crate::config::DB_FILENAME),
+        ("graph_db", crate::root_seam::config::DB_FILENAME),
         ("sessions_db", storage::SESSIONS_DB_FILENAME),
         ("branch_meta", storage::BRANCH_META_FILENAME),
         ("store_manifest", storage::STORE_MANIFEST_FILENAME),

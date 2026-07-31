@@ -52,14 +52,14 @@ impl TemporalOwnedSessionFixture {
     }
 }
 
-async fn temporal_database(path: &Path, mode: crate::db::TestDatabaseRuntimeMode) -> Database {
-    let runtime_mode = if mode == crate::db::TestDatabaseRuntimeMode::Initialize {
-        let seed = crate::db::engine::TestConnection::open(path);
-        crate::global_db::ensure_registered_schema(&seed)
+async fn temporal_database(path: &Path, mode: crate::root_seam::db::TestDatabaseRuntimeMode) -> Database {
+    let runtime_mode = if mode == crate::root_seam::db::TestDatabaseRuntimeMode::Initialize {
+        let seed = crate::root_seam::db::engine::TestConnection::open(path);
+        crate::root_seam::global_db::ensure_registered_schema(&seed)
             .await
             .expect("initialize temporal fixture through production migrations");
         drop(seed);
-        crate::db::TestDatabaseRuntimeMode::Existing
+        crate::root_seam::db::TestDatabaseRuntimeMode::Existing
     } else {
         mode
     };
@@ -72,7 +72,7 @@ async fn temporal_database(path: &Path, mode: crate::db::TestDatabaseRuntimeMode
 }
 
 async fn temporal_execute_batch(path: &Path, sql: &str) {
-    let db = temporal_database(path, crate::db::TestDatabaseRuntimeMode::Initialize).await;
+    let db = temporal_database(path, crate::root_seam::db::TestDatabaseRuntimeMode::Initialize).await;
     db.execute_write_batch("seed temporal consolidation fixture", sql)
         .await
         .unwrap();
@@ -81,14 +81,14 @@ async fn temporal_execute_batch(path: &Path, sql: &str) {
 }
 
 async fn temporal_initialize(path: &Path) {
-    temporal_database(path, crate::db::TestDatabaseRuntimeMode::Initialize)
+    temporal_database(path, crate::root_seam::db::TestDatabaseRuntimeMode::Initialize)
         .await
         .close();
 }
 
 async fn temporal_scalar(path: &Path, sql: &str) -> i64 {
     let scratch_root = path.parent().unwrap();
-    let snapshot = crate::sqlite_read_snapshot::open_in(path, scratch_root)
+    let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .unwrap();
     let mut rows = snapshot.connection().query(sql, ()).await.unwrap();

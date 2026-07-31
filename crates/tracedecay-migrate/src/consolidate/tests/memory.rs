@@ -57,7 +57,7 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
     source.checkpoint().await.unwrap();
     source.close();
 
-    let snapshot = crate::sqlite_read_snapshot::open_in(&source_path, temp.path())
+    let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(&source_path, temp.path())
         .await
         .unwrap();
     sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
@@ -137,7 +137,7 @@ async fn overlapping_facts_merge_tags_metadata_and_feedback_without_duplication(
     let applied = apply(&options, &planned.confirmation_token).await.unwrap();
     let graph_path = applied
         .destination_data_root
-        .join(crate::config::DB_FILENAME);
+        .join(crate::root_seam::config::DB_FILENAME);
     let (graph, _) = test_open_read_only(&graph_path).await;
     let memory = graph
         .begin_memory_read_transaction("inspect consolidated memory")

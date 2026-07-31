@@ -1,7 +1,7 @@
-use crate::db::engine::Executor;
+use crate::root_seam::db::engine::Executor;
 
 use super::{db_error, db_message, query_i64, quote_identifier};
-use crate::errors::Result;
+use crate::root_seam::errors::Result;
 
 const PLAN_TABLES: &[&str] = &[
     "consolidation_projection_stable_claims",

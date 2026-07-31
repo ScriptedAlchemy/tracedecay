@@ -3,13 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::cell::Cell;
 
-use crate::db::engine::{Executor, params};
+use crate::root_seam::db::engine::{Executor, params};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalObservationIdV1, MessageOccurrenceIdV1, ProjectionOutputOrdinalV1,
 };
 
-use crate::errors::Result;
+use crate::root_seam::errors::Result;
 
 use super::{db_error, db_message, query_i64, quote_identifier};
 

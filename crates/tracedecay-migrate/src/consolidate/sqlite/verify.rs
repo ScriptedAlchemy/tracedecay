@@ -1,13 +1,13 @@
 use std::path::Path;
 
-use crate::db::engine::Executor;
+use crate::root_seam::db::engine::Executor;
 
 use super::{
     SessionMergeOffsets, attach_snapshot_as, build_consolidation_message_map, db_error, db_message,
     external_source, mapped_parent_metadata, mapped_turn_message_id, observation, projection,
     query_i64, table_exists,
 };
-use crate::errors::Result;
+use crate::root_seam::errors::Result;
 
 struct TableVerification {
     label: &'static str,
@@ -16,16 +16,16 @@ struct TableVerification {
     expected: String,
 }
 
-pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
-    input_snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+pub(in crate::consolidate) async fn verify_session_union_sql(
+    input_snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     source: &Path,
     target: &Path,
-    destination_snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+    destination_snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     destination_root: &Path,
     offsets: &SessionMergeOffsets,
     source_project_id: &str,
 ) -> Result<()> {
-    let destination = destination_root.join(crate::storage::SESSIONS_DB_FILENAME);
+    let destination = destination_root.join(crate::root_seam::storage::SESSIONS_DB_FILENAME);
     let conn = destination_snapshots.get(&destination).map_err(|error| {
         db_error(
             "verify_consolidation",
@@ -653,7 +653,7 @@ async fn verify_payload_files(conn: &impl Executor, destination_root: &Path) -> 
         let byte_count = row
             .get::<i64>(2)
             .map_err(|error| db_error("verify_consolidation", error))?;
-        crate::sessions::lcm::payload::validate_payload_ref(&payload_ref).map_err(|_| {
+        crate::root_seam::sessions::lcm::payload::validate_payload_ref(&payload_ref).map_err(|_| {
             db_message(
                 "verify_consolidation",
                 format!("destination contains invalid external payload ref '{payload_ref}'"),

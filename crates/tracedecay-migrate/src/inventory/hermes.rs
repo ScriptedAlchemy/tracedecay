@@ -6,10 +6,10 @@ use super::project::{
     InventoryScanOptions, canonicalize_lossy, inspect_data_dir_candidate, push_integrity_issue,
 };
 use super::sqlite::sqlite_quick_check;
-use crate::config::TRACEDECAY_DIR;
-use crate::errors::Result;
+use crate::root_seam::config::TRACEDECAY_DIR;
+use crate::root_seam::errors::Result;
 use tracedecay_automation::skill_frontmatter::decode_yaml_scalar;
-use tracedecay_migrate::inventory::{
+use crate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath, StoreArtifact,
     StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };

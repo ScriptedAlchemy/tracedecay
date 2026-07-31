@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
+use crate::root_seam::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
 
 pub(crate) const MIGRATION_QUERY_PAGE_ROWS: i64 = 256;
 pub(crate) const MAX_MIGRATION_MATERIALIZED_ROWS: usize = 1_000_000;
@@ -584,7 +584,7 @@ where
                 .map_err(|error| format!("invalid source payload byte count: {error}"))?;
             let expected_bytes = u64::try_from(expected_bytes)
                 .map_err(|_| "source payload has a negative byte count".to_string())?;
-            crate::sessions::lcm::payload::validate_payload_ref(&payload_ref)
+            crate::root_seam::sessions::lcm::payload::validate_payload_ref(&payload_ref)
                 .map_err(|error| format!("unsafe source payload ref '{payload_ref}': {error}"))?;
             let source_file = source_dir.join(&payload_ref);
             fs::create_dir_all(&target_dir)

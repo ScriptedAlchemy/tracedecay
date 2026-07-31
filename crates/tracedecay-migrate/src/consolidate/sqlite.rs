@@ -4,10 +4,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::runtime::{ConsolidationArtifactAuthorityV1, ConsolidationAttachTokenV1};
-use crate::db::Database;
-use crate::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, params};
-use crate::errors::{Result, TraceDecayError};
-use crate::memory::store::MemoryStore;
+use crate::root_seam::db::Database;
+use crate::root_seam::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, params};
+use crate::root_seam::errors::{Result, TraceDecayError};
+use crate::root_seam::memory::store::MemoryStore;
 
 mod external_source;
 mod inspect;
@@ -17,7 +17,7 @@ pub(super) mod projection;
 mod temporal;
 mod verify;
 
-pub(in crate::migrate) use memory_v2::MemoryV2ArchiveMergeProof;
+pub(in crate) use memory_v2::MemoryV2ArchiveMergeProof;
 use memory_v2::{LegacyMappingPolicy, merge_memory_v2_authority, merge_memory_v2_owner_archives};
 use observation::merge_observation_authority;
 pub(super) use observation::{preflight_observation_merge, verify_observation_merge};
@@ -32,7 +32,7 @@ pub(super) use verify::verify_session_union_sql;
 
 #[cfg(test)]
 pub(super) async fn verify_projection_plan_for_test(
-    database: &crate::global_db::RegisteredGlobalDb,
+    database: &crate::root_seam::global_db::RegisteredGlobalDb,
     source: &Path,
     target_input: &Path,
     source_project_id: &str,
@@ -218,9 +218,9 @@ pub(super) async fn merge_registered_graph_facts(
 /// mutation. Legacy rows are unioned with remapped numeric identities; any
 /// Memory V2 authority is then merged by its stable owner-bound identities,
 /// including assertions, lineage, evidence, tombstones and feedback history.
-pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
+pub(in crate) async fn merge_branch_legacy_memory_snapshot(
     target: &Database,
-    source: &crate::sqlite_read_snapshot::SnapshotDatabase,
+    source: &crate::root_seam::sqlite_read_snapshot::SnapshotDatabase,
 ) -> Result<Vec<MemoryV2ArchiveMergeProof>> {
     let offsets = registered_graph_maxima(target).await?;
     let transaction = target
@@ -270,7 +270,7 @@ pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     Ok(proofs)
 }
 
-pub(in crate::migrate) async fn rebuild_branch_cutover_memory_banks(
+pub(in crate) async fn rebuild_branch_cutover_memory_banks(
     target: &Database,
 ) -> Result<()> {
     let transaction = target
@@ -735,7 +735,7 @@ pub(super) async fn merge_sessions(
     preflight_observation_merge(&transaction).await?;
     merge_sessions_tx(&transaction, offsets).await?;
     verify_observation_merge(&transaction).await?;
-    crate::sessions::lcm::schema::rebuild_raw_fts(&transaction)
+    crate::root_seam::sessions::lcm::schema::rebuild_raw_fts(&transaction)
         .await
         .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS"))?;
     transaction
@@ -776,7 +776,7 @@ pub(super) async fn merge_registered_sessions(
     preflight_observation_merge(&transaction).await?;
     merge_sessions_tx(&transaction, offsets).await?;
     verify_observation_merge(&transaction).await?;
-    crate::sessions::lcm::schema::rebuild_raw_fts(&transaction)
+    crate::root_seam::sessions::lcm::schema::rebuild_raw_fts(&transaction)
         .await
         .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS"))?;
     transaction
@@ -800,13 +800,13 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
     reject_future_lcm_schema(&transaction, "main", "sessions database").await?;
-    crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
+    crate::root_seam::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(&transaction)
+    crate::root_seam::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
+    crate::root_seam::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
     transaction
@@ -830,7 +830,7 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
 #[cfg(test)]
 async fn reject_future_lcm_schema_path(path: &Path, role: &str) -> Result<()> {
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let database = crate::sqlite_read_snapshot::open_in(path, scratch_root)
+    let database = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .map_err(|error| db_error("validate_lcm_schema", error))?;
     reject_future_lcm_schema(database.connection(), "main", role).await
@@ -862,12 +862,12 @@ async fn reject_future_lcm_schema(
     let version = row
         .get::<i64>(0)
         .map_err(|error| db_error("validate_lcm_schema", error))?;
-    if version > crate::sessions::lcm::LCM_SCHEMA_VERSION {
+    if version > crate::root_seam::sessions::lcm::LCM_SCHEMA_VERSION {
         return Err(db_message(
             "validate_lcm_schema",
             format!(
                 "{role} uses newer LCM schema version {version}; supported maximum is {}",
-                crate::sessions::lcm::LCM_SCHEMA_VERSION
+                crate::root_seam::sessions::lcm::LCM_SCHEMA_VERSION
             ),
         ));
     }
@@ -877,7 +877,7 @@ async fn reject_future_lcm_schema(
 #[cfg(test)]
 async fn reject_session_registry_rows(path: &Path) -> Result<()> {
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let db = crate::sqlite_read_snapshot::open_in(path, scratch_root)
+    let db = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
     let snapshot = db.connection();
@@ -1503,7 +1503,7 @@ async fn attach_token_as(
 
 pub(super) async fn attach_snapshot_as(
     conn: &impl Executor,
-    token: &crate::sqlite_read_snapshot::SnapshotAttachToken<'_>,
+    token: &crate::root_seam::sqlite_read_snapshot::SnapshotAttachToken<'_>,
     alias: &str,
 ) -> Result<()> {
     let path = token
@@ -1560,7 +1560,7 @@ async fn table_max(conn: &impl QueryExecutor, table: &str, column: &str) -> Resu
 #[cfg(test)]
 async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let db = crate::sqlite_read_snapshot::open_in(path, scratch_root)
+    let db = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .map_err(|error| db_error("table_max", error))?;
     table_max(db.connection(), table, column).await
@@ -1568,15 +1568,15 @@ async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
 
 #[cfg(test)]
 async fn open_migration_database(path: &Path, operation: &'static str) -> Result<Database> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(path, operation)?;
+    let authority = crate::root_seam::db::DatabaseAuthority::for_runtime(path, operation)?;
     match Database::open(path, &authority).await {
         Ok((database, _)) => Ok(database),
         #[cfg(test)]
-        Err(_) if authority.role() == crate::db::DatabaseAuthorityRole::Test => {
+        Err(_) if authority.role() == crate::root_seam::db::DatabaseAuthorityRole::Test => {
             Database::publish_test_runtime(
                 path,
                 &authority,
-                crate::db::TestDatabaseRuntimeMode::Existing,
+                crate::root_seam::db::TestDatabaseRuntimeMode::Existing,
             )
             .await
             .map(|(database, _)| database)

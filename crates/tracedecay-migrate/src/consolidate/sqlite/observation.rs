@@ -1,14 +1,14 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use crate::db::engine::{Executor, params};
+use crate::root_seam::db::engine::{Executor, params};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DurableClaudeObservationV1, ObservationScopeV1,
     SanitizationReceiptV1,
 };
 
-use crate::errors::Result;
+use crate::root_seam::errors::Result;
 
 use super::{db_error, db_message, projection, quote_identifier};
 
@@ -90,8 +90,8 @@ pub(super) async fn merge_observation_authority(conn: &impl Executor) -> Result<
     // target's resumable backfills, which continue from their retained
     // watermarks and so cover exactly the merged tail.
     for migration in [
-        crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
-        crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+        crate::root_seam::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+        crate::root_seam::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
     ] {
         conn.execute(
             "DELETE FROM global_schema_migrations WHERE migration = ?1",
@@ -111,8 +111,8 @@ pub(super) async fn merge_observation_authority(conn: &impl Executor) -> Result<
 /// marker, so the resumed pass covers only the appended tail.
 async fn seed_legacy_observation_backfill_watermarks(conn: &impl Executor) -> Result<()> {
     for migration in [
-        crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
-        crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+        crate::root_seam::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+        crate::root_seam::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
     ] {
         conn.execute(
             "INSERT OR IGNORE INTO observation_backfill_watermarks(
@@ -132,7 +132,7 @@ async fn seed_legacy_observation_backfill_watermarks(conn: &impl Executor) -> Re
 pub(in super::super) async fn verify_observation_merge(conn: &impl Executor) -> Result<()> {
     verify_observation_union(conn, "target_input", "source").await?;
     projection::verify(conn).await?;
-    crate::global_db::schema_stages::validate_observation_authority_connection(conn).await
+    crate::root_seam::global_db::schema_stages::validate_observation_authority_connection(conn).await
 }
 
 struct AuthorityUnionSpec {
@@ -602,7 +602,7 @@ async fn canonicalize_equivalent_duplicate_authority(conn: &impl Executor) -> Re
     if receipt_repairs.is_empty() && observation_repairs.is_empty() {
         return Ok(());
     }
-    crate::global_db::schema_stages::begin_observation_authority_canonical_repair(conn).await?;
+    crate::root_seam::global_db::schema_stages::begin_observation_authority_canonical_repair(conn).await?;
     for (receipt_id, receipt_json) in receipt_repairs {
         conn.execute(
             "UPDATE sanitization_receipts SET receipt_json = ?2 WHERE receipt_id = ?1",
@@ -621,7 +621,7 @@ async fn canonicalize_equivalent_duplicate_authority(conn: &impl Executor) -> Re
         .await
         .map_err(|error| db_error("canonicalize_duplicate_observation", error))?;
     }
-    crate::global_db::schema_stages::finish_observation_authority_canonical_repair(conn).await
+    crate::root_seam::global_db::schema_stages::finish_observation_authority_canonical_repair(conn).await
 }
 
 pub(in super::super) async fn preflight_observation_merge(conn: &impl Executor) -> Result<()> {

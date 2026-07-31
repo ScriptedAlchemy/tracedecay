@@ -1,10 +1,10 @@
-use crate::db::engine::Executor;
-use crate::db::{
+use crate::root_seam::db::engine::Executor;
+use crate::root_seam::db::{
     MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
     list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
 };
 
-use crate::errors::Result;
+use crate::root_seam::errors::Result;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1;
@@ -17,7 +17,7 @@ pub(super) enum LegacyMappingPolicy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(in crate::migrate) struct MemoryV2ArchiveMergeProof {
+pub(in crate) struct MemoryV2ArchiveMergeProof {
     pub owner: FactOwnerV1,
     pub schema: String,
     pub source_digest: String,

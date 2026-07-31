@@ -6,29 +6,26 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_application::DirectorySyncPolicy;
 
-use crate::migrate::inventory::{MigrationInventory, StoreStatus};
-use crate::migrate::registry::{
+use crate::inventory::{MigrationInventory, StoreStatus};
+use crate::registry::{
     RegistryReconstructionReport, reconstruct_registry_from_store_manifest,
 };
-use crate::storage::{
+use crate::root_seam::storage::{
     EnrollmentMarker, PrivateStoreIo, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
     has_sqlite_database_header, profile_sharded_data_root, profile_sharded_layout,
     read_enrollment_marker, read_store_manifest, validate_project_id, write_store_manifest,
 };
 
-pub use tracedecay_migrate::final_v2::*;
-/// The manifest plan, its forward-only checkpoint ladder, and store-artifact
-/// path safety live in `tracedecay-migrate`; they decide and record without
-/// owning a store. Re-exported so `crate::migrate::manifest::*` stays the
-/// caller path.
-pub use tracedecay_migrate::manifest::{
-    ArtifactState, ArtifactStateTransitionError, MIGRATION_MANIFEST_SCHEMA_VERSION,
-    MigrationApplyReport, MigrationArtifact, MigrationCleanupSourcesReport, MigrationDestination,
-    MigrationEndpoint, MigrationExportReport, MigrationManifest, MigrationPlanOptions,
-    MigrationProtocol, MigrationRollbackReport, MigrationRollbackState, StoreArtifactPath,
-    StoreArtifactPathValidationError, load_manifest, validate_migration_id,
+/// `crate::manifest::*` used to expose the final-v2 vocabulary
+/// alongside the manifest plan, so the seam keeps re-exporting it here.
+pub use crate::final_v2::*;
+use super::{
+    ArtifactState, ArtifactStateTransitionError, CheckpointWriter, MigrationApplyReport,
+    MigrationArtifact, MigrationCleanupSourcesReport, MigrationDestination, MigrationEndpoint,
+    MigrationExportReport, MigrationManifest, MigrationPlanOptions, MigrationProtocol,
+    MigrationRollbackReport, MigrationRollbackState, StoreArtifactPath,
+    StoreArtifactPathValidationError, save_manifest as write_checkpoint, validate_migration_id,
 };
-use tracedecay_migrate::manifest::{CheckpointWriter, save_manifest as write_checkpoint};
 
 /// Satisfies the extracted checkpoint port with the root's owner-private store
 /// IO, so the manifest package never chooses permissions or temp-file policy.
@@ -201,7 +198,7 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
         let report = reconstruct_registry_from_store_manifest(
             path,
             &profile_root,
-            crate::tracedecay::current_timestamp(),
+            crate::root_seam::tracedecay::current_timestamp(),
         );
         registry_reconstruction.plans.extend(report.plans);
         registry_reconstruction.issues.extend(report.issues);
@@ -325,14 +322,14 @@ pub async fn apply_migration_manifest(
 /// any registry, enrollment-marker, and finalization work that follows.
 pub async fn apply_migration_manifest_with_destination_lease(
     manifest: &mut MigrationManifest,
-    destination_lease: &crate::lifecycle_lease::LifecycleLease,
+    destination_lease: &crate::root_seam::lifecycle_lease::LifecycleLease,
 ) -> io::Result<MigrationApplyReport> {
     apply_migration_manifest_with_lease(manifest, Some(destination_lease)).await
 }
 
 async fn apply_migration_manifest_with_lease(
     manifest: &mut MigrationManifest,
-    destination_lease: Option<&crate::lifecycle_lease::LifecycleLease>,
+    destination_lease: Option<&crate::root_seam::lifecycle_lease::LifecycleLease>,
 ) -> io::Result<MigrationApplyReport> {
     let (project_root, source_data_dir, profile_root, project_id) = manifest_destination(manifest)?;
     if let Some(lease) = destination_lease
@@ -383,7 +380,7 @@ async fn apply_migration_manifest_with_lease(
             continue;
         }
         lifecycle_leases.push(
-            crate::lifecycle_lease::acquire_exclusive_for_profile(root, &operation)
+            crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(root, &operation)
                 .map_err(|error| invalid_manifest(&error.to_string()))?,
         );
     }
@@ -395,7 +392,7 @@ async fn apply_migration_manifest_with_lease(
             ));
         };
         database_scopes.push(
-            crate::db::enter_maintenance_database_scope(lease, root, &operation)
+            crate::root_seam::db::enter_maintenance_database_scope(lease, root, &operation)
                 .map_err(|error| invalid_manifest(&error.to_string()))?,
         );
     }
@@ -409,7 +406,7 @@ async fn apply_migration_manifest_with_lease(
     source_databases.dedup();
     let mut source_authorities = Vec::with_capacity(source_databases.len());
     for database in source_databases {
-        let authority = crate::db::DatabaseAuthority::for_runtime(&database, &operation)
+        let authority = crate::root_seam::db::DatabaseAuthority::for_runtime(&database, &operation)
             .map_err(|error| invalid_manifest(&error.to_string()))?;
         source_authorities.push((database, authority));
     }
@@ -431,7 +428,7 @@ async fn apply_migration_manifest_in_scope(
     source_data_dir: PathBuf,
     profile_root: PathBuf,
     project_id: String,
-    source_authorities: &[(PathBuf, crate::db::DatabaseAuthority)],
+    source_authorities: &[(PathBuf, crate::root_seam::db::DatabaseAuthority)],
     operation: &str,
 ) -> io::Result<MigrationApplyReport> {
     let data_root = profile_sharded_data_root(&profile_root, &project_id);
@@ -586,7 +583,7 @@ pub fn export_profile_store(
     target_dir: &Path,
 ) -> io::Result<MigrationExportReport> {
     let lifecycle =
-        crate::lifecycle_lease::acquire_exclusive_for_profile(profile_root, "profile store export")
+        crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(profile_root, "profile store export")
             .map_err(|error| {
                 invalid_manifest(&format!("could not isolate profile store export: {error}"))
             })?;
@@ -598,14 +595,14 @@ pub fn export_profile_store_with_lease(
     profile_root: &Path,
     project_id: &str,
     target_dir: &Path,
-    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
 ) -> io::Result<MigrationExportReport> {
     if !lifecycle.is_exclusive() || !lifecycle.guards_profile(profile_root) {
         return Err(invalid_manifest(
             "profile store export lease must exclusively guard the source profile",
         ));
     }
-    let _database_scope = crate::db::enter_maintenance_database_scope(
+    let _database_scope = crate::root_seam::db::enter_maintenance_database_scope(
         lifecycle,
         profile_root,
         "profile store export",
@@ -667,7 +664,7 @@ pub fn cleanup_migration_sources(
         .profile_root
         .as_deref()
         .ok_or_else(|| invalid_manifest("migration manifest has no destination profile_root"))?;
-    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
         profile_root,
         "migration source cleanup",
     )
@@ -676,7 +673,7 @@ pub fn cleanup_migration_sources(
             "could not isolate migration source cleanup: {error}"
         ))
     })?;
-    let _database_scope = crate::db::enter_maintenance_database_scope(
+    let _database_scope = crate::root_seam::db::enter_maintenance_database_scope(
         &lifecycle,
         profile_root,
         "migration source cleanup",
@@ -857,7 +854,7 @@ async fn copy_sqlite_snapshot(
     source: &Path,
     target: &Path,
     scratch_root: &Path,
-    source_authority: &crate::db::DatabaseAuthority,
+    source_authority: &crate::root_seam::db::DatabaseAuthority,
     operation: &str,
 ) -> io::Result<()> {
     if let Some(parent) = target.parent() {
@@ -868,7 +865,7 @@ async fn copy_sqlite_snapshot(
     let _source_authority = source_authority
         .hold_for(source, operation)
         .map_err(io::Error::other)?;
-    let source_snapshot = crate::sqlite_read_snapshot::open_in(source, scratch_root).await?;
+    let source_snapshot = crate::root_seam::sqlite_read_snapshot::open_in(source, scratch_root).await?;
     let snapshot_result = source_snapshot.backup_to(&temporary).await;
     let source_validation = source_snapshot.validate_source();
     drop(source_snapshot);
@@ -881,7 +878,7 @@ async fn copy_sqlite_snapshot(
         return Err(error);
     }
     set_snapshot_permissions(&temporary)?;
-    let temporary_authority = crate::db::DatabaseAuthority::for_runtime(
+    let temporary_authority = crate::root_seam::db::DatabaseAuthority::for_runtime(
         &temporary,
         &format!("{operation} verify snapshot staging"),
     )
@@ -890,7 +887,7 @@ async fn copy_sqlite_snapshot(
     drop(temporary_authority);
     let temporary_fingerprint = fingerprint_file(&temporary)?;
     sync_file(&temporary)?;
-    crate::db::DatabaseAuthority::replace_file_atomically(
+    crate::root_seam::db::DatabaseAuthority::replace_file_atomically(
         &temporary,
         target,
         "migration SQLite snapshot",
@@ -992,7 +989,7 @@ fn copy_file_atomically(source: &Path, target: &Path, label: &str) -> io::Result
     remove_stale_snapshot_temp(&temporary)?;
     PrivateStoreIo::copy_artifact(source, &temporary)?;
     sync_file(&temporary)?;
-    crate::db::DatabaseAuthority::replace_file_atomically(&temporary, target, label)
+    crate::root_seam::db::DatabaseAuthority::replace_file_atomically(&temporary, target, label)
         .map_err(io::Error::other)?;
     sync_parent_directory(target)
 }
@@ -1002,7 +999,7 @@ async fn verify_sqlite_snapshot(
     scratch_root: &Path,
     operation: &str,
 ) -> io::Result<()> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(
+    let authority = crate::root_seam::db::DatabaseAuthority::for_runtime(
         path,
         &format!("{operation} verify SQLite snapshot"),
     )
@@ -1159,7 +1156,7 @@ async fn apply_backup_artifact(
     source_data_dir: &Path,
     backup_root: &Path,
     sqlite_snapshot_scratch: &Path,
-    source_authorities: &[(PathBuf, crate::db::DatabaseAuthority)],
+    source_authorities: &[(PathBuf, crate::root_seam::db::DatabaseAuthority)],
     operation: &str,
 ) -> io::Result<()> {
     let source_path = manifest.backup_artifacts[index].source_path.clone();
@@ -1399,12 +1396,12 @@ fn verify_sqlite_artifact_contents(source: &Path, target: &Path) -> io::Result<(
 async fn verify_sqlite_integrity(
     path: &Path,
     scratch_root: &Path,
-    authority: &crate::db::DatabaseAuthority,
+    authority: &crate::root_seam::db::DatabaseAuthority,
 ) -> io::Result<()> {
     let _authority = authority
         .hold_for(path, "verify migration SQLite snapshot")
         .map_err(io::Error::other)?;
-    let snapshot = crate::sqlite_read_snapshot::open_in(path, scratch_root).await?;
+    let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root).await?;
     let mut rows = snapshot
         .connection()
         .query("PRAGMA quick_check", ())

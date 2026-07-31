@@ -1,13 +1,10 @@
-pub mod consolidate;
-pub mod hermes;
-pub mod inventory;
-pub mod manifest;
-pub mod memory_cutover;
-pub mod profile_backup;
-pub mod registry;
+//! Compatibility shim for the migration subsystem.
+//!
+//! The whole subsystem now lives in `tracedecay-migrate`. This module re-exports
+//! it so every existing `crate::migrate::*` and `tracedecay::migrate::*` caller
+//! path keeps resolving after the one-shot crate split.
 
-/// Store durability classification, extracted to `tracedecay-migrate` because
-/// it decides escalation policy without opening a store. Re-exported here so
-/// `crate::migrate::durability` stays the caller path.
-pub use tracedecay_migrate::durability;
-pub use tracedecay_migrate::final_v2;
+pub use tracedecay_migrate::{
+    consolidate, durability, final_v2, final_v2_executor, hermes, inventory, manifest,
+    memory_cutover, profile_backup, registry,
+};

@@ -7,11 +7,11 @@ use super::{
     LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE, attach_snapshot_as, db_error, db_message, query_i64,
     quote_identifier, table_exists,
 };
-use crate::db::engine::{Error as EngineError, QueryExecutor, Row};
-use crate::errors::Result;
+use crate::root_seam::db::engine::{Error as EngineError, QueryExecutor, Row};
+use crate::root_seam::errors::Result;
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::migrate::consolidate) struct DatabaseCollisionCounts {
+pub(in crate::consolidate) struct DatabaseCollisionCounts {
     pub sessions: u64,
     pub messages: u64,
     pub lcm_messages: u64,
@@ -33,26 +33,26 @@ struct LcmMessageCollisionCounts {
 }
 
 #[derive(Default)]
-pub(in crate::migrate::consolidate) struct GraphLogicalIdentities {
+pub(in crate::consolidate) struct GraphLogicalIdentities {
     facts: HashSet<Vec<u8>>,
     feedback: HashSet<Vec<u8>>,
     external_source_states: HashMap<String, [u8; 32]>,
 }
 
 impl GraphLogicalIdentities {
-    pub(in crate::migrate::consolidate) fn fact_count(&self) -> u64 {
+    pub(in crate::consolidate) fn fact_count(&self) -> u64 {
         self.facts.len() as u64
     }
 
-    pub(in crate::migrate::consolidate) fn feedback_count(&self) -> u64 {
+    pub(in crate::consolidate) fn feedback_count(&self) -> u64 {
         self.feedback.len() as u64
     }
 
-    pub(in crate::migrate::consolidate) fn fact_overlap(&self, other: &Self) -> u64 {
+    pub(in crate::consolidate) fn fact_overlap(&self, other: &Self) -> u64 {
         self.facts.intersection(&other.facts).count() as u64
     }
 
-    pub(in crate::migrate::consolidate) fn facts_union_matches(
+    pub(in crate::consolidate) fn facts_union_matches(
         &self,
         other: &Self,
         destination: &Self,
@@ -64,7 +64,7 @@ impl GraphLogicalIdentities {
                 .all(|key| self.facts.contains(key) || other.facts.contains(key))
     }
 
-    pub(in crate::migrate::consolidate) fn feedback_union_matches(
+    pub(in crate::consolidate) fn feedback_union_matches(
         &self,
         other: &Self,
         destination: &Self,
@@ -76,7 +76,7 @@ impl GraphLogicalIdentities {
                 .all(|key| self.feedback.contains(key) || other.feedback.contains(key))
     }
 
-    pub(in crate::migrate::consolidate) fn external_source_union_matches(
+    pub(in crate::consolidate) fn external_source_union_matches(
         &self,
         other: &Self,
         destination: &Self,
@@ -95,7 +95,7 @@ impl GraphLogicalIdentities {
     }
 }
 
-pub(in crate::migrate::consolidate) async fn extend_graph_identities(
+pub(in crate::consolidate) async fn extend_graph_identities(
     conn: &impl QueryExecutor,
     identities: &mut GraphLogicalIdentities,
 ) -> Result<()> {
@@ -219,7 +219,7 @@ fn row_text(row: &Row, index: i32) -> Result<String> {
     row.get::<String>(index).map_err(logical_error)
 }
 
-fn logical_error(error: EngineError) -> crate::errors::TraceDecayError {
+fn logical_error(error: EngineError) -> crate::root_seam::errors::TraceDecayError {
     db_error("logical_identities", error)
 }
 
@@ -234,15 +234,15 @@ fn push_f64(target: &mut Vec<u8>, value: f64) {
 }
 
 #[cfg(test)]
-pub(in crate::migrate::consolidate) async fn count_rows(path: &Path, table: &str) -> Result<u64> {
-    let snapshots = crate::sqlite_read_snapshot::SnapshotSet::capture(&[path.to_path_buf()])
+pub(in crate::consolidate) async fn count_rows(path: &Path, table: &str) -> Result<u64> {
+    let snapshots = crate::root_seam::sqlite_read_snapshot::SnapshotSet::capture(&[path.to_path_buf()])
         .await
         .map_err(|error| db_error("read_snapshot", error))?;
     count_rows_in(&snapshots, path, table).await
 }
 
-pub(in crate::migrate::consolidate) async fn count_rows_in(
-    snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+pub(in crate::consolidate) async fn count_rows_in(
+    snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     path: &Path,
     table: &str,
 ) -> Result<u64> {
@@ -262,15 +262,15 @@ pub(in crate::migrate::consolidate) async fn count_rows_in(
     u64::try_from(count).map_err(|error| db_error("count_rows", error))
 }
 
-pub(in crate::migrate::consolidate) async fn quick_check_in(
-    snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+pub(in crate::consolidate) async fn quick_check_in(
+    snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     path: &Path,
 ) -> Result<()> {
     let db = read_snapshot(snapshots, path)?;
     quick_check_connection(db.connection(), path).await
 }
 
-pub(in crate::migrate::consolidate) async fn quick_check_connection(
+pub(in crate::consolidate) async fn quick_check_connection(
     conn: &impl QueryExecutor,
     path: &Path,
 ) -> Result<()> {
@@ -298,8 +298,8 @@ pub(in crate::migrate::consolidate) async fn quick_check_connection(
     Ok(())
 }
 
-pub(in crate::migrate::consolidate) async fn inspect_collisions(
-    snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+pub(in crate::consolidate) async fn inspect_collisions(
+    snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     source_sessions: &Path,
     target_sessions: &Path,
 ) -> Result<DatabaseCollisionCounts> {
@@ -333,7 +333,7 @@ pub(in crate::migrate::consolidate) async fn inspect_collisions(
 }
 
 async fn overlap_count(
-    snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+    snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     source: &Path,
     target: &Path,
     table: &str,
@@ -370,7 +370,7 @@ async fn overlap_count(
 }
 
 async fn lcm_message_collision_counts(
-    snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+    snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     source: &Path,
     target: &Path,
 ) -> Result<LcmMessageCollisionCounts> {
@@ -431,9 +431,9 @@ async fn lcm_message_collision_counts(
 }
 
 fn read_snapshot<'a>(
-    snapshots: &'a crate::sqlite_read_snapshot::SnapshotSet,
+    snapshots: &'a crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     path: &Path,
-) -> Result<&'a crate::sqlite_read_snapshot::SnapshotDatabase> {
+) -> Result<&'a crate::root_seam::sqlite_read_snapshot::SnapshotDatabase> {
     snapshots
         .get(path)
         .map_err(|error| db_error("read_snapshot", error))

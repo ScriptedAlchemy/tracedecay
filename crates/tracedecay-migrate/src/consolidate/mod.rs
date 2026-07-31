@@ -11,7 +11,7 @@ mod finalize;
 mod preflight;
 mod prepare;
 mod runtime;
-pub(in crate::migrate) mod sqlite;
+pub(in crate) mod sqlite;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::RefId;
 use tracedecay_store::{CodeShardScopeV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
-use crate::db::engine::params;
+use crate::root_seam::db::engine::params;
 use evidence::{GraphStoreEvidence, InputReadEvidence, capture_input_evidence};
 #[cfg(test)]
 use files::sqlite_sidecar;
@@ -42,12 +42,12 @@ use runtime::{
     ConsolidationRuntimeOwnerV1, FrozenInputRuntimeSetV1,
 };
 
-use crate::branch_meta::{self, BranchEntry, BranchMeta};
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{
+use crate::root_seam::branch_meta::{self, BranchEntry, BranchMeta};
+use crate::root_seam::errors::{Result, TraceDecayError};
+use crate::root_seam::global_db::{
     GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
 };
-use crate::storage::{
+use crate::root_seam::storage::{
     self, EnrollmentMarker, PrivateStoreIo, StorageMode, StoreKind, StoreLayout, StoreManifest,
 };
 
@@ -201,11 +201,11 @@ impl Drop for MigrationScratchRoot {
 
 pub async fn plan(options: &ConsolidationOptions) -> Result<ConsolidationReport> {
     ensure_profile_offline(options)?;
-    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
         &options.profile_root,
         "profile shard consolidation plan",
     )?;
-    let _database_scope = crate::db::enter_maintenance_database_scope(
+    let _database_scope = crate::root_seam::db::enter_maintenance_database_scope(
         &lifecycle,
         &options.profile_root,
         "profile shard consolidation plan",
@@ -244,11 +244,11 @@ async fn apply_with_faults(
     prepare_stop: Option<prepare::PrepareStop>,
 ) -> Result<ConsolidationReport> {
     ensure_profile_offline(options)?;
-    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
         &options.profile_root,
         "profile shard consolidation",
     )?;
-    let database_scope = crate::db::enter_maintenance_database_scope(
+    let database_scope = crate::root_seam::db::enter_maintenance_database_scope(
         &lifecycle,
         &options.profile_root,
         "profile shard consolidation",
@@ -272,7 +272,7 @@ async fn apply_with_faults(
         .evidence
         .validate(&source_graphs, &target_graphs, &session_paths)?;
     let frozen_records = frozen_input_records(&resolved)?;
-    let profile = crate::daemon::profile_identity::load_or_create(&options.profile_root)?;
+    let profile = crate::root_seam::daemon::profile_identity::load_or_create(&options.profile_root)?;
     let profile_shard =
         StoreShardIdV1::profile(profile.brain_id().clone(), profile.profile_id().clone());
     let frozen = FrozenInputRuntimeSetV1::acquire(
@@ -384,12 +384,12 @@ async fn apply_with_faults(
 async fn mount_registered_profile_database(
     profile_root: &Path,
 ) -> Result<(
-    crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     Arc<RegisteredGlobalDb>,
 )> {
-    let identity = crate::daemon::profile_identity::load_or_create(profile_root)?;
+    let identity = crate::root_seam::daemon::profile_identity::load_or_create(profile_root)?;
     let runtime_registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
         )
         .await?;
@@ -432,7 +432,7 @@ async fn resolve_plan_inner(
         .profile_root
         .canonicalize()
         .map_err(|error| config_error(format!("could not resolve profile root: {error}")))?;
-    let git_common_dir = crate::worktree::git_common_dir(&project_root)
+    let git_common_dir = crate::root_seam::worktree::git_common_dir(&project_root)
         .ok_or_else(|| config_error("project must be an attached git checkout"))?;
     let destination_project_id = destination_project_id(
         &git_common_dir,
@@ -681,7 +681,7 @@ fn manifest_matches_identity(
         return true;
     }
     if candidate.project_root.is_dir()
-        && crate::worktree::git_common_dir(&candidate.project_root)
+        && crate::root_seam::worktree::git_common_dir(&candidate.project_root)
             .is_some_and(|path| same_path(&path, git_common_dir))
     {
         return true;
@@ -769,7 +769,7 @@ fn load_input_branch_meta(layout: &StoreLayout) -> Result<BranchMeta> {
                     layout.graph_db_path.display()
                 )));
             }
-            let default_branch = crate::branch::detect_default_branch(&layout.project_root)
+            let default_branch = crate::root_seam::branch::detect_default_branch(&layout.project_root)
                 .ok_or_else(|| {
                     config_error(format!(
                         "cannot synthesize missing branch metadata at '{}': repository default branch is unknown (detached HEAD or no default ref)",
@@ -819,7 +819,7 @@ fn recover_untracked_branch_graphs(layout: &StoreLayout, meta: &mut BranchMeta) 
         let base = relative
             .file_stem()
             .and_then(|value| value.to_str())
-            .map(crate::branch::sanitize_branch_name)
+            .map(crate::root_seam::branch::sanitize_branch_name)
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "branch".to_string());
         let mut hash = Sha256::new();
@@ -847,7 +847,7 @@ fn recover_untracked_branch_graphs(layout: &StoreLayout, meta: &mut BranchMeta) 
 
 async fn inventory_store(
     graph: &GraphStoreEvidence,
-    sessions: &crate::sqlite_read_snapshot::SnapshotSet,
+    sessions: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
     layout: &StoreLayout,
     meta: &BranchMeta,
 ) -> Result<StoreInventory> {
@@ -936,7 +936,7 @@ pub(crate) fn destination_project_id(git_common_dir: &Path, source: &str, target
     let mut hash = Sha256::new();
     hash.update(b"tracedecay-profile-consolidation-v1\0");
     hash.update(
-        crate::lifecycle_lease::canonical_or_original(git_common_dir)
+        crate::root_seam::lifecycle_lease::canonical_or_original(git_common_dir)
             .to_string_lossy()
             .as_bytes(),
     );
@@ -1190,7 +1190,7 @@ pub(crate) async fn retire_applied_input_manifests(
     // ledger's destination, regardless of which one applied "first".
     let mut consumers: BTreeMap<(PathBuf, String), Vec<&str>> = BTreeMap::new();
     for (_, other) in &applied {
-        let git_common_dir = crate::lifecycle_lease::canonical_or_original(&other.git_common_dir);
+        let git_common_dir = crate::root_seam::lifecycle_lease::canonical_or_original(&other.git_common_dir);
         consumers
             .entry((git_common_dir.clone(), other.source_project_id.clone()))
             .or_default()
@@ -1210,7 +1210,7 @@ pub(crate) async fn retire_applied_input_manifests(
         // a forward-then-back pair (A's destination feeding B and B's
         // destination feeding A) can legitimately mark both as superseded;
         // that is a property of the data, not an ordering bug.
-        let git_common_dir = crate::lifecycle_lease::canonical_or_original(&ledger.git_common_dir);
+        let git_common_dir = crate::root_seam::lifecycle_lease::canonical_or_original(&ledger.git_common_dir);
         let superseded = consumers
             .get(&(git_common_dir, ledger.destination_project_id.clone()))
             .is_some_and(|migration_ids| {
@@ -1691,8 +1691,8 @@ fn artifact_authorities(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArti
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| config_error("destination shard has no profile root"))?;
-    let profile = crate::daemon::profile_identity::load_or_create(profile_root)?;
-    let indexing = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
+    let profile = crate::root_seam::daemon::profile_identity::load_or_create(profile_root)?;
+    let indexing = crate::root_seam::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
         &resolved.report.project_root,
     )
     .map_err(|error| config_error(error.to_string()))?;
@@ -1790,8 +1790,8 @@ fn frozen_input_records(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArti
         .ok_or_else(|| config_error("destination shard has no profile root"))?
         .canonicalize()
         .map_err(io_error)?;
-    let profile = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-    let indexing = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
+    let profile = crate::root_seam::daemon::profile_identity::load_or_create(&profile_root)?;
+    let indexing = crate::root_seam::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
         &resolved.report.project_root,
     )
     .map_err(|error| config_error(error.to_string()))?;
@@ -1952,15 +1952,15 @@ fn canonical_project_id(value: &str) -> Result<ProjectId> {
 async fn merge_databases(
     resolved: &ResolvedPlan,
     ledger: &mut ConsolidationLedger,
-    lifecycle: &crate::lifecycle_lease::LifecycleLease,
-    maintenance: &crate::db::MaintenanceDatabaseScope<'_>,
+    lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+    maintenance: &crate::root_seam::db::MaintenanceDatabaseScope<'_>,
 ) -> Result<()> {
     let destination = &resolved.report.destination_data_root;
     let profile_root = destination
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| config_error("destination shard has no profile root"))?;
-    let profile = crate::daemon::profile_identity::load_or_create(profile_root)?;
+    let profile = crate::root_seam::daemon::profile_identity::load_or_create(profile_root)?;
     let profile_shard =
         StoreShardIdV1::profile(profile.brain_id().clone(), profile.profile_id().clone());
     let authorities = artifact_authorities(resolved)?;
@@ -2241,7 +2241,7 @@ fn database_paths_for_layouts(
 }
 
 fn graph_db_paths_for_root(root: &Path, meta: &BranchMeta) -> Result<Vec<PathBuf>> {
-    let main = root.join(crate::config::DB_FILENAME);
+    let main = root.join(crate::root_seam::config::DB_FILENAME);
     let mut paths = BTreeSet::new();
     for entry in meta.branches.values() {
         let path = confined_branch_graph_path(root, &entry.db_file)?;
@@ -2293,8 +2293,8 @@ fn confined_branch_graph_path(root: &Path, db_file: &str) -> Result<PathBuf> {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
-    crate::lifecycle_lease::canonical_or_original(left)
-        == crate::lifecycle_lease::canonical_or_original(right)
+    crate::root_seam::lifecycle_lease::canonical_or_original(left)
+        == crate::root_seam::lifecycle_lease::canonical_or_original(right)
 }
 
 fn migration_scratch_root(profile_root: &Path) -> Result<MigrationScratchRoot> {

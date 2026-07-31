@@ -18,14 +18,14 @@ use tracedecay_store::{
     plan_memory_v2_owner_merge,
 };
 
-use crate::branch_meta;
-use crate::db::engine::QueryExecutor;
-use crate::db::{
+use crate::root_seam::branch_meta;
+use crate::root_seam::db::engine::QueryExecutor;
+use crate::root_seam::db::{
     MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, list_memory_v2_archive_owners,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::storage;
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::root_seam::errors::{Result, TraceDecayError};
+use crate::root_seam::storage;
+use crate::root_seam::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 const LEGACY_SOURCE_STORE: &str = "legacy-memory-v1";
 const RECEIPT_FILENAME: &str = "memory-branch-cutover.json";
@@ -107,7 +107,7 @@ struct BranchMemoryCutoverReceiptSource {
     relative_path: PathBuf,
     generation: String,
     legacy_only: bool,
-    archives: Vec<crate::migrate::consolidate::sqlite::MemoryV2ArchiveMergeProof>,
+    archives: Vec<crate::consolidate::sqlite::MemoryV2ArchiveMergeProof>,
 }
 
 pub async fn plan(options: &MemoryCutoverOptions) -> Result<MemoryCutoverReport> {
@@ -120,7 +120,7 @@ async fn plan_resolved(resolved: &ResolvedMemoryCutover) -> Result<MemoryCutover
     storage::PrivateStoreIo::create_dir_all(&scratch)?;
     let mut sources = Vec::new();
     for path in branch_database_paths(&resolved.data_root)? {
-        let snapshot = crate::sqlite_read_snapshot::open_in(&path, &scratch)
+        let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(&path, &scratch)
             .await
             .map_err(|error| migration_error(format!("snapshot '{}': {error}", path.display())))?;
         let user_version = scalar_i64(snapshot.connection(), "PRAGMA user_version").await?;
@@ -171,11 +171,11 @@ pub async fn apply(
             "memory cutover confirmation token does not match the current branch-store generation",
         ));
     }
-    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
         &resolved.profile_root,
         "project-wide branch memory cutover",
     )?;
-    let _database_scope = crate::db::enter_maintenance_database_scope(
+    let _database_scope = crate::root_seam::db::enter_maintenance_database_scope(
         &lifecycle,
         &resolved.profile_root,
         "project-wide branch memory cutover",
@@ -230,12 +230,12 @@ async fn apply_planned(
                 source.path.display()
             )));
         }
-        let snapshot = crate::sqlite_read_snapshot::open_in(&source.path, &scratch)
+        let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(&source.path, &scratch)
             .await
             .map_err(|error| {
                 migration_error(format!("snapshot '{}': {error}", source.path.display()))
             })?;
-        let proofs = crate::migrate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
+        let proofs = crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
             &target, &snapshot,
         )
         .await?;
@@ -247,7 +247,7 @@ async fn apply_planned(
         }
         archive_proofs.push((source.path.clone(), proofs));
     }
-    crate::migrate::consolidate::sqlite::rebuild_branch_cutover_memory_banks(&target).await?;
+    crate::consolidate::sqlite::rebuild_branch_cutover_memory_banks(&target).await?;
 
     let owner = FactOwnerV1::Project {
         project_id: ProjectId::new(resolved.project_id.clone())
@@ -436,8 +436,8 @@ async fn verify_branch_removal_archive_closure(
 
     let scratch = data_root.join("scratch").join("memory-cutover-removal");
     storage::PrivateStoreIo::create_dir_all(&scratch)?;
-    let target_path = data_root.join(crate::config::db_filename(data_root));
-    let target = crate::sqlite_read_snapshot::open_in(&target_path, &scratch)
+    let target_path = data_root.join(crate::root_seam::config::db_filename(data_root));
+    let target = crate::root_seam::sqlite_read_snapshot::open_in(&target_path, &scratch)
         .await
         .map_err(|error| {
             migration_error(format!(
@@ -473,7 +473,7 @@ async fn verify_branch_removal_archive_closure(
                 original.display()
             )));
         }
-        let source = crate::sqlite_read_snapshot::open_in(&candidate, &scratch)
+        let source = crate::root_seam::sqlite_read_snapshot::open_in(&candidate, &scratch)
             .await
             .map_err(|error| {
                 migration_error(format!(
@@ -636,7 +636,7 @@ fn branch_validation_candidate(original: &Path, validation_paths: &[PathBuf]) ->
 fn validate_archive_proof(
     receipt: &BranchMemoryCutoverReceipt,
     original: &Path,
-    proof: &crate::migrate::consolidate::sqlite::MemoryV2ArchiveMergeProof,
+    proof: &crate::consolidate::sqlite::MemoryV2ArchiveMergeProof,
 ) -> Result<()> {
     let owner_matches = matches!(
         &proof.owner,
@@ -675,7 +675,7 @@ fn branch_v2_authority_tables(path: &Path) -> Vec<&'static str> {
     ]
     .into_iter()
     .filter(|table| {
-        crate::sqlite_read_snapshot::checkpointed_database_has_any_rows(path, &[*table])
+        crate::root_seam::sqlite_read_snapshot::checkpointed_database_has_any_rows(path, &[*table])
             .is_ok_and(|has_rows| has_rows)
     })
     .collect()
@@ -688,7 +688,7 @@ fn is_sha256_digest(value: &str) -> bool {
 }
 
 fn branch_has_no_durable_memory(path: &Path) -> bool {
-    crate::sqlite_read_snapshot::checkpointed_database_has_any_rows(
+    crate::root_seam::sqlite_read_snapshot::checkpointed_database_has_any_rows(
         path,
         &[
             "memory_facts",
@@ -844,14 +844,14 @@ fn write_cutover_receipt(
     sources: &[MemoryCutoverSource],
     archive_proofs: &[(
         PathBuf,
-        Vec<crate::migrate::consolidate::sqlite::MemoryV2ArchiveMergeProof>,
+        Vec<crate::consolidate::sqlite::MemoryV2ArchiveMergeProof>,
     )],
 ) -> Result<()> {
     let receipt = BranchMemoryCutoverReceipt {
         version: 2,
         project_id: resolved.project_id.clone(),
         archive_schema: MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1.to_owned(),
-        completed_at: crate::tracedecay::current_timestamp(),
+        completed_at: crate::root_seam::tracedecay::current_timestamp(),
         sources: sources
             .iter()
             .map(|source| {
@@ -916,7 +916,7 @@ async fn table_exists(connection: &impl QueryExecutor, table: &str) -> Result<bo
     let mut rows = connection
         .query(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
-            crate::db::engine::params![table],
+            crate::root_seam::db::engine::params![table],
         )
         .await
         .map_err(|error| migration_error(error.to_string()))?;
@@ -955,10 +955,10 @@ fn migration_error(message: impl Into<String>) -> TraceDecayError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::branch::{
+    use crate::root_seam::branch::{
         BranchAdminAction, BranchAdminOutcome, BranchAdminReport, prepare_branch_admin_mutation,
     };
-    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use crate::root_seam::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     /// A project store holding one tracked branch whose `SQLite` family carries a
     /// durable fact that exists nowhere else.
@@ -1065,7 +1065,7 @@ mod tests {
             )?;
             let mut canonical_paths = prepared.database_paths().to_vec();
             canonical_paths.sort();
-            let fence = crate::db::DatabaseDeletionFence::acquire(
+            let fence = crate::root_seam::db::DatabaseDeletionFence::acquire(
                 &canonical_paths,
                 "test branch store removal",
             )?;
@@ -1163,7 +1163,7 @@ mod tests {
     async fn branch_removal_refuses_when_archived_target_closure_is_missing() {
         let fixture = BranchStoreFixture::empty(&["feature"]);
         let branch_path = fixture.database_path("feature");
-        let target_path = fixture.data_root.join(crate::config::DB_FILENAME);
+        let target_path = fixture.data_root.join(crate::root_seam::config::DB_FILENAME);
         let target = initialize_test_database(&target_path).await;
         let source = initialize_test_database(&branch_path).await;
         let owner = FactOwnerV1::Project {
@@ -1178,7 +1178,7 @@ mod tests {
                 "INSERT INTO memory_v2_facts(
                     fact_id, owner_kind, project_id, owner_json, identity_json, created_at
                  ) VALUES (?1, 'project', ?2, ?3, ?4, 1)",
-                crate::db::engine::params![
+                crate::root_seam::db::engine::params![
                     "fact.branch-only",
                     "fixture-project",
                     serde_json::to_string(&owner).unwrap(),
@@ -1193,10 +1193,10 @@ mod tests {
 
         let scratch = fixture.data_root.join("scratch").join("test-cutover");
         storage::PrivateStoreIo::create_dir_all(&scratch).unwrap();
-        let snapshot = crate::sqlite_read_snapshot::open_in(&branch_path, &scratch)
+        let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(&branch_path, &scratch)
             .await
             .unwrap();
-        let proofs = crate::migrate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
+        let proofs = crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
             &target, &snapshot,
         )
         .await

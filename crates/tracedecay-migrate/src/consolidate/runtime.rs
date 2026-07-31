@@ -9,15 +9,15 @@ use tracedecay_store::{
     VerifiedStoreLocatorV1,
 };
 
-use crate::daemon::store_runtime::registry::{
+use crate::root_seam::daemon::store_runtime::registry::{
     ClosedStoreRuntime, LifecycleShardRuntimePublisher, ProfileAuthorityPin,
     ProfileAuthorityPinResult, ResolvedStoreLocator, StoreRuntimeHandle, StoreRuntimeKey,
     StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry,
     StoreRuntimeRegistryConfig, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
 };
-use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority, MaintenanceDatabaseScope};
-use crate::errors::{Result, TraceDecayError};
+use crate::root_seam::db::{Database, DatabaseAccessMode, DatabaseAuthority, MaintenanceDatabaseScope};
+use crate::root_seam::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -211,7 +211,7 @@ impl ConsolidationRuntimeOwnerV1 {
     pub(super) async fn new(
         profile_root: &Path,
         root: &Path,
-        lifecycle: &crate::lifecycle_lease::LifecycleLease,
+        lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
         maintenance: &MaintenanceDatabaseScope<'_>,
         profile_shard: StoreShardIdV1,
         records: &[ConsolidationArtifactRecordV1],
@@ -576,7 +576,7 @@ pub(super) struct FrozenInputRuntimeSetV1 {
 impl FrozenInputRuntimeSetV1 {
     pub(super) async fn acquire(
         profile_root: &Path,
-        lifecycle: &crate::lifecycle_lease::LifecycleLease,
+        lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
         maintenance: &MaintenanceDatabaseScope<'_>,
         profile_shard: StoreShardIdV1,
         records: &[ConsolidationArtifactRecordV1],
@@ -887,7 +887,7 @@ fn insert_locator(
     let verified = VerifiedStoreLocatorV1::new(
         shard_id,
         incarnation,
-        crate::daemon::store_runtime::resolver::canonical_store_locator_digest(&path)
+        crate::root_seam::daemon::store_runtime::resolver::canonical_store_locator_digest(&path)
             .map_err(runtime_error)?,
     );
     if locators
@@ -940,7 +940,7 @@ fn validate_relative_locator(locator: &Path) -> Result<()> {
 }
 
 fn current_file_identity(path: &Path) -> Result<u64> {
-    crate::db::sqlite_generation_identity(path).map_err(|_| {
+    crate::root_seam::db::sqlite_generation_identity(path).map_err(|_| {
         runtime_error(format!(
             "could not verify consolidation artifact file identity '{}'",
             path.display()
