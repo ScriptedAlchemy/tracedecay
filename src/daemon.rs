@@ -2056,7 +2056,7 @@ impl DaemonInvocationState {
                 ));
                 continue;
             }
-            let Some((context, authority_digest)) = self
+            let Some((context, _authority_digest)) = self
                 .service
                 .multi_root_query_context(&root, scope, ordinal, observed_at)
                 .await
@@ -2083,7 +2083,7 @@ impl DaemonInvocationState {
             };
             let generation = frozen_root_generation(
                 scope,
-                &authority_digest,
+                scope_set.digest(),
                 &source_revision,
                 &operation_value,
             );
@@ -2223,7 +2223,7 @@ impl DaemonInvocationState {
                         service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
                     );
                 }
-                extract_application_payload(&outcome)
+                extract_work_application_payload(&outcome)
             }
             tracedecay_application::MultiRootOperationV1::Git { request }
             | tracedecay_application::MultiRootOperationV1::Feedback { request }
@@ -2455,7 +2455,7 @@ fn unavailable_root_generation(
 
 fn frozen_root_generation(
     scope: &tracedecay_application::ResolvedScope,
-    authority_digest: &tracedecay_domain::ManifestDigest,
+    scope_set_digest: &tracedecay_domain::ManifestDigest,
     source_revision: &str,
     operation: &Value,
 ) -> tracedecay_domain::RootGenerationV1 {
@@ -2473,7 +2473,7 @@ fn frozen_root_generation(
         tracedecay_domain::StackRevision::new(
             tracedecay_domain::canonical_sha256(&(
                 "tracedecay.multi-root.stack.v1",
-                authority_digest,
+                scope_set_digest,
                 operation,
             ))
             .expect("validated authority and operation are canonical"),
@@ -2510,6 +2510,20 @@ fn extract_application_payload<T: serde::Serialize>(
         .ok()
         .and_then(|value| value.get("value")?.get("payload").cloned())
         .ok_or(service::invocation::DaemonInvocationProblem::Unavailable)
+}
+
+fn extract_work_application_payload(
+    outcome: &service::invocation::WorkApplicationOutcomeV1,
+) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
+    match outcome {
+        service::invocation::WorkApplicationOutcomeV1::Snapshot(outcome) => {
+            extract_application_payload(outcome)
+        }
+        service::invocation::WorkApplicationOutcomeV1::Delta(outcome) => {
+            extract_application_payload(outcome)
+        }
+        _ => Err(service::invocation::DaemonInvocationProblem::InvalidRequest),
+    }
 }
 
 fn multi_root_family_allows(
