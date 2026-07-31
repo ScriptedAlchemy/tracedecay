@@ -82,6 +82,22 @@ impl RegisteredGlobalDb {
             .map_err(|error| query::storage(OPERATION, error))?;
         Ok(key)
     }
+
+    pub(crate) async fn load_session_cursor_key_provider_result(
+        &self,
+    ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+        let key = self
+            .ensure_active_session_cursor_key_result()
+            .await
+            .map_err(|source| cursor_keys::GlobalDbCursorKeyProviderError::Provision { source })?;
+        let read = self.read_snapshot().await.map_err(|source| {
+            cursor_keys::GlobalDbCursorKeyProviderError::Storage {
+                operation: "load registered session cursor authentication key",
+                source,
+            }
+        })?;
+        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
+    }
 }
 
 /// Transitional PR8 rendering adapter over one registry-owned session shard.

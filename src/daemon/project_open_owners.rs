@@ -1338,7 +1338,7 @@ pub(super) async fn register_project_open_dependent_owners(
             invocation,
             project_root,
             database,
-            session_db,
+            Arc::clone(&session_db),
             Arc::clone(&graph),
             scope.clone(),
             access,
@@ -1364,6 +1364,7 @@ pub(super) async fn register_project_open_dependent_owners(
         invocation,
         project_root,
         &graph,
+        Arc::clone(&session_db),
         scope.clone(),
         &scout_configuration,
     )
@@ -1381,6 +1382,7 @@ async fn register_semantic_activation_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     graph: &Arc<crate::tracedecay::TraceDecay>,
+    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     scope: ResolvedScope,
     configuration: &crate::application::configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
