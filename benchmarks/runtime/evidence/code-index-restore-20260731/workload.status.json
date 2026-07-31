@@ -1,0 +1,52 @@
+{
+  "active_branch": "main",
+  "db_size_bytes": 438317056,
+  "edge_count": 255898,
+  "edges_by_kind": {
+    "annotates": 26567,
+    "calls": 153954,
+    "derives_macro": 194,
+    "extends": 21,
+    "implements": 1015,
+    "returns": 24446,
+    "type_of": 47676,
+    "uses": 2025
+  },
+  "file_count": 1808,
+  "files_by_language": {
+    "Dockerfile": 1,
+    "Other": 10,
+    "Python": 4,
+    "Rust": 1769,
+    "SQL": 1,
+    "TOML": 21,
+    "TypeScript": 2
+  },
+  "last_full_sync_at": 1785521639,
+  "last_sync_at": 1785521639,
+  "last_sync_duration_ms": 50676,
+  "last_updated": 1785521591,
+  "node_count": 122076,
+  "nodes_by_kind": {
+    "annotation_usage": 13282,
+    "class": 5,
+    "const": 3078,
+    "decorator": 3,
+    "enum": 1918,
+    "enum_variant": 9297,
+    "field": 22983,
+    "file": 1808,
+    "function": 22652,
+    "impl": 6549,
+    "interface": 4,
+    "method": 17512,
+    "module": 2482,
+    "static": 118,
+    "struct": 5895,
+    "trait": 359,
+    "type_alias": 1270,
+    "use": 12861
+  },
+  "serving_branch": "main",
+  "total_source_bytes": 41098416
+}
