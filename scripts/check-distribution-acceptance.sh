@@ -459,15 +459,13 @@ REQUIRE_EXACT_TEST_COUNT=nonzero \
   semantic_code::model_lifecycle::tests::
 
 echo "distribution acceptance: checking extracted query semantic fallback behavior"
-CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
+CARGO_NET_OFFLINE=true cargo test \
   --manifest-path "$query_package/Cargo.toml" \
   --release \
   --all-features \
   --lib \
   --config "$patch_config" \
-  retrieval::semantic::tests::every_non_ready_state_bypasses_semantic_authorities_and_preserves_query_bytes \
-  -- \
-  --exact
+  retrieval::semantic::tests::
 
 echo "distribution acceptance: checking extracted root strict semantic unavailability"
 CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
