@@ -4,8 +4,6 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -217,11 +215,10 @@ pub fn rehearse_complete_profile_backup(
         verify_restored_rehearsal(&staging, &restore_root, &backup)?;
         // Keep the ownership marker through rename and parent sync so a crash
         // never leaves an unowned staging directory or an unmarked published
-        // root that recovery cannot finish. Every nested directory is flushed
-        // after its children so all staged namespace entries precede publish.
-        sync_directory_tree(&staging)?;
+        // root that recovery cannot finish.
+        sync_directory(&staging)?;
         inject_rehearsal_publication_fault(RehearsalPublicationFault::BeforeRename)?;
-        publish_staged_directory(&staging, &restore_root).map_err(|error| {
+        fs::rename(&staging, &restore_root).map_err(|error| {
             format!(
                 "publish rehearsed profile '{}' to '{}': {error}",
                 staging.display(),
@@ -895,93 +892,6 @@ fn sync_file(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("sync '{}': {error}", path.display()))
 }
 
-fn sync_directory_tree(root: &Path) -> Result<(), String> {
-    for directory in directory_tree_postorder(root)? {
-        sync_directory(&directory)?;
-    }
-    Ok(())
-}
-
-fn directory_tree_postorder(root: &Path) -> Result<Vec<PathBuf>, String> {
-    fn collect(path: &Path, directories: &mut Vec<PathBuf>) -> Result<(), String> {
-        let metadata = fs::symlink_metadata(path)
-            .map_err(|error| format!("inspect staged path '{}': {error}", path.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "staged directory '{}' is not a regular directory",
-                path.display()
-            ));
-        }
-        let mut entries = fs::read_dir(path)
-            .map_err(|error| format!("read staged directory '{}': {error}", path.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read staged directory '{}': {error}", path.display()))?;
-        entries.sort_by_key(fs::DirEntry::file_name);
-        for entry in entries {
-            let entry_path = entry.path();
-            let entry_metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
-                format!("inspect staged entry '{}': {error}", entry_path.display())
-            })?;
-            if entry_metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "staged entry '{}' must not be a symlink",
-                    entry_path.display()
-                ));
-            }
-            if entry_metadata.is_dir() {
-                collect(&entry_path, directories)?;
-            } else if !entry_metadata.is_file() {
-                return Err(format!(
-                    "staged entry '{}' is not a regular file",
-                    entry_path.display()
-                ));
-            }
-        }
-        directories.push(path.to_path_buf());
-        Ok(())
-    }
-
-    let mut directories = Vec::new();
-    collect(root, &mut directories)?;
-    Ok(directories)
-}
-
-#[cfg(not(windows))]
-fn publish_staged_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::rename(source, destination)
-}
-
-#[cfg(windows)]
-fn publish_staged_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
-    }
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -1280,33 +1190,6 @@ mod tests {
             assert!(!staging.exists());
             assert!(!restore.join(REHEARSAL_MARKER_FILENAME).exists());
         }
-    }
-
-    #[test]
-    fn staged_directory_durability_walks_every_nested_directory_postorder() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("staging");
-        fs::create_dir_all(root.join("a/b")).unwrap();
-        fs::create_dir(root.join("c")).unwrap();
-        fs::write(root.join("a/b/data"), b"durable bytes").unwrap();
-        fs::write(root.join("c/data"), b"durable bytes").unwrap();
-
-        let directories = directory_tree_postorder(&root).unwrap();
-        let relative = directories
-            .iter()
-            .map(|path| path.strip_prefix(&root).unwrap().to_path_buf())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            relative,
-            vec![
-                PathBuf::from("a/b"),
-                PathBuf::from("a"),
-                PathBuf::from("c"),
-                PathBuf::new(),
-            ]
-        );
-        sync_directory_tree(&root).unwrap();
     }
 
     #[test]
