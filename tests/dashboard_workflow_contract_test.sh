@@ -82,8 +82,6 @@ if dashboard_job.index("actions/setup-node@") > dashboard_job.index("Install ast
 if dashboard_job.index("Install ast-grep") > dashboard_job.index("npm run boundary:check"):
     raise SystemExit("CI dashboard job must install ast-grep before the boundary gate")
 
-assets_job = job_block(ci, "dashboard-assets")
-
 # The accessibility gates are their own job. Every Rust job declares
 # `needs: dashboard-assets`, so an axe failure inside dashboard-assets skipped
 # the entire Rust matrix and destroyed the signal about whether Rust passed.
@@ -105,6 +103,7 @@ for required in [
 
 # Keeping the gates out of dashboard-assets is the entire point of the split;
 # a well-meaning "run them where the bundle is" edit would undo it silently.
+assets_job = job_block(ci, "dashboard-assets")
 for forbidden in ["playwright install", "npm run axe:"]:
     if forbidden in assets_job:
         raise SystemExit(
