@@ -576,6 +576,7 @@ impl RegisteredProject {
             retained_graphs,
         )
         .await
+        .expect("registered test server")
     }
 }
 

@@ -46,7 +46,9 @@ fn main() { println!("hi"); }
 
 async fn dashboard_test_server(cg: TraceDecay) -> Arc<McpServer> {
     let runtime = open_active_project_scoped_runtime(&cg).await;
-    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime).await
+    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
+        .await
+        .expect("registered test server")
 }
 
 // Multi-thread runtime: the blocking ureq probe must not starve the spawned

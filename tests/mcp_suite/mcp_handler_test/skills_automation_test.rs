@@ -200,7 +200,8 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
         .unwrap();
     let server =
         McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
-            .await;
+            .await
+            .expect("registered test server");
 
     let markdown_list = server
         .call_tool_for_test("tracedecay_skill_list", json!({"state": "active"}))

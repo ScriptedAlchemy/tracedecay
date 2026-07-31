@@ -664,7 +664,7 @@ impl McpServer {
         cg: TraceDecay,
         scope_prefix: Option<String>,
         runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
-    ) -> Arc<Self> {
+    ) -> crate::errors::Result<Arc<Self>> {
         Self::new_with_retained_test_graphs_for_test(cg, scope_prefix, runtime, Vec::new()).await
     }
 
@@ -683,11 +683,9 @@ impl McpServer {
         scope_prefix: Option<String>,
         runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
         retained_graphs: Vec<Arc<TraceDecay>>,
-    ) -> Arc<Self> {
+    ) -> crate::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
-        let mut context = runtime
-            .mcp_server_context_for_test(cg, scope_prefix)
-            .expect("MCP test runtime must retain exact profile and session authorities");
+        let mut context = runtime.mcp_server_context_for_test(cg, scope_prefix)?;
         // Hook notifications require a durable admission spool before their
         // plans replay and their post-commit side writes (route analytics,
         // span observations) run. Mount one on the runtime's project
@@ -702,8 +700,12 @@ impl McpServer {
                 )
             })
             .await
-            .expect("test server host-admission task completes")
-            .expect("test server host-admission spool opens");
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: format!("test server host-admission task failed: {error}"),
+            })?
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: format!("test server host-admission spool failed: {error:?}"),
+            })?;
             context.host_admission_broker = Some(Arc::new(
                 crate::application::host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
@@ -727,13 +729,12 @@ impl McpServer {
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
         retained_graphs: Vec<Arc<TraceDecay>>,
-    ) -> Arc<Self> {
-        let runtime = Arc::clone(
-            context
-                .host_admission_test_runtime
-                .as_ref()
-                .expect("registered test context must carry its host-admission test runtime"),
-        );
+    ) -> crate::errors::Result<Arc<Self>> {
+        let runtime = Arc::clone(context.host_admission_test_runtime.as_ref().ok_or_else(
+            || crate::errors::TraceDecayError::Config {
+                message: "registered test context is missing its host-admission runtime".to_owned(),
+            },
+        )?);
         let retained_root = context.cg.project_root().to_path_buf();
         let profile_root = runtime.profile_root_for_test().to_path_buf();
         let mut retained: Vec<(PathBuf, Arc<TraceDecay>)> = retained_graphs
@@ -753,8 +754,7 @@ impl McpServer {
                         profile_root: Some(profile_root),
                     },
                 )
-                .await
-                .expect("MCP test runtime retained project graph");
+                .await?;
             retained.push((canonical_or_original(&retained_root), Arc::new(active)));
         }
         // The daemon always has the active project mounted, so its resolver can
@@ -797,7 +797,7 @@ impl McpServer {
         context = context.with_retained_project_graph_resolver(resolver);
         let server = Self::new_with_context(context).await;
         let _ = active_graph_slot.set(server.cg_snapshot().await);
-        server
+        Ok(server)
     }
 
     /// Builds a direct test server with an isolated project admission spool.

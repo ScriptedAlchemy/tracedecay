@@ -232,7 +232,8 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         registry_db,
         vec![Arc::new(projects.target)],
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let responses = run_server_with_messages(
         server.clone(),
@@ -317,7 +318,8 @@ async fn linked_worktree_hook_route_reaches_target_across_client_sockets() {
         registry_db,
         vec![Arc::new(projects.target)],
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let session_id = "sess-linked-worktree";
     // The host's hook socket: closes as soon as the notification is delivered.
@@ -354,7 +356,8 @@ async fn hook_route_to_registered_but_unmounted_project_fails_closed() {
         None,
         registry_db,
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let session_id = "sess-unmounted-target";
     let responses = run_server_with_messages(
@@ -400,7 +403,8 @@ async fn hook_route_to_ambiguously_registered_project_fails_closed() {
         registry_db,
         vec![Arc::new(projects.target)],
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let session_id = "sess-ambiguous-target";
     let responses = run_server_with_messages(
@@ -436,7 +440,8 @@ async fn hook_route_from_unregistered_cwd_serves_the_active_project() {
         registry_db,
         vec![Arc::new(projects.target)],
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let responses = run_server_with_messages(
         server,
@@ -470,7 +475,8 @@ async fn hook_route_through_symlinked_workspace_reaches_target() {
         registry_db,
         vec![Arc::new(projects.target)],
     )
-    .await;
+    .await
+    .expect("registered test server");
 
     let responses =
         run_server_with_messages(server, vec![workspace_open(&link), files_call(1)]).await;
@@ -653,7 +659,9 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         })
         .await
         .expect("project store registers");
-    let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, registry).await;
+    let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, registry)
+        .await
+        .expect("registered test server");
 
     let session_id = "sess-live";
 

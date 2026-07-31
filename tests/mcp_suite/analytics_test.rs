@@ -88,7 +88,8 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
         .expect("seeding analytics events should succeed");
     let server =
         McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
-            .await;
+            .await
+            .expect("registered test server");
 
     // JSON response carries the same data in the typed shape the markdown
     // was rendered from.
@@ -325,7 +326,8 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
         .expect("seed more than ten thousand unrelated newer events");
     let server =
         McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
-            .await;
+            .await
+            .expect("registered test server");
 
     let response =
         handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
