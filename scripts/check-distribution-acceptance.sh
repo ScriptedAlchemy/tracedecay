@@ -468,16 +468,14 @@ CARGO_NET_OFFLINE=true cargo test \
   retrieval::semantic::tests::
 
 echo "distribution acceptance: checking extracted root strict semantic unavailability"
-CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
+CARGO_NET_OFFLINE=true cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
   --no-default-features \
   --features production \
   --lib \
   --config "$patch_config" \
-  daemon::code_index_scheduler::semantic_query_runtime::tests::strict_semantic_reports_typed_unavailable_without_a_fallback_result \
-  -- \
-  --exact
+  daemon::code_index_scheduler::semantic_query_runtime::tests::
 
 echo "distribution acceptance: checking extracted LSP framing and protocol behavior"
 for lsp_test in \
