@@ -715,16 +715,13 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             options.application_invocation_executor.is_some(),
         );
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
-            return expect_classified_dispatch(
+            return boxed_send(dispatch_application_surface_tools(
                 tool_name,
-                boxed_send(dispatch_application_surface_tools(
-                    tool_name,
-                    cg,
-                    args,
-                    options.clone(),
-                ))
-                .await,
-            );
+                cg,
+                args,
+                options.clone(),
+            ))
+            .await;
         }
         // Catalog-declared compatibility operations must resolve the MCP binding
         // before reaching their retained typed handler. Operations without an
@@ -738,18 +735,10 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
         if !LegacyToolCompatibilityOwner::admits(tool_name)
             && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name)
         {
-            return Err(TraceDecayError::Config {
-                message: format!("unknown tool: {tool_name}"),
-            });
+            return Err(unknown_tool_error(tool_name));
         }
         match dispatch_group {
-            Some(McpToolDispatchGroup::ApplicationSurface) => Err(TraceDecayError::Config {
-                message: format!(
-                    "internal: application-surface tool `{tool_name}` escaped early dispatch"
-                ),
-            }),
-            Some(McpToolDispatchGroup::Graph) => expect_classified_dispatch(
-                tool_name,
+            Some(McpToolDispatchGroup::Graph) => {
                 boxed_send(dispatch_graph_tools(
                     tool_name,
                     cg,
@@ -760,10 +749,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     options.application_deadline.clone(),
                     options.application_cancellation.clone(),
                 ))
-                .await,
-            ),
-            Some(McpToolDispatchGroup::Info) => expect_classified_dispatch(
-                tool_name,
+                .await
+            }
+            Some(McpToolDispatchGroup::Info) => {
                 boxed_send(dispatch_info_tools(
                     tool_name,
                     cg,
@@ -774,14 +762,12 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     active_project_session_db,
                     options.clone(),
                 ))
-                .await,
-            ),
-            Some(McpToolDispatchGroup::Admin) => expect_classified_dispatch(
-                tool_name,
-                boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await,
-            ),
-            Some(McpToolDispatchGroup::Analysis) => expect_classified_dispatch(
-                tool_name,
+                .await
+            }
+            Some(McpToolDispatchGroup::Admin) => {
+                boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::Analysis) => {
                 boxed_send(dispatch_analysis_tools(
                     tool_name,
                     cg,
@@ -790,18 +776,15 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     active_project_session_db,
                     options.clone(),
                 ))
-                .await,
-            ),
-            Some(McpToolDispatchGroup::Git) => expect_classified_dispatch(
-                tool_name,
-                boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await,
-            ),
-            Some(McpToolDispatchGroup::Edit) => expect_classified_dispatch(
-                tool_name,
-                boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await,
-            ),
-            Some(McpToolDispatchGroup::Health) => expect_classified_dispatch(
-                tool_name,
+                .await
+            }
+            Some(McpToolDispatchGroup::Git) => {
+                boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::Edit) => {
+                boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::Health) => {
                 boxed_send(dispatch_health_tools(
                     tool_name,
                     cg,
@@ -810,10 +793,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     active_project_session_db,
                     options.clone(),
                 ))
-                .await,
-            ),
-            Some(McpToolDispatchGroup::RetainedApplication) => expect_classified_dispatch(
-                tool_name,
+                .await
+            }
+            Some(McpToolDispatchGroup::RetainedApplication) => {
                 boxed_send(dispatch_retained_application_tools(
                     tool_name,
                     cg,
@@ -823,38 +805,34 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     active_lcm_context,
                     options.clone(),
                 ))
-                .await,
-            ),
-            Some(McpToolDispatchGroup::Memory) => expect_classified_dispatch(
-                tool_name,
-                boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await,
-            ),
-            Some(McpToolDispatchGroup::SessionWorkflow) => expect_classified_dispatch(
-                tool_name,
+                .await
+            }
+            Some(McpToolDispatchGroup::Memory) => {
+                boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::SessionWorkflow) => {
                 boxed_send(dispatch_session_workflow_tools(
                     tool_name,
                     cg,
                     args,
                     options.clone(),
                 ))
-                .await,
-            ),
-            None => Err(TraceDecayError::Config {
-                message: format!("unknown tool: {tool_name}"),
-            }),
+                .await
+            }
+            // Application-surface tools already returned above; reaching here means
+            // the name resolves to no reachable dispatch entry.
+            Some(McpToolDispatchGroup::ApplicationSurface) | None => {
+                Err(unknown_tool_error(tool_name))
+            }
         }
     })
 }
 
-fn expect_classified_dispatch(
-    tool_name: &str,
-    result: Option<Result<ToolResult>>,
-) -> Result<ToolResult> {
-    result.unwrap_or_else(|| {
-        Err(TraceDecayError::Config {
-            message: format!("internal: classified tool `{tool_name}` failed to dispatch"),
-        })
-    })
+/// The single rejection every dispatch group returns for a name it does not own.
+fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("unknown tool: {tool_name}"),
+    }
 }
 
 fn classify_mcp_tool_dispatch_group(
@@ -1088,8 +1066,8 @@ async fn dispatch_graph_tools(
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_search" => {
             graph::handle_search(
                 cg,
@@ -1125,9 +1103,8 @@ async fn dispatch_graph_tools(
         "tracedecay_signature" => graph::handle_signature(cg, args).await,
         "tracedecay_impls" => graph::handle_impls(cg, args).await,
         "tracedecay_derives" => graph::handle_derives(cg, args).await,
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch project-info, registry, and file-inspection tools
@@ -1142,8 +1119,8 @@ async fn dispatch_info_tools(
     selected_scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_status" => {
             info::handle_status(
                 cg,
@@ -1183,9 +1160,8 @@ async fn dispatch_info_tools(
         "tracedecay_signature_search" => {
             info::handle_signature_search(cg, args, selected_scope_prefix).await
         }
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch administrative tools (`tracedecay_hook_runtime`,
@@ -1195,8 +1171,8 @@ async fn dispatch_admin_tools(
     cg: &TraceDecay,
     args: Value,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_hook_runtime" => {
             hook_runtime::handle_hook_runtime(
                 cg,
@@ -1227,9 +1203,8 @@ async fn dispatch_admin_tools(
             )
             .await
         }
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch catalog-owned application surfaces.
@@ -1238,35 +1213,30 @@ async fn dispatch_application_surface_tools(
     cg: &TraceDecay,
     args: Value,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
-    if operation == ApplicationSurfaceOperation::DiagnosticsRead
-        && options.application_invocation_executor.is_none()
-    {
-        return None;
-    }
+) -> Result<ToolResult> {
+    let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) else {
+        return Err(unknown_tool_error(tool_name));
+    };
     let normalized_args =
         match crate::application_surface::normalize_application_tool_args(tool_name, args) {
             Ok(args) => args,
             Err(error) => {
-                return Some(Err(TraceDecayError::Config {
+                return Err(TraceDecayError::Config {
                     message: error.to_string(),
-                }));
+                });
             }
         };
-    Some(
-        application_surface::handle_application_surface(
-            cg,
-            operation,
-            normalized_args,
-            options.application_invocation_executor,
-            options.application_invocation_target,
-            options.application_request_id.clone(),
-            options.application_deadline.clone(),
-            options.application_cancellation.clone(),
-        )
-        .await,
+    application_surface::handle_application_surface(
+        cg,
+        operation,
+        normalized_args,
+        options.application_invocation_executor,
+        options.application_invocation_target,
+        options.application_request_id.clone(),
+        options.application_deadline.clone(),
+        options.application_cancellation.clone(),
     )
+    .await
 }
 
 /// Dispatch static-analysis report tools (`tracedecay_dead_code`,
@@ -1278,8 +1248,8 @@ async fn dispatch_analysis_tools(
     scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
         "tracedecay_circular" => analysis::handle_circular(cg, args).await,
         "tracedecay_hotspots" => analysis::handle_hotspots(cg, args, scope_prefix).await,
@@ -1312,9 +1282,8 @@ async fn dispatch_analysis_tools(
             )
             .await
         }
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch git-aware tools (`tracedecay_affected`, `tracedecay_changelog`,
@@ -1324,8 +1293,8 @@ async fn dispatch_git_tools(
     cg: &TraceDecay,
     args: Value,
     _options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
         "tracedecay_affected" => git::handle_affected(cg, args).await,
         "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
@@ -1335,9 +1304,8 @@ async fn dispatch_git_tools(
         "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
         "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
         "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch source-editing tools (`tracedecay_str_replace`,
@@ -1347,7 +1315,7 @@ async fn dispatch_edit_tools(
     cg: &TraceDecay,
     args: Value,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
+) -> Result<ToolResult> {
     let invocation = edit::SourceEditInvocationContext {
         executor: options.source_edit_executor.clone(),
         reconciliation_executor: options.source_edit_reconciliation_executor.clone(),
@@ -1355,7 +1323,7 @@ async fn dispatch_edit_tools(
         deadline: options.application_deadline.clone(),
         cancellation: options.application_cancellation.clone(),
     };
-    let result = match tool_name {
+    match tool_name {
         "tracedecay_str_replace" => edit::handle_str_replace(cg, args, invocation.clone()).await,
         "tracedecay_multi_str_replace" => {
             edit::handle_multi_str_replace(cg, args, invocation.clone()).await
@@ -1378,9 +1346,8 @@ async fn dispatch_edit_tools(
         "tracedecay_source_edit_reconcile" => {
             edit::handle_source_edit_reconcile(cg, args, invocation).await
         }
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch code-health and session-baseline tools (`tracedecay_health`,
@@ -1392,8 +1359,8 @@ async fn dispatch_health_tools(
     scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_test_map" => health::handle_test_map(cg, args, scope_prefix).await,
         "tracedecay_gini" => health::handle_gini(cg, args, scope_prefix).await,
         "tracedecay_dependency_depth" => {
@@ -1413,9 +1380,8 @@ async fn dispatch_health_tools(
         }
         "tracedecay_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
         "tracedecay_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch retained memory, session, and workflow operations only after the
@@ -1428,22 +1394,22 @@ async fn dispatch_retained_application_tools(
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     active_lcm_context: session::LcmHandlerContext<'_>,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let operation = RetainedSurfaceOperation::from_name(tool_name)?;
-    Some(
-        invoke_retained_mcp_request(
-            RetainedMcpExecutionContext::Project {
-                cg,
-                scope_prefix,
-                active_project_session_db,
-                active_lcm_context,
-                options: &options,
-            },
-            operation,
-            args,
-        )
-        .await,
+) -> Result<ToolResult> {
+    let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) else {
+        return Err(unknown_tool_error(tool_name));
+    };
+    invoke_retained_mcp_request(
+        RetainedMcpExecutionContext::Project {
+            cg,
+            scope_prefix,
+            active_project_session_db,
+            active_lcm_context,
+            options: &options,
+        },
+        operation,
+        args,
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1527,8 +1493,8 @@ async fn dispatch_memory_tools(
     cg: &TraceDecay,
     args: Value,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_automation_run_artifact_view" => {
             skills::handle_automation_run_artifact_view(cg, args).await
         }
@@ -1538,9 +1504,8 @@ async fn dispatch_memory_tools(
         "tracedecay_skill_list" => skills::handle_skill_list(cg, args, options.accounting_db).await,
         "tracedecay_skill_view" => skills::handle_skill_view(cg, args, options.accounting_db).await,
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 /// Dispatch session, dashboard, and workflow tools (`tracedecay_dashboard`,
@@ -1550,8 +1515,8 @@ async fn dispatch_session_workflow_tools(
     cg: &TraceDecay,
     args: Value,
     options: ToolCallRegistryOptions<'_>,
-) -> Option<Result<ToolResult>> {
-    let result = match tool_name {
+) -> Result<ToolResult> {
+    match tool_name {
         "tracedecay_diagnose" => {
             workflow::handle_diagnose(cg, args, options.code_index_publication_identity.as_deref())
                 .await
@@ -1583,9 +1548,8 @@ async fn dispatch_session_workflow_tools(
             )
             .await
         }
-        _ => return None,
-    };
-    Some(result)
+        _ => Err(unknown_tool_error(tool_name)),
+    }
 }
 
 #[cfg(test)]
@@ -1723,49 +1687,46 @@ mod tests {
         options: ToolCallRegistryOptions<'_>,
     ) -> bool {
         let invalid_args = Value::String("dispatch-metadata-probe".to_owned());
+        // The probe args are deliberately invalid, so an accepted tool still fails —
+        // just not with the sentinel every group returns for a name it does not own.
+        let owned = |result: Result<ToolResult>| {
+            !matches!(
+                &result,
+                Err(TraceDecayError::Config { message })
+                    if message == &format!("unknown tool: {tool_name}")
+            )
+        };
         match group {
             McpToolDispatchGroup::ApplicationSurface
             | McpToolDispatchGroup::RetainedApplication => false,
-            McpToolDispatchGroup::Graph => {
+            McpToolDispatchGroup::Graph => owned(
                 dispatch_graph_tools(tool_name, cg, invalid_args, None, None, None, None, None)
-                    .await
-                    .is_some()
-            }
-            McpToolDispatchGroup::Info => {
+                    .await,
+            ),
+            McpToolDispatchGroup::Info => owned(
                 dispatch_info_tools(tool_name, cg, invalid_args, None, None, None, None, options)
-                    .await
-                    .is_some()
-            }
+                    .await,
+            ),
             McpToolDispatchGroup::Admin => {
-                dispatch_admin_tools(tool_name, cg, invalid_args, options)
-                    .await
-                    .is_some()
+                owned(dispatch_admin_tools(tool_name, cg, invalid_args, options).await)
             }
-            McpToolDispatchGroup::Analysis => {
-                dispatch_analysis_tools(tool_name, cg, invalid_args, None, None, options)
-                    .await
-                    .is_some()
+            McpToolDispatchGroup::Analysis => owned(
+                dispatch_analysis_tools(tool_name, cg, invalid_args, None, None, options).await,
+            ),
+            McpToolDispatchGroup::Git => {
+                owned(dispatch_git_tools(tool_name, cg, invalid_args, options).await)
             }
-            McpToolDispatchGroup::Git => dispatch_git_tools(tool_name, cg, invalid_args, options)
-                .await
-                .is_some(),
-            McpToolDispatchGroup::Edit => dispatch_edit_tools(tool_name, cg, invalid_args, options)
-                .await
-                .is_some(),
-            McpToolDispatchGroup::Health => {
-                dispatch_health_tools(tool_name, cg, invalid_args, None, None, options)
-                    .await
-                    .is_some()
+            McpToolDispatchGroup::Edit => {
+                owned(dispatch_edit_tools(tool_name, cg, invalid_args, options).await)
             }
+            McpToolDispatchGroup::Health => owned(
+                dispatch_health_tools(tool_name, cg, invalid_args, None, None, options).await,
+            ),
             McpToolDispatchGroup::Memory => {
-                dispatch_memory_tools(tool_name, cg, invalid_args, options)
-                    .await
-                    .is_some()
+                owned(dispatch_memory_tools(tool_name, cg, invalid_args, options).await)
             }
             McpToolDispatchGroup::SessionWorkflow => {
-                dispatch_session_workflow_tools(tool_name, cg, invalid_args, options)
-                    .await
-                    .is_some()
+                owned(dispatch_session_workflow_tools(tool_name, cg, invalid_args, options).await)
             }
         }
     }
