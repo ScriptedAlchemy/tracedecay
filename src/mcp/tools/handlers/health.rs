@@ -42,7 +42,7 @@ use crate::types::NodeKind;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
-use super::support::{effective_path, unique_file_paths};
+use super::support::{effective_path, rendered_tool_result, unique_file_paths};
 
 struct HealthSnapshot {
     quality_signal: u32,
@@ -714,14 +714,12 @@ pub(super) async fn handle_gini(
         "outliers": outliers,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         vec![],
+        || render::generic_md(&output),
     ))
 }
 
@@ -763,14 +761,12 @@ pub(super) async fn handle_dependency_depth(
         "chains": chains,
     });
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         vec![],
+        || render::generic_md(&output),
     ))
 }
 
@@ -841,14 +837,12 @@ pub(super) async fn handle_health(
         })
     };
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         vec![],
+        || render::generic_md(&output),
     ))
 }
 
@@ -1097,14 +1091,12 @@ pub(super) async fn handle_runtime(
     {
         value["semantic_runtime"] = serde_json::to_value(&semantic).unwrap_or_else(|_| json!({}));
     }
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &value,
         vec![],
+        || render::generic_md(&value),
     ))
 }
 
@@ -1184,14 +1176,12 @@ pub(super) async fn handle_dsm(
         }
     };
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render_dsm_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         vec![],
+        || render_dsm_md(&output),
     ))
 }
 
@@ -1309,14 +1299,12 @@ pub(super) async fn handle_test_risk(
         message: format!("failed to serialize test risk report: {err}"),
     })?;
 
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         vec![],
+        || render::generic_md(&output),
     ))
 }
 
@@ -1398,12 +1386,12 @@ pub(super) async fn handle_test_map(
     });
 
     let touched_files = unique_file_paths(source_nodes.iter().map(|n| n.file_path.as_str()));
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({"content": [{"type": "text", "text": text}]}),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &output,
         touched_files,
+        || render::generic_md(&output),
     ))
 }
 
@@ -1451,15 +1439,9 @@ fn session_dimension_deltas(
 }
 
 fn session_tool_result(cg: &TraceDecay, args: &Value, output: &Value) -> ToolResult {
-    let text = render::finalize(Some(cg.project_root()), args, output, || {
+    rendered_tool_result(Some(cg.project_root()), args, output, vec![], || {
         render::generic_md(output)
-    });
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    })
 }
 
 /// Handles `tracedecay_session_start` tool calls.

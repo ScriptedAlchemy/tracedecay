@@ -6,8 +6,7 @@ use crate::mcp::tools::ToolResult;
 use crate::memory::types::FeedbackRequest;
 use crate::tracedecay::TraceDecay;
 
-use super::super::rendered_tool_json;
-use super::super::support::project_selector_present;
+use super::super::support::{project_selector_present, tool_json};
 use super::args::{fact_id, feedback_action};
 use super::{
     config_error, memory_application, memory_application_error, memory_operation_context,
@@ -51,7 +50,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
         refresh_target_memory_digest(&memory, &target_memory).await;
     }
     let value = json!({ "status": "recorded", "feedback": result });
-    Ok(rendered_tool_json(
+    Ok(tool_json(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
         &args,
         &value,

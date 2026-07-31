@@ -289,15 +289,6 @@ pub(super) fn text_tool_result(text: &str) -> ToolResult {
     )
 }
 
-pub(super) fn rendered_tool_json(
-    project_root: Option<&Path>,
-    args: &Value,
-    value: &Value,
-) -> ToolResult {
-    let text = render::finalize(project_root, args, value, || render::generic_md(value));
-    text_tool_result(&text)
-}
-
 pub(super) fn json_result(value: &Value) -> ToolResult {
     text_tool_result(&serde_json::to_string(value).unwrap_or_default())
 }

@@ -10,8 +10,7 @@ use crate::mcp::tools::ToolResult;
 use crate::memory::types::FeedbackRequest;
 use crate::tracedecay::TraceDecay;
 
-use super::super::rendered_tool_json;
-use super::super::support::project_selector_present;
+use super::super::support::{project_selector_present, tool_json};
 use super::args::{fact_id, feedback_action, requests_user_memory, required_str};
 use super::fact_store::handle_fact_store_for_target;
 use super::{
@@ -50,7 +49,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_memory_status(
         "memory": status.status,
         "feedback_history_repair": feedback_history_repair_payload(status.feedback_history_repair),
     });
-    Ok(rendered_tool_json(
+    Ok(tool_json(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
         &args,
         &value,
@@ -101,7 +100,7 @@ pub(crate) async fn handle_user_memory_tool(
                 )
                 .await
                 .map_err(memory_application_error)?;
-            Ok(rendered_tool_json(
+            Ok(tool_json(
                 None,
                 &args,
                 &json!({ "status": "recorded", "feedback": result }),
@@ -112,7 +111,7 @@ pub(crate) async fn handle_user_memory_tool(
                 .memory_status_with_repair_v1()
                 .await
                 .map_err(memory_application_error)?;
-            Ok(rendered_tool_json(
+            Ok(tool_json(
                 None,
                 &args,
                 &json!({
