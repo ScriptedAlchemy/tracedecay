@@ -593,34 +593,64 @@ impl DirectFeedbackImpactAdapter {
     /// This adapter used to mint `FileOccurrenceId::new(node.file_path)` — a
     /// raw repository-relative path — which disagreed with every other file
     /// identity in the system. Identity is now resolved from the same authority
-    /// that mints the cycle's impact target; a node the current generation does
-    /// not contain contributes nothing, and no resolver at all yields no
-    /// affected files. Either way the impact stays `Partial`, which is the
-    /// honest report, rather than carrying a guessed identity.
+    /// that mints the cycle's impact target, and the outcome distinguishes the
+    /// three reasons a node can contribute nothing: no resolver is bound, the
+    /// published identity belongs to another generation, or the generation
+    /// simply does not contain that path. Each maps onto its own coverage state
+    /// rather than collapsing into one indistinguishable empty vector.
     async fn resolved_affected_files(
         &self,
         generation: &tracedecay_domain::CodeGenerationId,
         file_paths: &[String],
-    ) -> Vec<FileOccurrenceId> {
+    ) -> ResolvedAffectedFiles {
         let Some(resolver) = self.code_index_identity.as_ref() else {
-            return Vec::new();
+            return ResolvedAffectedFiles::IdentityUnavailable;
         };
         let root = self.graph.project_root().to_path_buf();
         let Some(identity) = resolver.resolve(root.clone()).await else {
-            return Vec::new();
+            return ResolvedAffectedFiles::IdentityUnavailable;
         };
         if identity.generation_id() != generation {
-            return Vec::new();
+            return ResolvedAffectedFiles::GenerationMismatch;
         }
-        let mut files = file_paths
-            .iter()
-            .filter_map(|path| code_index_logical_path(&root, path))
-            .filter_map(|logical| identity.file(&logical).map(|(file, _)| file.clone()))
-            .collect::<Vec<_>>();
+        let mut resolved_every_path = true;
+        let mut files = Vec::with_capacity(file_paths.len());
+        for path in file_paths {
+            let file = code_index_logical_path(&root, path)
+                .and_then(|logical| identity.file(&logical).map(|(file, _)| file.clone()));
+            match file {
+                Some(file) => files.push(file),
+                None => resolved_every_path = false,
+            }
+        }
         files.sort();
         files.dedup();
-        files
+        if resolved_every_path {
+            ResolvedAffectedFiles::Complete(files)
+        } else {
+            ResolvedAffectedFiles::Partial(files)
+        }
     }
+}
+
+/// Typed outcome of resolving graph-node paths onto code-index file identity.
+///
+/// The empty-vector cases used to be indistinguishable from "this generation
+/// genuinely has no affected files"; each now carries its own coverage meaning.
+enum ResolvedAffectedFiles {
+    /// Every graph-node path resolved against the requested generation.
+    Complete(Vec<FileOccurrenceId>),
+    /// The generation matched, but at least one graph-node path has no file
+    /// identity in it, so the resolved set is a subset of the impact radius.
+    Partial(Vec<FileOccurrenceId>),
+    /// No code-index identity authority is bound to this runtime — the case for
+    /// runtimes opened outside the daemon. The adapter reports no affected files
+    /// rather than minting raw-path identities the rest of the system cannot
+    /// match.
+    IdentityUnavailable,
+    /// The published identity belongs to a different generation than the one the
+    /// request targets, so nothing it contains describes this impact.
+    GenerationMismatch,
 }
 
 impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
@@ -664,9 +694,19 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 .iter()
                 .map(|node| node.file_path.clone())
                 .collect::<Vec<_>>();
-            let affected_files = self
+            let (affected_files, graph_state) = match self
                 .resolved_affected_files(&generation, &node_file_paths)
-                .await;
+                .await
+            {
+                ResolvedAffectedFiles::Complete(files) => (files, FeedbackImpactStateV1::Complete),
+                ResolvedAffectedFiles::Partial(files) => (files, FeedbackImpactStateV1::Partial),
+                ResolvedAffectedFiles::IdentityUnavailable => {
+                    (Vec::new(), FeedbackImpactStateV1::Partial)
+                }
+                ResolvedAffectedFiles::GenerationMismatch => {
+                    return FeedbackImpactPortOutcome::Stale;
+                }
+            };
             match context.admission_at(request.input.observed_at) {
                 RequestAdmission::Admitted => {}
                 RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
@@ -715,19 +755,37 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 DirectAffectedTestsOutcome::Stale => return FeedbackImpactPortOutcome::Stale,
             };
 
+            // Folded exactly like `GraphImpactFeedbackAdapter`: the impact is
+            // complete only when both the graph and the affected-test evidence
+            // report complete coverage. `evidence_anchors` stays empty because
+            // this runtime binds no anchor authority — the graph traversal
+            // yields nodes, not retrieval anchors — and an invented anchor would
+            // be worse than none.
+            let state = if graph_state == FeedbackImpactStateV1::Complete
+                && affected_tests_state == FeedbackImpactStateV1::Complete
+            {
+                FeedbackImpactStateV1::Complete
+            } else {
+                FeedbackImpactStateV1::Partial
+            };
             let impact = FeedbackImpactV1 {
                 target: request.input.target.clone(),
                 affected_files,
                 affected_callers,
                 affected_tests,
                 evidence_anchors: Vec::new(),
-                state: FeedbackImpactStateV1::Partial,
+                state,
                 affected_tests_state,
             };
             if impact.validate().is_err() {
-                FeedbackImpactPortOutcome::Unavailable
-            } else {
-                FeedbackImpactPortOutcome::Partial(impact)
+                return FeedbackImpactPortOutcome::Unavailable;
+            }
+            match state {
+                FeedbackImpactStateV1::Complete => FeedbackImpactPortOutcome::Complete(impact),
+                FeedbackImpactStateV1::Partial => FeedbackImpactPortOutcome::Partial(impact),
+                FeedbackImpactStateV1::Stale | FeedbackImpactStateV1::Unavailable => {
+                    FeedbackImpactPortOutcome::Unavailable
+                }
             }
         })
     }

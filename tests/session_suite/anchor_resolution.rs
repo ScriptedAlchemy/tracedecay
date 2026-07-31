@@ -25,11 +25,12 @@ use tracedecay_domain::{
     VectorWatermark, WatermarkDriftV1,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome,
-    FactCurrentQuery, FactLineageQuery, FactStore, FactStoreResult, FactWriteBatch,
-    LegacyFactQuery, ObservationCommitReceipt, ObservationPersistOutcome,
-    ObservationProjectionStore, ObservationStore, ObservationWrite, RetrievalAnchorQuery,
-    SESSION_MESSAGE_PROJECTOR_VERSION, StoredFactV1, build_observation_resolution_authorization_v1,
+    AnchoredObservationWrite, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
+    FactCommitOutcome, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
+    FactLineageResponseV1, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
+    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationWrite, RetrievalAnchorQuery, SESSION_MESSAGE_PROJECTOR_VERSION,
+    StoredFactV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
 
@@ -565,6 +566,13 @@ impl FactStore for UnavailableFactStore {
         unreachable!("report resolution never queries facts")
     }
 
+    async fn query_fact_current_response(
+        &self,
+        _query: FactCurrentQuery,
+    ) -> FactStoreResult<FactCurrentResponseV1> {
+        unreachable!("report resolution never queries facts")
+    }
+
     async fn query_fact_as_of(
         &self,
         _query: FactAsOfQuery,
@@ -572,10 +580,24 @@ impl FactStore for UnavailableFactStore {
         unreachable!("report resolution never queries facts")
     }
 
+    async fn query_fact_as_of_response(
+        &self,
+        _query: FactAsOfQuery,
+    ) -> FactStoreResult<FactAsOfResponseV1> {
+        unreachable!("report resolution never queries facts")
+    }
+
     async fn query_fact_lineage(
         &self,
         _query: FactLineageQuery,
     ) -> FactStoreResult<Vec<FactLineageEventV1>> {
+        unreachable!("report resolution never queries fact lineage")
+    }
+
+    async fn query_fact_lineage_response(
+        &self,
+        _query: FactLineageQuery,
+    ) -> FactStoreResult<FactLineageResponseV1> {
         unreachable!("report resolution never queries fact lineage")
     }
 

@@ -38,12 +38,17 @@ const DISPATCH_TEXT_KEYS: &[&str] = &["description", "prompt", "subagent_type"];
 const SUBAGENT_DISPATCH_TOOLS: &[&str] = &["task", "subagent"];
 
 /// First non-blank model name on `value` among the accepted spellings.
+///
+/// The name is trimmed: a whitespace-padded spelling names the same model as
+/// its bare form, and leaving the padding on splits one model into two
+/// attribution identities.
 pub fn cursor_model_string(value: &Value) -> Option<String> {
     CURSOR_MODEL_KEYS.iter().copied().find_map(|key| {
         value
             .get(key)
             .and_then(Value::as_str)
-            .filter(|model| !model.trim().is_empty())
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
             .map(str::to_string)
     })
 }

@@ -803,14 +803,10 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
     }
 }
 
+/// Retained name for its nine call sites across the daemon and application
+/// surface; the saturating clamp is the one shared definition.
 pub(crate) fn invocation_now_micros() -> UtcMicros {
-    UtcMicros(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-            .unwrap_or(i64::MAX),
-    )
+    tracedecay_application::clock::now_micros()
 }
 
 pub(crate) fn application_delivery_route(surface: BindingSurface) -> Plan26DeliveryRouteV1 {

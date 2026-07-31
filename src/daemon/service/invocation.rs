@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
+use tracedecay_application::clock::now_micros;
 use tracedecay_application::feedback::{
     FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
 };
@@ -6787,17 +6788,6 @@ fn stable_digest(material: &impl Serialize) -> Result<ManifestDigest, Applicatio
     canonical_sha256(material).map_err(|_| invalid_git_request())
 }
 
-fn now_micros() -> UtcMicros {
-    UtcMicros(
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_micros()),
-        )
-        .unwrap_or(i64::MAX),
-    )
-}
-
 fn invalid_git_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -9478,13 +9468,10 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
+/// Retained name for this module's many call sites; the saturating clamp is the
+/// shared one so it cannot drift from every other runtime that stamps "now".
 fn current_micros() -> UtcMicros {
-    UtcMicros(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-            .unwrap_or_default(),
-    )
+    now_micros()
 }
 
 fn valid_token(value: &str, max_len: usize) -> bool {

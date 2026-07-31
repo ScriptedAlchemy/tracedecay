@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use tracedecay_application::{
     RequestAdmission, RequestContext, ResolvedScope,
+    clock::now_micros,
     storage::{
         StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1, StoreKeyV1,
         StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthBaselinePendingV1,
@@ -191,12 +192,4 @@ fn interruption(context: &RequestContext) -> Option<UnavailableReasonV1> {
         RequestAdmission::Cancelled => Some(UnavailableReasonV1::Cancelled),
         RequestAdmission::TimedOut => Some(UnavailableReasonV1::DeadlineExceeded),
     }
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
