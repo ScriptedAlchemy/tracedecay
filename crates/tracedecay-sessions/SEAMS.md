@@ -10,21 +10,73 @@ Each entry is a `crate::<root module>::…` path that no longer resolves because
 that module into a workspace crate too, or inverting the dependency behind a
 port that the root crate implements.
 
-**Total unresolved references: 300** across 25 root modules and 79 files.
+**Total unresolved references: 296** across 25 root modules and 79 files.
+
+## Crate check status
+
+`cargo check -p tracedecay-sessions` reports **220 errors**, all of them either a
+seam below or a cascade from one:
+
+| Code | Count | Meaning |
+| --- | ---: | --- |
+| `E0433` | 167 | `crate::<root module>` path does not resolve |
+| `E0432` | 52 | unresolved `use crate::<root module>::…` import |
+| `E0223` | 1 | ambiguous associated type, cascading from the unresolved `crate::privacy::SensitiveKeyPolicy` trait |
+
+The error count is smaller than the reference count because a single failed
+`use` masks every downstream use of the imported name. Resolving `crate::db`,
+`crate::application`, and `crate::privacy` should clear the large majority.
+
+Everything the moved code needed from third-party and sibling workspace crates
+is already wired in `Cargo.toml`; nothing outside this table is outstanding.
+
+## Notes on specific seams
+
+- `crate::application` is the **root** `src/application/` tree
+  (`host_admission`, `observation`, `session::compatibility`), not the existing
+  `tracedecay-application` crate. Only `session::lcm::compression_policy` had a
+  crate-side equivalent and was repointed at `crate::lcm::compression_policy`.
+- `crate::db` is the root SQLite engine façade (`db::engine::{Connection, Row,
+  Executor, …}`). It is the single highest-leverage seam: it blocks every LCM and
+  workflow storage module.
+- `crate::store` is the root store layer (`GlobalDbTranscriptStore`,
+  `TranscriptIngestStore`, …), distinct from the `tracedecay-store` crate that is
+  already a dependency.
+- `crate::privacy` supplies the sanitization kernel shared by every provider
+  parser; it is why the provider modules fail as a block.
+
+## Non-code references to the old path
+
+These name `src/sessions/…` as data or prose and were deliberately left alone;
+the benchmark manifests additionally pin SHA-256 digests over the harness files,
+so they need a re-seal rather than a path edit.
+
+- `benchmarks/pr5-observation/workload-v1.json` and
+  `benchmarks/pr5-observation/result-2026-07-26-dc17dd73.json`
+- `benchmarks/pr8-temporal/workload-v1.json` and
+  `benchmarks/pr8-temporal/result-provisional.json`
+- `tests/fixtures/transcript_golden/cline_like/manifest.json` and
+  `tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json`
+- `tests/fixtures/provider_normalization/codex/README.md`
+- Twelve `docs/**` files (LCM, memory, and plan documents) that cite the old
+  module paths in prose.
+
+The `include_str!`/`include_bytes!` fixture paths inside the moved code were
+repointed at the repo root and do resolve.
 
 ## Offenders by volume
 
 | Root module | References | Distinct paths | Files |
 | --- | ---: | ---: | ---: |
-| `crate::application` | 92 | 27 | 41 |
+| `crate::application` | 91 | 26 | 41 |
 | `crate::db` | 74 | 17 | 34 |
 | `crate::privacy` | 34 | 11 | 21 |
 | `crate::errors` | 12 | 4 | 3 |
-| `crate::store` | 10 | 8 | 10 |
 | `crate::config` | 9 | 5 | 6 |
 | `crate::global_db` | 9 | 2 | 8 |
 | `crate::storage` | 9 | 8 | 7 |
-| `crate::worktree` | 9 | 2 | 4 |
+| `crate::store` | 8 | 6 | 8 |
+| `crate::worktree` | 8 | 2 | 3 |
 | `crate::agents` | 7 | 3 | 4 |
 | `crate::accounting` | 6 | 1 | 6 |
 | `crate::daemon` | 6 | 2 | 3 |
@@ -44,7 +96,7 @@ port that the root crate implements.
 
 ## Full catalog
 
-### `crate::application` (92 references)
+### `crate::application` (91 references)
 
 - `crates/tracedecay-sessions/src/runtime/claude.rs:256` — `crate::application::host_admission::HostAdmissionFacade`
 - `crates/tracedecay-sessions/src/runtime/claude.rs:264` — `crate::application::observation::ObservationCancellation::default`
@@ -117,7 +169,6 @@ port that the root crate implements.
 - `crates/tracedecay-sessions/src/runtime/lcm/raw.rs:6` — `crate::application::session::compatibility::derived_text_for_snippet`
 - `crates/tracedecay-sessions/src/runtime/lcm/raw.rs:7` — `crate::application::session::compatibility::projected_content_hash`
 - `crates/tracedecay-sessions/src/runtime/lcm/schema.rs:1` — `crate::application::session::compatibility::projected_content_hash`
-- `crates/tracedecay-sessions/src/runtime/lcm/types.rs:4` — `crate::application::session::lcm`
 - `crates/tracedecay-sessions/src/runtime/lcm/types.rs:9` — `crate::application::session::compatibility`
 - `crates/tracedecay-sessions/src/runtime/lcm/types.rs:12` — `crate::application::session::lcm::contracts`
 - `crates/tracedecay-sessions/src/runtime/session_temporal_benchmark.rs:35` — `crate::application::context`
@@ -268,19 +319,6 @@ port that the root crate implements.
 - `crates/tracedecay-sessions/src/runtime/transcript_backfill.rs:1286` — `crate::errors::Result`
 - `crates/tracedecay-sessions/src/runtime/transcript_backfill.rs:1310` — `crate::errors::Result`
 
-### `crate::store` (10 references)
-
-- `crates/tracedecay-sessions/src/runtime/git_correlation/backfill.rs:3` — `crate::store::GlobalDbGitCorrelationStore`
-- `crates/tracedecay-sessions/src/runtime/git_correlation/store.rs:3` — `crate::store::git_correlation`
-- `crates/tracedecay-sessions/src/runtime/ingest/project.rs:10` — `crate::store`
-- `crates/tracedecay-sessions/src/runtime/ingest/scheduler.rs:9` — `crate::store::TranscriptIngestStore`
-- `crates/tracedecay-sessions/src/runtime/ingest/user.rs:9` — `crate::store::GlobalDbTranscriptStore`
-- `crates/tracedecay-sessions/src/runtime/ingest/user_provider.rs:9` — `crate::store::TranscriptIngestStore`
-- `crates/tracedecay-sessions/src/runtime/session_temporal_benchmark.rs:58` — `crate::store::GlobalDbSessionTemporalStore`
-- `crates/tracedecay-sessions/src/runtime/source.rs:53` — `crate::store::TranscriptIngestStore`
-- `crates/tracedecay-sessions/src/runtime/workflow_index/port.rs:3` — `crate::store::workflow`
-- `crates/tracedecay-sessions/src/runtime/workflow_ingest.rs:25` — `crate::store::GlobalDbWorkflowStore`
-
 ### `crate::config` (9 references)
 
 - `crates/tracedecay-sessions/src/runtime/claude_observation.rs:1642` — `crate::config::PinnedUserDataDir::new`
@@ -317,10 +355,20 @@ port that the root crate implements.
 - `crates/tracedecay-sessions/src/runtime/workflow_ingest/tests.rs:53` — `crate::storage::EnrollmentMarker`
 - `crates/tracedecay-sessions/src/runtime/workflow_ingest/tests.rs:55` — `crate::storage::StorageMode::ProfileSharded`
 
-### `crate::worktree` (9 references)
+### `crate::store` (8 references)
+
+- `crates/tracedecay-sessions/src/runtime/git_correlation/backfill.rs:3` — `crate::store::GlobalDbGitCorrelationStore`
+- `crates/tracedecay-sessions/src/runtime/ingest/project.rs:10` — `crate::store`
+- `crates/tracedecay-sessions/src/runtime/ingest/scheduler.rs:9` — `crate::store::TranscriptIngestStore`
+- `crates/tracedecay-sessions/src/runtime/ingest/user.rs:9` — `crate::store::GlobalDbTranscriptStore`
+- `crates/tracedecay-sessions/src/runtime/ingest/user_provider.rs:9` — `crate::store::TranscriptIngestStore`
+- `crates/tracedecay-sessions/src/runtime/session_temporal_benchmark.rs:58` — `crate::store::GlobalDbSessionTemporalStore`
+- `crates/tracedecay-sessions/src/runtime/source.rs:53` — `crate::store::TranscriptIngestStore`
+- `crates/tracedecay-sessions/src/runtime/workflow_ingest.rs:25` — `crate::store::GlobalDbWorkflowStore`
+
+### `crate::worktree` (8 references)
 
 - `crates/tracedecay-sessions/src/runtime/git_correlation/backfill.rs:569` — `crate::worktree::git_worktree_root`
-- `crates/tracedecay-sessions/src/runtime/git_correlation.rs:442` — `crate::worktree::git_worktree_root`
 - `crates/tracedecay-sessions/src/runtime/hermes/ingest.rs:484` — `crate::worktree::git_worktree_root`
 - `crates/tracedecay-sessions/src/runtime/hermes/ingest.rs:537` — `crate::worktree::git_worktree_root`
 - `crates/tracedecay-sessions/src/runtime/shared.rs:177` — `crate::worktree::git_worktree_root`
