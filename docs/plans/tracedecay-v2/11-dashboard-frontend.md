@@ -28,6 +28,12 @@ and persisted deep links retain compatibility and migration obligations; all
 other retention is judged by the user journeys, behavior, accessibility,
 performance, platform, and regression requirements below.
 
+That compatibility applies only to URLs/deep links evidenced on
+`origin/master`, in a published release, or in live persisted navigation.
+Branch-local routes, DTOs, and design tokens change to their final shape in
+place; references and tests on this branch do not create aliases or migration
+windows.
+
 Current implementation (2026-07-25): the legacy multi-app dashboard (shell,
 holographic, lcm, graph, code-diagnostics, savings, settings as separate
 bundles) was removed. The real single-app `app-dist` bundle is the product
@@ -159,10 +165,10 @@ corrections, not acceptance of the still-unverified checkpoint above.
   sparse circles, invisible real activity, bland space-hungry vertical lists,
   bland UML, service-box call chains, embedded-browser QA, and any falsified UI
   are rejected.** Plans 11a/11b carry the concrete replacements.
-- **Deleting or renaming design tokens is rejected.** A `tokens.css` variant
-  removed tokens and broke 109 existing references. Additive, backward-
-  compatible token evolution supersedes it; existing token names remain until
-  every consumer has an explicit compatible migration.
+- **Uncoordinated token deletion or rename is rejected.** A `tokens.css`
+  variant removed tokens and broke 109 branch-local references. Change the
+  unreleased token and all consumers together to the final shape; retain an
+  alias or migration only if a published external consumer is evidenced.
 - **The Explorer workspace replacement from `86fd70fe6` is superseded.** It
   was adopted and then reverted by `cb6c71739` to trunk behavior, retaining
   only the independently accepted Hermes LCM parsing. Later coordinator,
