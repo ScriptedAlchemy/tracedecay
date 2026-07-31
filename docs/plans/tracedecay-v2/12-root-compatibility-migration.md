@@ -188,7 +188,9 @@ family corruption remains preserve-and-escalate.
   disposition before serving and rebuilds affected derivatives; provenance
   never overrides erasure.
 - Delete obsolete V1 root wiring, direct database clients, source-only
-  temporary adapters, and dead flags after the recovery boundary passes.
+  temporary adapters, and source-only/internal dead flags after the recovery
+  boundary passes. Potentially installed CLI/configuration flags remain until
+  the authorized installed-client/host/profile census proves absence.
   Delete migration-only dependencies/features/build inputs and their dedicated
   test support only after the authorized registered-store/profile census proves
   no remaining archive or store depends on them.
