@@ -7885,6 +7885,20 @@ impl DaemonInvocationService {
         let request_id = request.request_id.clone();
         let operation = request.operation();
         let delivery_route = request.delivery_route;
+        if matches!(
+            &request.payload,
+            DaemonInvocationPayload::MultiRootScopeSetRead { .. }
+                | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
+                | DaemonInvocationPayload::MultiRootExecute { .. }
+        ) {
+            return match request.validate() {
+                Ok(()) => DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                ),
+                Err(problem) => DaemonInvocationResponse::problem(request_id, problem),
+            };
+        }
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project.
         let runtimes = self
@@ -8326,66 +8340,8 @@ impl DaemonInvocationService {
                 )
                 .await
             }
-            DaemonInvocationPayload::MultiRootScopeSetRead {
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                let Some(owner) = self.lsp_owner(project_root).await else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                let Some(storage) = owner.scope_set_storage else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                match storage.read(&request.scope_set_id) {
-                    Ok(Some(scope_set)) => {
-                        let Some(project_root) = project_root else {
-                            return DaemonInvocationResponse::problem(
-                                request_id,
-                                DaemonInvocationProblem::Unavailable,
-                            );
-                        };
-                        let Some((scope, outcome)) = self
-                            .multi_root_evidence(
-                                project_root,
-                                RequestId::new(request_id.clone())
-                                    .expect("validated daemon request id"),
-                                "scope_set_read",
-                                Some(scope_set),
-                                observed_at,
-                                deadline,
-                                cancellation,
-                            )
-                            .await
-                        else {
-                            return DaemonInvocationResponse::problem(
-                                request_id,
-                                DaemonInvocationProblem::Unavailable,
-                            );
-                        };
-                        DaemonInvocationResponse::with_outcome(
-                            request_id,
-                            DaemonInvocationOutcome::MultiRootScopeSetRead { scope, outcome },
-                        )
-                    }
-                    Ok(None) => DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                    ),
-                    Err(_) => DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    ),
-                }
-            }
-            DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
+            DaemonInvocationPayload::MultiRootScopeSetRead { .. }
+            | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
             | DaemonInvocationPayload::MultiRootExecute { .. } => {
                 DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
             }
@@ -10642,6 +10598,93 @@ mod tests {
             serde_json::from_str(&frame).expect("initialize success must be JSON-RPC");
         assert_eq!(response["id"], 2);
         assert!(response["result"]["capabilities"].is_object());
+    }
+
+    #[tokio::test]
+    async fn multi_root_payloads_refuse_before_runtime_or_projection_dispatch() {
+        let service = DaemonInvocationService::default();
+        let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+        let project_root = PathBuf::from("/quarantined-multi-root");
+        let scope_set_id = ScopeSetId::new("scope-set.quarantined").expect("scope set");
+        let observed_at = UtcMicros(1);
+        let deadline = Deadline::new(UtcMicros(2)).expect("deadline");
+        let cancellation =
+            CancellationContext::active("cancel.multi-root.quarantined").expect("cancellation");
+        let mut requests = vec![
+            DaemonInvocationRequest::multi_root_scope_set_read(
+                "request.multi-root.read",
+                MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
+                observed_at,
+                deadline.clone(),
+                cancellation.clone(),
+            ),
+            DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+                "request.multi-root.cas",
+                MultiRootScopeSetCasRequestV1::new(
+                    scope_set_id.clone(),
+                    None,
+                    vec![ProjectId::new("project.quarantined").expect("project")],
+                )
+                .expect("CAS request"),
+                observed_at,
+                deadline.clone(),
+                cancellation.clone(),
+            ),
+        ];
+        let revision = ScopeSetRevision::new(1).expect("revision");
+        let digest =
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("scope digest");
+        for (index, operation) in [
+            tracedecay_application::MultiRootOperationV1::Work {
+                request: serde_json::json!({}),
+            },
+            tracedecay_application::MultiRootOperationV1::Git {
+                request: serde_json::json!({}),
+            },
+            tracedecay_application::MultiRootOperationV1::Feedback {
+                request: serde_json::json!({}),
+            },
+            tracedecay_application::MultiRootOperationV1::Impact {
+                request: serde_json::json!({}),
+            },
+            tracedecay_application::MultiRootOperationV1::Query {
+                request: serde_json::json!({}),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            requests.push(DaemonInvocationRequest::multi_root_execute(
+                format!("request.multi-root.execute-{index}"),
+                MultiRootExecuteRequestV1::new(
+                    scope_set_id.clone(),
+                    revision.clone(),
+                    digest.clone(),
+                    operation,
+                    0,
+                    None,
+                )
+                .expect("execute request"),
+                observed_at,
+                deadline.clone(),
+                cancellation.clone(),
+            ));
+        }
+
+        for request in requests {
+            let response = service
+                .invoke(&registry, Some(&project_root), None, None, request)
+                .await;
+            assert!(matches!(
+                response.outcome,
+                DaemonInvocationOutcome::Problem {
+                    problem: DaemonInvocationProblem::Unavailable
+                }
+            ));
+        }
+        assert_eq!(registry.lock().await.active_sessions(), 0);
+        assert!(service.lsp_sessions.lock().await.is_empty());
+        assert!(service.authorized_lsp_workspaces.lock().await.is_empty());
     }
 
     #[tokio::test]
