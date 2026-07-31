@@ -1,12 +1,7 @@
-//! Compatibility façade for contracts now owned by focused workspace crates.
+//! Root shim for the kernel `types` module.
+//!
+//! The implementation moved to `tracedecay_runtime_core::types` in the one-shot
+//! crate split. This glob keeps every historical `crate::types::…` path resolving
+//! from the root crate.
 
-pub use tracedecay_application::source_edit::{
-    AstGrepResult, EditResult, InsertResult, MoveHint, MoveResult, MultiEditResult,
-};
-pub use tracedecay_domain::code_intelligence::{
-    BuildContextOptions, CodeBlock, Edge, EdgeKind, ExtractionResult, FileRecord, GraphStats,
-    IndexCoverageHint, Node, NodeKind, OutputFormat, ResolutionResult, ResolvedRef, SearchResult,
-    Subgraph, TaskContext, TraversalDirection, TraversalOptions, UnresolvedRef, Visibility,
-    generate_node_id,
-};
-pub use tracedecay_domain::observability::CostTurn;
+pub use tracedecay_runtime_core::types::*;

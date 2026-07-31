@@ -1,18 +1,7 @@
-use std::ffi::OsStr;
+//! Root shim for the kernel `os_str_bytes` module.
+//!
+//! The implementation moved to `tracedecay_runtime_core::os_str_bytes` in the one-shot
+//! crate split. This glob keeps every historical `crate::os_str_bytes::…` path resolving
+//! from the root crate.
 
-#[cfg(unix)]
-pub(crate) fn native_os_str_bytes(value: &OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt as _;
-    value.as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-pub(crate) fn native_os_str_bytes(value: &OsStr) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt as _;
-    value.encode_wide().flat_map(u16::to_le_bytes).collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn native_os_str_bytes(value: &OsStr) -> Vec<u8> {
-    value.as_encoded_bytes().to_vec()
-}
+pub use tracedecay_runtime_core::os_str_bytes::*;

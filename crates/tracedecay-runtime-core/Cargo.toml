@@ -1,0 +1,66 @@
+[package]
+name = "tracedecay-runtime-core"
+version = "0.1.0"
+edition.workspace = true
+description = "TraceDecay runtime kernel: errors, storage layout, database engine, stores, memory, git/worktree topology, and process leases"
+license = "MIT"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[features]
+default = []
+# Forwarded from the root package. Gates daemonless fixture runtimes and the
+# in-process transport doubles used by storage-runtime tests.
+test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
+
+[dependencies]
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+
+amari-holographic = "0.23.0"
+bincode = "1.3"
+dirs = "6"
+fs2 = "0.4"
+getrandom = "0.2"
+gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+hex = "0.4"
+regex = "1.12.3"
+reflink-copy = "0.1"
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tree-sitter = "0.26"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = "1"
+
+[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+fsys = "1.1.0"
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+] }
+
+[dev-dependencies]
+hex = "0.4"
+sha2 = "0.11"
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
