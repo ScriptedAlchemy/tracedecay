@@ -11,8 +11,8 @@ use reqwest::blocking::Client as HttpClient;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::Deserialize;
 use serde::Serialize;
-use tracedecay_application::remote::protocol::{RemoteProtocolBodyV1, RemoteProtocolRequestV1};
 use tracedecay_application::RequestId;
+use tracedecay_application::remote::protocol::{RemoteProtocolBodyV1, RemoteProtocolRequestV1};
 use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 
 const MAX_CREDENTIAL_BYTES: usize = 4_096;

@@ -22,6 +22,18 @@ const HEADER: &str = concat!(
     "// Authority: tracedecay-application catalog/schema contracts, ",
     "and tracedecay-tool-catalog executable bindings.\n\n",
 );
+
+/// Append one formatted line to a generated-source buffer.
+///
+/// Formatting into a `String` cannot fail, so every generator write site would
+/// otherwise carry the same unreachable error handling. Naming it once keeps
+/// the generator's real fallibility — schema resolution — visible.
+macro_rules! emit {
+    ($out:expr, $($argument:tt)*) => {
+        writeln!($out, $($argument)*).expect("String writes cannot fail")
+    };
+}
+
 struct Operation {
     name: String,
     operation_id: String,
@@ -304,10 +316,9 @@ fn render_schema_type_at(
             };
             Ok(format!("readonly {item}[]"))
         }
-        Some("object") | None
-            if object.contains_key("properties")
-                || object.contains_key("additionalProperties")
-                || schema_type == Some("object") =>
+        Some("object") => render_object_type(root, object, resolving),
+        None if object.contains_key("properties")
+            || object.contains_key("additionalProperties") =>
         {
             render_object_type(root, object, resolving)
         }
@@ -410,7 +421,7 @@ fn render_operations(
         let result_type = render_schema_type(&operation.result_schema.body)?;
         let request_schema = serde_json::to_string(&operation.request_schema.body)?;
         let result_schema = serde_json::to_string(&operation.result_schema.body)?;
-        writeln!(
+        emit!(
             out,
             "export type {0}Request = {1};\n\
              export type {0}Result = {2};\n\
@@ -424,8 +435,7 @@ fn render_operations(
             operation.type_name,
             request_schema,
             result_schema,
-        )
-        .expect("String writes cannot fail");
+        );
     }
     if operations.is_empty() {
         out.push_str("export const OPERATIONS = [] as const;\n\n");
@@ -433,7 +443,7 @@ fn render_operations(
         out.push_str("export const OPERATIONS = [\n");
     }
     for operation in operations {
-        writeln!(
+        emit!(
             out,
             "  {{ operation: {0}, operationId: {1}, route: {2}, method: \"POST\", bindingId: {3},\n\
              \x20   requestSchema: {{ schemaId: {4}, revision: {5} }}, resultSchema: {{ schemaId: {6}, revision: {7} }},\n\
@@ -450,8 +460,7 @@ fn render_operations(
             operation.result_schema.revision,
             serde_json::to_string(&operation.cancellation)?,
             operation.type_name
-        )
-        .expect("String writes cannot fail");
+        );
     }
     if !operations.is_empty() {
         out.push_str("] as const;\n\n");
@@ -470,14 +479,13 @@ fn render_operations(
          export const UNAVAILABLE_OPERATIONS = [\n",
     );
     for operation in unavailable {
-        writeln!(
+        emit!(
             out,
             "  {{ operation: {}, operationId: {}, availability: \"unavailable\", disposition: {} }},",
             quote(&operation.name),
             quote(&operation.operation_id),
             quote(operation.disposition)
-        )
-        .expect("String writes cannot fail");
+        );
     }
     out.push_str(
         "] as const satisfies readonly UnavailableOperationCapability[];\n\
@@ -499,13 +507,12 @@ fn render_server_operations() -> String {
          export const SERVER_OPERATIONS = [\n",
     );
     for operation in HttpApplicationOperation::ALL {
-        writeln!(
+        emit!(
             out,
             "  {{ operation: {}, route: {}, sdkAvailability: \"unavailable\", disposition: \"schema_unavailable\" }},",
             quote(operation.as_str()),
             quote(&format!("/application{}", operation.route_path()))
-        )
-        .expect("String writes cannot fail");
+        );
     }
     out.push_str(
         "] as const satisfies readonly ServerOperationDescriptor[];\n\
@@ -551,7 +558,7 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
         let module = operation.name.clone();
         let (request_source, request_type) = typify_schema(&operation.request_schema.body)?;
         let (result_source, result_type) = typify_schema(&operation.result_schema.body)?;
-        writeln!(
+        emit!(
             out,
             "#[allow(clippy::all)]\n\
              pub mod {module} {{\n\
@@ -569,8 +576,7 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
             binding = operation.binding,
             schema = operation.result_schema.id,
             revision = operation.result_schema.revision,
-        )
-        .expect("String writes cannot fail");
+        );
     }
     out.push_str(
         "#[derive(Clone, Debug, PartialEq, Eq)]\n\
@@ -644,37 +650,34 @@ fn render_python_operations(
          ServerOperationName: TypeAlias = Literal[\n",
     );
     for operation in HttpApplicationOperation::ALL {
-        writeln!(out, "    {:?},", operation.as_str()).expect("String writes cannot fail");
+        emit!(out, "    {:?},", operation.as_str());
     }
     for operation in operations {
-        writeln!(out, "    {:?},", operation.name).expect("String writes cannot fail");
+        emit!(out, "    {:?},", operation.name);
     }
     out.push_str("]\n\nSERVER_OPERATIONS: Final[dict[ServerOperationName, str]] = {\n");
     for operation in HttpApplicationOperation::ALL {
-        writeln!(
+        emit!(
             out,
             "    {:?}: {:?},",
             operation.as_str(),
             format!("/application{}", operation.route_path())
-        )
-        .expect("String writes cannot fail");
+        );
     }
     for operation in operations {
-        writeln!(out, "    {:?}: {:?},", operation.name, operation.route)
-            .expect("String writes cannot fail");
+        emit!(out, "    {:?}: {:?},", operation.name, operation.route);
     }
     out.push_str("}\n\nUNAVAILABLE_OPERATIONS: Final[dict[str, str]] = {\n");
     for operation in HttpApplicationOperation::ALL {
-        writeln!(out, "    {:?}: \"schema_unavailable\",", operation.as_str())
-            .expect("String writes cannot fail");
+        emit!(out, "    {:?}: \"schema_unavailable\",", operation.as_str());
     }
     for operation in unavailable {
-        writeln!(
+        emit!(
             out,
             "    {:?}: {:?},",
-            operation.name, operation.disposition
-        )
-        .expect("String writes cannot fail");
+            operation.name,
+            operation.disposition
+        );
     }
     out.push_str("}\n\n");
 
@@ -687,13 +690,11 @@ fn render_python_operations(
             render_python_schema_type(&operation.result_schema.body, &result_name)?;
         out.push_str(&request_definitions);
         if request_type != request_name {
-            writeln!(out, "{request_name}: TypeAlias = {request_type}\n")
-                .expect("String writes cannot fail");
+            emit!(out, "{request_name}: TypeAlias = {request_type}\n");
         }
         out.push_str(&result_definitions);
         if result_type != result_name {
-            writeln!(out, "{result_name}: TypeAlias = {result_type}\n")
-                .expect("String writes cannot fail");
+            emit!(out, "{result_name}: TypeAlias = {result_type}\n");
         }
     }
 
@@ -726,7 +727,7 @@ fn render_python_operations(
          WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {\n",
     );
     for operation in operations {
-        writeln!(
+        emit!(
             out,
             // Call the bare class, not `OperationDescriptor[..Request, ..Result](..)`:
             // instantiating the subscripted alias of a frozen+slots dataclass
@@ -751,8 +752,7 @@ fn render_python_operations(
             result_revision = operation.result_schema.revision,
             request_schema = python_literal(&operation.request_schema.body)?,
             result_schema = python_literal(&operation.result_schema.body)?,
-        )
-        .expect("String writes cannot fail");
+        );
     }
     out.push_str(
         "}\n\n\
@@ -766,18 +766,17 @@ fn render_python_operations(
          \x20   ) -> OperationResponse[ResultT]: ...\n\n\
          class WorkOperations:\n",
     );
-    writeln!(
+    emit!(
         out,
         "    \"\"\"The {count} operations admitted by canonical schema-body authority.\"\"\"\n",
         count = operations.len(),
-    )
-    .expect("String writes cannot fail");
+    );
     out.push_str(
         "    def __init__(self, invoke: OperationInvoker) -> None:\n\
          \x20       self._invoke = invoke\n\n",
     );
     for operation in operations {
-        writeln!(
+        emit!(
             out,
             "    def {name}(\n\
              \x20       self,\n\
@@ -792,8 +791,7 @@ fn render_python_operations(
              \x20       return self._invoke(descriptor, request, page=page)\n",
             name = operation.name,
             type_name = operation.type_name,
-        )
-        .expect("String writes cannot fail");
+        );
     }
     if out.ends_with("\n\n") {
         out.pop();
@@ -897,18 +895,15 @@ impl PythonSchemaRenderer<'_> {
                     let field_type =
                         self.render(field_schema, &format!("{name}{}", type_name(field)))?;
                     if required.contains(field.as_str()) {
-                        writeln!(fields, "    {field}: {field_type}")
-                            .expect("String writes cannot fail");
+                        emit!(fields, "    {field}: {field_type}");
                     } else {
-                        writeln!(fields, "    {field}: NotRequired[{field_type}]")
-                            .expect("String writes cannot fail");
+                        emit!(fields, "    {field}: NotRequired[{field_type}]");
                     }
                 }
                 if fields.is_empty() {
                     fields.push_str("    pass\n");
                 }
-                writeln!(self.definitions, "class {name}(TypedDict):\n{fields}")
-                    .expect("String writes cannot fail");
+                emit!(self.definitions, "class {name}(TypedDict):\n{fields}");
                 Ok(name.to_owned())
             }
             _ => Err("unsupported canonical schema node for Python generation".into()),
