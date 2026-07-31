@@ -8,6 +8,7 @@ use tracedecay_domain::{
 
 use crate::db::engine::{self, Executor, params};
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::types::MemoryCategory;
 use crate::privacy::sanitize_provider_metadata_text;
 use crate::tracedecay::current_timestamp;
 
@@ -399,29 +400,17 @@ fn validate_frontiers(frontiers: CapturedMemoryV2Frontiers) -> Result<()> {
     }
 }
 
+/// Parses a durably stored V1 category label. Only the exact canonical
+/// spellings round-trip; aliases stay a parse failure so a legacy row is
+/// skipped rather than reinterpreted.
 fn parse_category(value: &str) -> std::result::Result<tracedecay_domain::FactCategoryV1, ()> {
-    use tracedecay_domain::FactCategoryV1;
-    match value {
-        "general" => Ok(FactCategoryV1::General),
-        "user_pref" => Ok(FactCategoryV1::UserPref),
-        "project" => Ok(FactCategoryV1::Project),
-        "tool" => Ok(FactCategoryV1::Tool),
-        "decision" => Ok(FactCategoryV1::Decision),
-        "code_area" => Ok(FactCategoryV1::CodeArea),
-        _ => Err(()),
-    }
+    MemoryCategory::from_canonical_label(value)
+        .map(tracedecay_domain::FactCategoryV1::from)
+        .ok_or(())
 }
 
 fn category_label(category: tracedecay_domain::FactCategoryV1) -> &'static str {
-    use tracedecay_domain::FactCategoryV1;
-    match category {
-        FactCategoryV1::General => "general",
-        FactCategoryV1::UserPref => "user_pref",
-        FactCategoryV1::Project => "project",
-        FactCategoryV1::Tool => "tool",
-        FactCategoryV1::Decision => "decision",
-        FactCategoryV1::CodeArea => "code_area",
-    }
+    MemoryCategory::from(category).as_str()
 }
 
 fn payload_access_label(state: PayloadAccessState) -> &'static str {
