@@ -53,6 +53,7 @@ fn binding() -> WorkAttemptProjectionBindingV1 {
         id::<ProjectionGenerationId>("generation.work.runtime"),
         WorkProjectionSequenceV1::new(7),
         WorkVersion::new(3).unwrap(),
+        id::<ProposalId>("proposal.work.runtime"),
     )
     .unwrap()
 }

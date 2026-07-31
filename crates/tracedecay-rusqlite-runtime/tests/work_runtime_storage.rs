@@ -7,14 +7,16 @@ use tracedecay_application::{
     WorkExecutionService, WorkService,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
-    RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
+    ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
+    ProviderId, RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
     WorkAttemptIdentityV1, WorkAttemptProgressV1, WorkAttemptProjectionBindingV1,
     WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationAcknowledgementV1,
     WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1,
-    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProjectionCoverageV1,
-    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, WorkVersion, WorktreeId,
+    WorkEffectStateV1, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1, WorkFenceEpochV1,
+    WorkLeaseFenceV1, WorkLeaseId, WorkProjectionCoverageV1, WorkProjectionSequenceV1,
+    WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, WorkVersion,
+    WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -82,6 +84,40 @@ fn route(provider: &str, route: &str) -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(id::<ProviderId>(provider), id::<WorkProviderRouteId>(route)).unwrap()
 }
 
+fn requested_route() -> WorkProviderRouteV1 {
+    route(
+        "provider.work.codex-app-server",
+        "route.work.codex-app-server.v1",
+    )
+}
+
+fn execution_envelope(
+    authority: &WorkAuthority,
+    identity: WorkAttemptIdentityV1,
+    binding: WorkAttemptProjectionBindingV1,
+) -> WorkExecutionEnvelopeV1 {
+    WorkExecutionEnvelopeV1::new(
+        identity,
+        binding,
+        id::<WorkflowOperationRef>("operation.work.execute-provider"),
+        requested_route(),
+        WorkProviderBackendV1::CodexAppServer,
+        "gpt-test".to_owned(),
+        digest('c'),
+        authority.project_id().clone(),
+        authority.repository_id().clone(),
+        authority.worktree_id().clone(),
+        "/tmp/work-runtime-store".to_owned(),
+        None,
+        id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+        UtcMicros(9_000),
+        1,
+        WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
+        WorkEffectStateV1::Observational,
+    )
+    .unwrap()
+}
+
 fn lease(epoch: u64) -> WorkLeaseFenceV1 {
     WorkLeaseFenceV1::new(
         id::<WorkLeaseId>("lease.work.runtime-store"),
@@ -135,27 +171,31 @@ fn prepare_admitted_work(storage: &WorkSqliteStorage) -> (RequestContext, TaskId
     (context, task_id)
 }
 
-fn leased(task_id: TaskId) -> WorkAttemptV1 {
+fn leased(authority: &WorkAuthority, task_id: TaskId) -> WorkAttemptV1 {
+    let identity = WorkAttemptIdentityV1::new(
+        task_id,
+        id::<RunId>("run.work.runtime-store"),
+        id::<AttemptId>("attempt.work.runtime-store.1"),
+    )
+    .unwrap();
+    let binding = WorkAttemptProjectionBindingV1::new(
+        authority.projection_generation_id().unwrap(),
+        WorkProjectionSequenceV1::new(3),
+        WorkVersion::new(3).unwrap(),
+        id::<ProposalId>("proposal.work.runtime-store"),
+    )
+    .unwrap();
     WorkAttemptV1::new(
-        WorkAttemptIdentityV1::new(
-            task_id,
-            id::<RunId>("run.work.runtime-store"),
-            id::<AttemptId>("attempt.work.runtime-store.1"),
-        )
-        .unwrap(),
-        WorkAttemptProjectionBindingV1::new(
-            id::<ProjectionGenerationId>("generation.work.runtime-store"),
-            WorkProjectionSequenceV1::new(3),
-            WorkVersion::new(3).unwrap(),
-        )
-        .unwrap(),
+        identity.clone(),
+        binding.clone(),
+        execution_envelope(authority, identity, binding),
         lease(1),
         WorkAttemptStateV1::Leased,
         None,
         Vec::new(),
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
-        route("provider.work.requested", "route.work.requested"),
+        requested_route(),
         None,
         None,
     )
@@ -188,7 +228,7 @@ fn application_execution_service_composes_with_sqlite_adapter() {
     let projection = WorkService::new(storage.clone())
         .load(&context, &task_id)
         .unwrap();
-    let generation = id::<ProjectionGenerationId>("generation.work.runtime-store.application");
+    let generation = owner.projection_generation_id().unwrap();
     let snapshot = WorkProjectionSnapshotV1::new(
         generation.clone(),
         WorkProjectionSequenceV1::new(3),
@@ -202,20 +242,24 @@ fn application_execution_service_composes_with_sqlite_adapter() {
         id("attempt.work.runtime-store.application"),
     )
     .unwrap();
+    let projection_binding = WorkAttemptProjectionBindingV1::new(
+        generation,
+        WorkProjectionSequenceV1::new(3),
+        WorkVersion::new(3).unwrap(),
+        id::<ProposalId>("proposal.work.runtime-store"),
+    )
+    .unwrap();
+    let execution = execution_envelope(&owner, identity.clone(), projection_binding.clone());
     let service = WorkExecutionService::new(storage.clone());
     let leased = service
         .acquire_lease(
             &owner,
             &snapshot,
             identity.clone(),
-            WorkAttemptProjectionBindingV1::new(
-                generation,
-                WorkProjectionSequenceV1::new(3),
-                WorkVersion::new(3).unwrap(),
-            )
-            .unwrap(),
+            projection_binding,
+            execution,
             lease(1),
-            route("provider.work.requested", "route.work.requested"),
+            requested_route(),
         )
         .unwrap();
     assert_eq!(
@@ -225,6 +269,7 @@ fn application_execution_service_composes_with_sqlite_adapter() {
                 &snapshot,
                 identity.clone(),
                 leased.projection_binding().clone(),
+                leased.execution().clone(),
                 lease(1),
                 leased.requested_route().clone(),
             )
@@ -279,7 +324,7 @@ fn attempt_transitions_replay_and_rebuild_after_restart() {
     let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
-    let leased = leased(task_id);
+    let leased = leased(&owner, task_id);
     insert_attempt(&storage, &owner, &leased).unwrap();
     insert_attempt(&storage, &owner, &leased).unwrap();
 
@@ -328,7 +373,7 @@ fn lease_loss_rejects_stale_writer_without_partial_progress_or_artifacts() {
     let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
-    let leased = leased(task_id);
+    let leased = leased(&owner, task_id);
     insert_attempt(&storage, &owner, &leased).unwrap();
     let running = leased
         .transition(
@@ -359,7 +404,7 @@ fn terminal_evidence_is_published_exactly_once() {
     let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
-    let leased = leased(task_id);
+    let leased = leased(&owner, task_id);
     insert_attempt(&storage, &owner, &leased).unwrap();
     let running = leased
         .transition(
@@ -423,7 +468,11 @@ fn failed_attempt_event_rolls_back_snapshot_idempotency_and_terminal_rows() {
             .unwrap();
     });
     assert!(matches!(
-        insert_attempt(&storage, &authority(&context), &leased(task_id)),
+        insert_attempt(
+            &storage,
+            &authority(&context),
+            &leased(&authority(&context), task_id),
+        ),
         Err(WorkExecutionPersistenceError::Unavailable(_))
     ));
 
@@ -442,12 +491,76 @@ fn failed_attempt_event_rolls_back_snapshot_idempotency_and_terminal_rows() {
 }
 
 #[test]
+fn forged_projection_generation_rejects_insert_with_no_attempt_row() {
+    let store = RegisteredWorkStore::start("forged-generation");
+    let storage = store.storage().clone();
+    let (context, task_id) = prepare_admitted_work(&storage);
+    let owner = authority(&context);
+    let mut forged = leased(&owner, task_id);
+    // Rebuild with a caller-forged generation while keeping admitted projection data.
+    forged = WorkAttemptV1::new(
+        forged.identity().clone(),
+        WorkAttemptProjectionBindingV1::new(
+            id::<ProjectionGenerationId>("generation.work.forged-by-caller"),
+            forged.projection_binding().sequence(),
+            forged.projection_binding().work_version(),
+            forged.projection_binding().accepted_proposal().clone(),
+        )
+        .unwrap(),
+        forged.execution().clone(),
+        forged.lease().clone(),
+        forged.state(),
+        None,
+        Vec::new(),
+        WorkCancellationStateV1::None,
+        WorkRecoveryStateV1::Fresh,
+        forged.requested_route().clone(),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        insert_attempt(&storage, &owner, &forged),
+        Err(WorkExecutionPersistenceError::InvalidRequest)
+    );
+    assert_eq!(store.count("work_attempt_events_v1"), 0);
+    assert_eq!(store.count("work_attempt_snapshots_v1"), 0);
+    assert_eq!(store.count("work_attempt_idempotency_v1"), 0);
+}
+
+#[test]
+fn wrong_authority_rejects_insert_with_no_attempt_row() {
+    let store = RegisteredWorkStore::start("wrong-authority");
+    let storage = store.storage().clone();
+    let (context, task_id) = prepare_admitted_work(&storage);
+    let owner = authority(&context);
+    let foreign = WorkAuthority::new(
+        id::<ProjectId>("project.work.runtime-store.foreign"),
+        owner.repository_id().clone(),
+        owner.worktree_id().clone(),
+        owner.actor_id().clone(),
+        owner.policy_digest().clone(),
+    )
+    .unwrap();
+    let attempt = leased(&owner, task_id);
+
+    assert_eq!(
+        insert_attempt(&storage, &foreign, &attempt),
+        Err(WorkExecutionPersistenceError::InvalidRequest)
+    );
+    // Wrong authority must not create an attempt under either identity.
+    assert_eq!(store.count("work_attempt_events_v1"), 0);
+    assert_eq!(store.count("work_attempt_snapshots_v1"), 0);
+}
+
+#[test]
 fn recovery_candidate_resumes_and_clears_restart_work() {
     let store = RegisteredWorkStore::start("recovery");
     let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
-    let leased = leased(task_id);
+    let leased = leased(&owner, task_id);
     insert_attempt(&storage, &owner, &leased).unwrap();
     let recovery = leased
         .transition(
@@ -502,7 +615,7 @@ fn cancellation_acknowledgement_and_terminal_evidence_persist_together() {
     let storage = store.storage().clone();
     let (context, task_id) = prepare_admitted_work(&storage);
     let owner = authority(&context);
-    let leased = leased(task_id);
+    let leased = leased(&owner, task_id);
     insert_attempt(&storage, &owner, &leased).unwrap();
     let running = leased
         .transition(

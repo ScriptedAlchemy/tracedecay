@@ -329,6 +329,12 @@ pub(crate) fn validate_registered_attempt_projection(
     authority: &WorkAuthority,
     attempt: &WorkAttemptV1,
 ) -> AttemptStoreResult<()> {
+    let expected_generation =
+        projection_generation(authority).map_err(|_| AttemptStoreError::Unavailable)?;
+    if attempt.projection_binding().generation_id() != &expected_generation {
+        // Generation is authority-derived. A forged binding must not insert.
+        return Err(AttemptStoreError::InvalidRequest);
+    }
     let rows = registered_work_query(
         source,
         "SELECT owner_sequence, projection_payload
@@ -352,6 +358,9 @@ pub(crate) fn validate_registered_attempt_projection(
     let payload = migration_text(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
     let projection: WorkProjection =
         serde_json::from_str(payload).map_err(|_| AttemptStoreError::Unavailable)?;
+    if projection.authority() != authority {
+        return Err(AttemptStoreError::InvalidRequest);
+    }
     let owner_sequence =
         u64::try_from(owner_sequence).map_err(|_| AttemptStoreError::Unavailable)?;
     if attempt.projection_binding().sequence().get() > owner_sequence {
@@ -670,9 +679,10 @@ pub(crate) fn application_attempt_material(
 
 pub(crate) fn map_execution_persistence(error: AttemptStoreError) -> WorkExecutionPersistenceError {
     match error {
-        AttemptStoreError::Conflict
-        | AttemptStoreError::TerminalAlreadyPublished
-        | AttemptStoreError::InvalidRequest => WorkExecutionPersistenceError::Conflict,
+        AttemptStoreError::Conflict | AttemptStoreError::TerminalAlreadyPublished => {
+            WorkExecutionPersistenceError::Conflict
+        }
+        AttemptStoreError::InvalidRequest => WorkExecutionPersistenceError::InvalidRequest,
         AttemptStoreError::Unavailable => WorkExecutionPersistenceError::Unavailable(
             "SQLite Work runtime store failed".to_owned(),
         ),

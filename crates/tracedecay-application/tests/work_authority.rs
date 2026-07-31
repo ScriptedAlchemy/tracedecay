@@ -82,6 +82,15 @@ impl WorkStoragePort for TestStore {
             .ok_or(WorkStorageError::NotFoundOrNotAuthorized)
     }
 
+    fn projection(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+    ) -> Result<WorkProjection, WorkStorageError> {
+        let history = self.load(authority, task_id)?;
+        projection(&history)
+    }
+
     fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
         let mut histories = self.histories.lock().unwrap();
         let key = (

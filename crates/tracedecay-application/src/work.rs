@@ -60,12 +60,23 @@ impl WorkAppendOutcome {
 
 /// Exact-authority storage boundary. Implementations must compare both the
 /// expected version and `(command_id, input_digest)` atomically.
+///
+/// Mutation callers append and take the projection storage returns. Reads that
+/// need the current board use [`Self::projection`], not a full-history rebuild:
+/// the published fold is the authority, and raw event rows are not a backfill
+/// path for ordinary Work application traffic.
 pub trait WorkStoragePort: Send + Sync {
     fn load(
         &self,
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<Vec<WorkEvent>, WorkStorageError>;
+
+    fn projection(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+    ) -> Result<WorkProjection, WorkStorageError>;
 
     fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError>;
 }
