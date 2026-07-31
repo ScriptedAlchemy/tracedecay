@@ -6,9 +6,11 @@
 > source-string checks, snapshots, receipts, PR packets, and task ordering below
 > are not rebuild instructions; validate current memory behavior directly.
 > The schema/backfill items below are evidence-backed only for the audited live
-> `.tracedecay.db` memory tables described in this record. Branch-local future
-> shapes change in place and do not acquire a migration or deprecation path
-> from this archive.
+> `.tracedecay.db` memory tables described in this record. Pure source/request
+> shapes do not acquire a migration path from this archive. Any branch-written
+> memory table, archive, journal, checkpoint, or receipt remains in the
+> migration/recovery inventory until a separately authorized registered-store
+> census proves absence.
 
 Status: synthesis of four upstream audits on the `master` working tree. This is
 the single actionable summary the root triage (`t_fd962a8a`) consumes. Every

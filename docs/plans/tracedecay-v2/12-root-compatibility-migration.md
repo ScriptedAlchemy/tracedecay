@@ -9,9 +9,12 @@ recovery, and deletes migration-only and superseded V1 paths.
 Here V1/V2 name the released product path and the TraceDecay V2 product
 cutover, not a blanket requirement to version every branch contract. Migration
 inventory includes only a predecessor proven on `origin/master`, in a
-published package/release, or in live persisted data. Branch-local schemas,
-aliases, and adapters change to their final shape in place and require no
-archive, compatibility reader, or migration.
+published package/release, or in live persisted data. Pure branch-local API
+aliases, adapters, and transient DTOs change to their final shape in place.
+Branch-written schemas, stores, spools, files, journals, checkpoints, and
+receipts remain in the migration inventory until a separately authorized
+registered-store/profile census proves absence; Git history alone cannot remove
+their archive, compatibility-reader, or migration obligations.
 
 **Memory cutover correction (updated 2026-07-27).** The delivered Memory
 V1→V2 branch-store cutover is complete. Its typed owner archive covers all 33
@@ -144,7 +147,9 @@ family corruption remains preserve-and-escalate.
 - Migrate all detected supported families whose predecessor is proven released
   or live. Unknown or corrupt required data blocks the upgrade with Doctor
   guidance; PR19 has no skipped-family or deferred-family success state.
-  Branch-local families are finalized in place and never enter this inventory.
+  Pure branch-local API/DTO families are finalized in place. Branch-written
+  persisted families remain in this inventory until a separately authorized
+  registered-store/profile census proves absence.
 - Classify corruption by family. Deterministically rebuildable indexes and
   projections may be repaired under exclusive maintenance authority;
   authoritative facts, observations, sessions, and receipts are preserved and

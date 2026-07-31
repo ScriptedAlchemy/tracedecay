@@ -10,7 +10,9 @@
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
 > branch-only scaffolding; compatibility begins only after an evidenced package
-> publication or other released/live predecessor.
+> publication for pure APIs. Potentially persisted cursors, idempotency keys,
+> journals, checkpoints, and receipts keep backward-read/recovery until a
+> separately authorized registered-store/profile census proves absence.
 
 **Goal:** Publish Rust, TypeScript, and Python SDKs for accepted PR12–PR17
 operations without inventing lifecycle semantics.

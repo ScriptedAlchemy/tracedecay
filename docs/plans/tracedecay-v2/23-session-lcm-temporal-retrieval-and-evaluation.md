@@ -17,13 +17,14 @@ Plan 23 remains the owner of the behavior in this document. Plans 15, 24, and
 to recreate PR8's original module tree, Rust type spellings, schema names,
 suite registration, fixture filenames, benchmark scripts, or command list.
 
-The session-temporal schema versions 2 and 3 were introduced only on this
-integration branch; neither appears on `origin/master`, in a published
-package/release, or as an established live format. The final temporal schema
-therefore changes in place with no v2-to-v3 migration. By contrast, the
-pre-existing `session_messages` and `lcm_*` storage families are released/live
-persistence and retain the explicit forward-migration and compatibility
-projection obligations below.
+The session-temporal schema versions 2 and 3 were introduced on this integration
+branch, but registered-store admission and live dogfood mean version-2 rows may
+already exist outside Git history. Until a separately authorized census of
+every registered live/profile store proves absence, the v2-to-v3
+migration/recovery and backward-read obligations remain required and fail
+closed. This plan authorizes no live-store inspection. The pre-existing
+`session_messages` and `lcm_*` storage families independently retain their
+released/live forward-migration and compatibility-projection obligations.
 
 ## Outcome
 
@@ -477,10 +478,9 @@ reads.
 ### Database, daemon, compatibility, and migration
 
 - `src/global_db/session_temporal/schema.rs::ensure_session_temporal_schema`
-  installs and validates the final unreleased schema in place, including exact
-  columns/indexes, append-only triggers, derived evidence/member tables,
-  source-manifest tables, and receipt columns. It does not retain a
-  branch-local schema-version-2 reader or migration.
+  owns the schema-version-2 to schema-version-3 DDL migration, exact
+  column/index validation, append-only triggers, derived evidence/member
+  tables, source-manifest tables, and receipt columns.
 - `src/global_db/schema_contract/definitions.rs` registers every new table,
   foreign key, trigger, and index; `src/global_db/schema_stages.rs` keeps their
   installation atomic.
@@ -522,7 +522,7 @@ Legacy field mapping is normative:
   ineligible as migration input, preventing migrate/write-compatibility/rerun
   self-import.
 
-The final derived projection tables are:
+The schema-v3 derived projection tables are:
 
 ```sql
 session_derived_evidence(
@@ -546,7 +546,7 @@ session_derived_evidence_members(
 `idx_session_derived_evidence_anchor`,
 `idx_session_derived_evidence_thread_order`, and
 `idx_session_derived_evidence_members_occurrence`, then validates each exact
-column and index shape before recording the initial final schema version.
+column and index shape before recording schema version 3.
 
 Until dashboard bindings migrate, physical `session_messages` and `lcm_*`
 tables remain explicitly non-authoritative dashboard compatibility projections because SQLite views
@@ -595,7 +595,7 @@ machine-independent threshold or separate acceptance artifact.
   complete Plan 13 anchors and independent knowledge/valid time.
 - Rebuildable projections and indexes include derived member manifests,
   exact-literal support, source manifests, and receipt digests; deterministic
-  rebuild tests pass without a branch-local schema v2-to-v3 migration.
+  rebuild and schema v2-to-v3 migration/recovery tests pass.
 - One temporal kernel serves message, Turn, session, thread, agent, span/burst,
   summary, direct-anchor, LCM, and workflow-recovery reads.
 - Compact candidates are temporally resolved, fused with full retriever

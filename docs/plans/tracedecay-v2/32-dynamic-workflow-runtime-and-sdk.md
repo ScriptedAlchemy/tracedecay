@@ -19,13 +19,14 @@ definition, run, attempt, effect, and receipt records retain compatibility and
 migration obligations; all other retention is judged by the direct runtime,
 provider, recovery, platform, and regression behavior below.
 
-No Plan 32 workflow/lease/attempt wire contract or persisted runtime format is
-established on `origin/master`, in a published package/release, or in live
-product data. The runtime therefore implements its final contract in place;
-PR14/PR17 sequencing, fixtures, and branch records require no compatibility
-alias, dual reader/writer, or migration. Definition and authority versions
-below are product-data history and fencing identities, not evidence that a
-second wire-contract version shipped.
+No Plan 32 workflow/lease/attempt contract is established on `origin/master` or
+in a published package/release. Pure transient request DTOs therefore take
+their final shape in place. Definition, run, lease, attempt, effect, journal,
+and receipt records are persisted product data and may exist in dogfood stores;
+their backward-read/migration/recovery obligations remain fail-closed until a
+separately authorized registered-store census proves absence. Definition and
+authority versions below remain product-data history and fencing identities,
+not by themselves evidence that a second wire-contract version shipped.
 
 ## Decision
 

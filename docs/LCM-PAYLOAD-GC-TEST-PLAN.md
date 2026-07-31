@@ -7,8 +7,10 @@
 > test names/counts, hooks, file/line anchors, receipts, and gate matrices below
 > are not rebuild instructions; validate current GC behavior directly.
 > The recorded schema-v5 marker behavior applies to the then-live persisted
-> payload format; this archive creates no later version bump, compatibility
-> reader, or migration obligation for branch-local shapes.
+> payload format. This archive does not create a later version bump for pure
+> source/test shapes, but any branch-written payload file, metadata row,
+> marker, checkpoint, or receipt remains backward-readable/recoverable until a
+> separately authorized registered-store/profile census proves absence.
 
 Status: **historical test plan**. The implementation now lives in the runtime;
 its observable behavior, not the pre-implementation source shape below, is

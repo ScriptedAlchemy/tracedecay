@@ -10,7 +10,10 @@
 > platform gate lattice.
 > Historical version/compatibility/migration language applies only to APIs or
 > data proven on `origin/master`, in a published release, or in live
-> persistence; branch-local shapes change in place.
+> persistence. Pure branch-local adapter/source shapes change in place; any
+> branch-written store, spool, file, journal, checkpoint, receipt, or
+> projection remains recoverable until a separately authorized
+> registered-store/profile census proves absence.
 
 **Goal:** After dependency inversion, extract rusqlite, MCP/LSP, daemon, and
 remaining root adapters without changing product authority.

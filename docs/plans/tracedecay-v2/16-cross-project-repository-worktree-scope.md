@@ -16,11 +16,13 @@ compatibility and migration obligations; all other retention is evaluated
 through the direct scope, inventory, Git, platform, and regression behavior
 below.
 
-No Plan 16 multi-root selector, collection, or stack wire/persistence shape is
-established on `origin/master`, in a published package/release, or in live
-product data. PR15 therefore finalizes those shapes in place; single-root
-behavior proven on released surfaces remains supported, but branch-only
-aliases, readers, and migration fixtures create no compatibility obligation.
+No Plan 16 multi-root selector, collection, or stack contract is established on
+`origin/master` or in a published package/release. Pure transient selectors
+therefore finalize in place. Collection/stack records, resolved-scope
+snapshots, journals, checkpoints, and receipts may exist in dogfood stores;
+their readers and migration/recovery remain required until a separately
+authorized registered-store/profile census proves absence. Single-root
+behavior proven on released surfaces remains supported.
 
 **Local identity correction (2026-07-26).** Repository-level project/store
 identity now collapses a linked worktree onto its primary checkout through

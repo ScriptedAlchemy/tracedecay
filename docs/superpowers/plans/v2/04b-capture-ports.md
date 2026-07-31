@@ -8,8 +8,10 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
-> Historical compatibility/migration language applies only to evidenced
-> released provider formats; branch-local ports change in place.
+> Pure branch-local port traits change in place. Any provider envelope, spool
+> item, cursor, journal, checkpoint, or receipt potentially written by dogfood
+> keeps backward-read/migration or replay recovery until a separately
+> authorized installed-host/profile census proves absence.
 
 **Goal:** Separate provider capture/sanitization from daemon/store adapters
 without weakening one-writer, cursor, replay, or privacy contracts.

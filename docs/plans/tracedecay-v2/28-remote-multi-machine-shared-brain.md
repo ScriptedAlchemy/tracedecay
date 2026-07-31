@@ -16,11 +16,14 @@ retain compatibility and migration obligations; all other retention is judged
 by the direct offline capture, fenced replay, query, backup/restore, failover,
 platform, and regression behavior below.
 
-No remote enrollment/spool/replica/backup wire format is yet established on
-`origin/master`, in a published package/release, or in live persisted data.
-Those PR16 records therefore take their final shape in place. Authenticated
+No remote enrollment/spool/replica/backup format is established on
+`origin/master` or in a published package/release. Pure transient enrollment
+requests may take their final shape in place. Spool files, replica journals,
+backup manifests, checkpoints, and receipts may nevertheless exist through
+dogfood; old readers and migration/recovery remain fail-closed until a
+separately authorized machine/profile census proves absence. Authenticated
 protocol negotiation remains mandatory because independently deployed nodes
-can differ, but speculative old readers, aliases, and migrations do not.
+can differ.
 
 ## User outcome
 
@@ -196,10 +199,11 @@ finding and remediation identities.
    query, settings, CLI/API/dashboard/Doctor, stored generations, repository
    identity, retention/deletion, diagnostics, and health contracts remain
    supported through the remote application model where `origin/master`,
-   published releases, or live persistence prove the predecessor. Unreleased
-   enrollment, spool, cache/replica, backup, and restore records change in
-   place; once deployed, readers migrate or reject old data explicitly and
-   never silently reinterpret authority, identity,
+   published releases, or live persistence prove the predecessor. Pure
+   transient enrollment requests change in place. Potentially persisted spool,
+   cache/replica, backup, and restore records retain readers and
+   migration/recovery until the authorized machine/profile census proves
+   absence; they never silently reinterpret authority, identity,
    epoch, watermark, or deletion lineage. PR18 adds SDK bindings without
    replacing these PR16 APIs.
 

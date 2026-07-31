@@ -36,11 +36,14 @@ verify the journeys and safety properties, not recreate a former refactor
 schema registry or file inventory.
 
 The published `tracedecay_rename_preview` surface above is release evidence and
-keeps its compatibility obligation. No Plan 34 API-migration plan/apply shape
-has shipped; those branch-local contracts change in place. An alias,
-deprecation, or wrapper is planned only for a predecessor proven on
-`origin/master` or in a published package/release, never solely from source
-moves, PR sequencing, tests, or branch history.
+keeps its compatibility obligation. Pure branch-local Plan 34 plan/apply
+request DTOs change in place. Any migration-plan file, staged mutation,
+journal, checkpoint, rollback artifact, or receipt potentially written by
+dogfood remains backward-readable/recoverable until a separately authorized
+registered-store/profile census proves absence. An API alias, deprecation, or
+wrapper is planned only for a predecessor proven on `origin/master` or in a
+published package/release, never solely from source moves, PR sequencing,
+tests, or branch history.
 
 ## User outcome
 

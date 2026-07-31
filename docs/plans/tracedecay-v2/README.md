@@ -18,9 +18,13 @@ or schema needs a V2 shape. A compatibility alias, deprecation path, dual
 reader/writer, contract/schema V2 or V3, or migration is required only when the
 predecessor demonstrably exists on `origin/master`, in a published package or
 release, or in a live persisted format. Branch-local shapes, PR order,
-historical type names, tests, and future consumers are not release evidence;
-unreleased contracts change to their final shape in place. A `V1` suffix may
-name that initial final wire format without requiring a sibling version.
+historical type names, tests, and future consumers are not release evidence.
+Pure transient wire/request DTOs and source-only contracts change to their
+final shape in place. Anything written to a store, spool, file, installed host
+surface, or persisted projection remains a potential live format and preserves
+backward-read/migration recovery until a separately authorized census proves
+absence. A `V1` suffix may name an initial final wire format without requiring
+a sibling version by itself.
 
 ## Current product foundation
 

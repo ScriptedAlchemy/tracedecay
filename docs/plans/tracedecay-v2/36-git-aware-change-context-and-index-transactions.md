@@ -280,7 +280,10 @@ provable terminal outcome.
    supported CLI/MCP names,
    `HunkRef`/receipt behavior, and rendering, remain compatible delegates to
    the production kernels. A PR12 binding merely callable on this branch
-   changes to its final shape in place. Forward migration imports only prior read-only evidence whose typed
+   changes to its final shape in place. Branch-written provenance, anchors,
+   snapshots, indexes, journals, and receipts remain backward-readable until a
+   separately authorized registered-store/profile census proves absence.
+   Forward migration imports only prior read-only evidence whose typed
    Plan 16 identity, object format, exact ref/commit relationship, and content
    digest validate; unverifiable path/ref/SHA, inferred topology, cached
    conflict, or mutable-log rows remain quarantined. Migration never invents a

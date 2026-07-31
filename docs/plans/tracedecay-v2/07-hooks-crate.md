@@ -17,9 +17,12 @@ audits assess the host behavior, wire compatibility, migration, safety, and
 regressions specified here.
 
 The V1 envelope is the initial final wire format, not evidence for a V2
-sibling. A prior-revision decoder or migration window exists only for a host
-bundle/release or live replay spool that proves the predecessor was deployed.
-PR13-only Kimi/OpenCode shapes and fixture revisions change in place.
+sibling. Pure pre-admission host DTOs may change in place. Once an envelope,
+provider record, replay item, checkpoint, or receipt can enter a spool/file, it
+is potentially live through dogfood; prior-revision decoding and
+migration/replay recovery remain until a separately authorized installed-host
+and spool census proves absence. Fixture revisions alone remain insufficient
+evidence.
 
 ## PR13 user outcome
 
@@ -89,8 +92,10 @@ Wire compatibility remains normative on this production path:
 - When release or live-spool evidence establishes a prior revision, the
   declared migration window lets the current daemon decode the current and
   explicitly retained prior revision, while each writer emits only its
-  configured negotiated revision. Branch-local revisions are replaced in
-  place. There is no heuristic downgrade,
+  configured negotiated revision. Pure pre-admission branch-local DTOs are
+  replaced in place; any revision that may have entered a dogfood spool stays
+  in the migration window until the authorized installed-host/spool census
+  proves absence. There is no heuristic downgrade,
   reinterpretation, or dual-write. Receipts preserve the decoded and emitted
   revision, mixed-version replay remains idempotent, and expiry of the window
   converts the retired revision to the same reject-and-quarantine path without

@@ -17,8 +17,11 @@ behavior and architecture boundaries below.
 This cutover inventories only V1 APIs/data proven on `origin/master`, in a
 published package/release, or in live persisted storage. `TraceDecay V2` is
 the product destination, not evidence for contract-version siblings.
-Unreleased aliases, schemas, and adapters converge in place and do not acquire
-migration or deprecation windows from PR sequencing or tests.
+Unreleased source aliases, adapters, and transient DTOs converge in place and
+do not acquire migration or deprecation windows from PR sequencing or tests.
+Any branch-written schema, store, spool, file, journal, checkpoint, receipt, or
+projection stays in the cutover inventory until a separately authorized
+registered-store/profile census proves absence.
 
 ## User outcome
 

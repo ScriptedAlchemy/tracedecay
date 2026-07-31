@@ -8,8 +8,10 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
-> Historical schema/migration language applies only to evidenced released/live
-> persistence; branch-local projector shapes change in place.
+> Pure branch-local projector functions change in place. Any projection row,
+> cursor, journal, checkpoint, or receipt potentially written by dogfood keeps
+> backward-read/migration recovery until a separately authorized
+> registered-store/profile census proves absence.
 
 **Goal:** Extract deterministic session and observation reducers so projection
 edits do not compile database/runtime adapters.

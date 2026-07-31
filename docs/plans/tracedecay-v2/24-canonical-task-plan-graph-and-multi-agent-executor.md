@@ -14,12 +14,14 @@ persisted task/work records retain compatibility and migration obligations;
 all other retention is judged by the direct Work journey, lifecycle,
 platform, and regression behavior below.
 
-No Plan 24 Work wire contract or persisted task/runtime format is established
-on `origin/master`, in a published package/release, or in live product data.
-PR14/PR17 therefore implement the final Work shape directly in place; branch
-checkpoints, tests, and PR sequencing require no compatibility aliases,
-dual readers, or migration. Immutable work-item and graph versions below are
-product history/CAS identities, not contract-version release evidence.
+No Plan 24 Work contract is established on `origin/master` or in a published
+package/release. Pure transient request DTOs therefore take their final shape
+in place. Work-item, graph, read, lease, evidence, journal, checkpoint, and
+receipt records are persisted and may exist in dogfood stores; backward
+readers and migration/recovery remain required until a separately authorized
+registered-store census proves absence. Immutable work-item and graph versions
+below remain product history/CAS identities, not by themselves
+contract-version release evidence.
 
 ## Decision
 
