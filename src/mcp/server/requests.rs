@@ -80,14 +80,10 @@ struct ApplicationSurfaceDispatch<'a> {
     _registration: ApplicationCancellationRegistration<'a>,
 }
 
+/// Retained name for this module's call sites; the saturating clamp is the one
+/// shared definition so MCP cannot stamp "now" differently from the daemon.
 pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
-    tracedecay_domain::UtcMicros(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(i64::MAX, |duration| {
-                i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
-            }),
-    )
+    tracedecay_application::clock::now_micros()
 }
 
 fn is_source_edit_tool(tool_name: &str) -> bool {
