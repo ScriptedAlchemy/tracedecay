@@ -207,3 +207,7 @@ to refuse it; the producer is the bug. Repro:
 - git_correlation.rs:1582 tables_present: sole caller is #[cfg(test)] runs_for_git_scope (workflow_index.rs:636) → cfg(test) the wrapper.
 - Engine-layer leftovers (Deferred variant, Connection::transaction, last_insert_rowid, connection_runtime, Statement Target::Connection): only test callers remain post-cutover; engine/tests.rs:313 pins deferred behavior solely for the dead variant.
 - dashboard/mod.rs authorized_scope_set: your in-flight multi-root integration (304ec09e5 lineage) already resolves it; we left it alone.
+
+## 2026-07-31 ~18:45 — code-index restore gate: DISPROVEN (evidence a1e56de53)
+- benchmarks/runtime/evidence/code-index-restore-20260731/: N=7 cold restores over pre-indexed repo-scale workload (1,808 files / 122,076 nodes / 438MB db): 2.1–3.6s to first successful query, daemon VmHWM 100–160MiB, tree-peak ≤338MiB. Baseline 488.8s/7.8GiB → ~140–230x faster, ~50–80x less memory. Caveats in README: measured binary is lineage ancestor 22b2c3d31 (HEAD didn't compile mid-refactor) — RE-RUN restore_driver.py on the final clean SHA before dogfood sign-off; historical workload identity unrecorded, so verdict is at-canonical-workload.
+- Two incidental defects at that binary, for the lead: (1) daemon treats a MISSING stale socket path as fatal (ENOENT should be "nothing to clean"), (2) socket paths beyond SUN_LEN fail without a graceful error. Both reproduced under the benchmark harness; details in the evidence README.
