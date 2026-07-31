@@ -463,6 +463,29 @@ async fn query_fact_response_metadata_tx(
     })
 }
 
+/// Measure the coverage and contradiction metadata that accompanies a fact
+/// response, for callers that obtained the fact itself from another engine.
+///
+/// The typed runtime read port ([`FactReadOperationV1`]) admits only `Current`
+/// and `Lineage`, so a runtime-mounted shard has no read operation that can
+/// answer coverage or contradiction. The retained [`Database`] the runtime is
+/// mounted on is proven by `validate_mount` to be the identical SQLite file, so
+/// this snapshot measures the same authority the runtime would read rather than
+/// substituting a constant for a measurement.
+///
+/// [`FactReadOperationV1`]: tracedecay_store::FactReadOperationV1
+/// [`Database`]: crate::db::Database
+pub(in crate::store::memory) async fn fact_response_metadata_tx(
+    snapshot: &Transaction<'_>,
+    typed_owner: &FactOwnerV1,
+    fact_id: &FactId,
+    fact: Option<&StoredFactV1>,
+) -> FactStoreResult<(FactQueryCoverageV1, FactContradictionStateV1)> {
+    let metadata =
+        query_fact_response_metadata_tx(snapshot, typed_owner, fact_id, None, fact).await?;
+    Ok((metadata.coverage, metadata.contradiction))
+}
+
 async fn fact_lineage_event_exists_tx(
     snapshot: &Transaction<'_>,
     owner: &OwnerKey,
