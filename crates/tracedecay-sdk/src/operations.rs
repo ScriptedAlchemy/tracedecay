@@ -4496,11 +4496,16 @@ pub mod work_attempt_acquire_lease {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -4520,6 +4525,9 @@ pub mod work_attempt_acquire_lease {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -5845,6 +5853,57 @@ pub mod work_attempt_acquire_lease {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -6316,11 +6375,16 @@ pub mod work_attempt_acquire_lease {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -6340,6 +6404,9 @@ pub mod work_attempt_acquire_lease {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -8641,6 +8708,57 @@ pub mod work_attempt_cancel {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -9112,11 +9230,16 @@ pub mod work_attempt_cancel {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -9136,6 +9259,9 @@ pub mod work_attempt_cancel {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -14222,6 +14348,57 @@ pub mod work_attempt_publish_artifact {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -14693,11 +14870,16 @@ pub mod work_attempt_publish_artifact {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -14717,6 +14899,9 @@ pub mod work_attempt_publish_artifact {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -16917,6 +17102,57 @@ pub mod work_attempt_publish_progress {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -17388,11 +17624,16 @@ pub mod work_attempt_publish_progress {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -17412,6 +17653,9 @@ pub mod work_attempt_publish_progress {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -19661,6 +19905,57 @@ pub mod work_attempt_recover {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -20132,11 +20427,16 @@ pub mod work_attempt_recover {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -20156,6 +20456,9 @@ pub mod work_attempt_recover {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -22323,6 +22626,57 @@ pub mod work_attempt_renew_lease {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -22794,11 +23148,16 @@ pub mod work_attempt_renew_lease {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -22818,6 +23177,9 @@ pub mod work_attempt_renew_lease {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -25328,6 +25690,57 @@ pub mod work_attempt_start {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -25799,11 +26212,16 @@ pub mod work_attempt_start {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -25823,6 +26241,9 @@ pub mod work_attempt_start {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
@@ -28210,6 +28631,57 @@ pub mod work_attempt_terminalize {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
         ///Strongly typed canonical identity: `ProviderId`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -28681,11 +29153,16 @@ pub mod work_attempt_terminalize {
         ///{
         ///  "type": "object",
         ///  "required": [
+        ///    "accepted_proposal",
         ///    "generation_id",
         ///    "sequence",
         ///    "work_version"
         ///  ],
         ///  "properties": {
+        ///    "accepted_proposal": {
+        ///      "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh.",
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
         ///    "generation_id": {
         ///      "$ref": "#/definitions/ProjectionGenerationId"
         ///    },
@@ -28705,6 +29182,9 @@ pub mod work_attempt_terminalize {
         #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
         #[serde(deny_unknown_fields)]
         pub struct WorkAttemptProjectionBindingV1 {
+            /**Exact accepted proposal the attempt was admitted against. A superseded
+            or cleared proposal is a different binding, not a compatible refresh.*/
+            pub accepted_proposal: ProposalId,
             pub generation_id: ProjectionGenerationId,
             pub sequence: WorkProjectionSequenceV1,
             pub work_version: u64,
