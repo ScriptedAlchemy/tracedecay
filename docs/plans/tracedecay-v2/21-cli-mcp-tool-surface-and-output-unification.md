@@ -23,6 +23,12 @@ evidence rather than a spine to reconstruct. A missing callable operation or
 lost semantic is a gap; a renamed/deleted scaffold is not. PR17 adds only the
 surface needed to complete the Plan 24/32 user journey.
 
+CLI/MCP/HTTP names and shapes retain compatibility only when `origin/master`,
+a published package/release, or a live persisted cursor/receipt proves a
+predecessor. PR12/PR17 branch-local bindings and generated contracts change to
+their final shape in place; tests and operation inventories are not release
+evidence.
+
 **Cursor-parity correction (2026-07-27).** The cursor half of that parity
 requirement was stated as delivered while no shipped code-read surface could
 supply a continuation: CLI, MCP, and HTTP each pinned the page to
@@ -333,8 +339,9 @@ fixture does not land before its operation is callable.
 - Remove PR17 internal operation inventories, temporary cross-worktree
   registries, exact command/tool/type/file catalogs, generated parity
   manifests, shadow profiles, and declaration-only gates.
-- Compatibility aliases may delegate to the canonical operation for a bounded
-  period, but they own no schema or behavior.
+- Compatibility aliases with release evidence may delegate to the canonical
+  operation for a bounded period, but they own no schema or behavior.
+  Branch-local aliases are removed in place after callers move.
 - Remove any client-side provider launch, hidden fallback, task status write,
   scheduler, or Git implementation.
 
