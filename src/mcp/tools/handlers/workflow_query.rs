@@ -235,7 +235,7 @@ async fn run_payload(
         agent_count,
         agents_complete,
     } = match outcome {
-        WorkflowRunDetailOutcome::Run(detail) => detail,
+        WorkflowRunDetailOutcome::Run(detail) => *detail,
         WorkflowRunDetailOutcome::NotFound => return Ok(run_not_found_payload(run_id)),
         WorkflowRunDetailOutcome::Unavailable(reason) => {
             return Ok(index_unavailable_payload(reason));
@@ -538,12 +538,12 @@ mod tests {
                 .collect::<Vec<_>>();
             let agent_count = i64::try_from(self.agents.len()).expect("agent count");
             Box::pin(async move {
-                Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+                Ok(WorkflowRunDetailOutcome::Run(Box::new(WorkflowRunDetail {
                     run,
                     agents,
                     agent_count,
                     agents_complete: false,
-                }))
+                })))
             })
         }
 
@@ -559,12 +559,12 @@ mod tests {
             let agent_count = i64::try_from(self.agents.len()).expect("agent count");
             run.agent_count = agent_count;
             Box::pin(async move {
-                Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+                Ok(WorkflowRunDetailOutcome::Run(Box::new(WorkflowRunDetail {
                     run,
                     agents,
                     agent_count,
                     agents_complete: true,
-                }))
+                })))
             })
         }
     }
@@ -581,12 +581,12 @@ mod tests {
             let agents = self.0.agents.iter().take(2).cloned().collect::<Vec<_>>();
             let agent_count = i64::try_from(self.0.agents.len()).expect("agent count");
             Box::pin(async move {
-                Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+                Ok(WorkflowRunDetailOutcome::Run(Box::new(WorkflowRunDetail {
                     run,
                     agents,
                     agent_count,
                     agents_complete: false,
-                }))
+                })))
             })
         }
     }

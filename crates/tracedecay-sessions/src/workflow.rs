@@ -179,7 +179,7 @@ pub struct WorkflowRunDetail {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowRunDetailOutcome {
-    Run(WorkflowRunDetail),
+    Run(Box<WorkflowRunDetail>),
     NotFound,
     Unavailable(WorkflowIndexState),
 }
