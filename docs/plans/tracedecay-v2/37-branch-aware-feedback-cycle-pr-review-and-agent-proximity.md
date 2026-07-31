@@ -284,10 +284,11 @@ feedback requires exact saved-content or clean-generation identity.
   provider fixture matrices, and placeholder benchmark packets.
 - Remove reserved PR15/PR17 fields from PR13 schemas. Later callable
   operations add inputs to the current writer shape while retained decoders
-  accept potentially installed prior revisions. Release, persistence, an
-  independently deployed client, or a live host installation establishes a
-  versioned predecessor; the authorized installed-client/host census gates
-  decoder and negotiation retirement.
+  accept potentially installed prior revisions and responses emit each
+  client's negotiated retained revision. Release, persistence, an independently
+  deployed client, or a live host installation establishes a versioned
+  predecessor; the authorized installed-client/host census gates reader/writer
+  and negotiation retirement.
 - Remove adapter-local findings, proximity fanout/dedupe, suggestion streams,
   task linking, and evidence stores. The canonical owners above remain.
 - Do not remove or reduce any pillar, surface, lifecycle/provider state,
