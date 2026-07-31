@@ -13,6 +13,13 @@ queues and do not require one crate-first pull request per document. `NEXT.md`
 tracks current outcomes and blockers only. `GAP-LEDGER-PR8-PR14.md` and
 `pr9/00-contract-spine.md` are historical records, not parallel authorities.
 
+The `TraceDecay V2` roadmap name is independent of contract/schema versioning.
+Only a predecessor proven on `origin/master`, in a published package/release,
+or in a live persisted format can require a compatibility alias, deprecation,
+dual reader/writer, V2/V3 contract, or migration. Unreleased shapes change in
+place to the final contract; PR sequence, branch history, tests, historical
+plans, and a `V1` suffix alone do not establish a compatibility boundary.
+
 Core Work and the minimal Plan 24/32 runtime ship in PR14; PR17 retains
 residual advanced workflow capability.
 Dashboard acceptance is desktop-first, not desktop-only: desktop visual
@@ -791,8 +798,9 @@ generated declaration coverage, or schema equality alone is not acceptance.
 
 ## PR19 — V2 becomes the only product path
 
-**User outcome.** Existing released installations migrate forward to V2, cut
-over with bounded recovery, and finish with one supported implementation.
+**User outcome.** Existing released installations migrate only the predecessor
+APIs and persisted families proven in released or live use, cut over to the V2
+product with bounded recovery, and finish with one supported implementation.
 
 **End-to-end production path.** A destination-committed resumable backfill
 converts released data, isolated read-only shadow comparison verifies product
@@ -802,8 +810,10 @@ window, superseded V1 and migration-only paths are deleted.
 
 **Implementation and deletion.**
 
-- Record explicit compatibility dispositions for every published API and stored
-  datum that crosses the cutover.
+- Record explicit compatibility dispositions for every API proven published
+  and every stored datum proven present in a released or live format that
+  crosses the cutover. Branch-local shapes change in place and do not enter the
+  migration inventory.
 - Do not retain reverse cutover, long-lived dual write, lazy read migration,
   production shadow reads, or V1 as renewed authority.
 - Remove superseded V1 implementations, adapters, flags, branches, and

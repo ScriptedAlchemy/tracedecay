@@ -16,8 +16,15 @@ all other retention is judged by the direct anchor identity, resolution,
 authorization, lineage, deletion, Git, platform, and regression behavior
 below.
 
+The anchor/evidence V2/V3 shapes described below were introduced on this
+integration branch and have no predecessor on `origin/master`, in a published
+package/release, or in documented live persisted data. They therefore converge
+to one final wire shape in place. Their versioned names remain historical
+implementation provenance, not evidence for parallel readers, compatibility
+aliases, or migration; `V1` may still identify an initial final wire record.
+
 **Status (2026-07-23):** Landed on this branch. PR7/Plan 13's core — `RetrievalAnchorId`
-identity and resolution, V2/V3 anchor targets, native Git/worktree/integration-receipt
+identity and resolution, the branch's V2/V3-named anchor targets, native Git/worktree/integration-receipt
 topology anchors, the immutable evidence-span/occurrence/retriever-contribution
 contract, dispositions and safe tombstones, and the atomic evidence-assembly store — is
 implemented across `crates/tracedecay-domain/src/research/`,
@@ -226,15 +233,16 @@ Shipped reality:
 
 ## Native Git, worktree, and integration-receipt anchors
 
-PR7 extends `RetrievalAnchorTargetV3`; it does not create a parallel public
-topology ID family. Plan 16 owns canonical project/repository/worktree
+PR7 extends the one final `RetrievalAnchorTarget` shape in place; it does not
+create a parallel public topology ID family or retain a branch-local
+predecessor reader. Plan 16 owns canonical project/repository/worktree
 relationships, Plan 36 owns native Git capture and object/ref interpretation,
 Plan 27 owns provider/host observation decoding into Plan 03 canonical
 observations, Plan 24 owns task decisions and task-to-evidence links, and Plan
 32 owns admitted effects and terminal runtime receipts. Plan 13 stores
 immutable, payload-free references to those owner records.
 
-The public V3 anchor target retains one Git-topology variant beneath
+The final public anchor target retains one Git-topology variant beneath
 `RetrievalAnchorId`. It can reference repository and worktree captures, ref
 snapshots, native objects, pull-request/check snapshots, conflict and preflight
 observations, and integration receipts. These persisted wire records use the
@@ -252,8 +260,9 @@ native apply, destinations outside the bound capture, changed source sets, and
 owner receipts whose identity or digest does not match the referenced record.
 These are product-runtime provenance receipts from the owning operation, not
 PR acceptance owner receipts or planning evidence.
-Historical Rust type and source-file names remain evidence for wire migration,
-not an implementation layout requirement.
+Historical Rust type and source-file names remain provenance only; absent
+release or live-persistence evidence, they require neither wire migration nor a
+particular implementation layout.
 
 `RepositoryCaptureAnchorRefV1` identity is the Plan 16 `RepositoryId` plus the
 exact Plan 36 native repository snapshot identity, object format, and common-Git-
@@ -372,12 +381,13 @@ tool-result, and code-chunk occurrences. It does not reuse observation-level anc
 lineage as an ordering model: those collections cannot distinguish multiple projected
 outputs from one observation or preserve assembly order.
 
-The persisted V3 contract retains one profile identity type; opaque occurrence,
+The final persisted contract retains one profile identity type; opaque occurrence,
 set, span, contribution, disposition, replay, and privacy-bound request
 identities; explicit owner binding for child and source lineage; immutable
 source occurrence and evidence-span records; retriever contribution and
-watermark records; and disposition, tombstone, and resolution states. It
-preserves byte-compatible V2 decoding. A project may be absent only for
+watermark records; and disposition, tombstone, and resolution states. The
+branch-local predecessor changes in place, so no V2 compatibility decoder is
+required. A project may be absent only for
 explicitly profile-owned evidence; path, CWD, store filename, project label,
 host profile, PID, branch, or ref can never fill owner identity. Historical
 Rust module and helper-type names do not constrain the current implementation.
@@ -499,11 +509,13 @@ do not cover every member. Frozen source/projection watermarks live only in
 temporal-mode selection; the horizon preserves the selected boundary without
 redefining `TemporalModeV1`.
 
-`RetrievalAnchorTargetV3` adds `ExactSourceOccurrence(SourceOccurrenceIdV1)`,
+The final `RetrievalAnchorTarget` includes
+`ExactSourceOccurrence(SourceOccurrenceIdV1)`,
 `ExactEvidenceSpan(EvidenceSpanIdV1)`, and
-`RetrieverContribution(RetrieverContributionIdV1)`. Because V2 records are already
-persisted, `RetrievalAnchorRecordV3` extends rather than silently changing V2 wire
-semantics. `derive_exact_source_occurrence_anchor_id`,
+`RetrieverContribution(RetrieverContributionIdV1)`. The earlier V2-named
+records were persisted only by this unreleased branch, so the final record
+replaces them in place rather than creating a V3 compatibility sibling.
+`derive_exact_source_occurrence_anchor_id`,
 `derive_exact_evidence_span_anchor_id`, and
 `derive_retriever_contribution_anchor_id` call the existing canonical digest
 machinery. Public lookup still uses only `RetrievalAnchorId`; the new IDs identify
@@ -609,10 +621,12 @@ An unkeyed content/path hash or raw provider locator is not a
 `PrivacyDomainBoundLocatorDigest`. Equal locator material in different privacy
 domains or key epochs produces unlinkable aliases.
 
-All new durable lineage uses `AnchorLineageRefV3` with child/source anchor ID and
-explicit canonical owner/privacy binding. V2 rows remain decodable and migrate only
-after exact owner/privacy resolution; unverifiable V2 lineage stays typed
-`UnverifiableLegacy` and cannot serve. Publication atomically writes forward and
+All new durable lineage uses the final owner-bound lineage shape (currently
+named `AnchorLineageRefV3`) with child/source anchor ID and explicit canonical
+owner/privacy binding. The branch-local V2 rows change in place; no
+compatibility decoder or migration is required for them. Independently proven
+released/live legacy lineage remains typed `UnverifiableLegacy` unless exact
+owner/privacy resolution permits import. Publication atomically writes forward and
 reverse lineage. A provider-native copied message remains a distinct source
 occurrence and uses `LogicalCopyRecordV1`/`CopiedFrom`; it proves only the copy's
 authorship and cannot impersonate its source. A summary uses
@@ -660,14 +674,17 @@ summary or FTS text, hydrated payloads, query text, paths, arguments, results,
 or embeddings into evidence-assembly records.
 
 Persisted occurrence, canonical-set, span, projection-receipt, contribution,
-lineage, disposition, and replay records preserve the published V3 wire and
-reader compatibility. They enforce owner/privacy binding, immutable membership
+lineage, disposition, and replay records use the final unreleased wire shape.
+Reader compatibility is added only for a predecessor evidenced on
+`origin/master`, in a published package/release, or in live persisted data.
+They enforce owner/privacy binding, immutable membership
 and order, referential integrity, append-only dispositions, canonical digests,
 and efficient reverse resolution. Physical table, column, index, trigger,
 migration, and source-file names are implementation history rather than
 features to recreate.
 
-Migration rejects newer unsupported schemas; backfills only exact anchored,
+When release or live-persistence evidence identifies a predecessor, migration
+rejects newer unsupported schemas and backfills only exact anchored,
 owner/privacy-bound, source-ordered occurrences with verified receipt roles;
 creates multi-member runs only from proved adjacency; leaves other legacy
 records `UnverifiableLegacy`; verifies flattened span/set equality, catalog and
@@ -686,7 +703,7 @@ with immutable inserts and atomic rollback on replay conflict.
 
 ## Cross-plan ownership
 
-- Plan 13 owns `RetrievalAnchorId`, V3 anchor targets and lineage,
+- Plan 13 owns `RetrievalAnchorId`, the final anchor targets and lineage,
   occurrence-set/span/
   contribution identity, owner-bound lineage, replay semantics, resolution states,
   dispositions, and minimum-safe tombstones. Plan 02 owns generic persistence and
@@ -759,7 +776,7 @@ through without defining another reference type (Required behavior 10).
 - Rebuilding projections preserves anchor IDs and source lineage.
 - Evidence-span contract tests prove deterministic
   source-occurrence/set/span IDs, mixed message/tool/code runs, exact ordering,
-  cross-source assembly-only semantics, horizon validation, V3 wire compatibility,
+  cross-source assembly-only semantics, horizon validation, final-wire round trips,
   byte-identical canonical-set normalization across input permutations, catalog
   binding, same-timeline tool-result pairing, UTF-8/CRLF coordinate stability, and
   rejection of gaps, duplicates, owner/generation/timeline mismatch, bare offsets,
@@ -783,8 +800,9 @@ through without defining another reference type (Required behavior 10).
 - Tombstone-expiry and summary-lineage tests prove strict tombstone fields,
   authorization revocation, possession-only denial, and transitive source deletion
   through span -> contribution -> nested summary -> FTS/context.
-- Migration tests prove reader compatibility, integrity and immutability
-  constraints, shape/version refusal, exact-only backfill, dispositions-first
+- Migration tests are required only for evidenced released/live predecessors
+  and then prove reader compatibility, integrity and immutability constraints,
+  shape/version refusal, exact-only backfill, dispositions-first
   restore/consolidation, repeatable migration receipts, rollback, and no
   payload resurrection. Historical migration and schema-object names are not
   acceptance artifacts.

@@ -13,6 +13,15 @@ These are contributor documents only and never product runtime input.
 Numbered plans define component behavior and boundaries, not separate
 crate-first work queues.
 
+`TraceDecay V2` is the product-roadmap name, not evidence that every contract
+or schema needs a V2 shape. A compatibility alias, deprecation path, dual
+reader/writer, contract/schema V2 or V3, or migration is required only when the
+predecessor demonstrably exists on `origin/master`, in a published package or
+release, or in a live persisted format. Branch-local shapes, PR order,
+historical type names, tests, and future consumers are not release evidence;
+unreleased contracts change to their final shape in place. A `V1` suffix may
+name that initial final wire format without requiring a sibling version.
+
 ## Current product foundation
 
 - `tracedecay-domain` contains the first executable V2 domain contracts.
@@ -126,9 +135,11 @@ The authoritative acceptance rule in
 historical plan.
 
 PR12 transport and PR18 SDK contracts prove structural, semantic, and lifecycle
-compatibility against supported old and current consumers. Direct fault,
-restart, concurrency, cross-platform, migration, recovery, and deletion tests
-remain part of the product journey they protect.
+compatibility against supported old and current consumers only when those
+consumers are evidenced by `origin/master`, a published package/release, or a
+live persisted format. Direct fault, restart, concurrency, cross-platform,
+migration, recovery, and deletion tests remain part of the product journey
+they protect.
 
 Product, contributor, CI, release, and publication behavior preserves stock
 Cargo semantics. A slice that materially changes crate boundaries, dependency
