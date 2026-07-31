@@ -34,17 +34,17 @@ jobs:
     if: vars.BETA_CHANNEL_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Checkout release automation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           path: .release-automation
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -62,7 +62,7 @@ jobs:
         run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
 
       - name: Upload dashboard artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -107,18 +107,18 @@ jobs:
           set -euo pipefail
           test "$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json isPrerelease --jq .isPrerelease)" = true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Checkout release automation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           path: .release-automation
 
       - name: Download dashboard artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -376,18 +376,18 @@ jobs:
     needs: dashboard-assets
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Checkout release automation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           path: .release-automation
 
       - name: Download dashboard artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: dashboard-app-dist
           path: dashboard/app-dist
@@ -458,7 +458,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release automation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           path: .release-automation
@@ -511,10 +511,10 @@ jobs:
     needs: [build, package-workspace, publish-assets]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           path: release-source
