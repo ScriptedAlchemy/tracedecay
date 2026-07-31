@@ -911,8 +911,7 @@ mod tests {
 
     use crate::application::host_admission::{
         HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
-        HostProjectionDrainOutcome, ObservationCaptureAdmissionPort,
-        TranscriptCursorAdmissionPort,
+        HostProjectionDrainOutcome, ObservationCaptureAdmissionPort, TranscriptCursorAdmissionPort,
     };
     use crate::application::observation::{
         CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
@@ -972,8 +971,9 @@ mod tests {
             &'a self,
             _source: &'a ObservationSourceIdentityV1,
             _scope: &'a ObservationScopeV1,
-        ) -> impl Future<Output = Result<Option<ObservationSourceCursorV1>, HostAdmissionOutcome>>
-        + Send
+        ) -> impl Future<
+            Output = Result<Option<ObservationSourceCursorV1>, HostAdmissionOutcome>,
+        > + Send
         + 'a {
             async { Ok(None) }
         }

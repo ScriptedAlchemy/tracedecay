@@ -48,7 +48,7 @@ pub(crate) enum CommittedPayloadRemoval {
 }
 
 #[cfg(test)]
-pub async fn delete_external_payload(
+pub(crate) async fn delete_external_payload(
     conn: &Connection,
     storage_root: &Path,
     payload_ref: &str,
@@ -88,6 +88,7 @@ pub async fn delete_external_payload(
     Ok(outcome)
 }
 
+#[cfg(test)]
 pub(crate) fn reconcile_committed_payload_drain(
     outcome: &mut DeleteOutcome,
     payload_ref: &str,

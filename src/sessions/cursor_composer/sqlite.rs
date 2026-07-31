@@ -284,10 +284,6 @@ pub(crate) fn workspace_hash(envelope: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn bubble_epoch(bubble: &Value, key: &str) -> Option<i64> {
-    epoch_ms_to_secs(bubble.get(key).and_then(Value::as_i64))
-}
-
 pub(crate) fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
     ms.filter(|v| *v > 0).map(|v| v / 1000)
 }

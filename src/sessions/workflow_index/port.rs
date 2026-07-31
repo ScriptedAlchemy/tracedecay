@@ -19,7 +19,7 @@ pub(crate) trait WorkflowIngestWriteTxn: QueryExecutor + Executor + Sized + Send
 
 /// Fail-open ingest sink for discovered workflow runs.
 ///
-/// Implementations must preserve ProjectSessions authority checks, watermark
+/// Implementations must preserve `ProjectSessions` authority checks, watermark
 /// ordering, idempotent run/agent upserts, and fail-open-per-run skip
 /// semantics owned by the ingest sweep.
 pub(crate) trait WorkflowIngestSink: Send + Sync {

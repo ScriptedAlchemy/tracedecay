@@ -1,12 +1,10 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use serde_json::Value;
 use tracedecay_domain::{
-    CanonicalMessageRoleV1, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, RetentionClass,
-    SanitizationReceiptV1,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    RetentionClass, SanitizationReceiptV1,
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
@@ -539,33 +537,6 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
         RawJsonlSkippedReason::Whitespace => ObservationCoverageReason::BlankFrame,
         RawJsonlSkippedReason::Oversized => ObservationCoverageReason::OversizedFrame,
     }
-}
-
-pub(crate) fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
-}
-
-pub(crate) fn canonical_native_observation_id(
-    native_id: Option<&str>,
-    fallback: &ObservationId,
-) -> ObservationId {
-    native_id
-        .and_then(|native_id| ObservationId::new(native_id).ok())
-        .unwrap_or_else(|| fallback.clone())
-}
-
-pub(crate) fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
 }
 
 pub(crate) fn namespace_replacement_message_ids(

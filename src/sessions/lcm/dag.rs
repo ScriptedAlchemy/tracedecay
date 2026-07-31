@@ -263,15 +263,6 @@ pub fn summary_node_id(
     format!("sum_{}", projected_content_hash(&input.to_string()))
 }
 
-pub(crate) async fn load_summary_node(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-    node_id: &str,
-) -> Result<LcmSummaryNode, LcmError> {
-    load_summary_node_with_content(conn, provider, session_id, node_id, true).await
-}
-
 async fn load_summary_node_with_content(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,

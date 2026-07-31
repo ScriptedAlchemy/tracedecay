@@ -11,7 +11,9 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, Value, params};
+#[cfg(test)]
+use crate::db::engine::{Connection, TransactionBehavior};
+use crate::db::engine::{Executor, QueryExecutor, Value, params};
 
 use super::SessionMessageRecord;
 
@@ -1872,8 +1874,8 @@ pub use backfill::{
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
     WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
 };
-pub use store::AnalyticsSessionTimestamp;
 pub(crate) use backfill::{run_backfill, run_incremental_backfill};
+pub use store::AnalyticsSessionTimestamp;
 pub(crate) use store::{
     AnalyticsSessionTimestampSource, GitCorrelationStore, GitCorrelationWriteTxn,
 };

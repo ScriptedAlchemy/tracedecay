@@ -379,7 +379,7 @@ async fn sweep_ingests_runs_scoped_to_project_and_is_incremental() {
     let stats = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &project_root, &projects)
-    .await;
+        .await;
     // Both the meta run and the dir-only run land.
     assert_eq!(stats.runs_ingested, 2);
     // Meta run: 2 agents; orphan run: 1 agent.
@@ -419,7 +419,7 @@ async fn sweep_ingests_runs_scoped_to_project_and_is_incremental() {
     let again = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &project_root, &projects)
-    .await;
+        .await;
     assert_eq!(again, WorkflowIngestStats::default());
 }
 
@@ -439,7 +439,7 @@ async fn sweep_skips_runs_owned_by_a_different_project() {
     let stats = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &target_root, &projects)
-    .await;
+        .await;
     assert_eq!(stats, WorkflowIngestStats::default());
     let reader = store.index_reader().await;
     assert!(
@@ -509,7 +509,7 @@ async fn other_project_run_does_not_advance_watermark() {
     let stats = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &target_root, &projects)
-    .await;
+        .await;
     assert_eq!(stats.runs_ingested, 2); // target's wf_meta + wf_orphan
     let reader = store.index_reader().await;
     assert!(
@@ -547,7 +547,7 @@ async fn other_project_run_does_not_advance_watermark() {
     let again = store
         .workflow_store()
         .ingest_workflow_runs_from(&store.project_id, &target_root, &projects)
-    .await;
+        .await;
     assert_eq!(
         again.runs_ingested, 1,
         "the still-Running target run must be re-ingested, not stranded"

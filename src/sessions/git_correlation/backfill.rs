@@ -781,4 +781,3 @@ fn decode_session_activity_row(row: &Row) -> Result<SessionActivityRow, String> 
             .map_err(|e| format!("failed to decode message_max_ts: {e}"))?,
     })
 }
-

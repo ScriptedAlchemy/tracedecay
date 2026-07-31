@@ -382,6 +382,7 @@ pub(crate) struct CodeSourceSanitizationV1 {
 }
 
 impl CodeSourceSanitizationV1 {
+    #[cfg(test)]
     pub(crate) fn sanitized_bytes(&self) -> &[u8] {
         &self.sanitized_bytes
     }

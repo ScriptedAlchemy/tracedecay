@@ -65,6 +65,7 @@ impl TranscriptCatchUpFailure {
     /// Mutable session ingestion requires a retained daemon registry mount.
     /// Compatibility callers without that mount must fail before touching the
     /// legacy database or any provider source.
+    #[cfg(test)]
     pub(super) const fn registered_authority_unavailable(provider: &'static str) -> Self {
         Self::new(
             provider,

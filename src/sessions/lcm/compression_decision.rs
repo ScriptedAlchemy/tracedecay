@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::compression_policy::DEFAULT_INCREMENTAL_MAX_DEPTH;
 pub(super) use super::compression_policy::threshold_pressure;
 pub use super::compression_policy::{
     AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
@@ -6,8 +8,7 @@ pub use super::compression_policy::{
 };
 pub(crate) use super::compression_policy::{
     CondensationCandidateDecision, CondensationDecision, CondensationPolicy,
-    CondensationSkipReason, DEFAULT_INCREMENTAL_MAX_DEPTH, condensation_candidate_decision,
-    incremental_max_depth_limit,
+    CondensationSkipReason, condensation_candidate_decision, incremental_max_depth_limit,
 };
 use super::compression_policy::{forced_overflow_pressure, source_token_count};
 use super::summarizer::CompressionSummarizerAdapter;

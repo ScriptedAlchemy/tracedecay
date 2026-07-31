@@ -160,11 +160,8 @@ async fn schema_version(conn: &impl QueryExecutor) -> Option<i64> {
     rows.next().await.ok()??.get(0).ok()
 }
 
-/// True when both workflow tables are present, so a query against a store that
-/// predates this schema can short-circuit to empty instead of hitting a
-/// `no such table` error. Mirrors
-/// [`crate::sessions::git_correlation::tables_present`].
-pub(crate) async fn tables_present(conn: &impl QueryExecutor) -> Result<bool, WorkflowIndexError> {
+#[cfg(test)]
+async fn tables_present(conn: &impl QueryExecutor) -> Result<bool, WorkflowIndexError> {
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM sqlite_master
@@ -202,26 +199,6 @@ pub(crate) async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) 
         Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0),
         _ => 0,
     }
-}
-
-/// Advances the ingest watermark to `mtime` when it is newer than the stored
-/// value (monotonic; a stale re-scan never rewinds it). Requires the schema to
-/// exist; callers ensure it before writing.
-pub(crate) async fn bump_ingest_watermark(
-    conn: &impl Executor,
-    key: &str,
-    mtime: i64,
-) -> Result<(), WorkflowIndexError> {
-    conn.execute(
-        "INSERT INTO workflow_index_meta(key, value)
-         VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET
-             value = MAX(value, excluded.value),
-             updated_at = unixepoch()",
-        params![key, mtime],
-    )
-    .await?;
-    Ok(())
 }
 
 fn opt_text(value: Option<&str>) -> Value {
@@ -587,9 +564,8 @@ impl RegisteredWorkflowIndexSnapshot {
     }
 }
 
-/// Lists workflow runs spawned by one parent session, newest-first. Returns an
-/// empty vec (never an error) when the schema is absent.
-pub(crate) async fn runs_for_session(
+#[cfg(test)]
+async fn runs_for_session(
     conn: &impl QueryExecutor,
     parent_session_id: &str,
     limit: usize,
@@ -614,8 +590,8 @@ pub(crate) async fn runs_for_session(
     Ok(runs)
 }
 
-/// Fetches one run by its `wf_*` id, or `None` when absent.
-pub(crate) async fn run_for_id(
+#[cfg(test)]
+async fn run_for_id(
     conn: &impl QueryExecutor,
     run_id: &str,
 ) -> Result<Option<WorkflowRun>, WorkflowIndexError> {
@@ -630,9 +606,8 @@ pub(crate) async fn run_for_id(
     }
 }
 
-/// Lists the agents of one run, ordered by start time then label so a phase
-/// reads top-to-bottom.
-pub(crate) async fn agents_for_run(
+#[cfg(test)]
+async fn agents_for_run(
     conn: &impl QueryExecutor,
     run_id: &str,
     limit: usize,
@@ -657,15 +632,8 @@ pub(crate) async fn agents_for_run(
     Ok(agents)
 }
 
-/// Runs that ran "on branch X / in worktree Y / for commit Z": a run inherits
-/// its parent session's git spans, so this selects runs whose
-/// `parent_session_id` matches a session correlated with the given git ref.
-///
-/// Implemented as an `EXISTS` pushdown against the git-correlation tables
-/// ([`session_git_spans`] / [`commit_sessions`]) — the same tables
-/// `tracedecay_sessions_for` reads. When either the workflow schema or the
-/// git-correlation schema is absent, returns empty (nothing could correlate).
-pub(crate) async fn runs_for_git_scope(
+#[cfg(test)]
+async fn runs_for_git_scope(
     conn: &impl QueryExecutor,
     filter: &GitScopeFilter,
     limit: usize,
@@ -678,9 +646,6 @@ pub(crate) async fn runs_for_git_scope(
     if !tables_present(conn).await? {
         return Ok(Vec::new());
     }
-    // A git-scoped run query against a store written before the correlation
-    // schema existed can never match; report empty rather than issuing an
-    // EXISTS against missing tables.
     if !crate::sessions::git_correlation::tables_present(conn)
         .await
         .map_err(WorkflowIndexError::from)?
@@ -719,12 +684,8 @@ pub(crate) async fn runs_for_git_scope(
     Ok(runs)
 }
 
-/// EXISTS predicate scoping message search to one workflow run's agents.
-///
-/// Returns `(predicate_sql, params)` where `?1`, `?2`, … bind to the values
-/// in order (`run_id`, optional `agent_label`). Callers append `params` to
-/// their query bind list and AND the predicate into the outer WHERE clause.
-pub(crate) fn workflow_scope_exists_predicate(
+#[cfg(test)]
+fn workflow_scope_exists_predicate(
     filter: &WorkflowScopeFilter,
     message_source_path_col: &str,
     message_session_id_col: &str,
