@@ -12,9 +12,43 @@ impl WorkStoragePort for WorkSqliteStorage {
         load_registered_history(&self.handle, authority, task_id)
     }
 
+    fn projection(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+    ) -> Result<WorkProjection, WorkStorageError> {
+        load_registered_projection(&self.handle, authority, task_id)
+    }
+
     fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
         append_registered(&self.handle, request)
     }
+}
+
+/// Reads the published projection for one task. The snapshot row is what every
+/// append publishes with the fold; it is the ordinary read authority.
+pub(crate) fn load_registered_projection(
+    handle: &MigrationSqlHandle,
+    authority: &WorkAuthority,
+    task_id: &TaskId,
+) -> Result<WorkProjection, WorkStorageError> {
+    let rows = registered_work_query(
+        handle,
+        "SELECT projection_payload FROM work_projection_snapshots_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5 AND task_id = ?6",
+        authority_params_owned(authority)
+            .into_iter()
+            .chain([MigrationSqlValue::Text(task_id.as_str().to_owned())])
+            .collect(),
+    )
+    .map_err(|_| WorkStorageError::Unavailable)?;
+    let payload = rows
+        .rows
+        .first()
+        .and_then(|row| migration_text(&row.values, 0))
+        .ok_or(WorkStorageError::NotFoundOrNotAuthorized)?;
+    serde_json::from_str(payload).map_err(|_| WorkStorageError::Unavailable)
 }
 
 pub(crate) fn load_registered_history(

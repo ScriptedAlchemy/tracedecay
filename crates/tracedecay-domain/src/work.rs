@@ -7,8 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, RunId, TaskId, UtcMicros,
-    WorkCommandId, WorktreeId,
+    ActorId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, RepositoryId, RunId,
+    TaskId, UtcMicros, WorkCommandId, WorktreeId, canonical_sha256,
 };
 
 pub const MAX_WORK_TITLE_BYTES: usize = 512;
@@ -49,6 +49,8 @@ pub enum WorkContractError {
     InvalidProjectionHistory,
     #[error("work projection fold state was written at an unsupported version")]
     UnsupportedProjectionState,
+    #[error("work projection generation could not be derived from authority")]
+    InvalidProjectionGeneration,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -135,6 +137,21 @@ impl WorkAuthority {
 
     pub fn policy_digest(&self) -> &ManifestDigest {
         &self.policy_digest
+    }
+
+    /// Canonical projection generation for this authority.
+    ///
+    /// Generation is derived only from registered projection/fold authority.
+    /// Callers must never supply a snapshot- or binding-forged substitute.
+    pub fn projection_generation_id(&self) -> Result<ProjectionGenerationId, WorkContractError> {
+        let digest = canonical_sha256(&("tracedecay.work.projection.generation.v1", self))
+            .map_err(|_| WorkContractError::InvalidProjectionGeneration)?;
+        let hex = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .unwrap_or(digest.as_str());
+        ProjectionGenerationId::try_from(format!("generation.work.{hex}"))
+            .map_err(|_| WorkContractError::InvalidProjectionGeneration)
     }
 }
 

@@ -37,13 +37,8 @@ pub(crate) fn exact_snapshot_registered(
 ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
     let generation_id = projection_generation(authority)?;
     let sequence = WorkProjectionSequenceV1::new(registered_owner_cursor(handle, authority)?);
-    let projection =
-        load_registered_projection(handle, authority, task_id).map_err(|error| match error {
-            WorkStorageError::NotFoundOrNotAuthorized
-            | WorkStorageError::VersionConflict
-            | WorkStorageError::IdempotencyConflict => WorkProjectionPortError::Unavailable,
-            WorkStorageError::Unavailable => WorkProjectionPortError::Unavailable,
-        })?;
+    let projection = load_registered_projection(handle, authority, task_id)
+        .map_err(|_| WorkProjectionPortError::Unavailable)?;
     WorkProjectionSnapshotV1::new(
         generation_id,
         sequence,

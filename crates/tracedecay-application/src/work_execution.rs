@@ -107,6 +107,8 @@ impl From<WorkAttemptV1> for WorkAttemptResponseV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkExecutionPersistenceError {
     Conflict,
+    /// Projection generation or authority failed validation before any write.
+    InvalidRequest,
     Unavailable(String),
 }
 
@@ -114,6 +116,9 @@ impl Display for WorkExecutionPersistenceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Conflict => formatter.write_str("work attempt changed concurrently"),
+            Self::InvalidRequest => {
+                formatter.write_str("work attempt projection generation or authority is invalid")
+            }
             Self::Unavailable(message) => {
                 write!(formatter, "work attempt persistence unavailable: {message}")
             }

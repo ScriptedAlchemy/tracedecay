@@ -149,6 +149,9 @@ pub struct WorkAttemptProjectionBindingV1 {
     generation_id: ProjectionGenerationId,
     sequence: WorkProjectionSequenceV1,
     work_version: WorkVersion,
+    /// Exact accepted proposal the attempt was admitted against. A superseded
+    /// or cleared proposal is a different binding, not a compatible refresh.
+    accepted_proposal: ProposalId,
 }
 
 impl WorkAttemptProjectionBindingV1 {
@@ -156,11 +159,13 @@ impl WorkAttemptProjectionBindingV1 {
         generation_id: ProjectionGenerationId,
         sequence: WorkProjectionSequenceV1,
         work_version: WorkVersion,
+        accepted_proposal: ProposalId,
     ) -> Result<Self, WorkRuntimeContractError> {
         Ok(Self {
             generation_id,
             sequence,
             work_version,
+            accepted_proposal,
         })
     }
 
@@ -174,6 +179,10 @@ impl WorkAttemptProjectionBindingV1 {
 
     pub const fn work_version(&self) -> WorkVersion {
         self.work_version
+    }
+
+    pub fn accepted_proposal(&self) -> &ProposalId {
+        &self.accepted_proposal
     }
 }
 
@@ -812,12 +821,16 @@ pub enum WorkAttemptStateV1 {
     RecoveryRequired,
     Succeeded,
     Failed,
+    TimedOut,
     Cancelled,
 }
 
 impl WorkAttemptStateV1 {
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::TimedOut | Self::Cancelled
+        )
     }
 }
 
@@ -829,6 +842,10 @@ pub enum WorkTerminalEvidenceV1 {
         observed_at: UtcMicros,
     },
     Failed {
+        evidence_digest: ManifestDigest,
+        observed_at: UtcMicros,
+    },
+    TimedOut {
         evidence_digest: ManifestDigest,
         observed_at: UtcMicros,
     },
@@ -859,6 +876,16 @@ impl WorkTerminalEvidenceV1 {
         })
     }
 
+    pub fn timed_out(
+        evidence_digest: ManifestDigest,
+        observed_at: UtcMicros,
+    ) -> Result<Self, WorkRuntimeContractError> {
+        Ok(Self::TimedOut {
+            evidence_digest,
+            observed_at,
+        })
+    }
+
     pub fn cancelled(
         evidence_digest: ManifestDigest,
         observed_at: UtcMicros,
@@ -880,6 +907,9 @@ impl WorkTerminalEvidenceV1 {
             | Self::Failed {
                 evidence_digest, ..
             }
+            | Self::TimedOut {
+                evidence_digest, ..
+            }
             | Self::Cancelled {
                 evidence_digest, ..
             } => evidence_digest.clone(),
@@ -893,6 +923,7 @@ impl WorkTerminalEvidenceV1 {
             (self, state),
             (Self::Succeeded { .. }, WorkAttemptStateV1::Succeeded)
                 | (Self::Failed { .. }, WorkAttemptStateV1::Failed)
+                | (Self::TimedOut { .. }, WorkAttemptStateV1::TimedOut)
                 | (Self::Cancelled { .. }, WorkAttemptStateV1::Cancelled)
         )
     }
@@ -1006,8 +1037,13 @@ impl WorkAttemptV1 {
         &self,
         projection: &WorkProjection,
     ) -> Result<(), WorkRuntimeContractError> {
+        // Exact identity fencing: a newer work version, a superseded proposal,
+        // or a different task is a different admission surface, not a refresh of
+        // this attempt. Softening any of these to "at least" would let a
+        // replanned or superseded snapshot keep executing under the old lease.
         if self.identity.task_id() != projection.task_id()
-            || self.projection_binding.work_version() > projection.version()
+            || self.projection_binding.work_version() != projection.version()
+            || projection.accepted_proposal() != Some(self.projection_binding.accepted_proposal())
         {
             return Err(WorkRuntimeContractError::ProjectionMismatch);
         }
@@ -1115,7 +1151,9 @@ impl WorkAttemptV1 {
                     && matches!(self.cancellation, WorkCancellationStateV1::None)
                     && self.terminal.is_none()
             }
-            WorkAttemptStateV1::Succeeded | WorkAttemptStateV1::Failed => {
+            WorkAttemptStateV1::Succeeded
+            | WorkAttemptStateV1::Failed
+            | WorkAttemptStateV1::TimedOut => {
                 self.actual_route.is_some()
                     && self
                         .terminal
