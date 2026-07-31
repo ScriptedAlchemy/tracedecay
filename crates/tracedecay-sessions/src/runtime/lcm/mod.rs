@@ -17,7 +17,7 @@ mod summarizer;
 pub mod types;
 pub mod util;
 
-pub use crate::application::session::lcm::compression_policy;
+pub use crate::lcm::compression_policy;
 
 pub const LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT: &str = "You answer questions using expanded LCM retrieval context. Be concise, factual, and grounded in the provided context. If the context is insufficient, say so plainly.";
 
@@ -26,12 +26,12 @@ pub const LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT: &str = "You answer questions
 /// The `SQLite` runtime rejects any single query that materializes more than its
 /// admission limit, so whole-table reads arrive as a sequence of pages that are
 /// aggregated incrementally. The result stays a complete scan.
-pub(crate) const LCM_SCAN_PAGE_ROWS: i64 = 512;
+pub const LCM_SCAN_PAGE_ROWS: i64 = 512;
 
 /// Byte budget for a keyset page that carries raw message text. Pages stop
 /// short of the row budget when the text is large, so only an empty page
 /// proves such a scan is complete.
-pub(crate) const LCM_SCAN_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
+pub const LCM_SCAN_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
 
 pub use hermes::{LcmCompressionRequest, LcmSummarizerMode};
 pub use raw::derived_text_for_index;

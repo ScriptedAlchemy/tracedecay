@@ -5,7 +5,7 @@ use super::*;
 
 use crate::runtime::lcm::{LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS};
 
-pub(crate) async fn payload_health_summary(
+pub async fn payload_health_summary(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
@@ -75,7 +75,7 @@ pub(crate) async fn payload_health_summary(
     })
 }
 
-pub(crate) async fn payload_health_detail(
+pub async fn payload_health_detail(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
@@ -306,7 +306,7 @@ pub(crate) async fn payload_health_detail(
     })
 }
 
-pub(crate) fn payload_health_state(
+pub fn payload_health_state(
     payload: &LcmPayloadStatus,
     payload_gc: &LcmPayloadGcStatus,
 ) -> &'static str {
@@ -329,14 +329,14 @@ pub(crate) fn payload_health_state(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PayloadHealthDetail {
-    pub(crate) payload: LcmPayloadStatus,
-    pub(crate) payload_gc: LcmPayloadGcStatus,
-    pub(crate) missing_payload_refs: Vec<PayloadRefLocation>,
-    pub(crate) orphan_files: Vec<PayloadFileStatusSample>,
-    pub(crate) unreferenced_refs: Vec<PayloadRefStatusSample>,
-    pub(crate) missing_placeholder_refs: Vec<PayloadRefLocation>,
-    pub(crate) integrity_mismatch_refs: Vec<String>,
+pub struct PayloadHealthDetail {
+    pub payload: LcmPayloadStatus,
+    pub payload_gc: LcmPayloadGcStatus,
+    pub missing_payload_refs: Vec<PayloadRefLocation>,
+    pub orphan_files: Vec<PayloadFileStatusSample>,
+    pub unreferenced_refs: Vec<PayloadRefStatusSample>,
+    pub missing_placeholder_refs: Vec<PayloadRefLocation>,
+    pub integrity_mismatch_refs: Vec<String>,
 }
 
 async fn payload_byte_counts_for_scope(
@@ -751,26 +751,26 @@ fn payload_root_contained(storage_root: &Path) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct PayloadRefLocation {
-    pub(crate) payload_ref: String,
-    pub(crate) session_id: String,
-    pub(crate) message_id: String,
-    pub(crate) store_id: i64,
-    pub(crate) field: String,
+pub struct PayloadRefLocation {
+    pub payload_ref: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub store_id: i64,
+    pub field: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct PayloadFileStatusSample {
-    pub(crate) payload_ref: String,
-    pub(crate) bytes: u64,
-    pub(crate) age_seconds: i64,
-    pub(crate) eligible_at: i64,
+pub struct PayloadFileStatusSample {
+    pub payload_ref: String,
+    pub bytes: u64,
+    pub age_seconds: i64,
+    pub eligible_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct PayloadRefStatusSample {
-    pub(crate) payload_ref: String,
-    pub(crate) bytes: u64,
-    pub(crate) eligible_at: Option<i64>,
-    pub(crate) grace_remaining_seconds: Option<i64>,
+pub struct PayloadRefStatusSample {
+    pub payload_ref: String,
+    pub bytes: u64,
+    pub eligible_at: Option<i64>,
+    pub grace_remaining_seconds: Option<i64>,
 }

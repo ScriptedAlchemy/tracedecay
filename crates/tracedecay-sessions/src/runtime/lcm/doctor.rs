@@ -23,18 +23,18 @@ fn sql_placeholders(len: usize) -> String {
     std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
 
-pub(crate) struct DoctorRequest<'a> {
-    pub(crate) storage_root: &'a Path,
-    pub(crate) db_path: &'a Path,
-    pub(crate) provider: &'a str,
-    pub(crate) session_id: Option<&'a str>,
-    pub(crate) mode: &'a str,
-    pub(crate) apply: bool,
-    pub(crate) clean_config: LcmCleanConfig,
-    pub(crate) gc_config: LcmGcConfig,
+pub struct DoctorRequest<'a> {
+    pub storage_root: &'a Path,
+    pub db_path: &'a Path,
+    pub provider: &'a str,
+    pub session_id: Option<&'a str>,
+    pub mode: &'a str,
+    pub apply: bool,
+    pub clean_config: LcmCleanConfig,
+    pub gc_config: LcmGcConfig,
 }
 
-pub(crate) fn request_mutates(request: &DoctorRequest<'_>) -> bool {
+pub fn request_mutates(request: &DoctorRequest<'_>) -> bool {
     request.apply && matches!(request.mode, "repair" | "clean" | "gc")
 }
 
@@ -50,7 +50,7 @@ struct RepairRequest<'a> {
     gc_config: &'a LcmGcConfig,
 }
 
-pub(crate) async fn doctor(
+pub async fn doctor(
     conn: &(impl Executor + ?Sized),
     request: DoctorRequest<'_>,
 ) -> Result<Value, LcmError> {

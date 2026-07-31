@@ -37,20 +37,20 @@ pub use ingest::{
     ingest_homes_capped, ingest_homes_capped_with_admission, ingest_homes_for_projects,
     ingest_user_homes, ingest_user_homes_capped, ingest_user_sessions_capped,
 };
-pub(crate) use ingest::{ingest_legacy_pinned_profile, ingest_user_sessions_capped_with_admission};
+pub use ingest::{ingest_legacy_pinned_profile, ingest_user_sessions_capped_with_admission};
 
 #[cfg(all(test, windows))]
-pub(crate) use coverage::sqlite_incarnation;
+pub use coverage::sqlite_incarnation;
 #[cfg(test)]
-pub(crate) use observation::{
+pub use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,
     native_observation_record, normalize_native_observation, observation_source,
     prepare_observation_row, stable_native_id,
 };
 #[cfg(test)]
-pub(crate) use rows::HermesRow;
+pub use rows::HermesRow;
 #[cfg(test)]
-pub(crate) use state_db::{
+pub use state_db::{
     message_columns, open_read_only_strict, read_new_rows_strict, select_new_messages_sql,
     table_columns, validate_required_schema,
 };

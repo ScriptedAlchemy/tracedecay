@@ -6,21 +6,21 @@ use super::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PersistedSummaryInvocation {
-    pub(crate) summary_text: String,
-    pub(crate) route: Option<String>,
-    pub(crate) extraction_result: Option<LcmExtractionResult>,
+pub struct PersistedSummaryInvocation {
+    pub summary_text: String,
+    pub route: Option<String>,
+    pub extraction_result: Option<LcmExtractionResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CompressionSummarizerAdapter {
+pub enum CompressionSummarizerAdapter {
     Noop,
     HermesAuxiliary,
     Persisted(PersistedSummaryInvocation),
 }
 
 impl CompressionSummarizerAdapter {
-    pub(crate) fn from_mode(mode: LcmSummarizerMode) -> Self {
+    pub fn from_mode(mode: LcmSummarizerMode) -> Self {
         match mode {
             LcmSummarizerMode::Noop => Self::Noop,
             LcmSummarizerMode::HermesAuxiliary => Self::HermesAuxiliary,
@@ -45,18 +45,18 @@ impl CompressionSummarizerAdapter {
         }
     }
 
-    pub(crate) fn is_noop(&self) -> bool {
+    pub fn is_noop(&self) -> bool {
         matches!(self, Self::Noop)
     }
 
-    pub(crate) fn persisted_summary_invocation(&self) -> Option<&PersistedSummaryInvocation> {
+    pub fn persisted_summary_invocation(&self) -> Option<&PersistedSummaryInvocation> {
         match self {
             Self::Persisted(invocation) => Some(invocation),
             Self::Noop | Self::HermesAuxiliary => None,
         }
     }
 
-    pub(crate) fn summary_request(
+    pub fn summary_request(
         &self,
         provider: &str,
         session_id: &str,

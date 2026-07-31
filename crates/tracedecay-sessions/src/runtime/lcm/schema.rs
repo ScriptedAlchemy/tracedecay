@@ -44,7 +44,7 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
 
 /// Returns whether the raw-message FTS table and all three synchronization
 /// triggers use the v3 content-only contracts.
-pub(crate) async fn raw_fts_structure_is_current(
+pub async fn raw_fts_structure_is_current(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Option<bool> {
     let mut rows = conn
@@ -127,7 +127,7 @@ fn compact_sql(sql: &str) -> String {
 /// `lcm_raw_messages` via the FTS5 `'rebuild'` command. Used by the schema
 /// migration and the doctor repair path; idempotent and data-preserving
 /// because the index is derived entirely from the content table.
-pub(crate) async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
+pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
          DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
@@ -149,7 +149,7 @@ pub(crate) async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<(
 /// Test-only convenience wrapper: production schema creation runs through
 /// [`ensure_lcm_schema_in_transaction`] inside the callers' own transactions.
 #[cfg(test)]
-pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
+pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -164,7 +164,7 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError>
     }
 }
 
-pub(crate) async fn ensure_lcm_schema_in_transaction(
+pub async fn ensure_lcm_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), LcmError> {
     // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
@@ -414,7 +414,7 @@ pub(crate) async fn ensure_lcm_schema_in_transaction(
     Ok(())
 }
 
-pub(crate) async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
+pub async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
@@ -425,7 +425,7 @@ pub(crate) async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Opti
     rows.next().await.ok()??.get(0).ok()
 }
 
-pub(crate) async fn get_gc_meta(
+pub async fn get_gc_meta(
     conn: &(impl QueryExecutor + ?Sized),
     key: &str,
 ) -> Result<Option<String>, LcmError> {
@@ -438,7 +438,7 @@ pub(crate) async fn get_gc_meta(
     }
 }
 
-pub(crate) async fn set_gc_meta(
+pub async fn set_gc_meta(
     conn: &(impl Executor + ?Sized),
     key: &str,
     value: &str,
@@ -451,7 +451,7 @@ pub(crate) async fn set_gc_meta(
     Ok(())
 }
 
-pub(crate) async fn clear_gc_meta(
+pub async fn clear_gc_meta(
     conn: &(impl Executor + ?Sized),
     key: &str,
 ) -> Result<(), LcmError> {
@@ -460,7 +460,7 @@ pub(crate) async fn clear_gc_meta(
     Ok(())
 }
 
-pub(crate) async fn load_raw_message(
+pub async fn load_raw_message(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     message_id: &str,

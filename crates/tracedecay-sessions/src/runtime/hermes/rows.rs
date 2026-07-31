@@ -8,44 +8,44 @@ use crate::runtime::shared::StoredCursor;
 use super::MAX_HERMES_VALUE_BYTES;
 
 /// One joined `messages` × `sessions` row read past the cursor.
-pub(crate) struct HermesRow {
-    pub(crate) id: i64,
-    pub(crate) session_id: String,
-    pub(crate) role: String,
-    pub(crate) content: Option<String>,
-    pub(crate) reasoning: Option<String>,
-    pub(crate) tool_name: Option<String>,
-    pub(crate) tool_calls: Option<String>,
-    pub(crate) timestamp: Option<f64>,
-    pub(crate) session_model: Option<String>,
-    pub(crate) parent_session_id: Option<String>,
-    pub(crate) session_cwd: Option<String>,
-    pub(crate) session_source: Option<String>,
-    pub(crate) session_title: Option<String>,
-    pub(crate) session_started_at: Option<f64>,
-    pub(crate) session_ended_at: Option<f64>,
-    pub(crate) session_input_tokens: Option<i64>,
-    pub(crate) session_output_tokens: Option<i64>,
-    pub(crate) session_cache_read_tokens: Option<i64>,
-    pub(crate) session_cache_write_tokens: Option<i64>,
-    pub(crate) session_reasoning_tokens: Option<i64>,
+pub struct HermesRow {
+    pub id: i64,
+    pub session_id: String,
+    pub role: String,
+    pub content: Option<String>,
+    pub reasoning: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_calls: Option<String>,
+    pub timestamp: Option<f64>,
+    pub session_model: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub session_cwd: Option<String>,
+    pub session_source: Option<String>,
+    pub session_title: Option<String>,
+    pub session_started_at: Option<f64>,
+    pub session_ended_at: Option<f64>,
+    pub session_input_tokens: Option<i64>,
+    pub session_output_tokens: Option<i64>,
+    pub session_cache_read_tokens: Option<i64>,
+    pub session_cache_write_tokens: Option<i64>,
+    pub session_reasoning_tokens: Option<i64>,
     /// `messages.active` soft-delete flag (0 = rewound/undone turn). Legacy
     /// stores without the column read as 1.
-    pub(crate) active: i64,
+    pub active: i64,
     /// Set when SQL `typeof`/`length` rejected a column before materialization.
-    pub(crate) sql_value_oversized: bool,
+    pub sql_value_oversized: bool,
     /// Sum of SQL `length()` charges for text/blob columns (not Rust `String::len`).
-    pub(crate) sql_measured_bytes: u64,
+    pub sql_measured_bytes: u64,
 }
 
 /// One bounded `SQLite` page: row count, per-value, and cumulative byte caps applied
 /// before `String`/`Vec` materialization.
-pub(crate) struct HermesPageRead {
-    pub(crate) items: Vec<HermesRow>,
+pub struct HermesPageRead {
+    pub items: Vec<HermesRow>,
     #[cfg(test)]
-    pub(crate) new_cursor: StoredCursor,
+    pub new_cursor: StoredCursor,
     /// More rows remain at the authority, but the page byte budget stopped collection.
-    pub(crate) truncated_by_byte_budget: bool,
+    pub truncated_by_byte_budget: bool,
 }
 
 fn text_bytes<const N: usize>(values: [Option<&str>; N]) -> u64 {
@@ -54,7 +54,7 @@ fn text_bytes<const N: usize>(values: [Option<&str>; N]) -> u64 {
     })
 }
 
-pub(crate) fn hermes_native_payload_bytes(row: &HermesRow) -> u64 {
+pub fn hermes_native_payload_bytes(row: &HermesRow) -> u64 {
     let text_bytes = text_bytes([
         Some(row.session_id.as_str()),
         Some(row.role.as_str()),
@@ -84,7 +84,7 @@ fn hermes_row_bytes(row: &HermesRow) -> u64 {
         .saturating_add(16)
 }
 
-pub(crate) fn hermes_budget_bytes(row: &HermesRow) -> u64 {
+pub fn hermes_budget_bytes(row: &HermesRow) -> u64 {
     let capped = u64::try_from(MAX_OBSERVATION_RECORD_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -95,7 +95,7 @@ pub(crate) fn hermes_budget_bytes(row: &HermesRow) -> u64 {
         .min(capped)
 }
 
-pub(crate) fn hermes_page_row_charge(sql_measured_bytes: u64) -> u64 {
+pub fn hermes_page_row_charge(sql_measured_bytes: u64) -> u64 {
     let capped = u64::try_from(MAX_HERMES_VALUE_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);

@@ -6,7 +6,7 @@ pub use super::compression_policy::{
     effective_assembly_token_cap, effective_leaf_chunk_tokens, has_eligible_backlog,
     overflow_recovery_assembly_cap, progress_leaf_chunk_len,
 };
-pub(crate) use super::compression_policy::{
+pub use super::compression_policy::{
     CondensationCandidateDecision, CondensationDecision, CondensationPolicy,
     CondensationSkipReason, condensation_candidate_decision, incremental_max_depth_limit,
 };
@@ -45,21 +45,21 @@ pub struct CompressionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BoundaryTransitionDecision {
+pub enum BoundaryTransitionDecision {
     Ignore,
     CarryOver { old_session_id: String },
     StartCooldown { boundary_skip_at: i64 },
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CondensationDecisionInput<'a> {
+pub struct CondensationDecisionInput<'a> {
     pub has_backlog: bool,
     pub summary_fan_in: Option<usize>,
     pub incremental_max_depth: Option<i64>,
     pub summarizer: &'a CompressionSummarizerAdapter,
 }
 
-pub(crate) fn boundary_transition_decision(
+pub fn boundary_transition_decision(
     request: &LcmSessionBoundaryRequest,
     now: i64,
 ) -> BoundaryTransitionDecision {
@@ -80,7 +80,7 @@ pub(crate) fn boundary_transition_decision(
     }
 }
 
-pub(crate) fn cooldown_active(boundary_skip_at: Option<i64>, now: i64) -> bool {
+pub fn cooldown_active(boundary_skip_at: Option<i64>, now: i64) -> bool {
     match boundary_skip_at {
         Some(boundary_skip_at) => {
             now - boundary_skip_at < LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS
@@ -89,7 +89,7 @@ pub(crate) fn cooldown_active(boundary_skip_at: Option<i64>, now: i64) -> bool {
     }
 }
 
-pub(crate) fn condensation_policy_decision(
+pub fn condensation_policy_decision(
     input: CondensationDecisionInput<'_>,
 ) -> CondensationDecision {
     if input.has_backlog {

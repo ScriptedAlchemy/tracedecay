@@ -22,7 +22,7 @@ const TOOL_EVENT_PREVIEW_BYTES: usize = 2000;
 
 /// Map one rollout line to a provider-neutral message, or `None` for non-message
 /// events (`response_item`, tool calls, token counts, …).
-pub(crate) fn message_from_line(
+pub fn message_from_line(
     record: &Value,
     meta: &CodexMeta,
     model: Option<&str>,
@@ -74,7 +74,7 @@ pub(crate) fn message_from_line(
     })
 }
 
-pub(crate) fn response_item_goal_context_from_line(
+pub fn response_item_goal_context_from_line(
     record: &Value,
     meta: &CodexMeta,
     model: Option<&str>,
@@ -112,7 +112,7 @@ pub(crate) fn response_item_goal_context_from_line(
     ))
 }
 
-pub(crate) fn response_item_tool_event_from_line(
+pub fn response_item_tool_event_from_line(
     record: &Value,
     meta: &CodexMeta,
     model: Option<&str>,
@@ -184,7 +184,7 @@ pub(crate) fn response_item_tool_event_from_line(
     })
 }
 
-pub(crate) fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {
+pub fn response_item_tool_name(payload: &Value, response_item_type: &str) -> Option<String> {
     payload
         .get("name")
         .and_then(Value::as_str)
@@ -258,7 +258,7 @@ fn compact_response_item_value(value: &Value) -> String {
     )
 }
 
-pub(crate) fn response_item_tool_metadata(
+pub fn response_item_tool_metadata(
     response_item_type: &str,
     payload: &Value,
     tool_name: Option<String>,
@@ -338,7 +338,7 @@ fn goal_context_message(
     }
 }
 
-pub(crate) fn collect_response_item_text(value: &Value) -> String {
+pub fn collect_response_item_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Array(items) => items
@@ -362,7 +362,7 @@ pub(crate) fn collect_response_item_text(value: &Value) -> String {
     }
 }
 
-pub(crate) fn timestamp_from_record(record: &Value) -> Option<i64> {
+pub fn timestamp_from_record(record: &Value) -> Option<i64> {
     record
         .get("timestamp")
         .and_then(Value::as_str)
@@ -370,7 +370,7 @@ pub(crate) fn timestamp_from_record(record: &Value) -> Option<i64> {
         .map(|secs| secs as i64)
 }
 
-pub(crate) fn compacted_summary_from_line(
+pub fn compacted_summary_from_line(
     record: &Value,
     meta: &CodexMeta,
     model: Option<&str>,

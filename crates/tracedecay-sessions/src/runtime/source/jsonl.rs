@@ -25,7 +25,7 @@ pub struct NewJsonl {
 
 /// Why strict JSONL framing stopped before consuming the next record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JsonlFrameDeferral {
+pub enum JsonlFrameDeferral {
     Partial {
         offset: u64,
     },
@@ -40,7 +40,7 @@ pub(crate) enum JsonlFrameDeferral {
 }
 
 impl JsonlFrameDeferral {
-    pub(crate) fn offset(self) -> u64 {
+    pub fn offset(self) -> u64 {
         match self {
             Self::Partial { offset }
             | Self::Malformed { offset }
@@ -48,7 +48,7 @@ impl JsonlFrameDeferral {
         }
     }
 
-    pub(crate) fn reason_code(self) -> &'static str {
+    pub fn reason_code(self) -> &'static str {
         match self {
             Self::Partial { .. } => "partial_jsonl_frame",
             Self::Malformed { .. } => "malformed_jsonl_frame",
@@ -57,23 +57,23 @@ impl JsonlFrameDeferral {
     }
 }
 
-pub(crate) const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Default strict-scan budget keeps recovery bounded even without a hook cap.
-pub(crate) const STRICT_JSONL_BATCH_BYTES: u64 = 2 * 1024 * 1024;
-pub(crate) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
+pub const STRICT_JSONL_BATCH_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
 const JSONL_RESUME_FINGERPRINT_BYTES: usize = 4 * 1024;
 const JSONL_SNAPSHOT_SAMPLE_COUNT: u64 = 8;
 const JSONL_RESUME_HASH_BASE: u64 = 0x9e37_79b1_85eb_ca87;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct JsonlResumeState {
+pub struct JsonlResumeState {
     pub generation: u64,
     pub file_identity: u64,
     pub fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RawJsonlFrame {
+pub enum RawJsonlFrame {
     Eof,
     Complete { byte_len: u64 },
     Partial { byte_len: u64 },
@@ -217,7 +217,7 @@ fn rewritten_jsonl_generation(
 /// The retained record buffer never exceeds `max_record_bytes`. Oversized
 /// frames are drained in-place so legacy callers can skip complete records and
 /// continue without allocating or parsing them.
-pub(crate) struct RawJsonlFrameReader<R> {
+pub struct RawJsonlFrameReader<R> {
     reader: R,
     record: Vec<u8>,
     resume_tail: ResumeTail,
@@ -225,7 +225,7 @@ pub(crate) struct RawJsonlFrameReader<R> {
 }
 
 impl<R: BufRead> RawJsonlFrameReader<R> {
-    pub(crate) fn new(reader: R, max_record_bytes: usize) -> Self {
+    pub fn new(reader: R, max_record_bytes: usize) -> Self {
         Self {
             reader,
             record: Vec::new(),
@@ -242,19 +242,19 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
         self.resume_tail.fingerprint(position)
     }
 
-    pub(crate) fn record(&self) -> &[u8] {
+    pub fn record(&self) -> &[u8] {
         &self.record
     }
 
-    pub(crate) fn set_max_record_bytes(&mut self, max_record_bytes: usize) {
+    pub fn set_max_record_bytes(&mut self, max_record_bytes: usize) {
         self.max_record_bytes = max_record_bytes;
     }
 
-    pub(crate) fn into_inner(self) -> R {
+    pub fn into_inner(self) -> R {
         self.reader
     }
 
-    pub(crate) fn next_frame(&mut self) -> std::io::Result<RawJsonlFrame> {
+    pub fn next_frame(&mut self) -> std::io::Result<RawJsonlFrame> {
         self.next_frame_with_budget(
             u64::try_from(self.max_record_bytes)
                 .unwrap_or(u64::MAX)
@@ -262,7 +262,7 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
         )
     }
 
-    pub(crate) fn next_frame_with_budget(
+    pub fn next_frame_with_budget(
         &mut self,
         read_budget: u64,
     ) -> std::io::Result<RawJsonlFrame> {
@@ -328,7 +328,7 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
 
 /// Strict framing result used by providers that must retry invalid records.
 #[cfg(test)]
-pub(crate) enum StrictJsonlOutcome {
+pub enum StrictJsonlOutcome {
     Complete(NewJsonl),
     Deferred {
         parsed: NewJsonl,
@@ -337,7 +337,7 @@ pub(crate) enum StrictJsonlOutcome {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum MalformedJsonlPolicy {
+pub enum MalformedJsonlPolicy {
     Skip,
     Defer,
 }
@@ -391,7 +391,7 @@ pub fn stream_new_jsonl(
 /// `max_record_bytes` includes the terminating newline. Other providers retain
 /// [`stream_new_jsonl`]'s skip-and-advance behavior.
 #[cfg(test)]
-pub(crate) fn stream_new_jsonl_strict(
+pub fn stream_new_jsonl_strict(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
@@ -410,7 +410,7 @@ pub(crate) fn stream_new_jsonl_strict(
     })
 }
 
-pub(crate) fn stream_new_jsonl_with_policy(
+pub fn stream_new_jsonl_with_policy(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
@@ -470,7 +470,7 @@ pub(crate) fn stream_new_jsonl_with_policy(
 }
 
 /// One bounded, complete raw JSONL frame with its exact source byte range.
-pub(crate) struct RawJsonlRecord {
+pub struct RawJsonlRecord {
     pub offset: u64,
     pub end_offset: u64,
     pub resume_fingerprint: u64,
@@ -478,13 +478,13 @@ pub(crate) struct RawJsonlRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RawJsonlSkippedReason {
+pub enum RawJsonlSkippedReason {
     Whitespace,
     Oversized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RawJsonlSkippedRange {
+pub struct RawJsonlSkippedRange {
     pub offset: u64,
     pub end_offset: u64,
     pub resume_fingerprint: u64,
@@ -492,7 +492,7 @@ pub(crate) struct RawJsonlSkippedRange {
 }
 
 /// Raw framing result. No JSON parser has inspected these bytes.
-pub(crate) struct RawNewJsonl {
+pub struct RawNewJsonl {
     pub frames: Vec<RawJsonlRecord>,
     pub skipped: Vec<RawJsonlSkippedRange>,
     pub start_offset: u64,
@@ -506,7 +506,7 @@ pub(crate) struct RawNewJsonl {
 
 /// Strict bounded framing used by Claude's single-parse privacy boundary.
 #[cfg(test)]
-pub(crate) fn stream_new_jsonl_raw_strict(
+pub fn stream_new_jsonl_raw_strict(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
@@ -522,7 +522,7 @@ pub(crate) fn stream_new_jsonl_raw_strict(
 }
 
 #[cfg(test)]
-pub(crate) fn try_stream_new_jsonl_raw_strict(
+pub fn try_stream_new_jsonl_raw_strict(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
@@ -531,7 +531,7 @@ pub(crate) fn try_stream_new_jsonl_raw_strict(
     try_stream_new_jsonl_raw_strict_with_resume(path, prev, max_new_bytes, max_record_bytes, None)
 }
 
-pub(crate) fn try_stream_new_jsonl_raw_strict_with_resume(
+pub fn try_stream_new_jsonl_raw_strict_with_resume(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,

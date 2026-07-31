@@ -5801,11 +5801,30 @@ dependencies = [
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
+ "dirs",
+ "gix",
+ "hex",
+ "rayon",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracedecay-application",
+ "tracedecay-capture",
  "tracedecay-domain",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "url",
 ]
 
 [[package]]

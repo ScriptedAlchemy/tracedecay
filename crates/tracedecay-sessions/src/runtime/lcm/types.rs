@@ -393,7 +393,7 @@ pub struct LcmStoreTokenCoverage {
 }
 
 impl LcmStoreTokenCoverage {
-    pub(crate) const fn complete(scanned_messages: i64) -> Self {
+    pub const fn complete(scanned_messages: i64) -> Self {
         Self {
             complete: true,
             scanned_messages,

@@ -25,7 +25,7 @@ use std::time::UNIX_EPOCH;
 use tracedecay_capture::kiro::{
     KiroSnapshotMessage, snapshot_native_payload, stable_message_id as stable_kiro_message_id,
 };
-use tracedecay_sessions::decode_kiro_workspace_path;
+use crate::decode_kiro_workspace_path;
 
 use crate::application::host_admission::HostAdmissionFacade;
 #[cfg(test)]
@@ -81,7 +81,7 @@ pub struct KiroSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KiroSnapshotObservationRecord {
+pub struct KiroSnapshotObservationRecord {
     session_id: String,
     native_record_id: String,
     order: u64,
@@ -909,7 +909,7 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn normalize_kiro_snapshot_observations(
+pub fn normalize_kiro_snapshot_observations(
     messages: &[SessionMessageRecord],
 ) -> TranscriptIngestResult<Vec<KiroSnapshotObservationRecord>> {
     messages

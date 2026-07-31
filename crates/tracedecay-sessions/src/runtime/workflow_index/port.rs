@@ -11,6 +11,6 @@ use crate::db::engine::{Executor, QueryExecutor};
 use super::WorkflowIndexError;
 
 /// Write transaction surface required by workflow ingest upserts.
-pub(crate) trait WorkflowIngestWriteTxn: QueryExecutor + Executor + Sized + Send {
+pub trait WorkflowIngestWriteTxn: QueryExecutor + Executor + Sized + Send {
     fn commit(self) -> impl Future<Output = Result<(), WorkflowIndexError>> + Send;
 }

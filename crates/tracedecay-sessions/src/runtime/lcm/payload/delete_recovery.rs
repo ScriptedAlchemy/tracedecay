@@ -36,19 +36,19 @@ pub struct DeleteOutcome {
     pub bytes_freed: u64,
 }
 
-pub(crate) struct PreparedPayloadDelete {
+pub struct PreparedPayloadDelete {
     pub outcome: DeleteOutcome,
     pub pending_removal_bytes: Option<u64>,
 }
 
-pub(crate) enum CommittedPayloadRemoval {
+pub enum CommittedPayloadRemoval {
     Missing,
     Removed(u64),
     ReplacementPreserved,
 }
 
 #[cfg(test)]
-pub(crate) async fn delete_external_payload(
+pub async fn delete_external_payload(
     conn: &Connection,
     storage_root: &Path,
     payload_ref: &str,
@@ -89,7 +89,7 @@ pub(crate) async fn delete_external_payload(
 }
 
 #[cfg(test)]
-pub(crate) fn reconcile_committed_payload_drain(
+pub fn reconcile_committed_payload_drain(
     outcome: &mut DeleteOutcome,
     payload_ref: &str,
     drained: Result<Option<u64>, LcmError>,
@@ -111,7 +111,7 @@ pub(crate) fn reconcile_committed_payload_drain(
     }
 }
 
-pub(crate) async fn delete_external_payload_in_transaction(
+pub async fn delete_external_payload_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
@@ -230,7 +230,7 @@ pub(crate) async fn delete_external_payload_in_transaction(
 /// Removes a payload only after its database deletion tombstone committed.
 /// A replacement file with different content is retained for recovery rather
 /// than unlinked under a stale tombstone.
-pub(crate) fn remove_committed_payload_file(
+pub fn remove_committed_payload_file(
     storage_root: &Path,
     payload_ref: &str,
     expected_hash: Option<&str>,
@@ -247,7 +247,7 @@ pub(crate) fn remove_committed_payload_file(
     )
 }
 
-pub(crate) fn remove_committed_payload_file_with<F>(
+pub fn remove_committed_payload_file_with<F>(
     storage_root: &Path,
     payload_ref: &str,
     expected_hash: Option<&str>,
@@ -356,7 +356,7 @@ fn restore_quarantined_payload(
     fs::rename(quarantine, path).map_err(|error| LcmError::Io(error.to_string()))
 }
 
-pub(crate) fn payload_file_fingerprint(
+pub fn payload_file_fingerprint(
     dir: &Path,
     payload_ref: &str,
 ) -> Result<(String, u64, u64), LcmError> {

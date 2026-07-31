@@ -7,7 +7,7 @@ use super::{
 
 const COMMIT_SWEEP_WATERMARK_KEY: &str = "commit_attribution_watermark";
 
-pub(crate) async fn read_meta_value(
+pub async fn read_meta_value(
     conn: &(impl QueryExecutor + ?Sized),
     key: &str,
 ) -> Result<Option<i64>, GitCorrelationError> {
@@ -23,7 +23,7 @@ pub(crate) async fn read_meta_value(
     }
 }
 
-pub(crate) async fn write_meta_value(
+pub async fn write_meta_value(
     conn: &(impl Executor + ?Sized),
     key: &str,
     value: i64,
@@ -242,7 +242,7 @@ pub enum TargetScan {
 /// span write time) that actually scanned. A target the scanner could not read
 /// stops the watermark there, so a transient git failure defers attribution to
 /// the next sweep instead of silently dropping those spans forever.
-pub(crate) async fn run_commit_attribution_sweep<F>(
+pub async fn run_commit_attribution_sweep<F>(
     conn: &(impl Executor + ?Sized),
     gap_secs: i64,
     mut scan: F,

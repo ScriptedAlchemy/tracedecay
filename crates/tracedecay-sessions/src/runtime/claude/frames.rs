@@ -19,7 +19,7 @@ use super::cursor::{claude_cursor_key, claude_observation_source_id, claude_sour
 
 /// Stable identity available before the durable cursor lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ClaudeSourceScanIdentity {
+pub struct ClaudeSourceScanIdentity {
     pub provider: &'static str,
     pub session_id: String,
     pub source_id: String,
@@ -33,7 +33,7 @@ pub(super) struct ClaudeFrameScope {
 
 /// Exact byte coverage achieved by one bounded scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClaudeFrameCoverage {
+pub enum ClaudeFrameCoverage {
     Complete {
         start_offset: u64,
         end_offset: u64,
@@ -46,7 +46,7 @@ pub(crate) enum ClaudeFrameCoverage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClaudeSkippedFrameReason {
+pub enum ClaudeSkippedFrameReason {
     Whitespace,
     OutOfScope,
     Malformed,
@@ -54,7 +54,7 @@ pub(crate) enum ClaudeSkippedFrameReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClaudeSkippedFrame {
+pub struct ClaudeSkippedFrame {
     pub offset: u64,
     pub end_offset: u64,
     pub resume_fingerprint: u64,
@@ -68,7 +68,7 @@ enum ClaudeFramePayload {
 }
 
 /// One privacy-parsed Claude frame with its exact original source range.
-pub(crate) struct ClaudeSourceFrame {
+pub struct ClaudeSourceFrame {
     pub offset: u64,
     pub end_offset: u64,
     pub resume_fingerprint: u64,
@@ -128,7 +128,7 @@ impl ClaudeSourceFrame {
 }
 
 /// Parsed Claude frames and the typed cursor transition they cover.
-pub(crate) struct ClaudeSourceFrameScan {
+pub struct ClaudeSourceFrameScan {
     pub identity: ClaudeSourceScanIdentity,
     pub file_generation: u64,
     pub file_identity: u64,
@@ -150,7 +150,7 @@ pub(crate) struct ClaudeSourceFrameScan {
 /// identifiers are preserved byte-for-byte; credential-shaped stems become
 /// stable `privacy.structural-id.v1.*` digests. The observation source ID is
 /// already an opaque path digest and remains unchanged.
-pub(crate) fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIdentity> {
+pub fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIdentity> {
     let session_id = protect_sensitive_structural_id(&claude_source_id(path)?).ok()?;
     Some(ClaudeSourceScanIdentity {
         provider: PROVIDER,
@@ -163,7 +163,7 @@ pub(crate) fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIden
 
 /// Frame and privacy-parse newly appended Claude records exactly once.
 #[cfg(test)]
-pub(crate) fn scan_claude_source_frames(
+pub fn scan_claude_source_frames(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
@@ -177,7 +177,7 @@ pub(crate) fn scan_claude_source_frames(
     }
 }
 
-pub(crate) fn try_scan_claude_source_frames(
+pub fn try_scan_claude_source_frames(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
@@ -185,7 +185,7 @@ pub(crate) fn try_scan_claude_source_frames(
     try_scan_claude_source_frames_with_resume(identity, previous, max_new_bytes, None)
 }
 
-pub(crate) fn try_scan_claude_source_frames_with_resume(
+pub fn try_scan_claude_source_frames_with_resume(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,

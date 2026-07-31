@@ -71,7 +71,7 @@ struct CompressionTransactionContext {
     overflow_assembly_cap: Option<i64>,
 }
 
-pub(crate) async fn update_lifecycle(
+pub async fn update_lifecycle(
     conn: &impl Executor,
     update: LcmLifecycleUpdate,
 ) -> Result<LcmLifecycleState, LcmError> {
@@ -86,7 +86,7 @@ pub(crate) async fn update_lifecycle(
     lifecycle_state(conn, &update.provider, &update.conversation_id).await
 }
 
-pub(crate) async fn lifecycle_state(
+pub async fn lifecycle_state(
     conn: &impl QueryExecutor,
     provider: &str,
     conversation_id: &str,
@@ -121,7 +121,7 @@ pub(crate) async fn lifecycle_state(
 /// ownership unchanged. A mismatched boundary starts a short compression
 /// cooldown so the new session does not cascade straight back into compression
 /// while pressure is still unrelieved.
-pub(crate) async fn record_session_boundary(
+pub async fn record_session_boundary(
     conn: &impl Executor,
     request: LcmSessionBoundaryRequest,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
@@ -260,7 +260,7 @@ async fn current_unixepoch(conn: &impl QueryExecutor) -> Result<i64, LcmError> {
     Ok(row.get(0)?)
 }
 
-pub(crate) async fn preflight(
+pub async fn preflight(
     conn: &impl Executor,
     storage_root: &Path,
     request: LcmPreflightRequest,
@@ -350,7 +350,7 @@ pub(crate) async fn preflight(
     })
 }
 
-pub(crate) async fn compress(
+pub async fn compress(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,

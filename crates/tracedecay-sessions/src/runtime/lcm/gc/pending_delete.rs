@@ -27,7 +27,7 @@ pub(super) struct PayloadDeleteOutcomes {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct PayloadDeleteDrain {
+pub struct PayloadDeleteDrain {
     pub(super) outcomes: PayloadDeleteOutcomes,
     pub(super) errors: Vec<LcmGcError>,
 }
@@ -55,7 +55,7 @@ impl PayloadDeleteDrain {
         }
     }
 
-    pub(crate) fn merge(&mut self, other: Self) {
+    pub fn merge(&mut self, other: Self) {
         self.outcomes.removed.merge(other.outcomes.removed);
         self.outcomes.preserved.merge(other.outcomes.preserved);
         self.outcomes.missing.merge(other.outcomes.missing);
@@ -75,7 +75,7 @@ pub(super) fn pending_payload_delete_key(payload_ref: &str) -> String {
     format!("{PENDING_PAYLOAD_DELETE_PREFIX}{payload_ref}")
 }
 
-pub(crate) async fn stage_payload_delete(
+pub async fn stage_payload_delete(
     conn: &(impl Executor + ?Sized),
     payload_ref: &str,
     content_hash: Option<&str>,
@@ -92,14 +92,14 @@ pub(crate) async fn stage_payload_delete(
     schema::set_gc_meta(conn, &pending_payload_delete_key(payload_ref), &value).await
 }
 
-pub(crate) async fn drain_pending_payload_deletes_in_transaction(
+pub async fn drain_pending_payload_deletes_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
 ) -> Result<PayloadDeleteDrain, LcmError> {
     drain_pending_payload_deletes_matching(conn, storage_root, None).await
 }
 
-pub(crate) async fn drain_pending_payload_delete_in_transaction(
+pub async fn drain_pending_payload_delete_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,

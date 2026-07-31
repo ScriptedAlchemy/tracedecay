@@ -19,7 +19,7 @@ use super::record_metadata::{
 use super::{CWD_PROBE_LINES, KIND_REASONING, MARKER_PREVIEW_BYTES, PROVIDER};
 
 /// Durable context shared by V1 folding and the V2 observation projector.
-pub(crate) struct ClaudeRecordContext<'a> {
+pub struct ClaudeRecordContext<'a> {
     pub session_id: &'a str,
     pub project_key: &'a str,
     pub project_path: &'a str,
@@ -34,7 +34,7 @@ pub(crate) struct ClaudeRecordContext<'a> {
 
 /// Minimal canonical projection result. Rich reasoning and marker families remain
 /// V1 enrichments until their explicit projection contracts.
-pub(crate) enum ClaudeRecordDisposition {
+pub enum ClaudeRecordDisposition {
     Message {
         draft: Box<SessionDraft>,
         message: Box<SessionMessageRecord>,
@@ -44,7 +44,7 @@ pub(crate) enum ClaudeRecordDisposition {
 
 /// Map one sanitized Claude record to the canonical conversational V1 row.
 /// Pure: no I/O, cursor access, global state, or persistence.
-pub(crate) fn map_sanitized_claude_record(
+pub fn map_sanitized_claude_record(
     record: &Value,
     context: &ClaudeRecordContext<'_>,
 ) -> ClaudeRecordDisposition {
@@ -142,7 +142,7 @@ pub(super) fn retain_unchanged_tool_event_ids(
     }
 }
 
-pub(crate) fn transcript_cwd(path: &Path) -> Option<PathBuf> {
+pub fn transcript_cwd(path: &Path) -> Option<PathBuf> {
     let file = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
     let mut frames = RawJsonlFrameReader::new(reader, MAX_OBSERVATION_RECORD_BYTES);

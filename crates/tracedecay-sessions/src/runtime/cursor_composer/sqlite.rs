@@ -16,7 +16,7 @@ use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
 /// Outcome of a length-gated `SQLite` text/blob fetch that never materializes
 /// oversized or over-budget payloads into `Rust`.
 #[derive(Debug)]
-pub(crate) enum BoundedSqliteValue<T> {
+pub enum BoundedSqliteValue<T> {
     Missing,
     Ready { byte_len: u64, value: T },
     Oversized { byte_len: u64 },
@@ -25,7 +25,7 @@ pub(crate) enum BoundedSqliteValue<T> {
     Corrupt,
 }
 
-pub(crate) fn effective_sqlite_cap(max_bytes: u64, remaining: Option<u64>) -> u64 {
+pub fn effective_sqlite_cap(max_bytes: u64, remaining: Option<u64>) -> u64 {
     match remaining {
         Some(remaining) => remaining.min(max_bytes),
         None => max_bytes,
@@ -39,19 +39,19 @@ fn composer_payload_bytes(value: &Value) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-pub(crate) fn max_composer_record_bytes() -> u64 {
+pub fn max_composer_record_bytes() -> u64 {
     u64::try_from(MAX_OBSERVATION_RECORD_BYTES).unwrap_or(u64::MAX)
 }
 
-pub(crate) fn composer_source_charge(bytes: u64) -> u64 {
+pub fn composer_source_charge(bytes: u64) -> u64 {
     bytes.min(max_composer_record_bytes().saturating_add(1))
 }
 
-pub(crate) fn composer_budget_bytes(value: &Value) -> u64 {
+pub fn composer_budget_bytes(value: &Value) -> u64 {
     composer_payload_bytes(value).min(max_composer_record_bytes().saturating_add(1))
 }
 
-pub(crate) fn composer_id_from_envelope_key(key: &str) -> Option<&str> {
+pub fn composer_id_from_envelope_key(key: &str) -> Option<&str> {
     key.strip_prefix("composerData:")
         .filter(|id| !id.is_empty() && id.len() as u64 <= MAX_COMPOSER_SQLITE_KEY_BYTES)
 }
@@ -59,33 +59,33 @@ pub(crate) fn composer_id_from_envelope_key(key: &str) -> Option<&str> {
 /// Maximum bytes materializable for one `composerData:` session envelope.
 /// Reuses the JSONL frame ceiling so long header lists stay within one
 /// transcript-frame-sized allocation.
-pub(crate) const MAX_COMPOSER_ENVELOPE_BYTES: u64 = MAX_JSONL_RECORD_BYTES as u64;
+pub const MAX_COMPOSER_ENVELOPE_BYTES: u64 = MAX_JSONL_RECORD_BYTES as u64;
 
 /// Default cumulative sweep ceiling: one maximum-size envelope plus the byte
 /// needed by bounded readers to prove that a record crossed the ceiling.
-pub(crate) const DEFAULT_COMPOSER_SWEEP_BYTES: u64 = MAX_COMPOSER_ENVELOPE_BYTES + 1;
+pub const DEFAULT_COMPOSER_SWEEP_BYTES: u64 = MAX_COMPOSER_ENVELOPE_BYTES + 1;
 
 /// Maximum UTF-8 bytes in one `SQLite` key / blob id.
-pub(crate) const MAX_COMPOSER_SQLITE_KEY_BYTES: u64 = 512;
+pub const MAX_COMPOSER_SQLITE_KEY_BYTES: u64 = 512;
 
 /// Rows fetched per keyset-paginated `composerData:` key scan page. The scan
 /// walks the `cursorDiskKV` primary key in order, so pagination reproduces the
 /// original indexed prefix scan while keeping at most one page in memory.
-pub(crate) const COMPOSER_KEY_SCAN_PAGE: usize = 1024;
+pub const COMPOSER_KEY_SCAN_PAGE: usize = 1024;
 
 /// Shared foreign-store read handle (see [`crate::runtime::shared`]),
 /// aliased locally for the Cursor composer reader signatures.
-pub(crate) use crate::runtime::shared::SqliteReadConn as CursorConn;
+pub use crate::runtime::shared::SqliteReadConn as CursorConn;
 
 /// A read-only connection to a Cursor composer store.
-pub(crate) struct ReadOnlyDb {
-    pub(crate) conn: CursorConn,
+pub struct ReadOnlyDb {
+    pub conn: CursorConn,
 }
 
 /// Open a `SQLite` file strictly read-only and immutable (no locking, no
 /// `-wal`/`-shm` writes) via a `file:…?immutable=1&mode=ro` URI. The runtime
 /// helper also pins `busy_timeout = 0` and verifies `query_only = ON`.
-pub(crate) async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb> {
+pub async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb> {
     let path = db_path.to_path_buf();
     let conn = tokio::task::spawn_blocking(move || {
         tracedecay_rusqlite_runtime::open_immutable_reader(&path).ok()
@@ -101,7 +101,7 @@ pub(crate) async fn open_readonly_immutable(db_path: &Path) -> Option<ReadOnlyDb
 /// Passing `after = None` starts at the prefix lower bound; passing the last
 /// key of the previous page continues the primary-key-ordered scan. Never
 /// materializes envelope text — keys and byte lengths only.
-pub(crate) async fn scan_composer_keys_page(
+pub async fn scan_composer_keys_page(
     conn: &CursorConn,
     after: Option<&str>,
     limit: usize,
@@ -200,7 +200,7 @@ fn fetch_kv_text_bounded_sync(
     }
 }
 
-pub(crate) async fn fetch_kv_text_bounded(
+pub async fn fetch_kv_text_bounded(
     conn: &CursorConn,
     key: &str,
     max_bytes: u64,
@@ -212,7 +212,7 @@ pub(crate) async fn fetch_kv_text_bounded(
         .unwrap_or(BoundedSqliteValue::Corrupt)
 }
 
-pub(crate) async fn fetch_bubble_bounded(
+pub async fn fetch_bubble_bounded(
     conn: &CursorConn,
     composer_id: &str,
     bubble_id: &str,
@@ -242,7 +242,7 @@ pub(crate) async fn fetch_bubble_bounded(
     }
 }
 
-pub(crate) fn envelope_project(envelope: &Value) -> Option<ComposerProject> {
+pub fn envelope_project(envelope: &Value) -> Option<ComposerProject> {
     if let Some(uri) = envelope
         .get("workspaceIdentifier")
         .and_then(|w| w.get("uri"))
@@ -275,7 +275,7 @@ pub(crate) fn envelope_project(envelope: &Value) -> Option<ComposerProject> {
     None
 }
 
-pub(crate) fn workspace_hash(envelope: &Value) -> Option<String> {
+pub fn workspace_hash(envelope: &Value) -> Option<String> {
     envelope
         .get("workspaceIdentifier")
         .and_then(|w| w.get("id"))
@@ -284,11 +284,11 @@ pub(crate) fn workspace_hash(envelope: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
+pub fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
     ms.filter(|v| *v > 0).map(|v| v / 1000)
 }
 
 /// Resolved project for a composer envelope.
-pub(crate) struct ComposerProject {
-    pub(crate) path: String,
+pub struct ComposerProject {
+    pub path: String,
 }

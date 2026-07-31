@@ -17,7 +17,7 @@ use super::{
 mod orphan_scan;
 mod pending_delete;
 use orphan_scan::{payload_file_present, preview_orphan_files, stage_orphan_files};
-pub(crate) use pending_delete::{
+pub use pending_delete::{
     PayloadDeleteDrain, drain_pending_payload_delete_in_transaction,
     drain_pending_payload_deletes_in_transaction, stage_payload_delete,
 };
@@ -183,7 +183,7 @@ impl LcmGcReport {
     }
 }
 
-pub(crate) async fn referenced_payload_refs(
+pub async fn referenced_payload_refs(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
@@ -357,7 +357,7 @@ fn tombstone_placeholder(placeholder: &str) -> String {
     placeholder.to_string()
 }
 
-pub(crate) async fn payload_metadata_refs_for_scope(
+pub async fn payload_metadata_refs_for_scope(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
@@ -383,7 +383,7 @@ async fn payload_metadata_bytes(
     Ok(bytes)
 }
 
-pub(crate) async fn run_payload_gc(
+pub async fn run_payload_gc(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
@@ -462,7 +462,7 @@ async fn run_payload_gc_preview(
 }
 
 #[cfg(test)]
-pub(crate) async fn run_payload_gc_with_apply(
+pub async fn run_payload_gc_with_apply(
     conn: &Connection,
     storage_root: &Path,
     provider: &str,
@@ -498,7 +498,7 @@ pub(crate) async fn run_payload_gc_with_apply(
     Ok(report)
 }
 
-pub(crate) async fn finalize_gc_report(
+pub async fn finalize_gc_report(
     conn: &(impl Executor + ?Sized),
     report: &mut LcmGcReport,
     drain: PayloadDeleteDrain,
@@ -520,7 +520,7 @@ pub(crate) async fn finalize_gc_report(
     Ok(())
 }
 
-pub(crate) async fn finalize_gc_report_value(
+pub async fn finalize_gc_report_value(
     conn: &(impl Executor + ?Sized),
     report_value: &mut Value,
     drain: PayloadDeleteDrain,
@@ -533,7 +533,7 @@ pub(crate) async fn finalize_gc_report_value(
     Ok(())
 }
 
-pub(crate) async fn run_payload_gc_in_transaction(
+pub async fn run_payload_gc_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     provider: &str,
@@ -968,7 +968,7 @@ async fn reap_missing_metadata<E: Executor + ?Sized>(
     Ok(())
 }
 
-pub(crate) async fn rewrite_dangling_placeholders(
+pub async fn rewrite_dangling_placeholders(
     conn: &(impl Executor + ?Sized),
     dir: Option<&Path>,
     metadata_refs: &BTreeSet<String>,

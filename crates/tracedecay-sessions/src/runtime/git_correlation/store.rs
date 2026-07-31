@@ -24,7 +24,7 @@ pub struct AnalyticsSessionTimestamp {
 /// Borrowed view used to project analytics rows into
 /// [`AnalyticsSessionTimestamp`] without pulling infrastructure DTOs into
 /// sessions.
-pub(crate) trait AnalyticsSessionTimestampSource {
+pub trait AnalyticsSessionTimestampSource {
     fn as_analytics_session_timestamp(&self) -> Option<AnalyticsSessionTimestamp>;
 }
 
@@ -35,6 +35,6 @@ impl AnalyticsSessionTimestampSource for AnalyticsSessionTimestamp {
 }
 
 /// Write transaction surface required by span/commit backfill.
-pub(crate) trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send {
+pub trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send {
     fn commit(self) -> impl Future<Output = Result<(), GitCorrelationError>> + Send;
 }

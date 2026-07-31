@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::Value;
 
 use crate::runtime::SessionMessageRecord;
-pub use tracedecay_sessions::{NewRows, StoredCursor, TranscriptIngestStats};
+pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
 
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
@@ -147,14 +147,14 @@ fn read_new_rows_sync<T>(
 /// symlinks/`..`/trailing differences do not cause false mismatches. Falls back
 /// to a literal comparison when canonicalization fails (e.g. a path that no
 /// longer exists).
-pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
+pub fn paths_equal(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => normalized_paths_equal(&a, &b),
         _ => normalized_paths_equal(a, b),
     }
 }
 
-pub(crate) fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
+pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
     ProjectRootMatcher::new(project_root).contains(path)
 }
 
@@ -163,7 +163,7 @@ pub(crate) fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool 
 /// re-run `git_worktree_root`/`git_common_dir` on the fixed project side. A
 /// single [`ProjectRootMatcher::contains`] call is exactly equivalent to
 /// [`path_belongs_to_project`], which is a thin wrapper over it.
-pub(crate) struct ProjectRootMatcher {
+pub struct ProjectRootMatcher {
     root: PathBuf,
     worktree: Option<PathBuf>,
     common_dir: Option<PathBuf>,
@@ -171,7 +171,7 @@ pub(crate) struct ProjectRootMatcher {
 
 impl ProjectRootMatcher {
     /// Resolve the fixed project-side git identity once.
-    pub(crate) fn new(project_root: &Path) -> Self {
+    pub fn new(project_root: &Path) -> Self {
         Self {
             root: project_root.to_path_buf(),
             worktree: crate::worktree::git_worktree_root(project_root),
@@ -182,7 +182,7 @@ impl ProjectRootMatcher {
     /// True when `path` belongs to this project: it is the root, shares the
     /// project's git worktree or common dir, or discovers back to the root.
     /// Only the varying `path` side is git-resolved here.
-    pub(crate) fn contains(&self, path: &Path) -> bool {
+    pub fn contains(&self, path: &Path) -> bool {
         if paths_equal(path, &self.root) {
             return true;
         }
@@ -230,7 +230,7 @@ fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
 /// Shared by the workflow surfaces (run/agent summaries, result summaries,
 /// unfinished-run evidence) so a multi-line blob never smears a table, bullet,
 /// or stored column.
-pub(crate) fn one_line_truncated(text: &str, max: usize) -> String {
+pub fn one_line_truncated(text: &str, max: usize) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max {
         return collapsed;
@@ -242,7 +242,7 @@ pub(crate) fn one_line_truncated(text: &str, max: usize) -> String {
 /// Clip `text` to at most `max_bytes` on a UTF-8 boundary, appending a single
 /// `…` only when truncation occurred. Unlike [`one_line_truncated`] this keeps
 /// internal newlines, so multi-line derived-row previews retain their structure.
-pub(crate) fn preview_truncated(text: &str, max_bytes: usize) -> String {
+pub fn preview_truncated(text: &str, max_bytes: usize) -> String {
     let prefix = crate::text::utf8_prefix_at_or_before(text, max_bytes);
     if prefix.len() == text.len() {
         prefix.to_string()
@@ -252,7 +252,7 @@ pub(crate) fn preview_truncated(text: &str, max_bytes: usize) -> String {
 }
 
 /// Collapse whitespace and clip to a short preview suitable for a session title.
-pub(crate) fn preview_title(text: &str) -> String {
+pub fn preview_title(text: &str) -> String {
     const MAX_TITLE_CHARS: usize = 80;
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= MAX_TITLE_CHARS {
@@ -265,7 +265,7 @@ pub(crate) fn preview_title(text: &str) -> String {
 /// Return the storage representation used by LCM raw ingest for provider
 /// transcript content. This intentionally matches the active-message path:
 /// strings stay strings, structured content is compact JSON.
-pub(crate) fn message_storage_text(content: &Value) -> String {
+pub fn message_storage_text(content: &Value) -> String {
     if let Some(text) = content.as_str() {
         return text.to_string();
     }
@@ -274,7 +274,7 @@ pub(crate) fn message_storage_text(content: &Value) -> String {
 
 /// Return lossless storage text plus tool names discovered in either structured
 /// content blocks or a sibling `tool_calls` field.
-pub(crate) fn content_storage_text_and_tools(
+pub fn content_storage_text_and_tools(
     content: &Value,
     tool_calls: Option<&Value>,
 ) -> (String, Vec<String>) {
@@ -288,7 +288,7 @@ pub(crate) fn content_storage_text_and_tools(
     (message_storage_text(content), tools)
 }
 
-pub(crate) fn append_tool_calls_metadata(
+pub fn append_tool_calls_metadata(
     map: &mut serde_json::Map<String, Value>,
     message: &Value,
 ) {
@@ -331,7 +331,7 @@ impl io::Write for ByteCountSink {
 /// Records bounded per-call tool metadata (byte counts and identifiers only,
 /// never content) for `tool_use`/`tool_result` blocks found in `content`.
 /// Inserts the `tool_events` key only when at least one entry was collected.
-pub(crate) fn append_tool_event_metadata(
+pub fn append_tool_event_metadata(
     map: &mut serde_json::Map<String, Value>,
     content: &Value,
 ) {
@@ -380,26 +380,26 @@ pub(crate) fn append_tool_event_metadata(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct TranscriptLocation<'a> {
-    pub(crate) cwd: Option<&'a Path>,
-    pub(crate) provenance: &'a str,
+pub struct TranscriptLocation<'a> {
+    pub cwd: Option<&'a Path>,
+    pub provenance: &'a str,
 }
 
 impl<'a> TranscriptLocation<'a> {
-    pub(crate) fn new(cwd: Option<&'a Path>, provenance: &'a str) -> Self {
+    pub fn new(cwd: Option<&'a Path>, provenance: &'a str) -> Self {
         Self { cwd, provenance }
     }
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct TranscriptLocationMetadataKeys {
-    pub(crate) cwd: &'static str,
-    pub(crate) worktree: &'static str,
-    pub(crate) provenance: &'static str,
+pub struct TranscriptLocationMetadataKeys {
+    pub cwd: &'static str,
+    pub worktree: &'static str,
+    pub provenance: &'static str,
 }
 
 impl TranscriptLocationMetadataKeys {
-    pub(crate) const fn new(
+    pub const fn new(
         cwd: &'static str,
         worktree: &'static str,
         provenance: &'static str,
@@ -412,7 +412,7 @@ impl TranscriptLocationMetadataKeys {
     }
 }
 
-pub(crate) fn append_location_metadata(
+pub fn append_location_metadata(
     map: &mut serde_json::Map<String, Value>,
     keys: TranscriptLocationMetadataKeys,
     location: TranscriptLocation<'_>,
@@ -457,7 +457,7 @@ const USAGE_COUNTER_KEYS: [&str; 9] = [
 /// keeping only recognized numeric token counters (so arbitrarily large or
 /// provider-private payloads never bloat `metadata_json`). Returns `None`
 /// when the value has no `usage` object or it carries no recognized counters.
-pub(crate) fn usage_counters_from(value: &Value) -> Option<Value> {
+pub fn usage_counters_from(value: &Value) -> Option<Value> {
     let usage = value.get("usage")?.as_object()?;
     let mut counters = serde_json::Map::new();
     for key in USAGE_COUNTER_KEYS {
@@ -485,7 +485,7 @@ pub(crate) fn usage_counters_from(value: &Value) -> Option<Value> {
 /// Inserts transcript-recorded token usage into message metadata under the
 /// `usage` key the savings dashboard reads. Probes each candidate value in
 /// order and keeps the first recognized counters object.
-pub(crate) fn append_usage_metadata(
+pub fn append_usage_metadata(
     map: &mut serde_json::Map<String, Value>,
     candidates: &[&Value],
 ) {
@@ -564,7 +564,7 @@ fn visible_text_from_content(value: &Value) -> Option<String> {
 }
 
 /// Build a session title from the first user message, if any.
-pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<String> {
+pub fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<String> {
     messages
         .iter()
         .find(|message| message.role == "user")

@@ -4,7 +4,7 @@
 /// treats exhaustion as deferral even for an empty charge; snapshot adapters
 /// retain their historical behavior through [`Self::bounded_allowing_empty`].
 #[derive(Debug)]
-pub(crate) struct IngestByteBudget {
+pub struct IngestByteBudget {
     remaining: Option<u64>,
     consumed: u64,
     deferred: bool,
@@ -12,7 +12,7 @@ pub(crate) struct IngestByteBudget {
 }
 
 impl IngestByteBudget {
-    pub(crate) const fn bounded(limit: u64) -> Self {
+    pub const fn bounded(limit: u64) -> Self {
         Self {
             remaining: Some(limit),
             consumed: 0,
@@ -21,7 +21,7 @@ impl IngestByteBudget {
         }
     }
 
-    pub(crate) const fn bounded_allowing_empty(limit: u64) -> Self {
+    pub const fn bounded_allowing_empty(limit: u64) -> Self {
         Self {
             remaining: Some(limit),
             consumed: 0,
@@ -30,7 +30,7 @@ impl IngestByteBudget {
         }
     }
 
-    pub(crate) const fn unbounded() -> Self {
+    pub const fn unbounded() -> Self {
         Self {
             remaining: None,
             consumed: 0,
@@ -39,23 +39,23 @@ impl IngestByteBudget {
         }
     }
 
-    pub(crate) const fn exhausted(&self) -> bool {
+    pub const fn exhausted(&self) -> bool {
         matches!(self.remaining, Some(0))
     }
 
-    pub(crate) const fn remaining(&self) -> Option<u64> {
+    pub const fn remaining(&self) -> Option<u64> {
         self.remaining
     }
 
-    pub(crate) const fn consumed(&self) -> u64 {
+    pub const fn consumed(&self) -> u64 {
         self.consumed
     }
 
-    pub(crate) const fn deferred(&self) -> bool {
+    pub const fn deferred(&self) -> bool {
         self.deferred
     }
 
-    pub(crate) const fn defer(&mut self) {
+    pub const fn defer(&mut self) {
         self.deferred = true;
     }
 
@@ -64,7 +64,7 @@ impl IngestByteBudget {
     /// Readers receive [`Self::remaining`] as their cap, then report actual
     /// progress. Saturating subtraction preserves accounting if a reader
     /// reports beyond that cap, while unbounded budgets retain `None`.
-    pub(crate) fn record_progress(&mut self, bytes: u64, deferred: bool) {
+    pub fn record_progress(&mut self, bytes: u64, deferred: bool) {
         if let Some(remaining) = &mut self.remaining {
             *remaining = remaining.saturating_sub(bytes);
         }
@@ -72,7 +72,7 @@ impl IngestByteBudget {
         self.deferred |= deferred;
     }
 
-    pub(crate) fn try_consume(&mut self, bytes: u64) -> bool {
+    pub fn try_consume(&mut self, bytes: u64) -> bool {
         let Some(remaining) = self.remaining else {
             self.consumed = self.consumed.saturating_add(bytes);
             return true;

@@ -24,14 +24,14 @@ tokio::task_local! {
     static TRANSCRIPT_SOURCE_HOME: PathBuf;
 }
 
-pub(crate) async fn with_transcript_source_home<F>(home: PathBuf, future: F) -> F::Output
+pub async fn with_transcript_source_home<F>(home: PathBuf, future: F) -> F::Output
 where
     F: Future,
 {
     TRANSCRIPT_SOURCE_HOME.scope(home, future).await
 }
 
-pub(crate) fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     TRANSCRIPT_SOURCE_HOME
         .try_with(Clone::clone)
         .ok()
@@ -49,7 +49,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 /// dedicated multi-destination driver scans each source database only once.
 ///
 /// `project_id` must already be the typed registry or repository-marker identity.
-pub(crate) async fn ingest_project_sources_for_provider(
+pub async fn ingest_project_sources_for_provider(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
     registered: &RegisteredGlobalDb,
@@ -72,7 +72,7 @@ pub(crate) async fn ingest_project_sources_for_provider(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn ingest_project_sources_for_provider_with_cancellation(
+pub async fn ingest_project_sources_for_provider_with_cancellation(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
     registered: &RegisteredGlobalDb,
@@ -97,7 +97,7 @@ pub(crate) async fn ingest_project_sources_for_provider_with_cancellation(
 /// closed for observation providers. Daemon-owned callers must use
 /// [`ingest_project_sources_for_provider`] with their retained registry mount.
 #[cfg(test)]
-pub(crate) async fn ingest_project_sources_for_provider_without_registered_authority(
+pub async fn ingest_project_sources_for_provider_without_registered_authority(
     _db: &RegisteredGlobalDb,
     _project_root: &Path,
     project_id: Option<ProjectId>,
@@ -293,7 +293,7 @@ async fn ingest_project_sources_for_provider_inner(
     source_outcome.into_transcript_outcome()
 }
 
-pub(crate) async fn finalize_project_ingest(
+pub async fn finalize_project_ingest(
     db: &RegisteredGlobalDb,
     project_id: &ProjectId,
     project_root: &Path,

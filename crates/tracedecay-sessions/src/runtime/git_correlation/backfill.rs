@@ -357,7 +357,7 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-pub(crate) async fn run_backfill<E>(
+pub async fn run_backfill<E>(
     session_store: &GlobalDbGitCorrelationStore<'_>,
     analytics_events: &[E],
     git: &dyn GitReflogSource,
@@ -407,7 +407,7 @@ pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
 /// `tracedecay sessions git-backfill` remains the exhaustive, watermark-free,
 /// analytics-aware path); auto-backfill relies on session and reflog
 /// timestamps alone, which is enough to populate branch/worktree spans.
-pub(crate) async fn run_incremental_backfill(
+pub async fn run_incremental_backfill(
     session_store: &GlobalDbGitCorrelationStore<'_>,
     git: &dyn GitReflogSource,
     limit_sessions: usize,
@@ -681,7 +681,7 @@ async fn backfill_one_session(
 
 /// Reads per-session activity windows for the backfill from a project-sessions
 /// snapshot opened through [`GitCorrelationStore`].
-pub(crate) async fn session_activity_rows(
+pub async fn session_activity_rows(
     conn: &(impl QueryExecutor + ?Sized),
     limit: usize,
 ) -> Result<Vec<SessionActivityRow>, String> {
@@ -720,7 +720,7 @@ pub(crate) async fn session_activity_rows(
 /// history forward in bounded batches. Sessions with no timestamp at all are
 /// excluded (their `COALESCE` key is `NULL`, so the `HAVING` filter drops them —
 /// they carry no derivable activity window anyway).
-pub(crate) async fn session_activity_rows_since(
+pub async fn session_activity_rows_since(
     conn: &(impl QueryExecutor + ?Sized),
     since_exclusive: i64,
     limit: usize,

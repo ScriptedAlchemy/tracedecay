@@ -30,7 +30,7 @@ pub struct WorkflowStateItem {
 
 /// Reads through one caller-pinned snapshot, so every returned row is observed
 /// at a single database generation. The store adapter owns opening it.
-pub(crate) async fn list_unfinished(
+pub async fn list_unfinished(
     snapshot: &ReadSnapshot,
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {

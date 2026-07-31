@@ -15,12 +15,12 @@ mod session;
 mod status;
 
 use describe::*;
-pub(crate) use expand::expand;
+pub use expand::expand;
 use expand::{expand_query_match_from_hit, expand_query_synthesis_prompt, is_noise_block_content};
-pub(crate) use grep::grep;
+pub use grep::grep;
 use grep::{contains_cjk, raw_grep_hits, summary_grep_hits};
-pub(crate) use payload_health::*;
-pub(crate) use session::*;
+pub use payload_health::*;
+pub use session::*;
 use status::*;
 
 use super::types::LcmStoreTokenCoverage;
@@ -73,7 +73,7 @@ fn rerank_fetch_limit(limit: usize) -> usize {
     crate::application::session::compatibility::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
-pub(crate) async fn expand_query(
+pub async fn expand_query(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmExpandQueryRequest,
 ) -> Result<LcmExpandQueryResponse, LcmError> {
@@ -226,7 +226,7 @@ pub(crate) async fn expand_query(
     })
 }
 
-pub(crate) async fn describe(
+pub async fn describe(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmDescribeRequest,
 ) -> Result<LcmDescribeResponse, LcmError> {
@@ -277,7 +277,7 @@ pub(crate) async fn describe(
     })
 }
 
-pub(crate) async fn status(
+pub async fn status(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,

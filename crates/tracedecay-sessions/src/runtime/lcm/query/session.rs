@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) async fn load_session(
+pub async fn load_session(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmLoadSessionRequest,
 ) -> Result<LcmLoadSessionPage, LcmError> {
@@ -69,7 +69,7 @@ pub(crate) async fn load_session(
 /// `timestamp` is provider-supplied and may be absent or use a clock domain that
 /// cannot be compared with `store_id`, so recency ordering uses the raw store's
 /// insertion order.
-pub(crate) async fn recent_sessions(
+pub async fn recent_sessions(
     conn: &(impl QueryExecutor + ?Sized),
     provider: Option<&str>,
     limit: usize,
@@ -109,7 +109,7 @@ pub(crate) async fn recent_sessions(
 
 /// Lists providers that contain raw messages for an explicit session id,
 /// ordered by most recent ingested activity.
-pub(crate) async fn session_providers(
+pub async fn session_providers(
     conn: &(impl QueryExecutor + ?Sized),
     session_id: &str,
 ) -> Result<Vec<String>, LcmError> {
@@ -132,7 +132,7 @@ pub(crate) async fn session_providers(
 
 /// Loads a bounded turn-ordered replay slice for one session: head turns,
 /// tail turns (deduplicated against the head), and top summary-DAG nodes.
-pub(crate) async fn session_replay_slice(
+pub async fn session_replay_slice(
     conn: &(impl QueryExecutor + ?Sized),
     request: &LcmSessionReplayRequest,
 ) -> Result<LcmSessionReplaySlice, LcmError> {

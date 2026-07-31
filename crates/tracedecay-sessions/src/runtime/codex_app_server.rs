@@ -40,13 +40,13 @@ fn active_codex_children() -> &'static Mutex<ActiveCodexChildren> {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct CodexAppServerCancellation {
+pub struct CodexAppServerCancellation {
     cancelled: Arc<AtomicBool>,
     process_group: Arc<Mutex<Option<u32>>>,
 }
 
 impl CodexAppServerCancellation {
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         if let Some(process_group) = *self
             .process_group
@@ -57,7 +57,7 @@ impl CodexAppServerCancellation {
         }
     }
 
-    pub(crate) fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 
@@ -89,7 +89,7 @@ impl CodexAppServerCancellation {
         reason = "Windows daemon shutdown does not use this guard yet"
     )
 )]
-pub(crate) struct CodexAppServerShutdownGuard;
+pub struct CodexAppServerShutdownGuard;
 
 #[cfg_attr(
     windows,
@@ -98,7 +98,7 @@ pub(crate) struct CodexAppServerShutdownGuard;
         reason = "Windows daemon shutdown does not use this guard yet"
     )
 )]
-pub(crate) fn begin_codex_app_server_shutdown() -> CodexAppServerShutdownGuard {
+pub fn begin_codex_app_server_shutdown() -> CodexAppServerShutdownGuard {
     let process_groups = {
         let mut active = active_codex_children()
             .lock()
@@ -188,7 +188,7 @@ pub fn run_prompt_with_codex_app_server(
     run_prompt_with_optional_cancellation(prompt, config, thread_source, None, None, None)
 }
 
-pub(crate) fn run_work_with_codex_app_server(
+pub fn run_work_with_codex_app_server(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,

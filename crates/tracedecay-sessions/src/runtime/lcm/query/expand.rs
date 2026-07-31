@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::*;
 
-pub(crate) async fn expand(
+pub async fn expand(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     request: LcmExpandRequest,

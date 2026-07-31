@@ -682,7 +682,7 @@ pub(super) fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmErr
     Ok(dir)
 }
 
-pub(crate) fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
+pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
     existing_payload_dir_opt(storage_root)?.ok_or_else(|| {
         LcmError::Io(format!(
             "payload directory missing under {}",
@@ -696,7 +696,7 @@ pub(crate) fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmEr
 /// reports as `None` instead of an I/O error. Invalid configurations —
 /// symlinked dir, wrong file type, dir escaping the storage root — still
 /// error.
-pub(crate) fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
+pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
     let root = super::canonical_storage_root(storage_root)?;
     #[cfg(windows)]
     let _root_guard = open_verified_directory(&root)?;
@@ -714,7 +714,7 @@ pub(crate) fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<Pat
 }
 
 #[cfg(not(windows))]
-pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
+pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let metadata =
         fs::symlink_metadata(storage_root).map_err(|err| LcmError::Io(err.to_string()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -726,7 +726,7 @@ pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, Lcm
 }
 
 #[cfg(windows)]
-pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
+pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let root = open_verified_directory(storage_root)?;
     let canonical = storage_root
         .canonicalize()
@@ -774,7 +774,7 @@ fn ensure_payload_dir_under_root(root: &Path, dir: &Path) -> Result<(), LcmError
 }
 
 #[cfg(not(windows))]
-pub(crate) fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
+pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
     let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
     if parent == root {
         Ok(())
@@ -784,7 +784,7 @@ pub(crate) fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError>
 }
 
 #[cfg(windows)]
-pub(crate) fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
+pub fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError> {
     let parent = path.parent().ok_or(LcmError::InvalidPayloadRef)?;
     if parent != root {
         return Err(LcmError::InvalidPayloadRef);
