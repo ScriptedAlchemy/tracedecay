@@ -42,8 +42,7 @@ const TRANSACTION_SCHEMA: &str = "tracedecay.code-generation-retention-transacti
 /// what gets collected, so a receipt written inside it would vanish with the
 /// evidence it certifies.
 const SCOPE_RETENTION_LOCK_FILE: &str = ".code-index-scope-retention.lock";
-const SCOPE_RETENTION_TRANSACTION_FILE: &str =
-    ".code-index-scope-retention-transaction-v1.json";
+const SCOPE_RETENTION_TRANSACTION_FILE: &str = ".code-index-scope-retention-transaction-v1.json";
 const SCOPE_RETENTION_QUARANTINE_DIRECTORY: &str = ".code-index-scope-retention-quarantine-v1";
 const SCOPE_RETENTION_RECEIPTS_DIRECTORY: &str = "code-index-scope-retention-receipts-v1";
 const SCOPE_RETENTION_RECEIPT_SCHEMA: &str = "tracedecay.code-index-scope-retention-receipt.v1";
@@ -1258,9 +1257,7 @@ impl ScopeRootRetentionPlanV1 {
             .iter()
             .chain(self.retained_immature_scopes.iter())
             .chain(self.refused_scopes.iter().map(|refused| &refused.scope))
-            .fold(0_u64, |total, scope| {
-                total.saturating_add(scope.size_bytes)
-            })
+            .fold(0_u64, |total, scope| total.saturating_add(scope.size_bytes))
     }
 
     #[must_use]
@@ -1640,7 +1637,14 @@ fn measure_scope_tree(scope_root: &Path) -> Result<(u64, i64), CodeGenerationRet
             newest_mtime = newest_mtime.max(mtime_secs(&metadata)?);
         }
     }
-    Ok((total_bytes, if newest_mtime == i64::MIN { 0 } else { newest_mtime }))
+    Ok((
+        total_bytes,
+        if newest_mtime == i64::MIN {
+            0
+        } else {
+            newest_mtime
+        },
+    ))
 }
 
 fn directory_mtime_secs(path: &Path) -> Result<i64, CodeGenerationRetentionErrorV1> {
@@ -1976,9 +1980,7 @@ fn cleanup_committed_scope_transaction(
     remove_empty_scope_stage_root(&stage_root)
 }
 
-fn remove_empty_scope_stage_root(
-    stage_root: &Path,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
+fn remove_empty_scope_stage_root(stage_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
     let mut entries = match std::fs::read_dir(stage_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

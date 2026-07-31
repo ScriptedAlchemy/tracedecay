@@ -1257,9 +1257,13 @@ pub async fn collect_code_generation_retention_findings(
         superseded_generation_bytes: StorageByteSizeV1(plan.superseded_generation_bytes()),
         collectable_generation_count: plan.collectable_generations.len() as u64,
         collectable_generation_bytes: StorageByteSizeV1(plan.collectable_generation_bytes()),
-        stranded_scope_count: scopes.as_ref().map_or(0, |scopes| scopes.stranded_scope_count()),
+        stranded_scope_count: scopes
+            .as_ref()
+            .map_or(0, |scopes| scopes.stranded_scope_count()),
         stranded_scope_bytes: StorageByteSizeV1(
-            scopes.as_ref().map_or(0, |scopes| scopes.stranded_scope_bytes()),
+            scopes
+                .as_ref()
+                .map_or(0, |scopes| scopes.stranded_scope_bytes()),
         ),
     };
     let Ok(finding) = code_generation_retention_finding(&record, completeness) else {

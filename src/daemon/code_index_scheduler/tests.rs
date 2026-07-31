@@ -417,7 +417,10 @@ fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() 
     );
     let receipt = report.receipt.expect("durable reconciliation receipt");
     assert!(receipt.reclaimed_bytes > 0);
-    assert_eq!(receipt.reclaimed_bytes, report.plan.collectable_scope_bytes());
+    assert_eq!(
+        receipt.reclaimed_bytes,
+        report.plan.collectable_scope_bytes()
+    );
     assert!(
         code_index
             .path()
@@ -503,7 +506,9 @@ fn code_index_scope_with_a_pending_generation_journal_is_refused() {
         StrandedScopeRefusalV1::PendingGenerationRetention
     );
     assert!(
-        stranded_scope.join("active-code-generation-v1.json").is_file(),
+        stranded_scope
+            .join("active-code-generation-v1.json")
+            .is_file(),
         "a scope mid-transaction must survive reconciliation untouched"
     );
     assert!(
@@ -645,8 +650,9 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
         stranded_scope_count: 0,
         stranded_scope_bytes: StorageByteSizeV1(0),
     };
-    let finding = code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
-        .expect("the retention finding must be producible at this size");
+    let finding =
+        code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+            .expect("the retention finding must be producible at this size");
 
     assert!(
         finding.finding().coverage().is_complete(),
