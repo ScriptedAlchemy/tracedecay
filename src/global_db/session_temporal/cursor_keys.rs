@@ -37,6 +37,13 @@ pub(crate) enum GlobalDbCursorKeyProviderError {
     InvalidKeyVersion { value: i64 },
     #[error("cursor authentication key material is invalid")]
     InvalidKeyMaterial,
+    #[error("cursor authentication key cannot authorize retrieval cursors")]
+    InvalidRetrievalKey,
+    #[error("failed to provision the active cursor authentication key")]
+    Provision {
+        #[source]
+        source: SessionStoreError,
+    },
     #[error("failed to {operation}")]
     Storage {
         operation: &'static str,

@@ -7,6 +7,7 @@ use tracedecay_domain::SignedCursorKeyRefV1;
 use zeroize::Zeroizing;
 
 pub(super) const MAX_CURSOR_SECRET_BYTES: usize = 256;
+const CURSOR_KEY_DERIVATION_DOMAIN_V1: &[u8] = b"tracedecay.cursor-key-derivation.v1\0";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CursorKeyError {
@@ -70,6 +71,22 @@ impl InMemoryCursorAuthenticator {
     fn mac(&self) -> Result<Hmac<Sha256>, CursorKeyError> {
         <Hmac<Sha256> as KeyInit>::new_from_slice(&self.secret)
             .map_err(|_| CursorKeyError::InvalidMaterial)
+    }
+
+    /// Derive domain-separated key material without exposing the durable
+    /// cursor secret.
+    pub fn derive_key_material(
+        &self,
+        key: &SignedCursorKeyRefV1,
+        context: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CursorKeyError> {
+        if key != &self.key {
+            return Err(CursorKeyError::Unavailable);
+        }
+        let mut mac = self.mac()?;
+        mac.update(CURSOR_KEY_DERIVATION_DOMAIN_V1);
+        mac.update(context);
+        Ok(Zeroizing::new(mac.finalize().into_bytes().to_vec()))
     }
 }
 
