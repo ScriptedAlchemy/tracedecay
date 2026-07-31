@@ -9,8 +9,9 @@
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
-> branch-only scaffolding; without released or live predecessor evidence, the
-> current numbered plan changes the contract in place.
+> source-only/internal branch scaffolding. Potentially deployed callable names
+> remain compatible until an authorized installed-client/host census proves
+> absence; the current numbered plan governs final scope.
 
 **Goal:** Remove MCP imports of daemon internals and daemon imports of MCP
 handlers through one typed invocation boundary.

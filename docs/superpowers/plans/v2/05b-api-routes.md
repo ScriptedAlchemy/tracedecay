@@ -8,8 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
-> Historical compatibility/migration language applies only to evidenced
-> released callers; branch-local routes change in place.
+> Pure source-only/internal routes change in place. Potentially retained
+> branch-era routes remain compatible until an authorized
+> installed-client/host/live-profile census proves absence.
 
 **Goal:** Move HTTP/dashboard route families incrementally into
 `tracedecay-api` while preserving daemon-owned invocation and generated
@@ -45,9 +46,11 @@ applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Move one route family at a time. Old routes delegate only when release evidence
-proves an external caller; branch-local routes are replaced in place and never
-own duplicate logic. Revert the family and regenerated contract together.
+Move one route family at a time. Released routes and branch-era routes
+potentially retained by dogfood clients, saved navigation, bookmarks, or host
+files delegate without owning duplicate logic. Replace only source-only routes;
+an authorized installed-client/host/live-profile census gates retirement of
+potentially retained routes. Revert the family and regenerated contract together.
 Measure API-private and root route edits. Delete old routers/DTOs only after all
 production mounts, generated contracts, HTTP/SSE journeys, and package gates
 use `tracedecay-api`.

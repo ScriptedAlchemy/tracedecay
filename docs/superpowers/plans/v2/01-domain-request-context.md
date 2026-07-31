@@ -9,8 +9,9 @@
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
 > Historical version/compatibility/migration language cannot resurrect
-> branch-only scaffolding; without released or live predecessor evidence, the
-> current numbered plan changes the contract in place.
+> source-only branch scaffolding. Potentially deployed branch-era callable
+> façades remain compatible until an authorized installed-client/host census
+> proves absence; the current numbered plan governs final scope.
 
 **Goal:** Make query-facing DTOs and request scope independent of the root
 crate before extracting query.
@@ -55,8 +56,9 @@ content digest, generation, and owning project identity. Root compatibility is
       query nor root code-index modules.
 - [ ] Move the query-facing chunk DTO and conversion tests into domain.
 - [ ] Converge production entry points on application `RequestContext` plus
-      `ResolvedScope`; keep a delegating root façade only if release evidence
-      proves external compatibility requires it, otherwise replace it in place.
+      `ResolvedScope`; keep a delegating root façade when release evidence or a
+      potentially deployed dogfood/host consumer requires it. An authorized
+      installed-client/host census must prove absence before replacement.
 - [ ] Regenerate dashboard contracts if a schemars owner changes and prove
       byte-stable generated output or review the explicit schema delta.
 - [ ] Remove every query dependency on `crate::code_index::chunks`.
