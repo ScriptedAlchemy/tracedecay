@@ -982,9 +982,8 @@ mod tests {
         assert_eq!(plan.compute_digest().unwrap(), plan.plan_digest);
 
         let mut mutated = plan.clone();
-        if let ApiMigrationOperationRequestV1::InsertCompatibility {
-            disposition, ..
-        } = &mut mutated.operations[0]
+        if let ApiMigrationOperationRequestV1::InsertCompatibility { disposition, .. } =
+            &mut mutated.operations[0]
         {
             disposition.deletion_condition =
                 Some("different sunset predicate changes the digest".to_owned());
@@ -999,7 +998,10 @@ mod tests {
         let contribution = api_migration_catalog_contribution().unwrap();
         for binding in contribution.bindings() {
             assert!(
-                binding.binding_id().as_str().ends_with("api-migration-plan.v1"),
+                binding
+                    .binding_id()
+                    .as_str()
+                    .ends_with("api-migration-plan.v1"),
                 "unexpected binding {}",
                 binding.binding_id().as_str()
             );
