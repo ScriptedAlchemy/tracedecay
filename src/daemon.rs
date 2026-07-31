@@ -2278,6 +2278,17 @@ impl DaemonInvocationState {
         project_path: Option<&Path>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
+        if matches!(
+            &request.payload,
+            service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead { .. }
+                | service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
+                | service::invocation::DaemonInvocationPayload::MultiRootExecute { .. }
+        ) {
+            return DaemonInvocationResponse::problem(
+                request.request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
             request: scope_set_request,
