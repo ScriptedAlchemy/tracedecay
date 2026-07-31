@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use tracedecay_application::DirectorySyncPolicy;
 
 use crate::db::engine::{QueryExecutor, params};
 
@@ -108,17 +109,9 @@ fn sync_file(path: &Path) -> Result<(), LcmError> {
         .map_err(|error| LcmError::Io(error.to_string()))
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), LcmError> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
         .map_err(|error| LcmError::Io(error.to_string()))
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-fn sync_directory(_path: &Path) -> Result<(), LcmError> {
-    Ok(())
 }
 
 pub(super) async fn all_payload_metadata_refs(

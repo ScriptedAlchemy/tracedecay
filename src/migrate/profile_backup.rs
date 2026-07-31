@@ -7,6 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_application::DirectorySyncPolicy;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RehearsalPublicationFault {
@@ -891,13 +892,8 @@ fn sync_file(path: &Path) -> Result<(), String> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        File::open(path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("sync directory '{}': {error}", path.display()))?;
-    }
-    Ok(())
+    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
+        .map_err(|error| format!("sync directory '{}': {error}", path.display()))
 }
 
 #[cfg(unix)]

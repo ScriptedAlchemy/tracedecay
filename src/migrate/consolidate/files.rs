@@ -4,6 +4,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::DirectorySyncPolicy;
 
 use super::{config_error, io_error};
 use crate::errors::Result;
@@ -157,19 +158,11 @@ fn sync_file_and_parent(path: &Path) -> Result<()> {
     sync_parent_directory(parent)
 }
 
-#[cfg(unix)]
+// Windows directory handles commonly reject `sync_all` with AccessDenied, so
+// the shared implementation is a no-op there; file data is still flushed
+// before the atomic rename.
 pub(super) fn sync_parent_directory(parent: &Path) -> Result<()> {
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(io_error)
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-pub(super) fn sync_parent_directory(_parent: &Path) -> Result<()> {
-    // Windows directory handles commonly reject sync_all with AccessDenied.
-    // File data is still flushed before the atomic rename.
-    Ok(())
+    tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict).map_err(io_error)
 }
 
 pub(super) fn copy_sqlite_family_exact(source: &Path, target: &Path) -> Result<()> {

@@ -1,5 +1,7 @@
 //! Transactional session-store merge and durable migration ledger.
 
+use tracedecay_application::DirectorySyncPolicy;
+
 use super::*;
 use crate::db::engine::Value;
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
@@ -358,19 +360,12 @@ fn replace_migration_marker(temp: &Path, path: &Path) -> Result<(), String> {
     fs::rename(temp, path).map_err(|error| format!("could not upgrade migration marker: {error}"))
 }
 
-#[cfg(unix)]
+// Windows does not support opening a directory with ordinary `File::open`, so
+// the shared implementation is a no-op there and the durable file sync
+// performed before the rename is the strongest portable guarantee.
 fn sync_directory(dir: &Path) -> Result<(), String> {
-    fs::File::open(dir)
-        .and_then(|directory| directory.sync_all())
+    tracedecay_application::sync_directory(dir, DirectorySyncPolicy::Strict)
         .map_err(|error| format!("could not sync migration ledger directory: {error}"))
-}
-
-// Windows does not support opening a directory with ordinary `File::open`,
-// so the durable file sync above is the strongest portable guarantee there.
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-fn sync_directory(_dir: &Path) -> Result<(), String> {
-    Ok(())
 }
 
 fn fail_after(table: &str, requested: Option<&str>) -> Result<(), String> {
