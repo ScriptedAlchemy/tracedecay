@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File};
@@ -25,7 +25,7 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::{
     AnchorExpandRequest, ApplicationOutcome, ApplicationResult, OperationTermination, PageRequest,
-    ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+    ResultProjection, RetrievalOrder, RetrievalRequestMeta, now_micros,
 };
 use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackCycleResultV1, FeedbackFindingLifecycleV1,
@@ -2789,13 +2789,6 @@ fn open_project_file(
 
 fn generation_sequence(generation: &CodeGenerationId) -> Option<u64> {
     generation.as_str().split('.').nth(3)?.parse().ok()
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_micros() as i64);
-    UtcMicros(micros)
 }
 
 fn micros_to_seconds(value: UtcMicros) -> i64 {

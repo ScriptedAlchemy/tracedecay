@@ -49,7 +49,7 @@ use tracedecay_application::doctor::{
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, EffectReceipt, EffectTermination, IdempotencyKey,
-    OperationBudgetUsage, OperationReceipt, PreviewId, RequestContext, RequestId,
+    OperationBudgetUsage, OperationReceipt, PreviewId, RequestContext, RequestId, now_micros,
 };
 use tracedecay_domain::ManifestDigest;
 
@@ -2551,17 +2551,6 @@ fn doctor_report_request_context(
         request_id,
         Deadline::new(expires_at)?,
         CancellationContext::active(format!("cancel.daemon.doctor.{suffix}"))?,
-    )
-}
-
-fn now_micros() -> tracedecay_domain::UtcMicros {
-    tracedecay_domain::UtcMicros(
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_micros()),
-        )
-        .unwrap_or(i64::MAX),
     )
 }
 

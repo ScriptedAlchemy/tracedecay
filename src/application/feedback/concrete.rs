@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,7 +32,7 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     EvidenceDomain, OpaqueCursor, PageRequest, PolicyDecisionRef, RequestAdmission, RequestContext,
     RequestId, ResolvedScope, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
-    RetryDirective,
+    RetryDirective, now_micros,
 };
 use tracedecay_domain::feedback::{FeedbackDedupeKeyV1, FeedbackFindingId, FeedbackFindingV1};
 use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
@@ -1803,15 +1802,6 @@ fn validate_request(request: &FeedbackReadRequestV1) -> Result<(), ApplicationCo
         FeedbackReadRequestV1::Expand(request) => request.validate(),
         FeedbackReadRequestV1::List(request) => request.validate(),
     }
-}
-
-fn now_micros() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            duration.as_micros().min(i64::MAX as u128) as i64
-        });
-    UtcMicros(micros)
 }
 
 fn micros_to_seconds(micros: UtcMicros) -> i64 {

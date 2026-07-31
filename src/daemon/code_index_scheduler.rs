@@ -13,18 +13,19 @@ use std::{
         Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use thiserror::Error;
+use tracedecay_application::now_micros;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
     ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerDispositionV1,
-    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
-    WorktreeId, canonical_sha256,
+    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, WorktreeId,
+    canonical_sha256,
 };
 
 use crate::{
@@ -1498,18 +1499,6 @@ fn snapshot_content_identity(
         bytes.push(0xfe);
     }
     content_digest(&bytes)
-}
-
-fn now_micros() -> UtcMicros {
-    UtcMicros(
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros(),
-        )
-        .unwrap_or(i64::MAX),
-    )
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

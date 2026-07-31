@@ -2,11 +2,11 @@ use std::fmt::{self, Write as _};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::engine::params;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tracedecay_application::now_micros;
 use tracedecay_domain::{
     AnchorDurabilityClass, CanonicalObservationEnvelopeV1, DurableObservationV1, HydrationStateV1,
     ObservationScopeV1, PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
@@ -518,7 +518,7 @@ async fn resolve_current(
     if let Some(state) = classify_current_access(
         anchor.payload_access(),
         anchor.durability(),
-        now_micros(),
+        now_micros().0,
         true,
         true,
     ) {
@@ -642,7 +642,7 @@ async fn resolve_occurrence(
     if let Some(state) = classify_current_access(
         anchor.payload_access(),
         anchor.durability(),
-        now_micros(),
+        now_micros().0,
         anchor.owner() == observation.scope()
             && serde_json::to_string(observation.scope()).ok().as_deref() == Some(owner_json),
         provider_matches
@@ -864,7 +864,7 @@ async fn resolve_summary(
     if let Some(state) = classify_current_access(
         anchor.payload_access(),
         anchor.durability(),
-        now_micros(),
+        now_micros().0,
         owner_matches,
         session_matches,
     ) {
@@ -1176,14 +1176,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(&mut actual, "{byte:02x}");
     }
     actual
-}
-
-fn now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-        .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
