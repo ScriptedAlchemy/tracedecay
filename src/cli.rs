@@ -28,6 +28,9 @@ pub struct HostBundleCliOptions {
     pub component: Option<HostBundleComponentArg>,
     pub dry_run: bool,
     pub yes: bool,
+    /// Operator confirmation for claiming a path no receipt records. Distinct
+    /// from `yes`, which only confirms the plan the preview already showed.
+    pub adopt: bool,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -118,6 +121,12 @@ pub struct Cli {
     /// not by a global clap `requires`, so it does not leak onto other commands.
     #[arg(long, global = true)]
     pub yes: bool,
+    /// Additionally confirm taking ownership of an existing file that no
+    /// TraceDecay receipt records. Required alongside `--yes` for
+    /// `reinstall --component`; the previous bytes are always backed up first,
+    /// and a file another owner claims is refused regardless of this flag.
+    #[arg(long, global = true)]
+    pub adopt: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

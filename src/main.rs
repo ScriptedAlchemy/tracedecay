@@ -254,6 +254,7 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
         component: cli.component,
         dry_run: cli.dry_run,
         yes: cli.yes,
+        adopt: cli.adopt,
     };
     let command = match cli.command {
         Some(cmd) => cmd,
