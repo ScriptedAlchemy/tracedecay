@@ -104,6 +104,9 @@ compiles.
   language, and superseded plan authority. `00-plan-set-index.md` is the sole
   roadmap precedence; `NEXT.md` records current outcomes only, while historical
   plans and benchmarks are archival.
+- Name production modules, APIs, tests, scripts, and CI jobs for durable product
+  capabilities—not PR numbers, milestones, phases, or temporary gates. Keep
+  PR/milestone labels only in clearly archival plans and benchmark provenance.
 - Tests must be falsifiable and cover failure, denial, staleness, isolation,
   cancellation, and rollback where relevant, without duplicating the same
   substrate across every host × OS combination.
