@@ -1854,6 +1854,127 @@ fn daemon_runtime_parser_rejects_missing_database_telemetry() {
     assert!(error.to_string().contains("omitted database telemetry"));
 }
 
+fn host_component_result(
+    state: crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1,
+    artifact_states: &[(
+        &str,
+        crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1,
+    )],
+) -> crate::agents::host_bundle_v2::HostBundleComponentDoctorResultV1 {
+    use crate::agents::host_bundle_v2::{
+        HostBundleArtifactDoctorResultV1, HostBundleComponentDoctorResultV1, HostBundleComponentV1,
+        HostBundleRegistrationStateV1, HostKindV1,
+    };
+
+    HostBundleComponentDoctorResultV1 {
+        receipt_path: PathBuf::from("/profile/host-components/receipt.cursor-desktop.core.v1.json"),
+        host: Some(HostKindV1::CursorDesktop),
+        component: Some(HostBundleComponentV1::Core),
+        state,
+        registration: Some(HostBundleRegistrationStateV1::Current),
+        artifacts: artifact_states
+            .iter()
+            .map(
+                |(relative_path, state)| HostBundleArtifactDoctorResultV1 {
+                    relative_path: (*relative_path).to_string(),
+                    expected_digest: [1; 32],
+                    observed_digest: Some([2; 32]),
+                    ownership_marker: "tracedecay.cursor-desktop.core".to_string(),
+                    state: *state,
+                },
+            )
+            .collect(),
+        repair_action: "run `tracedecay reinstall --component core --yes` (backs up and re-owns)"
+            .to_string(),
+    }
+}
+
+/// Cursor Core's receipt-owned bundle drifts on every version bump (the plugin
+/// manifest stamps the version, the hook config bakes the binary path). That is
+/// repairable, so Doctor must warn and exit zero rather than fail.
+#[test]
+fn drifted_host_component_warns_and_keeps_a_clean_exit() {
+    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let mut counters = DoctorCounters::new();
+    let component = host_component_result(
+        State::Drifted,
+        &[
+            (".cursor/plugins/local/tracedecay/hooks/hooks.json", State::Drifted),
+            (".cursor/plugins/local/tracedecay/mcp.json", State::Current),
+        ],
+    );
+
+    super::report_host_component_state(&mut counters, &component);
+
+    assert_eq!(counters.issues, 0, "drift must not fail the doctor run");
+    assert_eq!(counters.warnings, 1);
+    super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap();
+}
+
+/// A contested path is not repairable without an operator decision, so it
+/// keeps failing — the distinction the `Drifted` state exists to preserve.
+#[test]
+fn ownership_conflict_still_fails_the_doctor_run() {
+    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let mut counters = DoctorCounters::new();
+    let component = host_component_result(
+        State::OwnershipConflict,
+        &[(".cursor/plugins/local/tracedecay/mcp.json", State::OwnershipConflict)],
+    );
+
+    super::report_host_component_state(&mut counters, &component);
+
+    assert_eq!(counters.issues, 1);
+    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap_err();
+    assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
+}
+
+/// An uninstall that left the host still advertising the component is
+/// reported, not silently skipped, and is repairable rather than blocking.
+#[test]
+fn orphaned_registration_warns_without_blocking() {
+    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let mut counters = DoctorCounters::new();
+
+    super::report_host_component_state(
+        &mut counters,
+        &host_component_result(State::OrphanedRegistration, &[]),
+    );
+
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
+
+/// The warning has to name the drifted paths, so an operator can tell which
+/// receipt-owned files moved without rerunning anything.
+#[test]
+fn drift_warning_names_only_the_drifted_paths() {
+    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let component = host_component_result(
+        State::Drifted,
+        &[
+            (".cursor/plugins/local/tracedecay/hooks/hooks.json", State::Drifted),
+            (
+                ".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json",
+                State::Drifted,
+            ),
+            (".cursor/plugins/local/tracedecay/mcp.json", State::Current),
+        ],
+    );
+
+    let named = super::drifted_paths(&component);
+
+    assert_eq!(
+        named,
+        ".cursor/plugins/local/tracedecay/hooks/hooks.json, \
+         .cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json"
+    );
+}
+
 #[test]
 fn doctor_result_fails_when_checks_report_issues() {
     let mut counters = DoctorCounters::new();
