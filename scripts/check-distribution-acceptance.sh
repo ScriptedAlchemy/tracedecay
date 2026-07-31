@@ -425,7 +425,9 @@ PY
 export ORT_LIB_PATH="$ort_lib_path"
 
 echo "distribution acceptance: checking packaged model-acquisition lifecycle suite"
-CARGO_NET_OFFLINE=true cargo test \
+REQUIRE_EXACT_TEST_COUNT=nonzero \
+  CARGO_NET_OFFLINE=true \
+  "$repo/scripts/require-exact-test.sh" cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
   --no-default-features \

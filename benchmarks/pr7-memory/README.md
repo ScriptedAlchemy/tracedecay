@@ -14,7 +14,6 @@ acceptance snapshot, signature, trust root, or attestation in this directory.
 
 | Path | Role |
 |---|---|
-| [workload-v1.json](workload-v1.json) | Versioned phase/workload pin (historical measurement shape) |
 | [evidence-index.json](evidence-index.json) | Legacy status pointer (`pending`; deprecated `current_acceptance` remains null) |
 | [result-provisional.json](result-provisional.json) | Historical local timings only — not accepted evidence |
 
@@ -22,7 +21,9 @@ acceptance snapshot, signature, trust root, or attestation in this directory.
 
 Product behavior is accepted through the cargo tests below. Performance
 numbers in `result-provisional.json` are diagnostic leftovers from a removed
-harness and must not be quoted as accepted PR7 evidence.
+harness and must not be quoted as accepted PR7 evidence. The retired
+`workload-v1.json` recorded that harness's execution shape; its removal does
+not upgrade the retained result or evidence index into accepted provenance.
 
 ## Direct behavioral tests
 
