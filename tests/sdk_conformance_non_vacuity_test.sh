@@ -7,6 +7,8 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+if '      - "tests/sdk_conformance_non_vacuity_test.sh"' not in workflow:
+    raise SystemExit("SDK conformance workflow paths do not cover the mutation test")
 marker = "  production-router:"
 if marker not in workflow:
     raise SystemExit("SDK conformance workflow is missing production-router")
@@ -14,6 +16,7 @@ job = re.split(r"\n  (?=\S)", workflow.split(marker, 1)[1], maxsplit=1)[0]
 for required in [
     "REQUIRE_EXACT_TEST_COUNT=nonzero",
     "scripts/require-exact-test.sh",
+    "tests/sdk_conformance_non_vacuity_test.sh",
     "--test production_daemon",
     "--ignored",
 ]:
