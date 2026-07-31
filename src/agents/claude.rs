@@ -72,7 +72,10 @@ impl AgentIntegration for ClaudeIntegration {
             &claude_md_path,
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
-        install_clean_local_config(&ctx.project_path)?;
+        let project_path = std::env::current_dir().map_err(|error| TraceDecayError::Config {
+            message: format!("failed to resolve Claude project path: {error}"),
+        })?;
+        install_clean_local_config(&project_path)?;
         sync_claude_plugin_cache(&ctx.home, &ctx.tracedecay_bin);
 
         eprintln!();

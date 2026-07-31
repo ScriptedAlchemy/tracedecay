@@ -542,7 +542,7 @@ impl HostComponentRegistrationDelegate {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                     return Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath);
                 }
-                Ok(metadata) => {
+                Ok(_) => {
                     let bytes = fs::read(path).map_err(|_| {
                         crate::agents::host_bundle_v2::HostBundleError::StorageFailure
                     })?;
