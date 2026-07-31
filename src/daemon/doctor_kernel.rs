@@ -1211,7 +1211,7 @@ pub async fn collect_code_generation_retention_findings(
     // stranded sibling scope is invisible to the scope-local census above, so
     // it is measured here or it is not measured anywhere.
     let scope_store_root = code_index_store_root.parent().map(Path::to_path_buf);
-    let live_roots = super::store_maintenance::resolve_live_code_index_roots(project_root);
+    let project_root = project_root.to_path_buf();
     let now = now_secs();
     let Ok(census) = tokio::task::spawn_blocking(move || {
         let plan = plan_code_generation_retention_with_verification(
@@ -1222,16 +1222,17 @@ pub async fn collect_code_generation_retention_findings(
         );
         // Zeros are only ever published together with `Partial`: a live-root set
         // that could not be proven must never read as "nothing is stranded".
-        let scopes = match (scope_store_root, live_roots) {
-            (Some(scope_store_root), Ok(live_roots)) => plan_scope_root_retention(
+        let scopes = scope_store_root.and_then(|scope_store_root| {
+            let live_roots =
+                super::store_maintenance::resolve_live_code_index_roots(&project_root).ok()?;
+            plan_scope_root_retention(
                 &scope_store_root,
                 &live_roots,
                 DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
                 now,
             )
-            .ok(),
-            _ => None,
-        };
+            .ok()
+        });
         (plan, scopes)
     })
     .await

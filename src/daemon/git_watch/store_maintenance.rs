@@ -309,16 +309,13 @@ pub(super) async fn run_code_index_scope_reconciliation(graph: &TraceDecay) -> b
         return true;
     }
 
-    let live_roots = match resolve_live_code_index_roots(&layout.project_root) {
-        Ok(live_roots) => live_roots,
-        Err(failure) => {
-            log_code_index_scope_reconciliation_degraded(failure);
-            return false;
-        }
-    };
+    let project_root = layout.project_root.clone();
     let now_secs = now_secs_i64();
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
+    // Repository discovery and the scope walk are both blocking filesystem work;
+    // neither belongs on the async authority lane.
     let report = tokio::task::spawn_blocking(move || {
+        let live_roots = resolve_live_code_index_roots(&project_root)?;
         run_scope_root_retention(
             &store_root,
             &live_roots,
@@ -327,6 +324,7 @@ pub(super) async fn run_code_index_scope_reconciliation(graph: &TraceDecay) -> b
             now_secs,
             completed_at,
         )
+        .map_err(|_| "scope_reconciliation_pass_failed")
     })
     .await;
 
@@ -368,8 +366,8 @@ pub(super) async fn run_code_index_scope_reconciliation(graph: &TraceDecay) -> b
             }
             true
         }
-        Ok(Err(_)) => {
-            log_code_index_scope_reconciliation_degraded("scope_reconciliation_pass_failed");
+        Ok(Err(failure)) => {
+            log_code_index_scope_reconciliation_degraded(failure);
             false
         }
         Err(_) => {
