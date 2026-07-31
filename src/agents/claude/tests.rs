@@ -297,7 +297,10 @@ fn registered_cache_refresh_refuses_registry_path_outside_cache_root() {
     let error = refresh_registered_claude_plugin_cache(home.path(), "/bin/tracedecay")
         .expect_err("an external registry path must be rejected");
     assert!(error.to_string().contains("outside"));
-    assert!(sentinel.exists(), "rejected external paths must stay untouched");
+    assert!(
+        sentinel.exists(),
+        "rejected external paths must stay untouched"
+    );
 }
 
 /// The clean replace must refuse to delete a marketplace dir tracedecay

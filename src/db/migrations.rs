@@ -1510,10 +1510,12 @@ async fn reject_precreated_v9_objects(conn: &Transaction) -> Result<()> {
     else {
         return Ok(());
     };
-    let precreated = row.get::<String>(0).map_err(|e| TraceDecayError::Database {
-        message: format!("v9: failed to decode V8 schema object: {e}"),
-        operation: "migrate_v9".to_string(),
-    })?;
+    let precreated = row
+        .get::<String>(0)
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to decode V8 schema object: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
     Err(TraceDecayError::Database {
         message: format!("v9: V8 admission rejected precreated V9 object: {precreated}"),
         operation: "migrate_v9".to_string(),
@@ -1521,13 +1523,7 @@ async fn reject_precreated_v9_objects(conn: &Transaction) -> Result<()> {
 }
 
 async fn create_and_verify_v9_read_cache(conn: &Transaction) -> Result<()> {
-    create_and_verify_schema_object(
-        conn,
-        "table",
-        "read_cache",
-        V9_READ_CACHE_TABLE_SQL,
-    )
-    .await?;
+    create_and_verify_schema_object(conn, "table", "read_cache", V9_READ_CACHE_TABLE_SQL).await?;
     create_and_verify_schema_object(
         conn,
         "index",
@@ -1554,11 +1550,14 @@ async fn verify_created_v9_parent_id_column(conn: &Transaction) -> Result<()> {
             message: format!("v9: failed to verify created nodes.parent_id column: {e}"),
             operation: "migrate_v9".to_string(),
         })?;
-    let matches_contract = rows.next().await.map_err(|e| TraceDecayError::Database {
-        message: format!("v9: failed to read created nodes.parent_id contract: {e}"),
-        operation: "migrate_v9".to_string(),
-    })?
-    .is_some();
+    let matches_contract = rows
+        .next()
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read created nodes.parent_id contract: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?
+        .is_some();
     if matches_contract {
         Ok(())
     } else {
@@ -1621,9 +1620,13 @@ async fn schema_object_sql(
     else {
         return Ok(None);
     };
-    Ok(Some(row.get::<String>(0).map_err(|e| TraceDecayError::Database {
-        message: format!("v9: failed to decode sqlite_master sql for {object_type} '{name}': {e}"),
-        operation: "migrate_v9".to_string(),
+    Ok(Some(row.get::<String>(0).map_err(|e| {
+        TraceDecayError::Database {
+            message: format!(
+                "v9: failed to decode sqlite_master sql for {object_type} '{name}': {e}"
+            ),
+            operation: "migrate_v9".to_string(),
+        }
     })?))
 }
 

@@ -368,7 +368,7 @@ impl HostComponentRegistrationDelegate {
     }
 
     /// Third-party analyzers already registered for a language this component
-    /// set's own analyzer would serve. OpenCode is the only host whose set
+    /// set's own analyzer would serve. `OpenCode` is the only host whose set
     /// registers a custom analyzer; every other host's component set writes
     /// TraceDecay-keyed entries that no third party can already own.
     fn competing_opencode_analyzer_claims(
@@ -1117,7 +1117,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
     }
 }
 
-/// Languages the component set's own OpenCode analyzer registration declares.
+/// Languages the component set's own `OpenCode` analyzer registration declares.
 /// `None` means the projection declares no bounded extension list, so every
 /// other analyzer must be treated as overlapping.
 fn opencode_tracedecay_extensions(
@@ -1139,7 +1139,7 @@ fn opencode_tracedecay_extensions(
     )
 }
 
-/// Whether a third-party analyzer registration claims a language TraceDecay's
+/// Whether a third-party analyzer registration claims a language `TraceDecay`'s
 /// own analyzer would serve. An entry without a bounded `extensions` list
 /// claims by host default, which cannot be proven disjoint.
 fn claims_any_extension(registration: &serde_json::Value, tracedecay: Option<&[String]>) -> bool {
@@ -1159,7 +1159,7 @@ fn claims_any_extension(registration: &serde_json::Value, tracedecay: Option<&[S
     })
 }
 
-/// Host extension names are not TraceDecay identifiers. A name the lifecycle
+/// Host extension names are not `TraceDecay` identifiers. A name the lifecycle
 /// vocabulary cannot carry is still reported under a stable derived id so a
 /// real conflict is never dropped for being unrepresentable.
 fn claim_identifier(name: &str) -> String {

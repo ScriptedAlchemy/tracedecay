@@ -14,6 +14,7 @@ use tracedecay_domain::{
 use tracedecay_store::SessionMessageRecord;
 use zeroize::Zeroizing;
 
+use crate::application::session::lcm::contracts::validate_payload_ref;
 use crate::db::engine;
 use crate::global_db::observation_projection::derive_projection;
 use crate::query::temporal::hydration::{
@@ -23,7 +24,6 @@ use crate::query::temporal::hydration::{
 use crate::query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
 };
-use crate::application::session::lcm::contracts::validate_payload_ref;
 use crate::sessions::lcm::payload::read_verified_payload_content;
 
 use super::operations::CanonicalPublicationManifest;
