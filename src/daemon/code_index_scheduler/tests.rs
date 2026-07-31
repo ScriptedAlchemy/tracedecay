@@ -346,6 +346,321 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
     assert!(observed.superseded_generation_bytes > 0);
 }
 
+// --- Code-index scope-root reconciliation ----------------------------------
+//
+// Generation retention above operates inside one
+// `code-index-v1/<sha256(canonical_project_root)>/` scope. These tests cover the
+// pass that reconciles the *scopes themselves* against the live project roots,
+// which is the only thing that can reach a scope whose root no longer exists.
+
+const EIGHT_DAYS_SECS: i64 = 8 * 24 * 60 * 60;
+
+fn unix_now_secs() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after the unix epoch")
+            .as_secs(),
+    )
+    .expect("unix seconds fit i64")
+}
+
+/// Publish `count` sealed generations into the scope `code_index_root` would use
+/// for `canonical_root`, and return that scope directory.
+fn seeded_scope(
+    fixture: &GitFixture,
+    code_index_root: &Path,
+    canonical_root: &Path,
+    count: usize,
+) -> PathBuf {
+    let scope = super::scoped_code_index_store_root(code_index_root, canonical_root);
+    std::fs::create_dir_all(&scope).expect("create code-index scope root");
+    retention_generations(fixture, &scope, count);
+    scope
+}
+
+#[test]
+fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        run_scope_root_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let code_index = TempDir::new().expect("code-index root");
+    let live_root = fixture.path().to_path_buf();
+    let deleted_worktree = fixture.path().join(".claude/worktrees/agent-deadbeef");
+
+    let live_scope = seeded_scope(&fixture, code_index.path(), &live_root, 2);
+    let stranded_scope = seeded_scope(&fixture, code_index.path(), &deleted_worktree, 2);
+    let live_roots = BTreeSet::from([live_root]);
+
+    let report = run_scope_root_retention(
+        code_index.path(),
+        &live_roots,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        CodeGenerationRetentionModeV1::Apply,
+        unix_now_secs() + EIGHT_DAYS_SECS,
+        UtcMicros(90),
+    )
+    .expect("reconcile code-index scope roots");
+
+    assert_eq!(report.collected_scopes.len(), 1);
+    assert_eq!(report.plan.live_scope_count, 1);
+    assert!(
+        !stranded_scope.exists(),
+        "a scope whose canonical project root is gone must be collected"
+    );
+    assert!(
+        live_scope.join("active-code-generation-v1.json").is_file(),
+        "reconciliation must never touch a scope a live root names"
+    );
+    let receipt = report.receipt.expect("durable reconciliation receipt");
+    assert!(receipt.reclaimed_bytes > 0);
+    assert_eq!(
+        receipt.reclaimed_bytes,
+        report.plan.collectable_scope_bytes()
+    );
+    assert!(
+        code_index
+            .path()
+            .join("code-index-scope-retention-receipts-v1")
+            .join(format!("receipt-{}.json", receipt.receipt_digest))
+            .is_file(),
+        "collection must leave a durable receipt outside the collected scope"
+    );
+}
+
+#[test]
+fn code_index_scope_matching_a_live_worktree_is_never_collected() {
+    use crate::retention::code_index_generations::{
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, plan_scope_root_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let code_index = TempDir::new().expect("code-index root");
+    let primary = fixture.path().to_path_buf();
+    let linked_worktree = fixture.path().join(".claude/worktrees/agent-live");
+
+    seeded_scope(&fixture, code_index.path(), &primary, 1);
+    seeded_scope(&fixture, code_index.path(), &linked_worktree, 1);
+    let live_roots = BTreeSet::from([primary, linked_worktree]);
+
+    let plan = plan_scope_root_retention(
+        code_index.path(),
+        &live_roots,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        unix_now_secs() + EIGHT_DAYS_SECS,
+    )
+    .expect("plan scope reconciliation");
+
+    assert_eq!(plan.live_scope_count, 2);
+    assert_eq!(
+        plan.stranded_scope_count(),
+        0,
+        "a linked worktree is a live canonical root, not a stranded scope"
+    );
+    assert_eq!(plan.stranded_scope_bytes(), 0);
+}
+
+#[test]
+fn code_index_scope_with_a_pending_generation_journal_is_refused() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        StrandedScopeRefusalV1, run_scope_root_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let code_index = TempDir::new().expect("code-index root");
+    let live_root = fixture.path().to_path_buf();
+    let deleted_worktree = fixture.path().join(".claude/worktrees/agent-interrupted");
+
+    seeded_scope(&fixture, code_index.path(), &live_root, 1);
+    let stranded_scope = seeded_scope(&fixture, code_index.path(), &deleted_worktree, 2);
+    // An unfinished generation-retention journal inside the scope. Recovering it
+    // belongs to that scope's own owner; collecting the scope would destroy the
+    // evidence recovery needs.
+    std::fs::write(
+        stranded_scope.join(".code-generation-retention-transaction-v1.json"),
+        b"{}",
+    )
+    .expect("seed pending generation journal");
+    let live_roots = BTreeSet::from([live_root]);
+
+    let report = run_scope_root_retention(
+        code_index.path(),
+        &live_roots,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        CodeGenerationRetentionModeV1::Apply,
+        unix_now_secs() + EIGHT_DAYS_SECS,
+        UtcMicros(91),
+    )
+    .expect("reconcile code-index scope roots");
+
+    assert!(report.collected_scopes.is_empty());
+    assert!(report.receipt.is_none());
+    assert!(report.plan.collectable_scopes.is_empty());
+    assert_eq!(report.plan.refused_scopes.len(), 1);
+    assert_eq!(
+        report.plan.refused_scopes[0].refusal,
+        StrandedScopeRefusalV1::PendingGenerationRetention
+    );
+    assert!(
+        stranded_scope
+            .join("active-code-generation-v1.json")
+            .is_file(),
+        "a scope mid-transaction must survive reconciliation untouched"
+    );
+    assert!(
+        report.plan.stranded_scope_bytes() > 0,
+        "a refused scope is still unreachable storage and must be reported"
+    );
+}
+
+#[test]
+fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        run_scope_root_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let code_index = TempDir::new().expect("code-index root");
+    let live_root = fixture.path().to_path_buf();
+    let just_removed = fixture.path().join(".claude/worktrees/agent-just-removed");
+
+    seeded_scope(&fixture, code_index.path(), &live_root, 1);
+    let stranded_scope = seeded_scope(&fixture, code_index.path(), &just_removed, 1);
+    let live_roots = BTreeSet::from([live_root]);
+
+    let report = run_scope_root_retention(
+        code_index.path(),
+        &live_roots,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        CodeGenerationRetentionModeV1::Apply,
+        unix_now_secs(),
+        UtcMicros(92),
+    )
+    .expect("reconcile code-index scope roots");
+
+    assert!(report.collected_scopes.is_empty());
+    assert_eq!(report.plan.retained_immature_scopes.len(), 1);
+    assert!(
+        stranded_scope.exists(),
+        "a scope stranded moments ago may still belong to a worktree being moved"
+    );
+    assert_eq!(
+        report.plan.stranded_scope_count(),
+        1,
+        "immaturity delays collection; it never hides the bytes"
+    );
+}
+
+#[test]
+fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        plan_scope_root_retention, run_scope_root_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let code_index = TempDir::new().expect("code-index root");
+    let scope = seeded_scope(&fixture, code_index.path(), fixture.path(), 2);
+    let unproven = BTreeSet::new();
+
+    // "The registry could not be read" and "this profile has no live roots" are
+    // indistinguishable at this layer, and one of those readings deletes the
+    // whole store. The planner refuses rather than choosing.
+    let planned = plan_scope_root_retention(
+        code_index.path(),
+        &unproven,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        unix_now_secs() + EIGHT_DAYS_SECS,
+    );
+    let applied = run_scope_root_retention(
+        code_index.path(),
+        &unproven,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        CodeGenerationRetentionModeV1::Apply,
+        unix_now_secs() + EIGHT_DAYS_SECS,
+        UtcMicros(93),
+    );
+
+    assert!(planned.is_err());
+    assert!(applied.is_err());
+    assert!(
+        scope.join("active-code-generation-v1.json").is_file(),
+        "an empty live-root set must never mean every scope is stranded"
+    );
+}
+
+/// The retention census must stay reachable on stores whose generations are
+/// individually larger than any byte budget worth calling cheap. Directory
+/// entries are what the census costs; bytes are not.
+#[test]
+fn oversized_generations_still_produce_a_complete_retention_finding() {
+    use crate::retention::code_index_generations::{
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR, GenerationDigestVerificationV1,
+        plan_code_generation_retention_with_verification,
+    };
+    use tracedecay_application::doctor::DoctorCoverageCompletenessV1;
+    use tracedecay_application::storage::{
+        CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
+        code_generation_retention_finding,
+    };
+
+    const ONE_GIB: u64 = 1024 * 1024 * 1024;
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    retention_generations(&fixture, store.path(), 4);
+    // Sparse growth: the manifest prefix each generation is read through is
+    // untouched, only the on-disk size a byte budget would have measured.
+    for entry in std::fs::read_dir(store.path().join("code-generations-v1"))
+        .expect("list sealed generations")
+    {
+        let entry = entry.expect("sealed generation entry");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(entry.path())
+            .expect("open sealed generation");
+        file.set_len(ONE_GIB).expect("grow sealed generation");
+    }
+
+    let plan = plan_code_generation_retention_with_verification(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        GenerationDigestVerificationV1::MetadataOnly,
+    )
+    .expect("metadata-only census must not depend on re-hashing gigabytes");
+
+    assert_eq!(plan.superseded_generations.len(), 3);
+    assert!(
+        plan.superseded_generation_bytes() >= 3 * ONE_GIB,
+        "the census must report the real footprint, not a budgeted subset"
+    );
+
+    let record = CodeGenerationRetentionRecordV1 {
+        store: StoreKeyV1::new("code-index-v1").expect("valid store key"),
+        superseded_generation_count: plan.superseded_generations.len() as u64,
+        superseded_generation_bytes: StorageByteSizeV1(plan.superseded_generation_bytes()),
+        collectable_generation_count: plan.collectable_generations.len() as u64,
+        collectable_generation_bytes: StorageByteSizeV1(plan.collectable_generation_bytes()),
+        stranded_scope_count: 0,
+        stranded_scope_bytes: StorageByteSizeV1(0),
+    };
+    let finding =
+        code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+            .expect("the retention finding must be producible at this size");
+
+    assert!(
+        finding.finding().coverage().is_complete(),
+        "a byte budget must not downgrade coverage the census actually achieved"
+    );
+    assert!(finding.finding().state().is_healthy_complete());
+}
+
 struct MixedAnchorReverseRerankExecutorV1;
 
 impl DeterministicLocalRerankExecutorV1 for MixedAnchorReverseRerankExecutorV1 {

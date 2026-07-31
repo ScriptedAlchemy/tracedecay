@@ -21,6 +21,13 @@ delete trigger before commit. Direct tests cover dry-run/apply, live-evidence
 preservation, current-frontier preservation, authority-loss rollback, and
 trigger restoration.
 
+Corrected 2026-07-31: failure class 2 and the matching Delivery entry claimed
+code-index generation retention was not implemented. That claim was stale —
+retention has been implemented and converging since before this correction. Both
+sections are restated below; the residual gap is stranded scope roots and the
+byte-budget gates that made the retention findings unreachable, both addressed
+by the same change that carries this correction.
+
 Size evidence published in this plan remains file- and directory-level only.
 `SqliteStoreSizeTelemetryPort` in
 `crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs` implements
@@ -42,10 +49,20 @@ suite names and counts are run evidence, not plan requirements.
 
 ## Measured failure classes (evidence, one dogfood profile)
 
-The current measured profile totals 106 GB: `projects/` is 101 GB across 464
-shards, all `sessions.db` files total 35.7 GiB, `branches/` totals 30.8 GiB,
-`code-index-v1/` totals 22.2 GiB, and `global.db` is 0.98 GiB. The largest
-single file is a 15.7 GiB `sessions.db`. These are reproducible file/directory
+**Superseded 2026-07-31.** The 106 GB / 22.2 GiB figures below described the
+profile as measured on 2026-07-23 and are retained only as the historical
+evidence that motivated this plan. The current census of the same profile
+(2026-07-31) is: `branches/` ≈ 43 GB, `sessions.db` ≈ 39 GB, `sessions.db-wal`
+≈ 13 GB, `code-index-v1/` ≈ 13 GB, `tracedecay.db` ≈ 7.1 GB, with 17 sealed
+generation files spread across 11 scope roots. The live tracedecay scope sits at
+generation `…00000082` with 4 superseded generations, 17 retention receipts
+dated Jul 27–29, and an empty quarantine — that is generation retention running
+and converging, not a store that has never collected.
+
+The historical measurement follows. The profile totalled 106 GB: `projects/` was
+101 GB across 464 shards, all `sessions.db` files totalled 35.7 GiB, `branches/`
+30.8 GiB, `code-index-v1/` 22.2 GiB, and `global.db` 0.98 GiB. The largest single
+file was a 15.7 GiB `sessions.db`. These are reproducible file/directory
 measurements, not inferred table sizes.
 
 1. **Live branch stores scale as branches × full graph size.** Branch creation
@@ -56,12 +73,40 @@ measurements, not inferred table sizes.
    inode link count 1 and apparent size equals allocated size. Branch GC can
    collect stores whose branch is gone; it cannot make live branch stores
    lightweight.
-2. **Code-index generations have no retention.** `code-index-v1/` contains 28
-   immutable generation files totalling 22.2 GiB with exactly one active
-   generation. The generation sequence is also 28, matching the file count, so
-   no generation has ever been deleted. Code inspection matches the disk
-   evidence: publication writes a new immutable generation file and advances
-   the active pointer, while removal exists only for temporary files.
+2. **Code-index storage is unreachable above the scope root** (restated
+   2026-07-31; the original "generations have no retention" reading is
+   withdrawn). The 2026-07-23 observation — 28 immutable generation files,
+   22.2 GiB, one active generation, sequence equal to file count — was accurate
+   for its date and is no longer the failure. Liveness-based generation
+   retention is implemented and converging: mark-and-sweep over
+   {active} ∪ vector-readable sources ∪ a newest-superseded rollback floor, an
+   exclusive per-scope store lock, a journal → quarantine → durable receipt →
+   unlink transaction with crash replay, and four lease-holding call sites
+   (daemon maintenance cadence, semantic runtime publication, Doctor kernel,
+   storage report).
+
+   The residual failure is one level up. Retention's unit is
+   `code-index-v1/<sha256(canonical_project_root)>/`, and every caller derives
+   exactly one scope from the project root it was handed, so nothing enumerated
+   the siblings. One repository carried three scope directories under a single
+   repository discriminator — two stranded by deleted agent worktrees — holding
+   7.2 GiB that no retention pass could reach and no report counted. Scope-root
+   reconciliation now closes this: it collects a stranded scope through the same
+   journal/quarantine/receipt ordering, only under the maintenance writer lease,
+   only against a *proven* live-root set (registry plus git's own worktree
+   registry per repository; any unreadable source collects nothing and emits a
+   named degradation), only past a seven-day minimum stranding age, and never by
+   recursively removing anything outside the journaled quarantine path.
+
+   A second, quieter failure sat beside it: the Doctor and storage-report
+   entry points guarded this family with byte budgets (64 MiB and 32 MiB) that
+   are smaller than a single ~1 GiB generation file, so Doctor answered
+   `Unknown` and the report answered `Unavailable` on every profile that had
+   anything to report, making `code_generation_retention_finding` structurally
+   unreachable. The census cost is directory entries (4–5) and cheap metadata
+   reads; only digest verification is expensive. Doctor now gates on entry count
+   and censuses from metadata, and the report keeps its digest budget but
+   degrades to a metadata-only entry instead of discarding a readable census.
 3. **Identity-drift orphan stores — ~41 GB.** A project-root path migration
    re-registered repositories under new project IDs; the old-identity stores
    remained silently, invisible to any surface. Registry GC exists but was
@@ -130,8 +175,28 @@ measurements, not inferred table sizes.
   offload/drop have bounded defaults; legacy session/raw pruning additionally
   requires durable summary lineage. Disposition-scoped observation-evidence
   release is active by default with a 30-day recovery horizon.
-- Code-index generation retention is not implemented; publication advances the
-  active pointer without collecting superseded immutable generation files.
+- Code-index generation retention is implemented and engaged (corrected
+  2026-07-31; the prior "not implemented; publication advances the pointer
+  without collecting" entry was stale). Collection is liveness-based
+  mark-and-sweep inside one scope root, transactional through a journal,
+  quarantine, and durable receipt, with crash replay on the next pass. It runs
+  from the daemon maintenance cadence, semantic-runtime publication, the Doctor
+  kernel, and the storage report, each under a lease and each pinning the vector
+  inventory before any sweep.
+- Code-index *scope-root* reconciliation is implemented and engaged. It is the
+  only pass that reaches a scope directory whose canonical project root no
+  longer exists. It runs beside generation retention on the maintenance cadence,
+  fails closed on any unreadable live-root source, holds the target scope's own
+  retention lock, refuses a scope with a pending generation-retention journal,
+  and applies a seven-day minimum stranding age.
+- Code-index retention observability is reachable. The Doctor storage finding
+  reports superseded, collectable, and stranded-scope counts and bytes; stranded
+  scopes make the finding non-clean even when the in-scope generation census is
+  clean, because a clean scope-local census structurally cannot see them.
+- Open gap: reconciliation is bounded by what the live-root enumeration can
+  prove. A repository whose worktree registry cannot be read retains every scope
+  and reports a named degradation, which is correct but leaves the bytes in
+  place until the enumeration succeeds.
 - Superseded `source_cursor_advances` are reclaimed in bounded batches by the
   daemon-authorized retention owner. The exact receipt supporting the current
   source frontier is retained; the delete trigger is suspended and restored

@@ -273,6 +273,194 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
     }
 }
 
+/// Reconcile whole code-index *scope roots* for one mounted repository.
+///
+/// Generation retention above is scoped to a single
+/// `code-index-v1/<sha256(canonical_project_root)>/` directory, and every caller
+/// derives exactly one such scope from the root it was handed. Nothing has ever
+/// enumerated the siblings, so a scope whose project root is gone — a deleted
+/// agent worktree is the ordinary cause — is unreachable by any retention pass
+/// and uncounted by any report. One dogfood repository carried three scope
+/// directories, two of them orphaned, holding 7.2 GiB nothing could see.
+///
+/// The pass is fail-closed by construction. It collects only when it can prove
+/// the *complete* live-root set for the repository: the mounted project root,
+/// the primary checkout, and every linked worktree git itself records. If any
+/// part of that enumeration cannot be read, the pass collects nothing and names
+/// the failure, because an empty or truncated live set would otherwise read as
+/// "every scope on disk is stranded".
+pub(super) async fn run_code_index_scope_reconciliation(graph: &TraceDecay) -> bool {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        run_scope_root_retention,
+    };
+
+    let layout = graph.hook_store_layout();
+    let store_root = code_index_scope_store_root(&layout.data_root);
+    if !store_root.is_dir() {
+        return true;
+    }
+
+    let project_root = layout.project_root.clone();
+    let now_secs = now_secs_i64();
+    let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
+    // Repository discovery and the scope walk are both blocking filesystem work;
+    // neither belongs on the async authority lane.
+    let report = tokio::task::spawn_blocking(move || {
+        let live_roots = resolve_live_code_index_roots(&project_root)?;
+        run_scope_root_retention(
+            &store_root,
+            &live_roots,
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            CodeGenerationRetentionModeV1::Apply,
+            now_secs,
+            completed_at,
+        )
+        .map_err(|_| "scope_reconciliation_pass_failed")
+    })
+    .await;
+
+    match report {
+        Ok(Ok(report)) => {
+            let reclaimed = report
+                .receipt
+                .as_ref()
+                .map_or(0, |receipt| receipt.reclaimed_bytes);
+            if reclaimed > 0 || report.plan.stranded_scope_count() > 0 {
+                log_daemon_event(
+                    "retention_code_index_scopes",
+                    &[
+                        ("store", "code-index-v1".to_string()),
+                        ("live_scopes", report.plan.live_scope_count.to_string()),
+                        (
+                            "stranded_scopes",
+                            report.plan.stranded_scope_count().to_string(),
+                        ),
+                        (
+                            "stranded_bytes",
+                            report.plan.stranded_scope_bytes().to_string(),
+                        ),
+                        (
+                            "retained_immature_scopes",
+                            report.plan.retained_immature_scopes.len().to_string(),
+                        ),
+                        (
+                            "refused_scopes",
+                            report.plan.refused_scopes.len().to_string(),
+                        ),
+                        (
+                            "collected_scopes",
+                            report.collected_scopes.len().to_string(),
+                        ),
+                        ("bytes_reclaimed", reclaimed.to_string()),
+                    ],
+                );
+            }
+            true
+        }
+        Ok(Err(failure)) => {
+            log_code_index_scope_reconciliation_degraded(failure);
+            false
+        }
+        Err(_) => {
+            log_code_index_scope_reconciliation_degraded("scope_reconciliation_task_panicked");
+            false
+        }
+    }
+}
+
+/// The complete set of canonical project roots that may legitimately own a
+/// scope directory under this repository's `code-index-v1/`.
+///
+/// Scope directories under one `data_root` all belong to one repository: linked
+/// worktrees share a git common directory and therefore one project store, and
+/// differ only by the per-worktree canonical root the scope hash is derived
+/// from. So the authoritative live set is exactly git's own worktree registry
+/// for that repository, read from the same `<common>/worktrees/<name>/gitdir`
+/// leaves `git worktree list` reports, plus the mounted root and the primary
+/// checkout.
+///
+/// Every failure is an `Err`, never a smaller set: a truncated live set is
+/// indistinguishable from stranding and would authorize deletion.
+pub(super) fn resolve_live_code_index_roots(
+    project_root: &Path,
+) -> Result<std::collections::BTreeSet<PathBuf>, &'static str> {
+    let mut roots = std::collections::BTreeSet::new();
+    insert_live_root_variants(&mut roots, project_root);
+
+    let Some(common) = crate::worktree::git_common_dir(project_root) else {
+        return Err("git_common_dir_unresolved");
+    };
+    // `<repo>/.git` is the common directory of the primary checkout; its parent
+    // is that checkout's root.
+    if common.file_name().is_some_and(|name| name == ".git")
+        && let Some(primary) = common.parent()
+    {
+        insert_live_root_variants(&mut roots, primary);
+    }
+
+    match std::fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|_| "worktree_registry_unreadable")?;
+                if !entry
+                    .file_type()
+                    .map_err(|_| "worktree_registry_unreadable")?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let raw = std::fs::read_to_string(entry.path().join("gitdir"))
+                    .map_err(|_| "worktree_gitdir_unreadable")?;
+                // `gitdir` points at `<worktree>/.git`; the worktree root is its
+                // parent. A worktree whose directory has been removed but whose
+                // metadata git still holds stays live here on purpose: only git
+                // pruning it makes its scope collectable.
+                let gitdir = PathBuf::from(raw.trim());
+                let root = gitdir.parent().ok_or("worktree_gitdir_malformed")?;
+                insert_live_root_variants(&mut roots, root);
+            }
+        }
+        // A repository with no linked worktrees has no `worktrees/` directory.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("worktree_registry_unreadable"),
+    }
+
+    if roots.is_empty() {
+        return Err("live_root_set_empty");
+    }
+    Ok(roots)
+}
+
+/// Record both the literal path and its symlink-resolved form. The scope hash
+/// is taken over the canonical root string recorded at publication time, and a
+/// live root spelled differently must never be mistaken for a dead one.
+fn insert_live_root_variants(roots: &mut std::collections::BTreeSet<PathBuf>, root: &Path) {
+    roots.insert(root.to_path_buf());
+    if let Ok(resolved) = std::fs::canonicalize(root) {
+        roots.insert(resolved);
+    }
+}
+
+/// The shared `code-index-v1/` parent that holds every scope root for one
+/// repository. Scope reconciliation operates here; generation retention
+/// operates one level down.
+pub(super) fn code_index_scope_store_root(data_root: &Path) -> PathBuf {
+    data_root.join("code-index-v1")
+}
+
+/// Durable failure visibility for scope reconciliation. Every refusal names why
+/// so a fail-closed pass is never mistaken for "nothing was stranded".
+fn log_code_index_scope_reconciliation_degraded(failure: &str) {
+    log_daemon_event(
+        "retention_degraded",
+        &[
+            ("pass", "code_index_scopes".to_string()),
+            ("failure", failure.to_string()),
+        ],
+    );
+}
+
 /// The exact per-project code-index store root this cadence sweeps.
 ///
 /// This must stay the scoped root the scheduler publishes into and Doctor
@@ -281,7 +469,7 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
 /// exists to end.
 pub(super) fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
     crate::retention::code_index_generations::scoped_code_index_store_root(
-        &data_root.join("code-index-v1"),
+        &code_index_scope_store_root(data_root),
         project_root,
     )
 }

@@ -852,6 +852,16 @@ struct CollectedStoreTelemetryV1 {
 const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_ENTRIES: usize = 4_096;
+/// Entry ceiling for the code-index generation census.
+///
+/// The census is metadata-only — a `stat` and a bounded manifest prefix per
+/// generation — so its cost scales with the number of directory entries, not
+/// with their size. Gating it on bytes instead (the previous
+/// `MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES` budget) compared a 64 MiB ceiling
+/// against generation files that are routinely ~1 GiB each, so the gate failed
+/// on every real profile and the finding this kernel exists to produce was
+/// structurally unreachable.
+const MAX_SYNCHRONOUS_GENERATION_CENSUS_ENTRIES: usize = 4_096;
 
 fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
     let mut pending = vec![root.to_path_buf()];
@@ -889,6 +899,31 @@ fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
             if observed_bytes > MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES {
                 return false;
             }
+        }
+    }
+    true
+}
+
+/// Whether the sealed-generation directory is small enough (in *entries*) for a
+/// synchronous metadata census. Byte size is deliberately not consulted.
+fn permits_synchronous_generation_census(generations_root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(generations_root) else {
+        return false;
+    };
+    let mut observed_entries = 0_usize;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            return false;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        observed_entries = observed_entries.saturating_add(1);
+        if observed_entries > MAX_SYNCHRONOUS_GENERATION_CENSUS_ENTRIES {
+            return false;
         }
     }
     true
@@ -1132,13 +1167,24 @@ pub async fn collect_retention_backlog_findings(
     storage_family_read(findings)
 }
 
-/// Read the exact code-generation liveness plan and surface superseded and
-/// collectable bytes through Doctor. These are ordinary files, not `SQLite`
-/// tables, so dbstat/table attribution cannot observe them.
+/// Read the exact code-generation liveness plan and surface superseded,
+/// collectable, and stranded-scope bytes through Doctor. These are ordinary
+/// files, not `SQLite` tables, so dbstat/table attribution cannot observe them.
+///
+/// The census is metadata-only by construction: gating this family on a byte
+/// budget made the finding unreachable on every profile that actually had
+/// something to report, because one sealed generation alone exceeds any budget
+/// small enough to be called cheap.
 pub async fn collect_code_generation_retention_findings(
     graph: &crate::db::Database,
     code_index_store_root: &Path,
+    project_root: &Path,
 ) -> DoctorStorageFamilyReadV1 {
+    use crate::retention::code_index_generations::{
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
+        plan_scope_root_retention,
+    };
     use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
     use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
     use tracedecay_application::storage::{
@@ -1152,7 +1198,7 @@ pub async fn collect_code_generation_retention_findings(
     {
         return DoctorStorageFamilyReadV1::Absent;
     }
-    if !permits_synchronous_exhaustive_scan(&code_index_store_root.join("code-generations-v1")) {
+    if !permits_synchronous_generation_census(&code_index_store_root.join("code-generations-v1")) {
         return DoctorStorageFamilyReadV1::Unknown;
     }
     let Ok(store) = DatabaseVectorGenerationStoreV1::open_legacy_migration(graph).await else {
@@ -1166,22 +1212,49 @@ pub async fn collect_code_generation_retention_findings(
     };
     let vector_readable_sources = inventory.retained_readable_sources();
     let root = code_index_store_root.to_path_buf();
-    let Ok(plan) = tokio::task::spawn_blocking(move || {
-        crate::retention::code_index_generations::plan_code_generation_retention(
+    // The shared parent that holds every scope root for this repository. A
+    // stranded sibling scope is invisible to the scope-local census above, so
+    // it is measured here or it is not measured anywhere.
+    let scope_store_root = code_index_store_root.parent().map(Path::to_path_buf);
+    let project_root = project_root.to_path_buf();
+    let now = now_secs();
+    let Ok(census) = tokio::task::spawn_blocking(move || {
+        let plan = plan_code_generation_retention_with_verification(
             &root,
             &vector_readable_sources,
-            crate::retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        )
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            GenerationDigestVerificationV1::MetadataOnly,
+        );
+        // Zeros are only ever published together with `Partial`: a live-root set
+        // that could not be proven must never read as "nothing is stranded".
+        let scopes = scope_store_root.and_then(|scope_store_root| {
+            let live_roots =
+                super::store_maintenance::resolve_live_code_index_roots(&project_root).ok()?;
+            plan_scope_root_retention(
+                &scope_store_root,
+                &live_roots,
+                DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+                now,
+            )
+            .ok()
+        });
+        (plan, scopes)
     })
     .await
     else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
+    let (plan, scopes) = census;
     let Ok(plan) = plan else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
     let Ok(store) = StoreKeyV1::new("code-index-v1") else {
         return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let completeness = if scopes.is_some() {
+        DoctorCoverageCompletenessV1::Complete
+    } else {
+        DoctorCoverageCompletenessV1::Partial
     };
     let record = CodeGenerationRetentionRecordV1 {
         store,
@@ -1189,10 +1262,16 @@ pub async fn collect_code_generation_retention_findings(
         superseded_generation_bytes: StorageByteSizeV1(plan.superseded_generation_bytes()),
         collectable_generation_count: plan.collectable_generations.len() as u64,
         collectable_generation_bytes: StorageByteSizeV1(plan.collectable_generation_bytes()),
+        stranded_scope_count: scopes
+            .as_ref()
+            .map_or(0, |scopes| scopes.stranded_scope_count()),
+        stranded_scope_bytes: StorageByteSizeV1(
+            scopes
+                .as_ref()
+                .map_or(0, |scopes| scopes.stranded_scope_bytes()),
+        ),
     };
-    let Ok(finding) =
-        code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
-    else {
+    let Ok(finding) = code_generation_retention_finding(&record, completeness) else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
     storage_family_read(vec![finding])
@@ -1503,8 +1582,12 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 &layout.data_root.join("code-index-v1"),
                 &project_root,
             );
-            let code_generation_retention =
-                collect_code_generation_retention_findings(&graph, &code_index_store_root).await;
+            let code_generation_retention = collect_code_generation_retention_findings(
+                &graph,
+                &code_index_store_root,
+                &project_root,
+            )
+            .await;
             let storage = [
                 orphan,
                 unregistered,
