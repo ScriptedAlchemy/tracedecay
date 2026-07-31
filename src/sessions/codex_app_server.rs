@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::{BufReader, ErrorKind, Write as IoWrite};
-#[cfg(windows)]
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -185,7 +184,7 @@ pub fn run_prompt_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_cancellation(prompt, config, thread_source, None)
+    run_prompt_with_optional_cancellation(prompt, config, thread_source, None, None, None)
 }
 
 pub(crate) fn run_prompt_with_codex_app_server_cancellable(
@@ -194,7 +193,32 @@ pub(crate) fn run_prompt_with_codex_app_server_cancellable(
     thread_source: &str,
     cancellation: &CodexAppServerCancellation,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_cancellation(prompt, config, thread_source, Some(cancellation))
+    run_prompt_with_optional_cancellation(
+        prompt,
+        config,
+        thread_source,
+        Some(cancellation),
+        None,
+        None,
+    )
+}
+
+pub(crate) fn run_work_with_codex_app_server(
+    prompt: &str,
+    config: &CodexAppServerSummaryConfig,
+    thread_source: &str,
+    cancellation: &CodexAppServerCancellation,
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<CodexAppServerSummary> {
+    run_prompt_with_optional_cancellation(
+        prompt,
+        config,
+        thread_source,
+        Some(cancellation),
+        Some(cwd),
+        Some(timeout),
+    )
 }
 
 fn run_prompt_with_optional_cancellation(
@@ -202,6 +226,8 @@ fn run_prompt_with_optional_cancellation(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
     cancellation: Option<&CodexAppServerCancellation>,
+    cwd: Option<&Path>,
+    timeout: Option<Duration>,
 ) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
     let mut command = codex_app_server_command(&config.codex_bin);
@@ -249,7 +275,16 @@ fn run_prompt_with_optional_cancellation(
         }
     });
 
-    let outcome = run_codex_protocol(&mut child, &line_rx, prompt, config, thread_source, model);
+    let outcome = run_codex_protocol(
+        &mut child,
+        &line_rx,
+        prompt,
+        config,
+        thread_source,
+        model,
+        cwd,
+        timeout.unwrap_or(config.timeout),
+    );
     drop(child);
     let _ = stdout_reader.join();
     outcome
@@ -262,6 +297,8 @@ fn run_codex_protocol(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
     model: Option<&str>,
+    cwd: Option<&Path>,
+    timeout: Duration,
 ) -> Result<CodexAppServerSummary> {
     let mut stdin = child
         .child
@@ -270,7 +307,7 @@ fn run_codex_protocol(
         .ok_or_else(|| TraceDecayError::Config {
             message: "codex app-server stdin was not available".to_string(),
         })?;
-    let deadline = Instant::now() + config.timeout;
+    let deadline = Instant::now() + timeout.min(config.timeout);
     send_json(
         &mut stdin,
         &json!({
@@ -285,7 +322,7 @@ fn run_codex_protocol(
             }
         }),
     )?;
-    wait_for_response(line_rx, deadline, 0)?;
+    wait_for_response(&line_rx, deadline, 0)?;
     send_json(&mut stdin, &json!({"method": "initialized", "params": {}}))?;
 
     let thread_params = build_ephemeral_thread_start_params(model, thread_source);
@@ -293,7 +330,7 @@ fn run_codex_protocol(
         &mut stdin,
         &json!({"method": "thread/start", "id": 1, "params": thread_params}),
     )?;
-    let thread_response = wait_for_response(line_rx, deadline, 1)?;
+    let thread_response = wait_for_response(&line_rx, deadline, 1)?;
     let thread_model = find_model_id(&thread_response);
     let thread_id = thread_response
         .pointer("/result/thread/id")
@@ -306,10 +343,11 @@ fn run_codex_protocol(
         })?
         .to_string();
 
+    let cwd = cwd.unwrap_or_else(|| Path::new("."));
     let mut turn_params = json!({
         "threadId": thread_id,
         "input": [{"type": "text", "text": prompt}],
-        "cwd": std::env::temp_dir().to_string_lossy(),
+        "cwd": cwd.to_string_lossy(),
         "effort": "low",
         "summary": "concise"
     });
@@ -320,8 +358,9 @@ fn run_codex_protocol(
         &mut stdin,
         &json!({"method": "turn/start", "id": 2, "params": turn_params}),
     )?;
+    drop(stdin);
 
-    let mut summary = wait_for_turn_summary(line_rx, deadline)?;
+    let mut summary = wait_for_turn_summary(&line_rx, deadline)?;
     if summary.model.is_none() {
         summary.model = thread_model;
     }

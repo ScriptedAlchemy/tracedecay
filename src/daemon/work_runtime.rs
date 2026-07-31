@@ -11,7 +11,7 @@ use tracedecay_application::{
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
     WorkAttemptTerminalizeRequestV1, WorkDispatchBoundsV1, WorkDispatchError, WorkExecutionError,
     WorkExecutionQueueV1, WorkExecutionService, WorkProviderExecutionError,
-    WorkProviderSettlementV1, WorkStoragePort,
+    WorkProviderSettlementV1, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
     AttemptId, ManifestDigest, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
@@ -534,15 +534,35 @@ where
         snapshot: &WorkProjectionSnapshotV1,
         task_id: &tracedecay_domain::TaskId,
     ) -> Result<WorkAttemptProjectionBindingV1, WorkExecutionError> {
+        let generation_id = self.authority.projection_generation_id().map_err(|error| {
+            WorkProviderExecutionError::Unavailable(format!(
+                "work projection generation unavailable: {error}"
+            ))
+        })?;
+        if snapshot.generation_id() != &generation_id {
+            // Never copy a caller-forged snapshot generation into the binding.
+            return Err(WorkExecutionError::NotFound);
+        }
         let projection = snapshot
             .projections()
             .iter()
             .find(|projection| projection.task_id() == task_id)
             .ok_or(WorkExecutionError::NotFound)?;
+        if projection.authority() != &self.authority {
+            return Err(WorkExecutionError::NotFound);
+        }
+        if !projection.is_execution_admitted() {
+            return Err(WorkExecutionError::NotFound);
+        }
+        let accepted_proposal = projection
+            .accepted_proposal()
+            .cloned()
+            .ok_or(WorkExecutionError::NotFound)?;
         Ok(WorkAttemptProjectionBindingV1::new(
-            snapshot.generation_id().clone(),
+            generation_id,
             snapshot.sequence(),
             projection.version(),
+            accepted_proposal,
         )?)
     }
 
