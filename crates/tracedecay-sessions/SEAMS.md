@@ -62,7 +62,10 @@ so they need a re-seal rather than a path edit.
   module paths in prose.
 
 The `include_str!`/`include_bytes!` fixture paths inside the moved code were
-repointed at the repo root and do resolve.
+repointed at the repo root and do resolve for workspace builds. They now escape
+the crate directory, so `cargo package`/`cargo publish` for this crate cannot see
+them; the fixtures need to move under `crates/tracedecay-sessions/tests/` before
+the crate is publishable.
 
 ## Offenders by volume
 
