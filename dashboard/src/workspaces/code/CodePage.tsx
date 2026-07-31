@@ -8,7 +8,7 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
-import { Meter, Readout } from '../../ui/instrument.tsx';
+import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
@@ -866,20 +866,11 @@ function SymbolRow({
         {node.qualified_name ?? node.name ?? node.id}
       </span>
       {node.degree != null ? (
-        <span className="flex w-20 shrink-0 flex-col items-end gap-1">
-          <span
-            className="td-value text-2xs leading-none text-text-secondary"
-            data-cell="numeric"
-          >
-            {node.degree}
-            <span className="td-unit ml-1">deg</span>
-          </span>
-          <Meter
-            fraction={degreeCeiling > 0 ? node.degree / degreeCeiling : null}
-            className="h-[3px] w-full"
-            align="right"
-          />
-        </span>
+        <FigureRail
+          value={node.degree}
+          unit="deg"
+          fraction={degreeCeiling > 0 ? node.degree / degreeCeiling : null}
+        />
       ) : null}
       <span
         className="td-value w-52 shrink-0 truncate text-right text-2xs text-text-muted max-md:hidden"

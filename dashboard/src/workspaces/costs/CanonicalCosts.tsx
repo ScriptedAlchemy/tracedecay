@@ -14,95 +14,45 @@
  * counted were never priced. That is a real accounting state, and the plate
  * renders it as one instead of as `$0.00`.
  */
-import { useQuery } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
 import { CostsReadModelSchema, type CostsReadModel } from '../../contracts/wire.ts';
-import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
-import { EnvelopeTruth, OmissionReasons, ReadModelState } from '../../ui/EnvelopeTruth.tsx';
-import { MetricGroups } from '../../ui/MetricPlate.tsx';
+import { CanonicalReadModelSection } from '../../ui/CanonicalReadModelSection.tsx';
+import { Field } from '../../ui/instrument.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { StateChip } from '../../ui/StateChip';
 
 export function CanonicalCosts() {
-  const scope = useScope((s) => s.scope);
-  const costs = useQuery({
-    queryKey: ['costs', 'canonical', scopeKey(scope)],
-    queryFn: () => fetchEnvelope(scopedUrl(scope, '/api/costs'), CostsReadModelSchema),
-    refetchInterval: 60_000,
-  });
-
   return (
-    <section className="border-t border-edge-subtle" aria-label="Canonical cost observations">
-      <h2 className="px-4 pt-4 text-sm font-semibold tracking-tight">
-        Canonical cost observations
-      </h2>
-      <p className="px-4 pt-0.5 text-2xs text-text-muted">
-        usage and estimated cost with their eligible populations, coverage, and pricing
-        provenance — the same Plan 26 read model the CLI and MCP serve
-      </p>
-      {costs.isPending ? (
-        <ReadModelState kind="loading" detail="requesting canonical cost observations" />
-      ) : costs.data === undefined ? (
-        <ReadModelState kind="unknown" detail="no response recorded" />
-      ) : (
-        <CostsReadModelBody
-          result={costs.data}
-          refreshing={costs.isFetching}
-          onRefresh={() => void costs.refetch()}
-        />
-      )}
-    </section>
+    <CanonicalReadModelSection<CostsReadModel>
+      title="Canonical cost observations"
+      blurb={
+        'usage and estimated cost with their eligible populations, coverage, and pricing' +
+        ' provenance — the same Plan 26 read model the CLI and MCP serve'
+      }
+      queryKey={['costs', 'canonical']}
+      url="/api/costs"
+      schema={CostsReadModelSchema}
+      refetchInterval={60_000}
+      loadingDetail="requesting canonical cost observations"
+      className="border-t border-edge-subtle"
+      metrics={(model) => [...model.usage, ...model.estimated_cost]}
+      emptyLabel="the read model carried no cost measurements — this is a payload with no metrics, not a zero bill"
+      horizonAttributes={(model) => ({ 'data-costs-current': model.current ? 'true' : 'false' })}
+      horizonFields={(model) => <HorizonFields model={model} />}
+      footer={<LatencyBreakdown />}
+    />
   );
 }
 
-function CostsReadModelBody({
-  result,
-  refreshing,
-  onRefresh,
-}: {
-  result: EnvelopeResult<CostsReadModel>;
-  refreshing: boolean;
-  onRefresh: () => void;
-}) {
-  if (result.outcome === 'transport') {
-    return <ReadModelState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
-  }
-  const { envelope } = result;
-  const model = envelope.payload;
+/** The costs projector is asked for an all-time window, which reaches the wire
+ * as `since_micros: 0`. That is an unbounded horizon, not January 1970. */
+function HorizonFields({ model }: { model: CostsReadModel }) {
+  const stamp = (micros: number) => formatMicrosUtc(micros, { zeroAs: 'unbounded' });
   return (
     <>
-      <EnvelopeTruth
-        state={envelope.domain_state}
-        coverage={envelope.coverage}
-        freshness={envelope.freshness}
-        legalActions={envelope.legal_actions}
-        authorization={envelope.authorization}
-        refreshing={refreshing}
-        onRefresh={onRefresh}
-      />
-      <OmissionReasons coverage={envelope.coverage} />
-      <HorizonLine model={model} />
-      <div className="flex flex-col gap-4 px-4 py-3">
-        <MetricGroups
-          metrics={[...model.usage, ...model.estimated_cost]}
-          emptyLabel="the read model carried no cost measurements — this is a payload with no metrics, not a zero bill"
-        />
-        <LatencyBreakdown />
-      </div>
-    </>
-  );
-}
-
-function HorizonLine({ model }: { model: CostsReadModel }) {
-  return (
-    <dl
-      className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
-      data-costs-current={model.current ? 'true' : 'false'}
-    >
       <Field label="horizon">
-        {formatMicros(model.horizon.since_micros)} → {formatMicros(model.horizon.until_micros)}
+        {stamp(model.horizon.since_micros)} → {stamp(model.horizon.until_micros)}
       </Field>
-      <Field label="observed at">{formatMicros(model.observed_at_micros)}</Field>
+      <Field label="observed at">{stamp(model.observed_at_micros)}</Field>
       <Field label="authorized scope">{model.authorized_scope_ref}</Field>
       <Field label="pricing revision">
         {/* Not "unpriced" and not a dash on its own: the projector distinguishes
@@ -113,7 +63,7 @@ function HorizonLine({ model }: { model: CostsReadModel }) {
       <Field label="frontier">
         {model.current ? 'current' : 'not current'} · watermark {model.watermark}
       </Field>
-    </dl>
+    </>
   );
 }
 
@@ -155,20 +105,4 @@ function LatencyBreakdown() {
       </p>
     </section>
   );
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="uppercase tracking-[0.08em] text-text-muted">{label}</dt>
-      <dd className="min-w-0 break-words text-text-secondary tabular">{children}</dd>
-    </div>
-  );
-}
-
-/** The costs projector is asked for an all-time window, which reaches the wire
- * as `since_micros: 0`. That is an unbounded horizon, not January 1970. */
-function formatMicros(micros: number): string {
-  if (micros === 0) return 'unbounded';
-  return new Date(Math.floor(micros / 1000)).toISOString();
 }

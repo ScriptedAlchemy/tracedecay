@@ -381,7 +381,7 @@ function ProjectSpreadPlate({ spread }: { spread: ProjectSpread }) {
             </span>
             <Meter
               fraction={ceiling > 0 ? row.tokens / ceiling : null}
-              className="h-1 w-24 shrink-0 max-sm:hidden"
+              className="w-24 shrink-0 max-sm:hidden"
             />
             <span
               className="td-value w-14 shrink-0 text-right text-2xs text-text-muted"
@@ -421,7 +421,7 @@ function ProjectSpreadPlate({ spread }: { spread: ProjectSpread }) {
               </span>
               <Meter
                 fraction={ceiling > 0 ? Math.abs(row.deviation) / ceiling : null}
-                className="h-1 w-16 shrink-0 max-sm:hidden"
+                className="w-16 shrink-0 max-sm:hidden"
                 tone={row.deviation < 0 ? 'bg-state-stale' : undefined}
               />
               <span
@@ -471,7 +471,8 @@ function ShareRow({
       ) : null}
       <Meter
         fraction={value != null && total > 0 ? value / total : null}
-        className="h-[3px] w-20 shrink-0 max-sm:hidden"
+        height="row"
+        className="w-20 shrink-0 max-sm:hidden"
       />
       <span
         className="td-value w-14 shrink-0 text-right text-2xs text-text-secondary"

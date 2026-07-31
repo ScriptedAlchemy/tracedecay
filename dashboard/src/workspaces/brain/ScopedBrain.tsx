@@ -3,7 +3,7 @@ import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
-import { Meter, Readout } from '../../ui/instrument.tsx';
+import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -497,20 +497,11 @@ function StoreCard({ store }: { store: ProjectStoreContext }) {
                   >
                     {artifact.artifact_kind}
                   </span>
-                  <span className="flex w-20 shrink-0 flex-col items-end gap-1">
-                    <span
-                      className="td-value text-2xs leading-none text-text-secondary"
-                      data-cell="numeric"
-                    >
-                      {size.value}
-                      {size.unit ? <span className="td-unit ml-1">{size.unit}</span> : null}
-                    </span>
-                    <Meter
-                      fraction={(artifact.size_bytes ?? 0) / heaviest}
-                      className="h-[3px] w-full"
-                      align="right"
-                    />
-                  </span>
+                  <FigureRail
+                    value={size.value}
+                    unit={size.unit}
+                    fraction={(artifact.size_bytes ?? 0) / heaviest}
+                  />
                 </li>
               );
             })}
@@ -552,19 +543,10 @@ function ActivityByCategory({
             <span className="td-value min-w-0 flex-1 truncate text-2xs text-text-secondary">
               {row.category}
             </span>
-            <span className="flex w-20 shrink-0 flex-col items-end gap-1">
-              <span
-                className="td-value text-2xs leading-none text-text-secondary"
-                data-cell="numeric"
-              >
-                {row.events.toLocaleString()}
-              </span>
-              <Meter
-                fraction={ceiling > 0 ? row.events / ceiling : null}
-                className="h-[3px] w-full"
-                align="right"
-              />
-            </span>
+            <FigureRail
+              value={row.events.toLocaleString()}
+              fraction={ceiling > 0 ? row.events / ceiling : null}
+            />
           </li>
         ))}
       </ul>
