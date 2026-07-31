@@ -88,7 +88,7 @@ async fn test_create_schema_idempotent() {
 }
 
 #[tokio::test]
-async fn v8_to_v9_backfills_contains_edges_on_real_schema() {
+async fn v8_to_v9_creates_exact_objects_and_backfills_contains_edges() {
     let (conn, _dir) = create_raw_db().await;
     crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
         .await
@@ -111,6 +111,74 @@ async fn v8_to_v9_backfills_contains_edges_on_real_schema() {
         .expect("migrate real v8 schema to v9");
 
     assert_eq!(get_user_version(&conn).await, 9);
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_table_info('read_cache')
+             WHERE (cid = 0 AND name = 'project_id' AND type = 'TEXT' AND notnull = 1 AND pk = 1)
+                OR (cid = 1 AND name = 'session_id' AND type = 'TEXT' AND notnull = 1 AND pk = 2)
+                OR (cid = 2 AND name = 'file_path' AND type = 'TEXT' AND notnull = 1 AND pk = 3)
+                OR (cid = 3 AND name = 'mtime_ns' AND type = 'INTEGER' AND notnull = 1 AND pk = 0)
+                OR (cid = 4 AND name = 'mode' AND type = 'TEXT' AND notnull = 1 AND pk = 4)
+                OR (cid = 5 AND name = 'args_hash' AND type = 'TEXT' AND notnull = 1 AND pk = 5)
+                OR (cid = 6 AND name = 'digest' AND type = 'TEXT' AND notnull = 1 AND pk = 0)
+                OR (cid = 7 AND name = 'body' AND type = 'BLOB' AND notnull = 1 AND pk = 0)
+                OR (cid = 8 AND name = 'token_count' AND type = 'INTEGER' AND notnull = 1 AND pk = 0)
+                OR (cid = 9 AND name = 'created_at' AND type = 'INTEGER' AND notnull = 1 AND pk = 0)"
+        )
+        .await,
+        10,
+        "created read_cache columns must match the V9 contract"
+    );
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM pragma_table_info('read_cache')").await,
+        10,
+        "created read_cache table must not contain extra columns"
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_index_info('idx_read_cache_session')
+             WHERE (seqno = 0 AND name = 'session_id')
+                OR (seqno = 1 AND name = 'created_at')"
+        )
+        .await,
+        2,
+        "created read_cache index must match the V9 contract"
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_index_info('idx_read_cache_session')"
+        )
+        .await,
+        2,
+        "created read_cache index must not contain extra columns"
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_table_info('nodes')
+             WHERE name = 'parent_id'
+               AND type = 'TEXT'
+               AND notnull = 0
+               AND dflt_value IS NULL
+               AND pk = 0"
+        )
+        .await,
+        1,
+        "created nodes.parent_id column must match the V9 contract"
+    );
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM pragma_index_info('idx_nodes_parent_id')
+             WHERE seqno = 0 AND name = 'parent_id'"
+        )
+        .await,
+        1,
+        "created parent index must match the V9 contract"
+    );
     let mut rows = conn
         .query("SELECT parent_id FROM nodes WHERE id = 'child'", ())
         .await
@@ -131,7 +199,7 @@ async fn v8_to_v9_backfills_contains_edges_on_real_schema() {
 }
 
 #[tokio::test]
-async fn v8_to_v9_rejects_preadded_parent_column_and_rolls_back() {
+async fn v8_to_v9_rejects_exact_preadded_parent_column_before_mutation() {
     let (conn, _dir) = create_raw_db().await;
     crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
         .await
@@ -157,6 +225,7 @@ async fn v8_to_v9_rejects_preadded_parent_column_and_rolls_back() {
         !table_exists(&conn, "read_cache").await,
         "failed v9 migration must roll back earlier schema changes"
     );
+    assert!(column_exists(&conn, "nodes", "parent_id").await);
 }
 
 #[tokio::test]
@@ -278,7 +347,7 @@ async fn v8_to_v9_rejects_malformed_precreated_read_cache_table() {
 }
 
 #[tokio::test]
-async fn v8_to_v9_rejects_wrong_read_cache_session_index() {
+async fn v8_to_v9_rejects_exact_precreated_read_cache_index_before_mutation() {
     let (conn, _dir) = create_raw_db().await;
     crate::db::migrations::migrate_test_connection_to_version(&conn, 8)
         .await
@@ -297,22 +366,31 @@ async fn v8_to_v9_rejects_wrong_read_cache_session_index() {
             created_at   INTEGER NOT NULL,
             PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
         );
-        CREATE INDEX idx_read_cache_session ON read_cache(file_path);",
+        CREATE INDEX idx_read_cache_session ON read_cache(session_id, created_at);
+        INSERT INTO read_cache VALUES (
+            'project', 'session', 'src/lib.rs', 1, 'lines',
+            'args', 'digest', X'01', 1, 1
+        );",
     )
     .await
-    .expect("plant wrong read_cache index");
+    .expect("plant exact-looking read_cache index");
 
     let error = crate::db::migrations::migrate_test_connection_to_version(&conn, 9)
         .await
-        .expect_err("wrong read_cache index must fail closed");
+        .expect_err("every precreated V9 index must fail closed");
 
     assert!(
-        error
-            .to_string()
-            .contains("idx_read_cache_session"),
+        error.to_string().contains("idx_read_cache_session"),
         "unexpected migration error: {error}"
     );
     assert_eq!(get_user_version(&conn).await, 8);
+    assert!(!column_exists(&conn, "nodes", "parent_id").await);
+    assert_eq!(
+        scalar_i64(&conn, "SELECT COUNT(*) FROM read_cache").await,
+        1,
+        "failed admission must preserve the original V8 database"
+    );
+    assert!(index_exists(&conn, "idx_read_cache_session").await);
 }
 
 #[tokio::test]
