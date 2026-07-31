@@ -510,7 +510,14 @@ fn record_timestamp(value: &Value) -> Option<i64> {
         })
 }
 
-fn timestamp_tag_from_record(record: &Value) -> Option<i64> {
+/// Extracts and parses the first `<timestamp>…</timestamp>` tag carried by a
+/// transcript line's text content.
+///
+/// Cursor emits no structured per-message time, so this tag is the whole
+/// signal; every reader of a Cursor transcript has to agree on where it is
+/// looked for (top-level, `message`, or a content array element) or two lanes
+/// will date the same message differently.
+pub fn timestamp_tag_from_record(record: &Value) -> Option<i64> {
     let message = record.get("message").unwrap_or(record);
     let content = message.get("content").unwrap_or(message);
     match content {
