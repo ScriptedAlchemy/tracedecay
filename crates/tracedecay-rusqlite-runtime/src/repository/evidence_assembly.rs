@@ -161,23 +161,16 @@ impl EvidenceAssemblyExecutor {
             ],
         )?;
 
-        for anchor in [
-            &write.span.anchor,
-            &write.contribution.anchor,
-            &write
-                .occurrences
-                .first()
-                .ok_or_else(|| invalid("evidence assembly occurrences"))?
-                .occurrence_anchor,
-        ] {
+        for anchor in [&write.span.anchor, &write.contribution.anchor]
+            .into_iter()
+            .chain(
+                write
+                    .occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.occurrence_anchor),
+            )
+        {
             insert_derived_anchor(savepoint, anchor, &evidence_owner_digest)?;
-        }
-        for occurrence in write.occurrences.iter().skip(1) {
-            insert_derived_anchor(
-                savepoint,
-                &occurrence.occurrence_anchor,
-                &evidence_owner_digest,
-            )?;
         }
 
         publish_reverse_lineage(savepoint, write)?;
@@ -570,16 +563,28 @@ fn evidence_anchor_is_current(
     {
         return Err(invalid("evidence retrieval anchor persistence mismatch"));
     }
-    let state = connection
+    let state = latest_disposition_state(connection, anchor.anchor_id().as_str(), &owner_json)?;
+    Ok(state.as_deref().is_none_or(|state| state == "active"))
+}
+
+/// Reads the newest disposition recorded for an anchor, if it has one.
+///
+/// `None` means the anchor was never disposed, which every caller treats the
+/// same as an explicitly active disposition.
+fn latest_disposition_state(
+    connection: &rusqlite::Connection,
+    anchor_id: &str,
+    owner_json: &str,
+) -> rusqlite::Result<Option<String>> {
+    connection
         .query_row(
             "SELECT state FROM retrieval_anchor_dispositions
              WHERE anchor_id = ?1 AND owner_json = ?2
              ORDER BY sequence DESC LIMIT 1",
-            params![anchor.anchor_id().as_str(), encode(anchor.owner())?],
+            params![anchor_id, owner_json],
             |row| row.get::<_, String>(0),
         )
-        .optional()?;
-    Ok(state.as_deref().is_none_or(|state| state == "active"))
+        .optional()
 }
 
 fn require_source_anchor_current(
@@ -598,15 +603,11 @@ fn require_source_anchor_current(
     if !source_owner_matches_assembly(&source_owner, &occurrence.owner) {
         return Err(invalid("evidence source anchor owner mismatch"));
     }
-    let state = connection
-        .query_row(
-            "SELECT state FROM retrieval_anchor_dispositions
-             WHERE anchor_id = ?1 AND owner_json = ?2
-             ORDER BY sequence DESC LIMIT 1",
-            params![occurrence.exact_source_anchor.as_str(), owner_json],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
+    let state = latest_disposition_state(
+        connection,
+        occurrence.exact_source_anchor.as_str(),
+        &owner_json,
+    )?;
     if state.as_deref().is_none_or(|state| state == "active") {
         Ok(())
     } else {
@@ -661,13 +662,7 @@ fn insert_anchor(
             ))
         },
     )?;
-    if existing
-        == (
-            encode(anchor)?,
-            encode(anchor.owner())?,
-            projection_generation.to_owned(),
-        )
-    {
+    if existing == (anchor_json, owner_json, projection_generation.to_owned()) {
         Ok(())
     } else {
         Err(invalid("retrieval anchor replay conflict"))
@@ -910,7 +905,7 @@ fn insert_derived_anchor(
             owner_digest.to_owned(),
             target_kind.to_owned(),
             target_id.to_owned(),
-            encode(anchor)?,
+            anchor_json,
         )
     {
         Ok(())

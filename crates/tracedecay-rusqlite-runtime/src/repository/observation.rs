@@ -594,73 +594,36 @@ fn persist_retrieval_anchor(
             anchor.projection_generation().as_str(),
         ],
     )?;
-    let stored = connection
-        .query_row(
-            "SELECT anchor_json, owner_json, projection_generation
-             FROM retrieval_anchors WHERE anchor_id = ?1",
-            [anchor.anchor_id().as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()?;
-    if stored.as_ref()
-        != Some(&(
-            encode(anchor)?,
-            encode(anchor.owner())?,
-            anchor.projection_generation().as_str().to_owned(),
-        ))
-    {
-        return Err(invalid("retrieval anchor identity collision"));
-    }
+    // A conflict means the anchor was already stored: nothing left to write,
+    // and the identity/alias checks are exactly what verification does.
     if inserted == 0 {
         return verify_retrieval_anchor(connection, anchor);
     }
     for alias in anchor.aliases() {
-        let alias_kind = encode(&alias.kind())?;
-        let locator_digest = encode(alias.locator_digest())?;
         connection.execute(
             "INSERT INTO retrieval_anchor_aliases (
                 owner_json, alias_kind, locator_digest, anchor_id
              ) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(owner_json, alias_kind, locator_digest) DO NOTHING",
             params![
-                encode(anchor.owner())?,
-                alias_kind,
-                locator_digest,
+                owner_json,
+                encode(&alias.kind())?,
+                encode(alias.locator_digest())?,
                 anchor.anchor_id().as_str(),
             ],
         )?;
-        let stored_anchor_id: String = connection.query_row(
-            "SELECT anchor_id FROM retrieval_anchor_aliases
-             WHERE owner_json = ?1 AND alias_kind = ?2 AND locator_digest = ?3",
-            params![encode(anchor.owner())?, alias_kind, locator_digest],
-            |row| row.get(0),
-        )?;
-        if stored_anchor_id != anchor.anchor_id().as_str() {
-            return Err(invalid("retrieval anchor alias collision"));
-        }
     }
-    let alias_count = connection.query_row(
-        "SELECT COUNT(*) FROM retrieval_anchor_aliases
-         WHERE owner_json = ?1 AND anchor_id = ?2",
-        params![encode(anchor.owner())?, anchor.anchor_id().as_str()],
-        |row| row.get::<_, i64>(0),
-    )?;
-    if usize::try_from(alias_count).ok() != Some(anchor.aliases().len()) {
-        return Err(invalid("retrieval anchor alias collision"));
-    }
-    Ok(())
+    // The row we just inserted trivially matches, so verification is really
+    // reading back the aliases: any that resolved to a different anchor, or a
+    // count that outruns this record's aliases, is a collision.
+    verify_retrieval_anchor(connection, anchor)
 }
 
 fn verify_retrieval_anchor(
     connection: &rusqlite::Connection,
     anchor: &RetrievalAnchorRecordV2,
 ) -> rusqlite::Result<()> {
+    let owner_json = encode(anchor.owner())?;
     let stored = connection
         .query_row(
             "SELECT anchor_json, owner_json, projection_generation
@@ -678,7 +641,7 @@ fn verify_retrieval_anchor(
     if stored.as_ref()
         != Some(&(
             encode(anchor)?,
-            encode(anchor.owner())?,
+            owner_json.clone(),
             anchor.projection_generation().as_str().to_owned(),
         ))
     {
@@ -690,7 +653,7 @@ fn verify_retrieval_anchor(
                 "SELECT anchor_id FROM retrieval_anchor_aliases
                  WHERE owner_json = ?1 AND alias_kind = ?2 AND locator_digest = ?3",
                 params![
-                    encode(anchor.owner())?,
+                    owner_json,
                     encode(&alias.kind())?,
                     encode(alias.locator_digest())?,
                 ],
@@ -704,7 +667,7 @@ fn verify_retrieval_anchor(
     let alias_count = connection.query_row(
         "SELECT COUNT(*) FROM retrieval_anchor_aliases
          WHERE owner_json = ?1 AND anchor_id = ?2",
-        params![encode(anchor.owner())?, anchor.anchor_id().as_str()],
+        params![owner_json, anchor.anchor_id().as_str()],
         |row| row.get::<_, i64>(0),
     )?;
     if usize::try_from(alias_count).ok() != Some(anchor.aliases().len()) {
