@@ -551,11 +551,11 @@ impl RemoteReplayServiceV1 {
             .current_writer(&frame)
             .map_err(RemoteReplayServiceErrorV1::Persistence)?;
         let writer = current.writer.as_ref().ok_or_else(|| {
-            RemoteReplayServiceErrorV1::AuthorityUnavailable(current.state.clone())
+            RemoteReplayServiceErrorV1::AuthorityUnavailable(Box::new(current.state.clone()))
         })?;
         if request.expected_authority.as_ref() != Some(&writer.authority.fence) {
             return Err(RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(
-                current.state.clone(),
+                Box::new(current.state.clone()),
             ));
         }
         let authority_credential = self
@@ -602,11 +602,11 @@ pub enum RemoteReplayServiceErrorV1 {
     #[error("remote replay request does not match the durable caller enrollment")]
     RequestBindingMismatch,
     #[error("remote replay expected authority does not match the current writer")]
-    ExpectedAuthorityMismatch(CurrentRemoteAuthorityStateV1),
+    ExpectedAuthorityMismatch(Box<CurrentRemoteAuthorityStateV1>),
     #[error("remote replay credential authority failed")]
     Credential(RemoteEnrollmentAuthorityErrorV1),
     #[error("remote replay authority is unavailable")]
-    AuthorityUnavailable(CurrentRemoteAuthorityStateV1),
+    AuthorityUnavailable(Box<CurrentRemoteAuthorityStateV1>),
     #[error(transparent)]
     Persistence(RemoteCapturePersistenceErrorV1),
     #[error(transparent)]
@@ -660,7 +660,9 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
             Err(error) => {
                 let authority = match &error {
                     RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
-                    | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => state.clone(),
+                    | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => {
+                        state.as_ref().clone()
+                    }
                     _ => fallback_authority,
                 };
                 let failure = replay_protocol_failure(error);
