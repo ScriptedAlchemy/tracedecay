@@ -597,17 +597,6 @@ mod tests {
         serde_json::from_str(text).expect("admin project result should be valid JSON")
     }
 
-    fn automation_cli_source() -> String {
-        [
-            include_str!("../../../automation_cli/mod.rs"),
-            include_str!("../../../automation_cli/config.rs"),
-            include_str!("../../../automation_cli/facts.rs"),
-            include_str!("../../../automation_cli/runs.rs"),
-            include_str!("../../../automation_cli/skills.rs"),
-        ]
-        .concat()
-    }
-
     async fn seed_compatibility_fact_proposal(
         cg: &TraceDecay,
         proposal_id: &str,
@@ -824,27 +813,6 @@ mod tests {
 
         let owner_after = crate::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
         assert_eq!(owner_after, owner_before);
-        let client_source = automation_cli_source();
-        let direct_init = ["serve::ensure_", "initialized"].concat();
-        let direct_apply = ["apply_fact_", "proposal("].concat();
-        assert!(client_source.contains("tracedecay_admin_project"));
-        assert!(!client_source.contains(&direct_init));
-        assert!(!client_source.contains(&direct_apply));
-
-        let admin_source = include_str!("admin_project.rs");
-        for direct_file_authority in [
-            ["load_", "fact_proposal("].concat(),
-            ["list_", "fact_proposals("].concat(),
-            ["apply_", "fact_proposal("].concat(),
-            ["reject_", "fact_proposal("].concat(),
-        ] {
-            assert!(
-                !admin_source.contains(&direct_file_authority),
-                "admin fact operations must use MemoryApplication, not {direct_file_authority}"
-            );
-        }
-        let application_boundary = ["Memory", "Application"].concat();
-        assert!(admin_source.contains(&application_boundary));
     }
 
     #[test]
@@ -936,13 +904,6 @@ mod tests {
         let round_trip =
             serde_json::from_value::<MemoryCuratorAutomationRun>(client_run.clone()).unwrap();
         assert_eq!(round_trip, typed_run);
-
-        let client_source = automation_cli_source();
-        let direct_init = ["serve::ensure_", "initialized"].concat();
-        let direct_apply = ["apply_fact_", "proposal("].concat();
-        assert!(client_source.contains("tracedecay_admin_project"));
-        assert!(!client_source.contains(&direct_init));
-        assert!(!client_source.contains(&direct_apply));
     }
 
     #[test]

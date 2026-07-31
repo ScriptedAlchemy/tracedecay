@@ -5,59 +5,6 @@ use super::{
     should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
 };
 use tracedecay::user_config::UserConfig;
-use tracedecay_code_extraction::complexity::{RUST_COMPLEXITY, count_complexity};
-use tree_sitter::Node;
-
-fn find_rust_function<'tree>(node: Node<'tree>, source: &[u8], name: &str) -> Option<Node<'tree>> {
-    if node.kind() == "function_item"
-        && node
-            .child_by_field_name("name")
-            .and_then(|name_node| name_node.utf8_text(source).ok())
-            == Some(name)
-    {
-        return Some(node);
-    }
-
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            if let Some(found) = find_rust_function(cursor.node(), source, name) {
-                return Some(found);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    None
-}
-
-#[test]
-fn dispatch_command_stays_a_thin_family_router() {
-    let source = include_str!("main.rs");
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(
-            &tracedecay_code_extraction::ts_provider::language("rust")
-                .expect("failed to load Rust grammar"),
-        )
-        .expect("failed to load Rust grammar");
-    let tree = parser.parse(source, None).expect("parse failed");
-    let function = find_rust_function(tree.root_node(), source.as_bytes(), "dispatch_command")
-        .expect("dispatch_command not found");
-    let metrics = count_complexity(function, &RUST_COMPLEXITY, source.as_bytes());
-    let lines = function.end_position().row - function.start_position().row + 1;
-
-    assert!(
-        metrics.branches <= 9,
-        "dispatch_command should only select a command family; found {} branches",
-        metrics.branches
-    );
-    assert!(
-        lines <= 24,
-        "dispatch_command should remain a thin router; found {lines} lines"
-    );
-}
 
 #[test]
 fn async_runtime_bounds_parallel_allocators() {

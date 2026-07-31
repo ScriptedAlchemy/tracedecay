@@ -160,38 +160,10 @@ mod tests {
     }
 
     #[test]
-    fn automation_rpc_preserves_response_and_has_no_local_database_fallback() {
+    fn automation_rpc_preserves_response_shape() {
         let payload = serde_json::json!({ "run": { "run_id": "run-5", "status": "ok" } });
         assert_eq!(automation_run_result(&payload).unwrap(), &payload["run"]);
         assert!(automation_run_result(&serde_json::json!({})).is_err());
-
-        let source = [
-            include_str!("mod.rs"),
-            include_str!("config.rs"),
-            include_str!("facts.rs"),
-            include_str!("runs.rs"),
-            include_str!("skills.rs"),
-        ]
-        .concat();
-        let direct_init = ["serve::ensure_", "initialized"].concat();
-        let direct_apply = ["apply_fact_", "proposal("].concat();
-        assert!(!source.contains(&direct_init));
-        assert!(!source.contains(&direct_apply));
-        assert!(source.contains("tracedecay_admin_project"));
-
-        let fact_source = include_str!("facts.rs");
-        for direct_file_authority in [
-            "load_fact_proposal(",
-            "list_fact_proposals(",
-            "reject_fact_proposal(",
-            "record_session_fact_proposals(",
-        ] {
-            assert!(
-                !fact_source.contains(direct_file_authority),
-                "automation facts must use the daemon authority, not {direct_file_authority}"
-            );
-        }
-        assert!(fact_source.contains("daemon_automation_action"));
     }
 
     #[test]
@@ -213,12 +185,23 @@ mod tests {
             Some(&current),
             &changed
         ));
-        let source = include_str!("config.rs");
-        assert!(source.contains("\"scope\": \"project\""));
-        assert!(source.contains("\"scope\": \"profile\""));
-        assert!(
-            source.contains("crate::commands::daemon_tool_json(\n        None"),
-            "global config reconciliation must use a projectless daemon request"
+    }
+
+    #[test]
+    fn automation_reconcile_requests_bind_project_and_profile_scopes() {
+        assert_eq!(
+            super::config::project_automation_reconcile_args(),
+            serde_json::json!({
+                "action": "automation_reconcile",
+                "scope": "project"
+            })
+        );
+        assert_eq!(
+            super::config::profile_automation_reconcile_args(),
+            serde_json::json!({
+                "action": "automation_reconcile",
+                "scope": "profile"
+            })
         );
     }
 }

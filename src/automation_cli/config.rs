@@ -9,16 +9,27 @@ pub(crate) fn automation_config_changed(
     current != Some(updated)
 }
 
+pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
+    serde_json::json!({
+        "action": "automation_reconcile",
+        "scope": "project"
+    })
+}
+
+pub(crate) fn profile_automation_reconcile_args() -> serde_json::Value {
+    serde_json::json!({
+        "action": "automation_reconcile",
+        "scope": "profile"
+    })
+}
+
 pub(crate) async fn notify_project_automation_scheduler(
     project_path: &std::path::Path,
 ) -> tracedecay::errors::Result<()> {
     crate::commands::daemon_tool_json(
         Some(project_path),
         "tracedecay_admin_project",
-        serde_json::json!({
-            "action": "automation_reconcile",
-            "scope": "project"
-        }),
+        project_automation_reconcile_args(),
     )
     .await
     .map(|_| ())
@@ -28,10 +39,7 @@ pub(crate) async fn notify_profile_automation_schedulers() -> tracedecay::errors
     crate::commands::daemon_tool_json(
         None,
         "tracedecay_admin_project",
-        serde_json::json!({
-            "action": "automation_reconcile",
-            "scope": "profile"
-        }),
+        profile_automation_reconcile_args(),
     )
     .await
     .map(|_| ())
