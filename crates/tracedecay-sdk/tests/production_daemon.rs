@@ -197,10 +197,10 @@ fn assert_work_attempt_finish_route_admits_missing_attempt(client: &Client) {
     assert_eq!(problem.kind, "not_found_or_not_authorized");
     assert_eq!(problem.code, "not_found_or_not_authorized");
     assert_eq!(problem.retry, "never");
-    assert_eq!(
-        problem.envelope["binding_id"],
-        json!(WorkAttemptFinish::BINDING_ID)
-    );
+    // Concealment doctrine: a not-found/not-authorized problem must NOT
+    // confirm the probed route exists, so the envelope omits binding_id
+    // (pinned by concealed_http_problem_omits_binding in tracedecay-api).
+    assert_eq!(problem.envelope["binding_id"], serde_json::Value::Null);
     assert_eq!(
         problem.envelope["contract"]["schema_id"],
         json!(WorkAttemptFinish::RESULT_SCHEMA_ID)
