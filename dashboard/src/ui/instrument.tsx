@@ -525,15 +525,9 @@ export function WorkspaceHeader({
   actions?: ReactNode;
 }) {
   return (
-    // The gate's handle on this one line. Every workspace's header is this
-    // element, so the clipping assertion in `e2e/responsive.ts` can hold all of
-    // them to the same invariant — nothing placed here may render outside this
-    // element's padding box — without each surface growing a marker of its own.
-    // `min-h-9` rather than `h-9`, and wrapping: at the widths where the line
-    // fits, both render exactly as the fixed height did. Where it does not
-    // fit, a fixed height had no way to be honest — the overflowing child was
-    // painted outside the box and, on `/settings`, 276px of it off-screen. A
-    // header that grows keeps the content it was given.
+    // `min-h`, not `h`: the header wraps rather than clipping. Every
+    // workspace's header is this element, and `e2e/responsive.ts` asserts
+    // nothing renders outside its padding box.
     <header
       data-workspace-header
       className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle bg-surface-1 py-1 px-3"
@@ -544,12 +538,9 @@ export function WorkspaceHeader({
       <h1 className="shrink-0 text-2xs font-semibold uppercase tracking-[0.2em] text-text-primary">
         {title}
       </h1>
-      {/* Withdrawn below `sm`, where the line has no width to spend on filler.
-       * Decorative and `aria-hidden`, this hairline was nonetheless the whole
-       * overflow at 320 CSS px: its 8px box plus one 10.5px gap took a header
-       * offering 254px of content box to 273px of children, pushing the state
-       * chip 19px outside that box with its label flush against the screen
-       * edge. Above `sm` the rule earns its width, so wide layout is unchanged. */}
+      {/* Withdrawn below `sm`, where the line has no width to spend on filler:
+       * decorative though it is, this hairline plus its gap was the whole
+       * header overflow at 320 CSS px. Above `sm` it earns its width. */}
       <span aria-hidden className="td-rule max-sm:hidden" />
       {note ? (
         <span className="min-w-0 truncate text-3xs tracking-[0.04em] text-text-muted">

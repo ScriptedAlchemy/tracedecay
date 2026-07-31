@@ -348,21 +348,15 @@ export const UNSCOPED_CACHE_KEY = 'unscoped';
  *
  * `/api/projects` and `/api/dashboard` are never rewritten — the registry is
  * the thing that lists projects, and the chrome is above all of them — so the
- * same URL is fetched under every scope. Keying those by scope anyway split one
- * answer into a cache entry per project: switching project refetched a listing
- * that had not changed, four surfaces reading the registry each held their own
- * copy of it, and an entry warmed under one scope was invisible under the next.
+ * same URL is fetched under every scope, and keying them by scope splits one
+ * answer into an entry per project.
  *
- * A question about the ROUTE, which is the part that took a correction: asking
- * instead whether `scopedUrl` had rewritten this particular request read as the
- * same thing and is not. `scopedUrl` rewrites nothing at all under the
- * all-projects scope, so every route collapsed into the unscoped bucket there
- * and stopped agreeing with `scopeKey` — which is how `useSchedulerControl`
- * came to write a fresh scheduler reading into a key no reader was watching,
- * leaving the button showing the state that had just been changed.
- *
- * So a scoped route keys by scope in every scope, including `all`, and only the
- * genuinely unscoped routes share one entry.
+ * The question is about the ROUTE, not about whether `scopedUrl` rewrote this
+ * particular request: `scopedUrl` rewrites nothing under the all-projects
+ * scope, so asking it collapses every route into the unscoped bucket there and
+ * stops agreeing with `scopeKey` — which lets a writer put a fresh reading into
+ * a key no reader is watching. So a scoped route keys by scope in every scope,
+ * including `all`, and only the genuinely unscoped routes share one entry.
  */
 export function requestScopeKey(scope: DashboardScope, url: string): string {
   return unscopedRoute(url) ? UNSCOPED_CACHE_KEY : scopeKey(scope);
