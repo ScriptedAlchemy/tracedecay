@@ -1881,7 +1881,7 @@ async fn dispatch_doctor_owner_operation(
                         &receipt,
                     )?);
                     owner_execution = Some(execution);
-                    owner_effect = Some(receipt);
+                    owner_effect = Some(*receipt);
                 }
                 super::service::invocation::DoctorConfigurationOutcomeV1::Denied => {
                     return Err(DoctorRemediationDispatchErrorV1::Denied);

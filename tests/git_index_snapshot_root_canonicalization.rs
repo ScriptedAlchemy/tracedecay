@@ -57,14 +57,16 @@ fn capture_agrees_across_symlink_repository_root_aliases() {
         repository_id.clone(),
         worktree_id.clone(),
         captured_at,
-    );
+    )
+    .expect("real-path snapshot");
     let via_alias = capture_exact_git_snapshot_for_test(
         &alias,
         project_id,
         repository_id,
         worktree_id,
         captured_at,
-    );
+    )
+    .expect("alias-path snapshot");
 
     assert_ne!(
         alias.as_os_str(),
@@ -95,7 +97,8 @@ fn capture_agrees_across_symlink_repository_root_aliases() {
         RepositoryId::new("repository.fixture").expect("repository id"),
         WorktreeId::new("worktree.fixture").expect("worktree id"),
         captured_at,
-    );
+    )
+    .expect("drifted snapshot");
     assert_ne!(
         drifted, via_alias,
         "exact CAS identity must still diverge on genuine content drift"

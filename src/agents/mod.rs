@@ -891,10 +891,11 @@ pub(crate) fn restore_host_file_metadata(
     if state.posix_acl_supported {
         match &state.posix_acl_access {
             Some(acl) => xattr::set(path, "system.posix_acl_access", acl)?,
-            None => match xattr::get(path, "system.posix_acl_access")? {
-                Some(_) => xattr::remove(path, "system.posix_acl_access")?,
-                None => {}
-            },
+            None => {
+                if xattr::get(path, "system.posix_acl_access")?.is_some() {
+                    xattr::remove(path, "system.posix_acl_access")?;
+                }
+            }
         }
     }
     Ok(())

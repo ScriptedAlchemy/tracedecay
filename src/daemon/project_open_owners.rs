@@ -2258,10 +2258,9 @@ fn production_ci_provider_configuration(
     credential: GitHubReadOnlyCredentialV1,
     http: GitHubHttpReadConfigV1,
     source_access: Arc<dyn CiSourceAccessAuthorityV1>,
-) -> ProductionCiProviderConfigV1 {
-    ProductionCiProviderConfigV1 {
-        provider: ProviderId::new("provider.github-actions")
-            .expect("static GitHub Actions provider id"),
+) -> Option<ProductionCiProviderConfigV1> {
+    Some(ProductionCiProviderConfigV1 {
+        provider: ProviderId::new("provider.github-actions").ok()?,
         parser: CiFailureParserIdentityV1 {
             parser_id: "parser.github-actions.v1".to_owned(),
             parser_version: "1".to_owned(),
@@ -2270,7 +2269,7 @@ fn production_ci_provider_configuration(
         credential,
         http,
         source_access,
-    }
+    })
 }
 
 const fn host_kind_for_hook(host: HookHostV1) -> HostKindV1 {
@@ -2352,7 +2351,8 @@ async fn resolve_production_github_provider_config(
             GitHubHttpReadConfigV1::default(),
             ci_source_access,
         )
-    });
+    })
+    .flatten();
     let review_discovery_authority =
         github_discovery_authorization_context(project_source_access, &feedback_scope)
             .zip(github_discovery_source_access_request(&feedback_scope));
@@ -3541,7 +3541,8 @@ mod tests {
             GitHubReadOnlyCredentialV1::anonymous(),
             GitHubHttpReadConfigV1::default(),
             Arc::clone(&source_access),
-        );
+        )
+        .expect("static CI provider configuration");
 
         assert_eq!(
             ci.provider,

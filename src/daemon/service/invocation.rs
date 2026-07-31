@@ -517,7 +517,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     SemanticEvaluateAndPublish {
-        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        candidate: Box<crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1>,
     },
     LspOpen {
         client_revision: String,
@@ -1054,7 +1054,9 @@ impl DaemonInvocationRequest {
             revision: DAEMON_INVOCATION_REVISION,
             request_id: request_id.into(),
             delivery_route: None,
-            payload: DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate },
+            payload: DaemonInvocationPayload::SemanticEvaluateAndPublish {
+                candidate: Box::new(candidate),
+            },
         }
     }
 
@@ -4373,11 +4375,12 @@ impl Pr13HookOrchestrationPortV1 for BoundedPr13HookOrchestratorV1 {
     }
 }
 
-fn pr13_hook_orchestration_registry()
--> &'static StdMutex<BTreeMap<([u8; 16], [u8; 16]), Weak<dyn Pr13HookOrchestrationPortV1>>> {
-    static REGISTRY: OnceLock<
-        StdMutex<BTreeMap<([u8; 16], [u8; 16]), Weak<dyn Pr13HookOrchestrationPortV1>>>,
-    > = OnceLock::new();
+type Pr13HookOrchestrationRegistryKey = ([u8; 16], [u8; 16]);
+type Pr13HookOrchestrationRegistry =
+    StdMutex<BTreeMap<Pr13HookOrchestrationRegistryKey, Weak<dyn Pr13HookOrchestrationPortV1>>>;
+
+fn pr13_hook_orchestration_registry() -> &'static Pr13HookOrchestrationRegistry {
+    static REGISTRY: OnceLock<Pr13HookOrchestrationRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
@@ -5202,7 +5205,7 @@ pub(crate) enum DoctorConfigurationOutcomeV1 {
     },
     Effect {
         execution: OperationReceipt,
-        receipt: EffectReceipt,
+        receipt: Box<EffectReceipt>,
     },
     Denied,
     Unavailable,
@@ -5267,7 +5270,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                 ..
             } => DoctorConfigurationOutcomeV1::Effect {
                 execution: effect.execution,
-                receipt: effect.receipt,
+                receipt: Box::new(effect.receipt),
             },
             DaemonInvocationOutcome::ApplicationProblem {
                 problem: ApplicationProblem::NotFoundOrNotAuthorized { .. },
@@ -8323,7 +8326,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
-                self.execute_semantic_evaluation(project_root, request_id, candidate)
+                self.execute_semantic_evaluation(project_root, request_id, *candidate)
                     .await
             }
             DaemonInvocationPayload::LspOpen {
@@ -10598,7 +10601,7 @@ mod tests {
                 format!("request.multi-root.execute-{index}"),
                 MultiRootExecuteRequestV1::new(
                     scope_set_id.clone(),
-                    revision.clone(),
+                    revision,
                     digest.clone(),
                     operation,
                     0,

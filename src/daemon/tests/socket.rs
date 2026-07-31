@@ -683,7 +683,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         git_scope.repository_id.clone(),
         git_scope.worktree_id.clone(),
         observed_at,
-    );
+    )
+    .expect("exact socket Git snapshot");
     let identity = GitCommitIdentityV1 {
         name: "TraceDecay Test".to_owned(),
         email: "tracedecay@example.com".to_owned(),
@@ -725,7 +726,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         RepositoryId::new("repository.socket-git").unwrap(),
         WorktreeId::new("worktree.socket-git").unwrap(),
         observed_at,
-    );
+    )
+    .expect("unauthorized socket Git snapshot");
     let unauthorized = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.unauthorized",
         crate::application_surface::GitPreviewSurfaceRequest {
@@ -761,7 +763,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         RepositoryId::new("repository.caller-selected").unwrap(),
         WorktreeId::new("worktree.caller-selected").unwrap(),
         observed_at,
-    );
+    )
+    .expect("forged-scope socket Git snapshot");
     let forged_scope = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.forged-scope",
         crate::application_surface::GitPreviewSurfaceRequest {
@@ -897,7 +900,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
                 git_scope.repository_id.clone(),
                 git_scope.worktree_id.clone(),
                 observed_at,
-            ),
+            )
+            .expect("recovery socket Git snapshot"),
             selected_hunks: Vec::new(),
             commit_intent: Some(
                 GitIndexCommitIntentV1::new(

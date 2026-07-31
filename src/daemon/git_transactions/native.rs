@@ -1536,28 +1536,25 @@ pub(crate) fn capture_exact_snapshot_for_test(
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
-) -> RepositoryStateSnapshotV1 {
+) -> crate::errors::Result<RepositoryStateSnapshotV1> {
     // Same canonical root the daemon owner mounts; alias paths must not mint a
     // divergent snapshot that later fails exact preview CAS.
-    let repository_root = super::canonicalize_repository_root(repository_root)
-        .expect("test repository root must canonicalize");
+    let repository_root = super::canonicalize_repository_root(repository_root)?;
     let assembler = NativeGitIndexPreviewAssembler::new(
         &repository_root,
         project_id,
         repository_id,
         worktree_id,
     );
-    let runner = FixedGitIndexRunner::new(&repository_root).expect("test Git runner");
+    let runner = FixedGitIndexRunner::new(&repository_root).map_err(test_snapshot_error)?;
     let status = assembler
         .read_authority()
         .status()
-        .expect("test native status");
-    let lock = runner
-        .acquire_index_lock()
-        .expect("test snapshot index lock");
+        .map_err(test_snapshot_error)?;
+    let lock = runner.acquire_index_lock().map_err(test_snapshot_error)?;
     let tree = runner
         .index_tree_under_lock(&lock)
-        .expect("test index tree");
+        .map_err(test_snapshot_error)?;
     let placeholder = RepositoryStateSnapshotV1::new(
         assembler.project_id.clone(),
         assembler.repository_id.clone(),
@@ -1566,14 +1563,15 @@ pub(crate) fn capture_exact_snapshot_for_test(
         tree.format(),
         status.head,
         RepositoryIndexSnapshotV1 {
-            checksum: canonical_sha256(&b"placeholder".as_slice()).expect("test digest"),
+            checksum: canonical_sha256(&b"placeholder".as_slice()).map_err(test_snapshot_error)?,
             tree_id: Some(tree),
             state: RepositoryIndexStateV1::Clean,
             unmerged_stage_digest: None,
         },
         RepositoryWorkingTreeSnapshotV1 {
             state: RepositoryWorkingTreeStateV1::Clean,
-            tracked_digest: canonical_sha256(&b"placeholder".as_slice()).expect("test digest"),
+            tracked_digest: canonical_sha256(&b"placeholder".as_slice())
+                .map_err(test_snapshot_error)?,
             untracked_name_digest: None,
             ignored_collision_digest: None,
         },
@@ -1585,10 +1583,17 @@ pub(crate) fn capture_exact_snapshot_for_test(
         captured_at,
         tracedecay_domain::GitCoverageV1::complete(),
     )
-    .expect("test placeholder snapshot");
+    .map_err(test_snapshot_error)?;
     assembler
         .capture_snapshot(&placeholder, &runner, &lock)
-        .expect("exact test snapshot")
+        .map_err(test_snapshot_error)
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+fn test_snapshot_error(error: impl std::fmt::Display) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::Config {
+        message: format!("failed to capture exact Git test snapshot: {error}"),
+    }
 }
 
 #[cfg(test)]
@@ -2599,14 +2604,16 @@ mod tests {
             repository_id.clone(),
             worktree_id.clone(),
             captured_at,
-        );
+        )
+        .expect("real-path snapshot");
         let via_alias = capture_exact_snapshot_for_test(
             &alias,
             project_id.clone(),
             repository_id.clone(),
             worktree_id.clone(),
             captured_at,
-        );
+        )
+        .expect("alias-path snapshot");
         assert_eq!(
             via_real, via_alias,
             "alias and real roots must produce identical snapshot identity at capture"
