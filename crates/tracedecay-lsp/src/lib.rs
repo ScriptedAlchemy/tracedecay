@@ -90,7 +90,7 @@ pub use gateway::{
     OutgoingCall, RenameCandidate, RenameCandidateResult, RenameCandidateUnavailableReason,
     SemanticProviderAdapter, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
     SemanticResponse, SignatureHelp, TypeHierarchyItem, UnavailableSemanticProvider,
-    WorkspaceSymbol, lsp_semantic_request, project_semantic_outcome,
+    WorkspaceSymbol, lsp_semantic_request, percent_hex_nibble, project_semantic_outcome,
 };
 pub use overlay::{
     CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority, DebouncedDiagnostic,

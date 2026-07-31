@@ -10,7 +10,12 @@ use serde_json::Value;
 
 /// Accepted spellings for a model name on a Cursor-native record, in
 /// precedence order. Cursor has emitted every one of these across versions.
-const CURSOR_MODEL_KEYS: &[&str] = &[
+///
+/// Public because provider ingest outside this crate reads the same records
+/// and must agree on both the spellings and their precedence; a lane that
+/// keeps its own copy of this list silently attributes a different model as
+/// soon as Cursor changes which spelling it emits.
+pub const CURSOR_MODEL_KEYS: &[&str] = &[
     "model",
     "model_id",
     "modelId",

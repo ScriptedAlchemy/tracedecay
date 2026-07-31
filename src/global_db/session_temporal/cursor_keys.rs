@@ -1,7 +1,7 @@
 use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
+use tracedecay_application::now_micros;
 use tracedecay_domain::{
     PrivacyDomainId, RetrievalCursorKeyId, SessionCursorKeyIdV1, SessionCursorVersionV1,
     SignedCursorKeyRefV1, canonical_sha256,
@@ -197,7 +197,7 @@ impl GlobalDbCursorKeyProvider {
         read: &ReadSnapshot,
         expected: SignedCursorKeyRefV1,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
-        Self::from_registered_key_ref_at(read, expected, now_micros()).await
+        Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
     pub(crate) async fn from_registered_snapshot(
@@ -208,7 +208,7 @@ impl GlobalDbCursorKeyProvider {
             .cursor_key()
             .cloned()
             .ok_or(GlobalDbCursorKeyProviderError::SnapshotKeyUnavailable)?;
-        Self::from_registered_key_ref_at(read, expected, now_micros()).await
+        Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
     async fn from_registered_key_ref_at(
@@ -361,14 +361,6 @@ impl SessionCursorAuthenticator for GlobalDbCursorKeyProvider {
             .1
             .verify(key, authenticated, signature)
     }
-}
-
-fn now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-        .unwrap_or(i64::MAX)
 }
 
 fn storage(source: crate::db::engine::Error) -> GlobalDbCursorKeyProviderError {

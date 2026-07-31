@@ -10,7 +10,7 @@ use serde_json::Value;
 pub(crate) use tracedecay_capture::cursor::normalize_cursor_observation;
 use tracedecay_capture::cursor::{
     cursor_projected_message_id, normalize_cursor_observation_with_message_id,
-    observation_native_record_id,
+    observation_native_record_id, timestamp_tag_from_record,
 };
 #[cfg(test)]
 use tracedecay_domain::CanonicalObservationFactV1;
@@ -1379,27 +1379,6 @@ impl TimestampCarry {
         }
         self.carried.or(self.fallback)
     }
-}
-
-/// Extracts and parses the first `<timestamp>…</timestamp>` tag found in a
-/// transcript line's text content.
-fn timestamp_tag_from_record(record: &Value) -> Option<i64> {
-    let message = record.get("message").unwrap_or(record);
-    let content = message.get("content").unwrap_or(message);
-    match content {
-        Value::String(text) => timestamp_tag_from_text(text),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .find_map(timestamp_tag_from_text),
-        _ => None,
-    }
-}
-
-fn timestamp_tag_from_text(text: &str) -> Option<i64> {
-    let start = text.find("<timestamp>")? + "<timestamp>".len();
-    let end = start + text[start..].find("</timestamp>")?;
-    crate::timeutil::parse_cursor_human_timestamp(text[start..end].trim())
 }
 
 #[derive(Clone, Copy)]

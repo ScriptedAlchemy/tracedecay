@@ -524,6 +524,11 @@ impl CronSchedule {
     }
 }
 
+/// Hinnant's `civil_from_days`, written with `div_euclid`/`rem_euclid` rather
+/// than the branch form used by the canonical copy in
+/// `tracedecay_capture::timestamp`. The two agree for every input; this crate
+/// keeps its own so it can stay free of workspace dependencies, which is worth
+/// more than deduplicating twelve lines of pure arithmetic.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);

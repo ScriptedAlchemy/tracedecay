@@ -1160,9 +1160,7 @@ fn write_receipt(
 }
 
 fn sync_directory(path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(storage)
+    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict).map_err(storage)
 }
 
 fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {

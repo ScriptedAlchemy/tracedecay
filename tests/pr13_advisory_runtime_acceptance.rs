@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tracedecay::application::advisory::ci_runtime::{
@@ -31,7 +30,7 @@ use tracedecay_application::feedback::{
 };
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
+    RequestContext, RequestId, ResolvedScope, now_micros,
 };
 use tracedecay_domain::feedback::{
     FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1,
@@ -348,17 +347,6 @@ async fn corrupt_provider_identity_fails_production_decoder() {
             .await
             .is_none()
     );
-}
-
-fn now_micros() -> UtcMicros {
-    UtcMicros(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_micros()
-            .try_into()
-            .unwrap(),
-    )
 }
 
 fn proximity_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext {

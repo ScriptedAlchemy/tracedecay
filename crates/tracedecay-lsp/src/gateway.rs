@@ -205,15 +205,22 @@ fn decode_uri_segment(segment: &str) -> Option<Vec<u8>> {
             index += 1;
             continue;
         }
-        let high = source.get(index + 1).copied().and_then(hex_value)?;
-        let low = source.get(index + 2).copied().and_then(hex_value)?;
+        let high = source.get(index + 1).copied().and_then(percent_hex_nibble)?;
+        let low = source.get(index + 2).copied().and_then(percent_hex_nibble)?;
         decoded.push((high << 4) | low);
         index += 3;
     }
     Some(decoded)
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
+/// Decodes one hex digit of a `%XX` percent-escape, in either case.
+///
+/// `None` for any byte that is not a hex digit, which is what makes a
+/// malformed escape fail the whole decode instead of silently producing a
+/// different byte. Shared so a URI and an HTTP path can never disagree on
+/// which escapes are well formed.
+#[must_use]
+pub fn percent_hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

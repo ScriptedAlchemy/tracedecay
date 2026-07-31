@@ -8,6 +8,7 @@
 pub mod advisory;
 pub mod api_migration;
 pub mod authorization;
+pub mod clock;
 pub mod configuration;
 pub mod context;
 pub mod context_scout;
@@ -54,6 +55,7 @@ pub use authorization::{
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
     SourceAuthorizationSnapshot,
 };
+pub use clock::now_micros;
 pub use configuration::{
     ConfigurationGetRequestV1, ConfigurationSetRequestV1,
     configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
