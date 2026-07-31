@@ -113,6 +113,19 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
         cancellation,
     );
     let mut pre_admission_requests = vec![wire_round_trip(&read_request)];
+    pre_admission_requests.push(DaemonInvocationRequest::lsp_open(
+        "request.multi-root.pre-admission-lsp",
+        "client.multi-root",
+        None,
+        vec![
+            url::Url::from_file_path(first.path())
+                .expect("first URI")
+                .to_string(),
+            url::Url::from_file_path(second.path())
+                .expect("second URI")
+                .to_string(),
+        ],
+    ));
     let (cas_deadline, cas_cancellation) = controls("pre-admission-cas", observed_at);
     pre_admission_requests.push(
         DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
@@ -242,6 +255,32 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
     let second_uri = url::Url::from_file_path(second.path())
         .expect("second URI")
         .to_string();
+    let mut lsp_scopes = vec![
+        crate::daemon::project_open_owners::resolved_scope_for_project(
+            first.path(),
+            &first_project,
+        )
+        .expect("first scope"),
+        crate::daemon::project_open_owners::resolved_scope_for_project(
+            second.path(),
+            &second_project,
+        )
+        .expect("second scope"),
+    ];
+    lsp_scopes.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
+    let selector_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.daemon.lsp-workspace-selector.v1",
+        lsp_scopes
+            .iter()
+            .map(|scope| &scope.scope_digest)
+            .collect::<Vec<_>>(),
+    ))
+    .expect("selector digest");
+    let quarantined_scope_set_id = ScopeSetId::new(format!(
+        "scope-set.lsp.{}",
+        selector_digest.as_str().trim_start_matches("sha256:")
+    ))
+    .expect("scope set id");
     let lsp = execute_daemon_invocation(
         &engine,
         &first_handshake,
@@ -255,12 +294,67 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
     .await;
     assert!(matches!(
         lsp.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
+    assert_eq!(
+        engine
+            .invocation
+            .lsp_session_registry
+            .lock()
+            .await
+            .active_sessions(),
+        0,
+        "quarantined multi-root initialize must not mount an LSP runtime"
+    );
+    assert!(
+        engine
+            .invocation
+            .service
+            .persisted_scope_set(first.path(), &quarantined_scope_set_id)
+            .await
+            .is_none(),
+        "quarantined initialize must not persist the scope set in the first store"
+    );
+    assert!(
+        engine
+            .invocation
+            .service
+            .persisted_scope_set(second.path(), &quarantined_scope_set_id)
+            .await
+            .is_none(),
+        "quarantined initialize must not persist the scope set in the second store"
+    );
+    let single_root_lsp = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::lsp_open(
+            "request.single-root.lsp",
+            "client.single-root",
+            Some(first_uri.clone()),
+            vec![first_uri.clone()],
+        ),
+    )
+    .await;
+    assert!(matches!(
+        single_root_lsp.outcome,
         DaemonInvocationOutcome::LspOpened {
-            scope_set_id: Some(_),
-            scope_set_digest: Some(_),
+            scope_set_id: None,
+            scope_set_digest: None,
             ..
         }
     ));
+    assert_eq!(
+        engine
+            .invocation
+            .lsp_session_registry
+            .lock()
+            .await
+            .active_sessions(),
+        1,
+        "single-root initialize must keep the existing runtime path working"
+    );
 
     let observed_at = now();
     let (deadline, cancellation) = controls("cas", observed_at);
