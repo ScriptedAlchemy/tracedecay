@@ -19,7 +19,9 @@ use tracedecay_domain::{
     VectorGenerationIdV1,
 };
 
-use super::ports::{CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError};
+use super::ports::{
+    CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError, contract_error,
+};
 
 mod execution_authority;
 mod service;
@@ -447,7 +449,7 @@ where
         };
         batch
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         if self.control.is_cancelled() {
             return Ok(RetrieverOutcome::Cancelled);
         }
@@ -649,7 +651,7 @@ fn semantic_checkpoint_digest(
         &request.capability_manifest_digest,
         prefix,
     ))
-    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    .map_err(contract_error)?;
     CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
         .map_err(contract_error)
 }
@@ -712,10 +714,6 @@ fn port_error_outcome<E>(
         RetrievalPortError::BudgetExceeded => Ok(RetrieverOutcome::BudgetExceeded(usage)),
         error => Err(error),
     }
-}
-
-fn contract_error(error: impl std::fmt::Display) -> RetrievalPortError {
-    RetrievalPortError::Contract(error.to_string())
 }
 
 #[cfg(test)]

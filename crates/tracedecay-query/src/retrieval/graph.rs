@@ -21,6 +21,7 @@ use tracedecay_domain::{
 
 use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, GraphEvidenceReadPort, RetrievalPortError,
+    contract_error,
 };
 
 mod projection;
@@ -50,13 +51,13 @@ impl GraphLaneRequest {
         self.base
             .budget
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.budget
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.generation
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         if self.max_depth == 0 {
             return Err(RetrievalPortError::Contract(
                 "graph traversal depth must be positive".to_owned(),
@@ -149,6 +150,18 @@ impl GraphLaneEvidence {
 
     pub fn validate(&self, request: &GraphLaneRequest) -> Result<(), RetrievalPortError> {
         request.validate()?;
+        self.validate_against_validated_request(request)
+    }
+
+    /// Same rejection set as [`Self::validate`], minus the request
+    /// revalidation the caller has already performed.
+    ///
+    /// The lane validates the request once per retrieval; re-running it for
+    /// every candidate in the batch is pure hot-path cost.
+    fn validate_against_validated_request(
+        &self,
+        request: &GraphLaneRequest,
+    ) -> Result<(), RetrievalPortError> {
         if self.binding.occurrence.generation != request.generation {
             return Err(RetrievalPortError::GenerationMismatch);
         }
@@ -229,7 +242,7 @@ where
     ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
         batch
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         if batch.coverage.eligible < batch.candidates.len() as u64 {
             return Err(RetrievalPortError::Contract(
                 "graph coverage cannot report fewer eligible candidates than it emitted".to_owned(),
@@ -255,7 +268,7 @@ where
                         "graph lane evidence is missing for a returned occurrence".to_owned(),
                     )
                 })?;
-            evidence.validate(request)?;
+            evidence.validate_against_validated_request(request)?;
             if evidence.binding.candidate_anchor != candidate.anchor_id
                 || evidence.binding.source_occurrence != candidate.source_occurrence_id
             {
@@ -315,7 +328,7 @@ where
         };
         rebuilt
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         Ok(rebuilt)
     }
 }
@@ -422,9 +435,9 @@ fn graph_checkpoint_digest(
         generation.as_str(),
         prefix,
     ))
-    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    .map_err(contract_error)?;
     CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(|error| RetrievalPortError::Contract(error.to_string()))
+        .map_err(contract_error)
 }
 
 #[cfg(test)]

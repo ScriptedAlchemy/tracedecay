@@ -21,6 +21,7 @@ use tracedecay_domain::{
 
 use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, ExactTermPostingReadPort, RetrievalPortError,
+    contract_error,
 };
 
 /// Typed exact-lane request.
@@ -43,13 +44,13 @@ impl ExactLaneRequest<'_> {
         self.base
             .budget
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.budget
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.generation
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         let mut seen = BTreeSet::new();
         for literal in &self.literals {
             literal.validate()?;
@@ -103,6 +104,18 @@ pub struct ExactLaneEvidence {
 impl ExactLaneEvidence {
     pub fn validate(&self, request: &ExactLaneRequest<'_>) -> Result<(), RetrievalPortError> {
         request.validate()?;
+        self.validate_against_validated_request(request)
+    }
+
+    /// Same rejection set as [`Self::validate`], minus the request
+    /// revalidation the caller has already performed.
+    ///
+    /// The lane validates the request once per retrieval; re-running it for
+    /// every candidate in the batch is pure hot-path cost.
+    fn validate_against_validated_request(
+        &self,
+        request: &ExactLaneRequest<'_>,
+    ) -> Result<(), RetrievalPortError> {
         if self.binding.occurrence.generation != request.generation {
             return Err(RetrievalPortError::GenerationMismatch);
         }
@@ -116,7 +129,7 @@ impl ExactLaneEvidence {
         }
         self.admission_proof
             .validate_for_request(&request.base)
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         if !self.matched_literals.iter().any(|literal| {
             literal.field == self.admission_proof.field
                 && literal.original_bytes == self.admission_proof.original_bytes
@@ -618,7 +631,7 @@ where
     ) -> Result<RetrieverBatch<ExactLaneEvidence>, RetrievalPortError> {
         batch
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         let mut admitted: Vec<(CompactCandidate, ExactLaneEvidence)> =
             Vec::with_capacity(batch.candidates.len());
         for candidate in &batch.candidates {
@@ -635,7 +648,7 @@ where
                         "exact lane evidence is missing for a returned occurrence".to_owned(),
                     )
                 })?;
-            evidence.validate(request)?;
+            evidence.validate_against_validated_request(request)?;
             if evidence.binding.candidate_anchor != candidate.anchor_id
                 || evidence.binding.source_occurrence != candidate.source_occurrence_id
             {
@@ -667,7 +680,7 @@ where
             let minted = self
                 .authority
                 .admit(proof.field, &proof.original_bytes, &request.base)
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?
+                .map_err(contract_error)?
                 .ok_or_else(|| {
                     RetrievalPortError::Contract(
                         "the central exact admission authority rejected the proof literal"
@@ -739,7 +752,7 @@ where
         };
         rebuilt
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         Ok(rebuilt)
     }
 }
@@ -830,9 +843,9 @@ fn exact_checkpoint_digest(
         generation.as_str(),
         prefix,
     ))
-    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    .map_err(contract_error)?;
     CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(|error| RetrievalPortError::Contract(error.to_string()))
+        .map_err(contract_error)
 }
 
 #[cfg(test)]
