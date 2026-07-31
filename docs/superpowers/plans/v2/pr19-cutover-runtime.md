@@ -10,10 +10,11 @@
 > platform gate lattice.
 > Historical version/compatibility/migration language applies only to APIs or
 > data proven on `origin/master`, in a published release, or in live
-> persistence. Pure branch-local API/source shapes change in place; any
-> branch-written store, spool, file, journal, checkpoint, receipt, or
-> projection remains in cutover recovery until a separately authorized
-> registered-store/profile census proves absence.
+> persistence. Pure source-only/internal API shapes change in place.
+> Potentially deployed branch-era callable APIs remain compatible until an
+> authorized installed-client/host census proves absence; any branch-written
+> store, spool, file, journal, checkpoint, receipt, or projection remains in
+> cutover recovery until the registered-store/profile census proves absence.
 
 **Goal:** Complete API migration apply, migrate released data atomically to one
 V2 writer, retire aliases/V1, and extract runtime adapters after inversion.

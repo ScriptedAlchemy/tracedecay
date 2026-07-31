@@ -48,9 +48,12 @@ acceptance live in the applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Before first publication, generated schemas change to their final shape in
-place. After an evidenced package release, schemas follow the accepted
-major-version compatibility policy. Rollback unpublishes or yanks a package release according to registry
+Before first publication, generated schemas change in place only when they
+have not potentially reached an independently deployed dogfood client or host
+installation. Potentially deployed schemas remain negotiated until an
+authorized installed-client/host census proves absence. After an evidenced
+package release, schemas follow the accepted major-version compatibility
+policy. Rollback unpublishes or yanks a package release according to registry
 policy but never changes server semantics. Measure generation, package size,
 startup, paging/SSE overhead, and conformance duration. Delete private client
 wrappers and aliases only after three-language local/remote conformance,
