@@ -16,6 +16,12 @@ retain compatibility and migration obligations; all other retention is judged
 by the direct offline capture, fenced replay, query, backup/restore, failover,
 platform, and regression behavior below.
 
+No remote enrollment/spool/replica/backup wire format is yet established on
+`origin/master`, in a published package/release, or in live persisted data.
+Those PR16 records therefore take their final shape in place. Authenticated
+protocol negotiation remains mandatory because independently deployed nodes
+can differ, but speculative old readers, aliases, and migrations do not.
+
 ## User outcome
 
 An enrolled machine can keep capturing permitted observations while
@@ -186,12 +192,14 @@ finding and remediation identities.
    exercise higher-epoch promotion, atomic publication, rollback before
    publication, and read-only old-authority rejoin from the same operational
    surfaces.
-5. **Preserve compatibility across the journey.** Existing local capture,
+5. **Preserve evidenced compatibility across the journey.** Existing local capture,
    query, settings, CLI/API/dashboard/Doctor, stored generations, repository
    identity, retention/deletion, diagnostics, and health contracts remain
-   supported through the remote application model. Versioned enrollment,
-   spool, cache/replica, backup and restore readers migrate or reject old data
-   explicitly; they never silently reinterpret authority, identity,
+   supported through the remote application model where `origin/master`,
+   published releases, or live persistence prove the predecessor. Unreleased
+   enrollment, spool, cache/replica, backup, and restore records change in
+   place; once deployed, readers migrate or reject old data explicitly and
+   never silently reinterpret authority, identity,
    epoch, watermark, or deletion lineage. PR18 adds SDK bindings without
    replacing these PR16 APIs.
 
