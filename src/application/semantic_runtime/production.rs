@@ -15,8 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkV1,
     CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore, LogicalEvidenceId,
-    ManifestDigest, Pr9FallbackSubpayload, ProjectionBatchRequestV1, ProjectionOperationV1,
-    ProjectionReplayReasonV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
+    ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionReplayReasonV1,
+    QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
     RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
     SemanticSearchIndexProfileV1, SourceOccurrenceId, UtcMicros, VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
@@ -35,8 +35,8 @@ use crate::retention::code_index_generations::{
     plan_code_generation_retention, recover_code_generation_retention,
 };
 use crate::search_eval::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
-use crate::search_eval::pr10_native::{
-    Pr10ProjectionCaseOutcomeV1, Pr10ProjectionCaseSampleV1, Pr10ProjectionCaseV1,
+use crate::search_eval::semantic_native::{
+    SemanticProjectionCaseOutcomeV1, SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1,
 };
 use crate::search_eval::{
     CandidateOutputError, ProductionCandidateNativeGenerationResourcesV1,
@@ -65,7 +65,7 @@ use crate::store::vector_generations::{
     DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
     VectorGenerationPlanV1,
 };
-use tracedecay_query::retrieval::AuthorizedPr9FallbackV1;
+use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::graph::production_code_index_freshness;
 use tracedecay_query::retrieval::ports::{
@@ -658,7 +658,7 @@ impl ProductionSemanticRuntimeV1 {
         clean: &PreparedSemanticEvaluationGenerationV1,
         sources: &ProductionCandidateSemanticProjectionSourcesV1<'_>,
     ) -> Result<
-        BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
+        BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
         SemanticRuntimeScheduleFailureV1,
     > {
         block_on_semantic_evaluation(
@@ -671,7 +671,7 @@ impl ProductionSemanticRuntimeV1 {
         clean: &PreparedSemanticEvaluationGenerationV1,
         sources: &ProductionCandidateSemanticProjectionSourcesV1<'_>,
     ) -> Result<
-        BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
+        BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
         SemanticRuntimeScheduleFailureV1,
     > {
         let store =
@@ -697,7 +697,7 @@ impl ProductionSemanticRuntimeV1 {
         clean: &PreparedSemanticEvaluationGenerationV1,
         sources: &ProductionCandidateSemanticProjectionSourcesV1<'_>,
     ) -> Result<
-        BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
+        BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
         SemanticRuntimeScheduleFailureV1,
     > {
         let clean_prepared = &clean.prepared_projection;
@@ -740,12 +740,12 @@ impl ProductionSemanticRuntimeV1 {
 
         let mut samples = BTreeMap::new();
         samples.insert(
-            Pr10ProjectionCaseV1::Clean,
+            SemanticProjectionCaseV1::Clean,
             projection_case_sample_from_prepared(
                 clean_prepared,
                 clean.resources.clean_projection_build_micros,
                 clean.projection_input_bytes,
-                Pr10ProjectionCaseOutcomeV1::Complete,
+                SemanticProjectionCaseOutcomeV1::Complete,
             ),
         );
 
@@ -768,9 +768,9 @@ impl ProductionSemanticRuntimeV1 {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
         samples.insert(
-            Pr10ProjectionCaseV1::IdempotencyReplay,
-            Pr10ProjectionCaseSampleV1 {
-                outcome: Pr10ProjectionCaseOutcomeV1::Complete,
+            SemanticProjectionCaseV1::IdempotencyReplay,
+            SemanticProjectionCaseSampleV1 {
+                outcome: SemanticProjectionCaseOutcomeV1::Complete,
                 elapsed_micros: elapsed_micros(replay_started),
                 input_bytes: 0,
                 chunks_added_or_changed: 0,
@@ -796,12 +796,12 @@ impl ProductionSemanticRuntimeV1 {
         )
         .await?;
         samples.insert(
-            Pr10ProjectionCaseV1::OneSymbol,
+            SemanticProjectionCaseV1::OneSymbol,
             projection_case_sample_from_prepared(
                 &one_symbol,
                 one_symbol_elapsed,
                 one_symbol_input,
-                Pr10ProjectionCaseOutcomeV1::Complete,
+                SemanticProjectionCaseOutcomeV1::Complete,
             ),
         );
 
@@ -821,12 +821,12 @@ impl ProductionSemanticRuntimeV1 {
         )
         .await?;
         samples.insert(
-            Pr10ProjectionCaseV1::NoOp,
+            SemanticProjectionCaseV1::NoOp,
             projection_case_sample_from_prepared(
                 &no_op,
                 no_op_elapsed,
                 no_op_input,
-                Pr10ProjectionCaseOutcomeV1::Complete,
+                SemanticProjectionCaseOutcomeV1::Complete,
             ),
         );
 
@@ -846,12 +846,12 @@ impl ProductionSemanticRuntimeV1 {
         )
         .await?;
         samples.insert(
-            Pr10ProjectionCaseV1::Deletion,
+            SemanticProjectionCaseV1::Deletion,
             projection_case_sample_from_prepared(
                 &deletion,
                 deletion_elapsed,
                 deletion_input,
-                Pr10ProjectionCaseOutcomeV1::Complete,
+                SemanticProjectionCaseOutcomeV1::Complete,
             ),
         );
 
@@ -879,9 +879,9 @@ impl ProductionSemanticRuntimeV1 {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
         samples.insert(
-            Pr10ProjectionCaseV1::Cancellation,
-            Pr10ProjectionCaseSampleV1 {
-                outcome: Pr10ProjectionCaseOutcomeV1::CancelledWithoutPublication,
+            SemanticProjectionCaseV1::Cancellation,
+            SemanticProjectionCaseSampleV1 {
+                outcome: SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication,
                 elapsed_micros: elapsed_micros(cancellation_started),
                 input_bytes: 0,
                 chunks_added_or_changed: 0,
@@ -932,12 +932,12 @@ impl ProductionSemanticRuntimeV1 {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
         samples.insert(
-            Pr10ProjectionCaseV1::IncompatibleState,
+            SemanticProjectionCaseV1::IncompatibleState,
             projection_case_sample_from_prepared(
                 &incompatible,
                 incompatible_elapsed,
                 incompatible_input,
-                Pr10ProjectionCaseOutcomeV1::FullRebuildIncompatible,
+                SemanticProjectionCaseOutcomeV1::FullRebuildIncompatible,
             ),
         );
         Ok(samples)
@@ -1243,7 +1243,7 @@ impl ProductionSemanticRuntimeV1 {
         calibration: Option<&SemanticCalibrationProfileV1>,
         control: &C,
         mode: SemanticQueryModeV1,
-        fallback: Arc<Pr9FallbackSubpayload>,
+        fallback: Arc<QueryFallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
     where
         C: SemanticExecutionControl + Sync,
@@ -1526,15 +1526,15 @@ impl PreparedSemanticEvaluationGenerationV1 {
         let rerank = context
             .rerank_policy
             .zip(rerank_authority)
-            .map(
-                |(policy, authority)| crate::search_eval::pr10_native::Pr10NativeRerankInputV1 {
+            .map(|(policy, authority)| {
+                crate::search_eval::semantic_native::SemanticNativeRerankInputV1 {
                     request: context.request,
                     policy,
                     views: &mut rerank_views as &mut _,
                     executor: authority.executor(),
                     control: &control,
-                },
-            );
+                }
+            });
         if context.profile.semantic_weight_ppm == 0 {
             return evaluate(ProductionCandidateNativeQueryInputsV1 {
                 semantic: None,
@@ -1566,10 +1566,12 @@ impl PreparedSemanticEvaluationGenerationV1 {
         };
         let lane = SemanticCodeRetriever::new(&embedder, &scoped_vectors, &control);
         evaluate(ProductionCandidateNativeQueryInputsV1 {
-            semantic: Some(crate::search_eval::pr10_native::Pr10NativeSemanticInputV1 {
-                lane: &lane,
-                request: &request,
-            }),
+            semantic: Some(
+                crate::search_eval::semantic_native::SemanticNativeSemanticInputV1 {
+                    lane: &lane,
+                    request: &request,
+                },
+            ),
             rerank,
         })
     }
@@ -1704,7 +1706,10 @@ fn installed_artifact_member_bytes(
 fn evaluation_state_id() -> String {
     static NEXT_EVALUATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let sequence = NEXT_EVALUATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("pr10-native-evaluation:{}:{sequence}", std::process::id())
+    format!(
+        "semantic-native-evaluation:{}:{sequence}",
+        std::process::id()
+    )
 }
 
 fn block_on_semantic_evaluation<Output>(
@@ -2105,8 +2110,8 @@ fn projection_case_sample_from_prepared(
     prepared: &PreparedVectorGenerationV1,
     elapsed_micros: u64,
     input_bytes: u64,
-    outcome: Pr10ProjectionCaseOutcomeV1,
-) -> Pr10ProjectionCaseSampleV1 {
+    outcome: SemanticProjectionCaseOutcomeV1,
+) -> SemanticProjectionCaseSampleV1 {
     let mut chunks_added_or_changed = 0_u64;
     let mut chunks_deleted = 0_u64;
     let mut chunks_reused = 0_u64;
@@ -2119,7 +2124,7 @@ fn projection_case_sample_from_prepared(
             ProjectionOperationV1::Reused => chunks_reused += 1,
         }
     }
-    Pr10ProjectionCaseSampleV1 {
+    SemanticProjectionCaseSampleV1 {
         outcome,
         elapsed_micros,
         input_bytes,
@@ -2170,7 +2175,7 @@ fn execute_calibrated_semantic_query<'a, L>(
     lane: &'a L,
     readiness: SemanticLaneReadinessV1<'a>,
     mode: SemanticQueryModeV1,
-    fallback: Arc<Pr9FallbackSubpayload>,
+    fallback: Arc<QueryFallbackSubpayload>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
     L: SemanticLaneRetriever,
@@ -2208,7 +2213,7 @@ where
 /// [`DaemonSemanticRuntimeHandleV1::query_factory`].
 ///
 /// Non-ready / indexing / degraded states never construct the retriever and
-/// return the frozen PR9 fallback without waiting on `FastEmbed` download or
+/// return the frozen query fallback without waiting on `FastEmbed` download or
 /// projection. Exact/lexical/graph owners stay independently callable.
 pub fn compose_application_semantic_search<'a, V, C>(
     handle: &DaemonSemanticRuntimeHandleV1,
@@ -2218,7 +2223,7 @@ pub fn compose_application_semantic_search<'a, V, C>(
     vectors: &'a V,
     control: &'a C,
     mode: SemanticQueryModeV1,
-    fallback: Arc<Pr9FallbackSubpayload>,
+    fallback: Arc<QueryFallbackSubpayload>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
     V: SemanticVectorReadPort,
@@ -2272,7 +2277,7 @@ pub async fn compose_project_application_semantic_search<C>(
     calibration: Option<&SemanticCalibrationProfileV1>,
     control: &C,
     mode: SemanticQueryModeV1,
-    fallback: Arc<Pr9FallbackSubpayload>,
+    fallback: Arc<QueryFallbackSubpayload>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
     C: SemanticExecutionControl + Sync,
@@ -2298,9 +2303,9 @@ where
 }
 
 /// Production execution bridge for callers that already own authenticated
-/// semantic request material and an authenticated frozen PR9 composition.
+/// semantic request material and an authenticated frozen query composition.
 ///
-/// MCP cannot use this bridge until its query-MAC and PR9 composition
+/// MCP cannot use this bridge until its query-MAC and query composition
 /// authorities are mounted; accepting the typed request here prevents that
 /// boundary from inventing either input.
 #[derive(Clone, Copy, Debug, Default)]
@@ -2315,12 +2320,12 @@ impl ProductionProjectSemanticSearchBridgeV1 {
         calibration: Option<&'a SemanticCalibrationProfileV1>,
         control: &'a C,
         mode: SemanticQueryModeV1,
-        authorized_pr9: &'a AuthorizedPr9FallbackV1,
+        authorized_query: &'a AuthorizedQueryFallbackV1,
     ) -> SemanticRuntimeFuture<'a, Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>>
     where
         C: SemanticExecutionControl + Sync + 'a,
     {
-        if request.query_digest != authorized_pr9.query_digest {
+        if request.query_digest != authorized_query.query_digest {
             return Box::pin(async { Err(SemanticQueryServiceError::InvalidFallback) });
         }
         Box::pin(compose_project_application_semantic_search(
@@ -2330,7 +2335,7 @@ impl ProductionProjectSemanticSearchBridgeV1 {
             calibration,
             control,
             mode,
-            Arc::clone(&authorized_pr9.fallback),
+            Arc::clone(&authorized_query.fallback),
         ))
     }
 }
@@ -2926,12 +2931,12 @@ mod tests {
         }
     }
 
-    fn composition_fallback() -> Arc<Pr9FallbackSubpayload> {
-        let mut fallback = Pr9FallbackSubpayload {
-            profile_id: FusionProfileId::try_from("profile.pr9.semantic-contract.v1".to_owned())
+    fn composition_fallback() -> Arc<QueryFallbackSubpayload> {
+        let mut fallback = QueryFallbackSubpayload {
+            profile_id: FusionProfileId::try_from("profile.query.semantic-contract.v1".to_owned())
                 .expect("profile"),
             ordered_candidates: Vec::new(),
-            public_pr9_lane_coverage: BTreeMap::from([
+            public_fallback_lane_coverage: BTreeMap::from([
                 (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
                 (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
                 (RetrieverKind::Graph, PublicRetrieverStatus::Complete),

@@ -1,7 +1,7 @@
 //! Transport-independent semantic composition and optional rerank execution.
 //!
 //! This authority consumes the calibrated semantic lane decision and the
-//! already-authorized PR9 fallback. It never reconstructs the fallback
+//! already-authorized query fallback. It never reconstructs the fallback
 //! subpayload: every outcome carries the exact same caller-owned [`Arc`].
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_domain::{
     ComponentRevision, DiversityPolicy, FusionProfile, OptionalStagePublicStatus,
-    Pr9FallbackSubpayload, RankedCandidate, RerankPolicy, RetrievalRequest, RetrieverKind,
+    QueryFallbackSubpayload, RankedCandidate, RerankPolicy, RetrievalRequest, RetrieverKind,
     SanitizedStageFailure, SemanticRetrievalContinuationV1,
 };
 
@@ -18,7 +18,7 @@ use super::{
     SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCalibrationEvidenceV1,
     SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
 };
-use crate::retrieval::AuthorizedPr9FallbackV1;
+use crate::retrieval::AuthorizedQueryFallbackV1;
 use crate::retrieval::fusion::{CompositionKernel, CompositionOutputV1, FusionStageInput};
 use crate::retrieval::rerank::BoundedRerankOutcomeV1;
 
@@ -55,21 +55,21 @@ pub struct ExecutedSemanticCompositionV1 {
     pub composition: CompositionOutputV1,
     pub calibration: SemanticCalibrationEvidenceV1,
     pub rerank: OptionalStagePublicStatus,
-    pub fallback: Arc<Pr9FallbackSubpayload>,
+    pub fallback: Arc<QueryFallbackSubpayload>,
 }
 
-/// Semantic influence or the exact typed reason that PR9 remained authoritative.
+/// Semantic influence or the exact typed reason that query fallback remained authoritative.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticCompositionExecutionOutcomeV1 {
     Augmented(Box<ExecutedSemanticCompositionV1>),
     Fallback {
         abstention: SemanticAbstentionV1,
-        fallback: Arc<Pr9FallbackSubpayload>,
+        fallback: Arc<QueryFallbackSubpayload>,
     },
 }
 
 impl SemanticCompositionExecutionOutcomeV1 {
-    pub fn fallback(&self) -> &Arc<Pr9FallbackSubpayload> {
+    pub fn fallback(&self) -> &Arc<QueryFallbackSubpayload> {
         match self {
             Self::Augmented(executed) => &executed.fallback,
             Self::Fallback { fallback, .. } => fallback,
@@ -118,7 +118,7 @@ impl SemanticCompositionExecutionAuthorityV1 {
         self.rerank_policy.as_ref()
     }
 
-    /// Compose the original PR9 lane inputs with one admitted semantic lane.
+    /// Compose the original query lane inputs with one admitted semantic lane.
     ///
     /// Typed semantic abstentions pass through unchanged. Composition failure
     /// becomes a typed lane abstention, while strict mode remains unavailable.
@@ -127,13 +127,13 @@ impl SemanticCompositionExecutionAuthorityV1 {
     pub fn execute(
         &self,
         request: &RetrievalRequest,
-        authorized_pr9: &AuthorizedPr9FallbackV1,
+        authorized_query: &AuthorizedQueryFallbackV1,
         semantic: SemanticQueryServiceOutcomeV1,
         on_abstention: SemanticAbstentionDispositionV1,
         rerank: Option<SemanticRerankReadinessV1<'_>>,
     ) -> Result<SemanticCompositionExecutionOutcomeV1, SemanticQueryServiceError> {
-        if authorized_pr9.fallback.validate().is_err()
-            || !Arc::ptr_eq(semantic.fallback(), &authorized_pr9.fallback)
+        if authorized_query.fallback.validate().is_err()
+            || !Arc::ptr_eq(semantic.fallback(), &authorized_query.fallback)
         {
             return Err(SemanticQueryServiceError::InvalidFallback);
         }
@@ -152,7 +152,7 @@ impl SemanticCompositionExecutionAuthorityV1 {
             } => (semantic_lane, calibration, fallback),
         };
 
-        let mut lanes = authorized_pr9.pr9_lanes.clone();
+        let mut lanes = authorized_query.fallback_lanes.clone();
         lanes.push(semantic_lane);
         let mut composition = match self.composition.compose(
             &FusionStageInput {
@@ -171,7 +171,7 @@ impl SemanticCompositionExecutionAuthorityV1 {
             }
         };
 
-        let rerank = match authorized_pr9
+        let rerank = match authorized_query
             .request_cursor
             .as_ref()
             .and_then(|cursor| cursor.semantic.as_ref())
@@ -363,7 +363,7 @@ fn is_candidate_permutation(original: &[RankedCandidate], reranked: &[RankedCand
 fn semantic_abstention(
     disposition: SemanticAbstentionDispositionV1,
     abstention: SemanticAbstentionV1,
-    fallback: Arc<Pr9FallbackSubpayload>,
+    fallback: Arc<QueryFallbackSubpayload>,
 ) -> Result<SemanticCompositionExecutionOutcomeV1, SemanticQueryServiceError> {
     match disposition {
         SemanticAbstentionDispositionV1::UseFallback => {
@@ -491,10 +491,10 @@ mod tests {
         }
     }
 
-    fn fallback() -> Arc<Pr9FallbackSubpayload> {
+    fn fallback() -> Arc<QueryFallbackSubpayload> {
         Arc::new(
-            Pr9FallbackSubpayload::new(
-                id("profile.pr9.semantic-execution.v1"),
+            QueryFallbackSubpayload::new(
+                id("profile.query.semantic-execution.v1"),
                 Vec::new(),
                 BTreeMap::from([
                     (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
@@ -504,7 +504,7 @@ mod tests {
                 Vec::new(),
                 None,
             )
-            .expect("canonical PR9 fallback"),
+            .expect("canonical query fallback"),
         )
     }
 
@@ -535,16 +535,16 @@ mod tests {
         }
     }
 
-    fn authorized(fallback: Arc<Pr9FallbackSubpayload>) -> AuthorizedPr9FallbackV1 {
-        AuthorizedPr9FallbackV1 {
+    fn authorized(fallback: Arc<QueryFallbackSubpayload>) -> AuthorizedQueryFallbackV1 {
+        AuthorizedQueryFallbackV1 {
             query_digest: QueryDigest::new(
                 id("privacy.semantic-execution"),
                 1,
                 QueryMac::new(format!("hmac-sha256:{}", "1".repeat(64))).expect("query MAC"),
             ),
             fallback,
-            composition: empty_composition(id("profile.pr9.semantic-execution.v1")),
-            pr9_lanes: vec![
+            composition: empty_composition(id("profile.query.semantic-execution.v1")),
+            fallback_lanes: vec![
                 empty_lane(RetrieverKind::ExactLiteral),
                 empty_lane(RetrieverKind::Lexical),
                 empty_lane(RetrieverKind::Graph),
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn admitted_semantic_lane_reuses_pr9_lanes_and_fallback_identity() {
+    fn admitted_semantic_lane_reuses_fallback_lanes_and_fallback_identity() {
         let fallback = fallback();
         let identity = Arc::as_ptr(&fallback);
         let authorized = authorized(Arc::clone(&fallback));
@@ -783,7 +783,7 @@ mod tests {
     fn strict_mode_keeps_composition_failure_typed() {
         let fallback = fallback();
         let mut authorized = authorized(Arc::clone(&fallback));
-        authorized.pr9_lanes.clear();
+        authorized.fallback_lanes.clear();
         let result = authority().execute(
             &request(),
             &authorized,

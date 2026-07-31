@@ -403,7 +403,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         routing: RoutingContractV1::new(
             1,
             "Search symbols",
-            "Search the admitted single-root PR9 symbol evidence.",
+            "Search the admitted single-root query symbol evidence.",
             vec!["Find this symbol".to_owned()],
         )?,
         request_schema: request_schema.clone(),

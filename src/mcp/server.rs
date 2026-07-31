@@ -211,7 +211,7 @@ pub(crate) struct CodeIndexSearchCompletedV1 {
     pub(crate) ordered_candidates: Vec<tracedecay_domain::RankedCandidate>,
     /// Exact canonical object produced under the mounted query authority.
     /// Optional semantic work may report status but cannot mutate these bytes.
-    pub(crate) pr9_fallback: Arc<tracedecay_domain::Pr9FallbackSubpayload>,
+    pub(crate) query_fallback: Arc<tracedecay_domain::QueryFallbackSubpayload>,
     /// Authorized generation-bound display metadata, kept outside the
     /// canonical bytes so presentation cannot mutate ranking identity.
     pub(crate) display_by_anchor:

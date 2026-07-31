@@ -21,29 +21,29 @@ use tracedecay_code_index::projection::{
     expected_request_digest, project_for_publication,
 };
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, ExtractionBatchV1, FileOccurrenceId,
-    LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    UtcMicros, ValidatedCodeFileV1,
+    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, FileOccurrenceId,
+    LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
 };
 
 const WORKLOAD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmarks/pr9-code-index/workload-v1.json"
+    "/../../benchmarks/query-code-index/workload-v1.json"
 );
 const EXPECTED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmarks/pr9-code-index/expected-v1.json"
+    "/../../benchmarks/query-code-index/expected-v1.json"
 );
 const DEFAULT_RESULT_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmarks/pr9-code-index/result-provisional.json"
+    "/../../benchmarks/query-code-index/result-provisional.json"
 );
-const CHUNKER_V1: &str = "chunker.pr9-benchmark.v1";
-const CHUNKER_REPLAY: &str = "chunker.pr9-benchmark.replay";
-const CHUNKER_INCOMPATIBLE: &str = "chunker.pr9-benchmark.incompatible";
+const CHUNKER_V1: &str = "chunker.query-benchmark.v1";
+const CHUNKER_REPLAY: &str = "chunker.query-benchmark.replay";
+const CHUNKER_INCOMPATIBLE: &str = "chunker.query-benchmark.incompatible";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -409,7 +409,7 @@ impl CodeChunkProjectionSink for CountingSink {
 
 fn main() {
     if let Err(error) = run_cli() {
-        eprintln!("PR9 code-index benchmark: {error}");
+        eprintln!("query code-index benchmark: {error}");
         std::process::exit(1);
     }
 }
@@ -603,7 +603,7 @@ fn execute_case(
                 .ok_or_else(|| "warm workload has no source files".to_owned())?;
             changed
                 .bytes
-                .extend_from_slice(b"\n// pr9 benchmark one-file edit\n");
+                .extend_from_slice(b"\n// query benchmark one-file edit\n");
             let input_bytes = changed.bytes.len() as u64;
             (
                 rebuild_one_file(
@@ -868,9 +868,9 @@ fn chunker(
 ) -> Result<DeterministicCodeChunker, String> {
     Ok(DeterministicCodeChunker::new(
         generation_id,
-        id::<RepositoryId>("repo.pr9-code-index-benchmark")?,
-        id::<SanitizerRevision>("sanitizer.pr9-benchmark.v1")?,
-        id::<PolicyRevisionId>("policy.pr9-benchmark.v1")?,
+        id::<RepositoryId>("repo.query-code-index-benchmark")?,
+        id::<SanitizerRevision>("sanitizer.query-benchmark.v1")?,
+        id::<PolicyRevisionId>("policy.query-benchmark.v1")?,
         chunker_revision,
         tracedecay_code_extraction::LanguageRegistry::new(),
     ))
@@ -887,7 +887,7 @@ fn receipt_bound_file(
         content_digest: content_digest(&source.bytes),
         disposition: SnapshotFileDispositionV1::Present,
     };
-    let sanitizer_revision = id::<SanitizerRevision>("sanitizer.pr9-benchmark.v1")?;
+    let sanitizer_revision = id::<SanitizerRevision>("sanitizer.query-benchmark.v1")?;
     let intake = SanitizedCodeIntake::new(
         StaticLanguageRegistry::new(),
         sanitizer_revision.clone(),
@@ -895,13 +895,13 @@ fn receipt_bound_file(
     );
     let capability = intake
         .admit(SanitizedCodeSnapshotV1 {
-            repository: id::<RepositoryId>("repo.pr9-code-index-benchmark")?,
+            repository: id::<RepositoryId>("repo.query-code-index-benchmark")?,
             worktree: None,
             reference: None,
             source_revision: None,
             sanitizer_revision,
             sanitization_receipts: vec![id::<SanitizationReceiptId>(
-                "receipt.pr9-code-index-benchmark.v1",
+                "receipt.query-code-index-benchmark.v1",
             )?],
             content_identity: content_digest(&source.bytes),
             captured_at: UtcMicros(1_000_000),
@@ -911,6 +911,7 @@ fn receipt_bound_file(
     intake
         .bind_file(
             &capability,
+            &id::<ProjectId>("project.query-code-index-benchmark")?,
             ValidatedCodeFileV1 {
                 generation_id: generation_id.clone(),
                 file,
@@ -934,7 +935,7 @@ fn file_occurrence(
         .concat()
         .as_slice(),
     );
-    id::<FileOccurrenceId>(&format!("file.pr9-benchmark.{}", &digest[..32]))
+    id::<FileOccurrenceId>(&format!("file.query-benchmark.{}", &digest[..32]))
 }
 
 fn generation(sequence: u64) -> Result<CodeGenerationId, String> {
@@ -950,7 +951,7 @@ fn projection_request(
     case: CaseName,
     replay_reason: ProjectionReplayReasonV1,
 ) -> Result<ProjectionBatchRequestV1, String> {
-    let target = projection_key(b"pr9-code-index-lexical-profile-v1")?;
+    let target = projection_key(b"query-code-index-lexical-profile-v1")?;
     let previous_projection_key = (case != CaseName::Clean).then(|| target.clone());
     let mut request = ProjectionBatchRequestV1 {
         request_digest: digest_id::<ManifestDigest>(b"placeholder")?,
@@ -967,7 +968,7 @@ fn projection_request(
 fn projection_key(profile: &[u8]) -> Result<ProjectionKeyV1, String> {
     Ok(ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,
-        schema_revision: "lexical.pr9-benchmark.v1".to_owned(),
+        schema_revision: "lexical.query-benchmark.v1".to_owned(),
         profile_digest: digest_id(profile)?,
     })
 }
@@ -1149,13 +1150,13 @@ fn validate_manifests(
     expected: &ExpectedManifest,
 ) -> Result<(), String> {
     if workload.schema_version != 1
-        || workload.workload_id != "pr9-code-index-v1"
+        || workload.workload_id != "query-code-index-v1"
         || workload.harness_revision != "code-index-chunks.v2"
     {
         return Err("unsupported workload identity or revision".to_owned());
     }
     if workload.repetitions.warmups != 5 || workload.repetitions.measured != 30 {
-        return Err("PR9 requires exactly 5 warmups and 30 measured repetitions".to_owned());
+        return Err("query requires exactly 5 warmups and 30 measured repetitions".to_owned());
     }
     let cases = workload
         .cases
@@ -1163,7 +1164,7 @@ fn validate_manifests(
         .map(|case| case.name)
         .collect::<BTreeSet<_>>();
     if cases != CaseName::ALL.into_iter().collect() || workload.cases.len() != CaseName::ALL.len() {
-        return Err("workload must contain every PR9 case exactly once".to_owned());
+        return Err("workload must contain every query case exactly once".to_owned());
     }
     let calibration = calibrate(workload)?;
     if workload.corpus.content_digest != calibration.pins.content_digest
@@ -1197,7 +1198,7 @@ fn validate_manifests(
         || expected.workload_id != workload.workload_id
         || expected.scales != calibration.expected.scales
     {
-        return Err("expected PR9 case counts drifted".to_owned());
+        return Err("expected query case counts drifted".to_owned());
     }
     Ok(())
 }
@@ -1333,7 +1334,7 @@ fn percentile(values: &[f64], percentile: usize) -> f64 {
 
 fn corpus_digest(sources: &[WorkloadFile]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.pr9-code-index-corpus.v1\0");
+    hasher.update(b"tracedecay.query-code-index-corpus.v1\0");
     for source in sources {
         hasher.update(source.logical_path.as_bytes());
         hasher.update([0]);

@@ -215,7 +215,7 @@ fn retained_project_graph_resolver(
 
 struct McpSemanticExecutionControlV1 {
     started: std::time::Instant,
-    admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
+    admission_provider: query_mcp_admission::QueryMcpReadAdmissionProviderV1,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
 }
@@ -267,9 +267,9 @@ fn code_index_scope_unavailable() -> crate::mcp::server::CodeIndexSearchOutcomeV
 
 fn code_index_search_hydration_budget(
     accepted_semantic_budget: Option<&tracedecay_domain::RetrievalBudget>,
-    pr9_budget: &tracedecay_domain::RetrievalBudget,
+    query_budget: &tracedecay_domain::RetrievalBudget,
 ) -> tracedecay_domain::RetrievalBudget {
-    accepted_semantic_budget.copied().unwrap_or(*pr9_budget)
+    accepted_semantic_budget.copied().unwrap_or(*query_budget)
 }
 
 struct CodeIndexSearchHydrationSourceV1<A, P, H> {
@@ -518,7 +518,7 @@ impl tracedecay_query::retrieval::hydrate::HydrationExecutionControlV1
 fn code_index_search_executor(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_id: tracedecay_domain::ProjectId,
-    admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
+    admission_provider: query_mcp_admission::QueryMcpReadAdmissionProviderV1,
 ) -> crate::mcp::server::CodeIndexSearchExecutor {
     let execution_admission = Arc::new(tokio::sync::Semaphore::new(
         MAX_CONCURRENT_CODE_INDEX_SEARCHES,
@@ -570,19 +570,19 @@ fn code_index_search_executor(
             let terminal_expected_authority = authority.clone();
             let policy = match (
                 tracedecay_domain::SanitizerRevision::new(
-                    tracedecay_query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
+                    tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
                 ),
                 tracedecay_domain::QueryNormalizationRevision::new(
-                    tracedecay_query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+                    tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1,
                 ),
                 tracedecay_domain::ExactAdmissionRuleRevision::new(
-                    tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                    tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
                 ),
                 tracedecay_domain::ComponentRevision::new(
-                    tracedecay_query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                    tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
                 ),
                 tracedecay_domain::ScoreDomainId::new(
-                    tracedecay_query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                    tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
                 ),
             ) {
                 (
@@ -591,7 +591,7 @@ fn code_index_search_executor(
                     Ok(exact_rule_revision),
                     Ok(lexical_profile_revision),
                     Ok(lexical_score_domain),
-                ) => code_index_scheduler::pr9_runtime::Pr9SearchExecutionPolicyV1 {
+                ) => code_index_scheduler::query_runtime::QuerySearchExecutionPolicyV1 {
                     principal: authority.principal,
                     authorization_revision: authority.authorization_revision,
                     sanitizer_revision,
@@ -679,7 +679,7 @@ fn code_index_search_executor(
                 let execution_scope = scope.clone();
                 let execution_control = Arc::clone(&control);
                 let execution_request =
-                    code_index_scheduler::pr9_runtime::Pr9SearchExecutionRequestV1::new(
+                    code_index_scheduler::query_runtime::QuerySearchExecutionRequestV1::new(
                         request.query,
                         policy,
                     );
@@ -688,7 +688,7 @@ fn code_index_search_executor(
                     let _execution_permit = execution_permit;
                     runtime.block_on(async move {
                         execution_schedulers
-                            .execute_pr9_with_semantic(
+                            .execute_query_with_semantic(
                                 &execution_project_root,
                                 &execution_scope,
                                 execution_request,
@@ -769,14 +769,14 @@ fn code_index_search_executor(
             let executed = match execution_result {
                 Ok(executed) => executed,
                 Err(error) => {
-                    use code_index_scheduler::pr9_runtime::Pr9SearchExecutionErrorV1;
-                    use code_index_scheduler::semantic_query_runtime::Pr9SemanticSearchExecutionErrorV1;
+                    use code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1;
+                    use code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1;
                     tracing::warn!(
                         project_id = %project_id.as_str(),
                         error = %error,
                         "code_index_search_failed"
                     );
-                    if let Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                    if let QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
                         generation,
                         abstention,
                     } = &error
@@ -792,27 +792,27 @@ fn code_index_search_executor(
                         );
                     }
                     let reason = match error {
-                        Pr9SemanticSearchExecutionErrorV1::Pr9(error) => match error {
-                        Pr9SearchExecutionErrorV1::AuthorityUnavailable
-                        | Pr9SearchExecutionErrorV1::Authority(
-                            tracedecay_query::retrieval::Pr9QueryAuthorityErrorV1::AuthorityUnavailable,
+                        QuerySemanticSearchExecutionErrorV1::Query(error) => match error {
+                        QuerySearchExecutionErrorV1::AuthorityUnavailable
+                        | QuerySearchExecutionErrorV1::Authority(
+                            tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable,
                         ) => crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        Pr9SearchExecutionErrorV1::GenerationUnavailable => {
+                        QuerySearchExecutionErrorV1::GenerationUnavailable => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
                         }
-                        Pr9SearchExecutionErrorV1::InvalidScope(_)
-                        | Pr9SearchExecutionErrorV1::InvalidPolicy(_) => {
+                        QuerySearchExecutionErrorV1::InvalidScope(_)
+                        | QuerySearchExecutionErrorV1::InvalidPolicy(_) => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::InvalidRequest
                         }
-                        Pr9SearchExecutionErrorV1::Retrieval(_)
-                        | Pr9SearchExecutionErrorV1::Authority(_) => {
+                        QuerySearchExecutionErrorV1::Retrieval(_)
+                        | QuerySearchExecutionErrorV1::Authority(_) => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
                         }
                         },
-                        Pr9SemanticSearchExecutionErrorV1::Semantic(_) => {
+                        QuerySemanticSearchExecutionErrorV1::Semantic(_) => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
                         }
-                        Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => {
+                        QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable
                         }
                     };
@@ -830,7 +830,7 @@ fn code_index_search_executor(
             if let Some(reason) = control.request_termination() {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        code_generation: Some(executed.query.generation.as_str().to_owned()),
                         reason,
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                             reason: reason.as_str(),
@@ -841,7 +841,7 @@ fn code_index_search_executor(
             if !admission_provider.route_is_registered() {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        code_generation: Some(executed.query.generation.as_str().to_owned()),
                         reason:
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -858,7 +858,7 @@ fn code_index_search_executor(
                 _ => {
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                         crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            code_generation: Some(executed.query.generation.as_str().to_owned()),
                             reason:
                                 crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -873,7 +873,7 @@ fn code_index_search_executor(
                 Err(error) => {
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                         crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            code_generation: Some(executed.query.generation.as_str().to_owned()),
                             reason:
                                 crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -891,7 +891,7 @@ fn code_index_search_executor(
             {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        code_generation: Some(executed.query.generation.as_str().to_owned()),
                         reason:
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -919,18 +919,18 @@ fn code_index_search_executor(
                             abstention,
                         ),
                     },
-                    executed.pr9.authorized.fallback.ordered_candidates.clone(),
+                    executed.query.authorized.fallback.ordered_candidates.clone(),
                     fallback.cursor.clone(),
                     None,
                 ),
             };
             let Some(latest) = schedulers
-                .generation_for(&terminal_scope, &executed.pr9.generation)
+                .generation_for(&terminal_scope, &executed.query.generation)
                 .await
             else {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        code_generation: Some(executed.query.generation.as_str().to_owned()),
                         reason:
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -939,7 +939,7 @@ fn code_index_search_executor(
                     },
                 );
             };
-            let mut hydration_request = executed.pr9.sanitized.request().clone();
+            let mut hydration_request = executed.query.sanitized.request().clone();
             let hydration_budget = code_index_search_hydration_budget(
                 accepted_semantic_budget,
                 &hydration_request.budget,
@@ -1055,7 +1055,7 @@ fn code_index_search_executor(
                     );
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                         crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            code_generation: Some(executed.query.generation.as_str().to_owned()),
                             reason:
                                 crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
                             semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -1095,7 +1095,7 @@ fn code_index_search_executor(
             if let Some(reason) = control.request_termination() {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        code_generation: Some(executed.query.generation.as_str().to_owned()),
                         reason,
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                             reason: reason.as_str(),
@@ -1106,7 +1106,7 @@ fn code_index_search_executor(
             if !admission_provider.route_is_registered() {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        code_generation: Some(executed.query.generation.as_str().to_owned()),
                         reason:
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -1123,7 +1123,7 @@ fn code_index_search_executor(
                 _ => {
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                         crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            code_generation: Some(executed.query.generation.as_str().to_owned()),
                             reason:
                                 crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                             semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -1139,7 +1139,7 @@ fn code_index_search_executor(
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                             crate::mcp::server::CodeIndexSearchUnavailableV1 {
                                 code_generation: Some(
-                                    executed.pr9.generation.as_str().to_owned(),
+                                    executed.query.generation.as_str().to_owned(),
                                 ),
                                 reason:
                                     crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
@@ -1159,7 +1159,7 @@ fn code_index_search_executor(
             {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        code_generation: Some(executed.query.generation.as_str().to_owned()),
                         reason:
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
@@ -1170,9 +1170,9 @@ fn code_index_search_executor(
             }
             crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(
                 crate::mcp::server::CodeIndexSearchCompletedV1 {
-                    code_generation: executed.pr9.generation.as_str().to_owned(),
+                    code_generation: executed.query.generation.as_str().to_owned(),
                     ordered_candidates,
-                    pr9_fallback: executed.pr9.authorized.fallback,
+                    query_fallback: executed.query.authorized.fallback,
                     display_by_anchor,
                     semantic,
                     next_cursor,
@@ -1198,8 +1198,8 @@ mod core_logging;
 mod core_proxy;
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
-pub(crate) mod pr9_authority_provider;
 pub(crate) mod project_open_owners;
+pub(crate) mod query_authority_provider;
 pub(crate) mod remote_brain;
 pub(crate) mod remote_enrollment;
 mod remote_https;
@@ -1227,11 +1227,11 @@ pub(crate) use lsp_gateway::{
 };
 #[cfg(unix)]
 mod memory_repair_scheduler;
-mod pr9_mcp_admission;
 #[cfg(unix)]
 pub mod pr_autotrack;
 mod profile_host_admission_replay;
 pub(crate) mod profile_identity;
+mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
 mod service;
@@ -1795,7 +1795,7 @@ struct DaemonInvocationState {
     github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    pr9_authority_provider: pr9_authority_provider::DaemonPr9AuthorityProviderV1,
+    query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
     semantic_projection_scheduler:
         crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
@@ -1814,8 +1814,8 @@ impl Default for DaemonInvocationState {
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
-            pr9_authority_provider:
-                pr9_authority_provider::DaemonPr9AuthorityProviderV1::default(),
+            query_authority_provider:
+                query_authority_provider::DaemonQueryAuthorityProviderV1::default(),
             semantic_projection_scheduler:
                 crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
         }
@@ -1873,41 +1873,47 @@ impl DaemonInvocationState {
         DaemonLspOwnerRegistrar::new(&self.service)
     }
 
-    async fn mount_pr9_authority_for_project(
+    async fn mount_query_authority_for_project(
         &self,
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
-    ) -> std::result::Result<(), code_index_scheduler::pr9_runtime::Pr9RuntimeMountErrorV1> {
-        code_index_scheduler::pr9_runtime::mount_pr9_query_authority_on_project_open(
+    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
+    {
+        code_index_scheduler::query_runtime::mount_query_authority_on_project_open(
             &self.code_index_schedulers,
             project_root,
             scope,
-            &self.pr9_authority_provider,
+            &self.query_authority_provider,
         )
         .await
     }
 
-    fn restore_initial_pr9_authority_for_project(
+    fn restore_initial_query_authority_for_project(
         &self,
         scope: tracedecay_application::ResolvedScope,
         state: crate::config::retrieval::RetrievalProfileStateV1,
+        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
     ) -> std::result::Result<
-        pr9_authority_provider::Pr9AuthorityProviderStatusV1,
-        pr9_authority_provider::Pr9AuthorityUpdateErrorV1,
+        query_authority_provider::QueryAuthorityProviderStatusV1,
+        query_authority_provider::QueryAuthorityUpdateErrorV1,
     > {
-        self.pr9_authority_provider
-            .install_evaluated_initial_state(scope, state)
+        self.query_authority_provider
+            .install_evaluated_initial_state(scope, state, cursor_keys)
     }
 
-    fn pr9_activation_registrar(
+    fn query_activation_registrar(
         &self,
         project_root: &Path,
+        session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     ) -> Arc<dyn crate::application::semantic_runtime::RetrievalProfileActivationObserverV1> {
-        Arc::new(pr9_authority_provider::DaemonPr9ActivationRegistrarV1::new(
-            self.pr9_authority_provider.clone(),
-            self.code_index_schedulers.clone(),
-            project_root.to_path_buf(),
-        ))
+        Arc::new(
+            query_authority_provider::DaemonQueryActivationRegistrarV1::new(
+                self.query_authority_provider.clone(),
+                self.code_index_schedulers.clone(),
+                project_root.to_path_buf(),
+                session_db,
+            ),
+        )
     }
 
     async fn mount_code_index(
@@ -5959,7 +5965,7 @@ async fn production_project_server(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project search scope is invalid: {error:?}"),
             })?;
-    let code_search_admission = pr9_mcp_admission::admit_pr9_mcp_read(
+    let code_search_admission = query_mcp_admission::admit_query_mcp_read(
         Some(&profile_identity),
         &code_search_project_id,
         &code_search_scope,
@@ -5969,7 +5975,7 @@ async fn production_project_server(
         message: format!("project search admission is unavailable: {error}"),
     })?;
     let code_search_authority = code_search_admission.search_authority();
-    let read_admission_provider = pr9_mcp_admission::Pr9McpReadAdmissionProviderV1::new(
+    let read_admission_provider = query_mcp_admission::QueryMcpReadAdmissionProviderV1::new(
         profile_identity.clone(),
         code_search_project_id.clone(),
         Arc::clone(&route_registered),

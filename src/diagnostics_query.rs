@@ -1,5 +1,5 @@
 //! Typed diagnostic query core over [`DiagnosticsStore`] (Plan 35, "Universal
-//! managed diagnostics"; pr9/22-diagnostic-query-core packet).
+//! managed diagnostics"; query/22-diagnostic-query-core packet).
 //!
 //! This module is a pure read path: no writes, no repair, no schema changes.
 //! Every lane returns domain records with explicit coverage — `Complete`,

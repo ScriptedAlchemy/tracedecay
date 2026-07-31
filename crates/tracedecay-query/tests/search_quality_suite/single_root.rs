@@ -91,7 +91,7 @@ fn profile() -> FusionProfile {
     FusionProfile {
         profile_id: id("profile.fixture.v1"),
         evaluation_result_anchor: id("evaluation.fixture"),
-        calibrations: RetrieverKind::PR9_FALLBACK_LANES
+        calibrations: RetrieverKind::QUERY_FALLBACK_LANES
             .into_iter()
             .map(|lane| {
                 (

@@ -1418,16 +1418,16 @@ async fn register_semantic_activation_owner(
         Some(state) => state,
         None => {
             let (report, accepted_profile, runtime) =
-                crate::application::semantic_runtime::bundled_pr9_authority().map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!("bundled PR9 authority rejected: {error}"),
-                    }
-                })?;
+                crate::application::semantic_runtime::bundled_query_authority().map_err(
+                    |error| TraceDecayError::Config {
+                        message: format!("bundled query authority rejected: {error}"),
+                    },
+                )?;
             let evaluation_corpus_digest = tracedecay_domain::ManifestDigest::new(
                 report.corpus_digest.clone(),
             )
             .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled PR9 corpus digest rejected: {error}"),
+                message: format!("bundled query corpus digest rejected: {error}"),
             })?;
             accepted_profiles
                 .publish(
@@ -1438,7 +1438,7 @@ async fn register_semantic_activation_owner(
                 )
                 .await
                 .map_err(|error| TraceDecayError::Config {
-                    message: format!("bundled PR9 authority publication failed: {error}"),
+                    message: format!("bundled query authority publication failed: {error}"),
                 })?;
             let state = crate::config::retrieval::RetrievalProfileStateV1::new(
                 configuration.revision_id.clone(),
@@ -1446,23 +1446,31 @@ async fn register_semantic_activation_owner(
                 &runtime,
             )
             .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled PR9 initial state rejected: {error}"),
+                message: format!("bundled query initial state rejected: {error}"),
             })?;
             configuration_store
                 .install_initial_state(&configuration_pin, &state)
                 .await
                 .map_err(|error| TraceDecayError::Config {
-                    message: format!("bundled PR9 initial state publication failed: {error}"),
+                    message: format!("bundled query initial state publication failed: {error}"),
                 })?;
             state
         }
     };
-    let observer = invocation.pr9_activation_registrar(project_root);
+    let observer = invocation.query_activation_registrar(project_root, Arc::clone(&session_db));
     if current_state.audit().is_empty() {
+        let cursor_keys = Arc::new(
+            session_db
+                .load_session_cursor_key_provider_result()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("query cursor key authority unavailable: {error}"),
+                })?,
+        );
         invocation
-            .restore_initial_pr9_authority_for_project(scope.clone(), current_state)
+            .restore_initial_query_authority_for_project(scope.clone(), current_state, cursor_keys)
             .map_err(|error| TraceDecayError::Config {
-                message: format!("bundled PR9 initial authority restore failed: {error}"),
+                message: format!("bundled query initial authority restore failed: {error}"),
             })?;
     } else {
         let committed = configuration_store
@@ -1482,15 +1490,15 @@ async fn register_semantic_activation_owner(
             })?;
     }
     if let Err(error) = invocation
-        .mount_pr9_authority_for_project(project_root, &scope)
+        .mount_query_authority_for_project(project_root, &scope)
         .await
     {
         tracing::debug!(
-            event = "pr9_authority_mount",
+            event = "query_authority_mount",
             outcome = "unavailable",
             project_id = %scope.project_id,
             reason = %error,
-            "PR9 search authority unavailable; non-search project surfaces remain mounted"
+            "query search authority unavailable; non-search project surfaces remain mounted"
         );
     }
     if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
@@ -1508,7 +1516,7 @@ async fn register_semantic_activation_owner(
             outcome = "unavailable",
             project_id = %scope.project_id,
             reason = %error,
-            "semantic query authority unavailable; canonical PR9 remains mounted"
+            "semantic query authority unavailable; canonical query remains mounted"
         );
     }
     let Some(inspector) =

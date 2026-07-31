@@ -1545,7 +1545,7 @@ fn commit_production_composition_project(project: &std::path::Path) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_composition_harness_wires_pr9_search_authority() {
+async fn production_composition_harness_wires_query_search_authority() {
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source dir");
@@ -1579,7 +1579,7 @@ async fn production_composition_harness_wires_pr9_search_authority() {
                 candidate["display"]["name"] == json!("production_composition_probe")
             })
         }),
-        "production PR9 search authority did not return the indexed symbol: {payload}"
+        "production query search authority did not return the indexed symbol: {payload}"
     );
     harness.shutdown().await;
 }

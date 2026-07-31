@@ -438,7 +438,7 @@ impl FakeVectorGenerationStoreV1 {
     }
 
     /// Discard any checkpointed execution for the same deterministic build
-    /// identity and restart projection from its authoritative PR9 inputs.
+    /// identity and restart projection from its authoritative query inputs.
     /// Already-published generations and the active pointer are untouched.
     pub fn rebuild_generation(
         &mut self,
@@ -965,7 +965,7 @@ pub struct DatabaseVectorGenerationStoreV1<'database> {
     database: &'database Database,
 }
 
-/// SQLite-backed, non-authoritative state used by the native PR10 evaluator.
+/// SQLite-backed, non-authoritative state used by the native semantic evaluator.
 ///
 /// It executes the same generation state machine and writer path as
 /// production, but uses an isolated row that is removed after the measured
@@ -3246,7 +3246,7 @@ mod tests {
                 .expect("database");
 
         let evaluation =
-            DatabaseVectorEvaluationStoreV1::open(&database, "pr10-native-evaluation:test")
+            DatabaseVectorEvaluationStoreV1::open(&database, "semantic-native-evaluation:test")
                 .await
                 .expect("SQLite-backed evaluation store");
         assert_eq!(

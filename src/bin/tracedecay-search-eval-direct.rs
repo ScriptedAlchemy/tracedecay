@@ -16,7 +16,7 @@ use tracedecay::search_eval::{
 #[derive(Debug, Parser)]
 #[command(
     name = "tracedecay-search-eval",
-    about = "Run direct PR9/PR10 search-quality evaluation"
+    about = "Run direct query/semantic search-quality evaluation"
 )]
 struct Cli {
     #[command(subcommand)]

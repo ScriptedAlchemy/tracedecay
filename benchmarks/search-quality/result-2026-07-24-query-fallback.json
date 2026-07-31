@@ -2,8 +2,8 @@
   "schema_version": 1,
   "recorded_at_utc": "2026-07-24T05:38:20Z",
   "status": "fail",
-  "scope": "pr9-fallback",
-  "command": "cargo run --quiet --bin tracedecay-search-eval -- compare --profiles pr9-fallback",
+  "scope": "query-fallback",
+  "command": "cargo run --quiet --bin tracedecay-search-eval -- compare --profiles query-fallback",
   "exit_code": 2,
   "evaluator_status": "invalid",
   "reason": "ranked candidate code-chunk:chunk.v1.sha256:5b55aef74d4248d5a7b186c3489bc319f749c063618d54ec934ac3ab4a3c72bf has no corpus occurrence binding",
@@ -13,7 +13,7 @@
     "repository_state": "dirty_shared_checkout"
   },
   "workload": {
-    "path": "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json",
+    "path": "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json",
     "sha256": "114a8ca919d2db7700f56810ccce6a70e2424ba4d4f231d7eeefe163da9552ff",
     "source_repository_commit": "01b0a0afe34c3342d6b5b076383f86ed8a8d0c66",
     "source_repository_tree": "3d8de57a843244229c3b19995c9d0b9e00081769",
@@ -30,5 +30,5 @@
     "status": "not_recorded",
     "reason": "the evaluator rejected the candidate before emitting a comparison report"
   },
-  "next_corrective_owner": "PR9 search-quality evaluator and corpus-occurrence binding"
+  "next_corrective_owner": "QUERY search-quality evaluator and corpus-occurrence binding"
 }

@@ -2,7 +2,7 @@
 //!
 //! Internal `stage_hunks` / `unstage_hunks` / `commit_index` capabilities remain
 //! application-only (no surface bindings). Adapters expose only `git_preview`
-//! and `git_apply`; PR9 status/diff/history/blame/hunk reads are callable
+//! and `git_apply`; query status/diff/history/blame/hunk reads are callable
 //! independently and expose no mutation capability.
 
 use tracedecay_tool_catalog::{

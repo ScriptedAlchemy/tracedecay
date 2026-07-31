@@ -19,12 +19,11 @@ use thiserror::Error;
 use tracedecay_domain::{
     CandidateContribution, CandidateSetDigest, CompactCandidate, ComponentRevision,
     EphemeralSanitizedQueryViewV1, ExactClass, FixedPointScore, FusedCandidate, FusionProfile,
-    LogicalEvidenceId, OccurrenceProvenance, PrivacyDomainId,
-    PublicRetrieverStatus, QueryDigest, QueryMac, QueryNormalizationRevision, RankedCandidate,
-    RankingDecision, RankingDecisionKind, RetrievalAnchorId, RetrievalContractError,
-    RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch,
-    RetrieverContinuation, RetrieverKind, RetrieverOutcome, SanitizerRevision, SourceFreshness,
-    SourceOccurrenceId, UtcMicros,
+    LogicalEvidenceId, OccurrenceProvenance, PrivacyDomainId, PublicRetrieverStatus, QueryDigest,
+    QueryMac, QueryNormalizationRevision, RankedCandidate, RankingDecision, RankingDecisionKind,
+    RetrievalAnchorId, RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId,
+    RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind,
+    RetrieverOutcome, SanitizerRevision, SourceFreshness, SourceOccurrenceId, UtcMicros,
 };
 use zeroize::Zeroizing;
 
@@ -547,7 +546,7 @@ pub struct CompositionPageV1 {
     pub cursor: Option<RetrievalCursor>,
 }
 
-/// Generic PR9 composition kernel. Evidence values are validated by
+/// Generic query composition kernel. Evidence values are validated by
 /// `RetrieverBatch<E>` but never interpreted, copied, or hydrated here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompositionKernel {

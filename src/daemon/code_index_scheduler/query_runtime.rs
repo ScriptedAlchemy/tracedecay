@@ -1,7 +1,7 @@
-//! Fail-closed production activation and execution for authenticated PR9 search.
+//! Fail-closed production activation and execution for authenticated query search.
 //!
 //! The daemon owns only orchestration here. Accepted profile/evaluation state
-//! and process-local query/cursor keys come from a configured authority port;
+//! and durable provider-derived query/cursor keys come from a configured authority port;
 //! this module never chooses weights, anchors, revisions, or key material.
 
 use std::collections::BTreeSet;
@@ -30,13 +30,13 @@ use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
 use tracedecay_query::retrieval::{
-    AuthorizedPr9FallbackV1, Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1, RawRetrievalRequestV1,
+    AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
     RetrievalPortError, SanitizedRetrievalRequestV1,
 };
 
-/// Immutable evidence that a configured authority accepted one exact PR9
+/// Immutable evidence that a configured authority accepted one exact query
 /// profile for one exact admitted scope.
-pub(in crate::daemon) struct AcceptedPr9EvaluationV1 {
+pub(in crate::daemon) struct AcceptedQueryEvaluationV1 {
     pub status: crate::search_eval::DirectEvaluationStatusV1,
     pub scope_digest: tracedecay_domain::ManifestDigest,
     pub profile_id: FusionProfileId,
@@ -44,11 +44,11 @@ pub(in crate::daemon) struct AcceptedPr9EvaluationV1 {
 }
 
 /// Provider-owned activation material. The keyring is already constructed by
-/// the configured process-local secret authority, so raw key bytes never cross
+/// the configured durable key authority, so raw key bytes never cross
 /// this daemon orchestration boundary.
-pub(in crate::daemon) struct Pr9AuthorityMaterialV1 {
+pub(in crate::daemon) struct QueryAuthorityMaterialV1 {
     pub scope: ResolvedScope,
-    pub evaluation: AcceptedPr9EvaluationV1,
+    pub evaluation: AcceptedQueryEvaluationV1,
     pub profile: FusionProfile,
     pub diversity: DiversityPolicy,
     pub ranking_revision: ComponentRevision,
@@ -56,8 +56,8 @@ pub(in crate::daemon) struct Pr9AuthorityMaterialV1 {
 }
 
 #[derive(Debug, Error)]
-pub(in crate::daemon) enum Pr9AuthorityProviderErrorV1 {
-    #[error("configured PR9 authority is unavailable: {0}")]
+pub(in crate::daemon) enum QueryAuthorityProviderErrorV1 {
+    #[error("configured query authority is unavailable: {0}")]
     Unavailable(String),
 }
 
@@ -65,37 +65,37 @@ pub(in crate::daemon) enum Pr9AuthorityProviderErrorV1 {
 ///
 /// Returning a list is intentional: the daemon rejects zero or multiple
 /// candidates rather than selecting an arbitrary profile or key owner.
-pub(in crate::daemon) trait Pr9AuthorityProviderV1: Send + Sync {
+pub(in crate::daemon) trait QueryAuthorityProviderV1: Send + Sync {
     fn accepted_authorities(
         &self,
         scope: &ResolvedScope,
         privacy_domain: &PrivacyDomainId,
-    ) -> Result<Vec<Pr9AuthorityMaterialV1>, Pr9AuthorityProviderErrorV1>;
+    ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1>;
 }
 
 #[derive(Debug, Error)]
-pub(in crate::daemon) enum Pr9RuntimeMountErrorV1 {
+pub(in crate::daemon) enum QueryRuntimeMountErrorV1 {
     #[error(transparent)]
-    Provider(#[from] Pr9AuthorityProviderErrorV1),
-    #[error("no accepted PR9 authority exists for the exact admitted scope")]
+    Provider(#[from] QueryAuthorityProviderErrorV1),
+    #[error("no accepted query authority exists for the exact admitted scope")]
     AuthorityMissing,
-    #[error("multiple PR9 authorities match the exact admitted scope")]
+    #[error("multiple query authorities match the exact admitted scope")]
     AuthorityAmbiguous,
-    #[error("PR9 authority scope does not exactly match the admitted scope")]
+    #[error("query authority scope does not exactly match the admitted scope")]
     ScopeMismatch,
-    #[error("PR9 evaluation is not PASS")]
+    #[error("query evaluation is not PASS")]
     EvaluationNotPassed,
-    #[error("PR9 evaluation no longer binds the supplied profile")]
+    #[error("query evaluation no longer binds the supplied profile")]
     EvaluationStale,
-    #[error("PR9 process-local query/cursor key is unavailable")]
+    #[error("durable query cursor key is unavailable")]
     KeyUnavailable,
-    #[error("PR9 query/cursor key privacy domain does not match the published generation")]
+    #[error("query/cursor key privacy domain does not match the published generation")]
     PrivacyDomainMismatch,
     #[error("no complete current code generation exists for the exact admitted scope")]
     GenerationUnavailable,
     #[error(transparent)]
-    Authority(#[from] Pr9QueryAuthorityErrorV1),
-    #[error("PR9 authority mount failed: {0}")]
+    Authority(#[from] QueryAuthorityErrorV1),
+    #[error("query authority mount failed: {0}")]
     Mount(String),
 }
 
@@ -103,52 +103,52 @@ pub(in crate::daemon) enum Pr9RuntimeMountErrorV1 {
 ///
 /// Kept separate from the async registry mutation so project-open callers can
 /// report precise configuration failures before changing mounted state.
-pub(in crate::daemon) fn prepare_pr9_query_authority(
+pub(in crate::daemon) fn prepare_query_authority(
     scope: &ResolvedScope,
     privacy_domain: &PrivacyDomainId,
-    provider: &dyn Pr9AuthorityProviderV1,
-) -> Result<Arc<Pr9QueryAuthorityV1>, Pr9RuntimeMountErrorV1> {
+    provider: &dyn QueryAuthorityProviderV1,
+) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
     scope
         .validate()
-        .map_err(|_| Pr9RuntimeMountErrorV1::ScopeMismatch)?;
+        .map_err(|_| QueryRuntimeMountErrorV1::ScopeMismatch)?;
     privacy_domain
         .validate()
-        .map_err(|_| Pr9RuntimeMountErrorV1::PrivacyDomainMismatch)?;
+        .map_err(|_| QueryRuntimeMountErrorV1::PrivacyDomainMismatch)?;
     let mut candidates = provider.accepted_authorities(scope, privacy_domain)?;
     if candidates.is_empty() {
-        return Err(Pr9RuntimeMountErrorV1::AuthorityMissing);
+        return Err(QueryRuntimeMountErrorV1::AuthorityMissing);
     }
     if candidates.len() != 1 {
-        return Err(Pr9RuntimeMountErrorV1::AuthorityAmbiguous);
+        return Err(QueryRuntimeMountErrorV1::AuthorityAmbiguous);
     }
     let material = candidates
         .pop()
-        .ok_or(Pr9RuntimeMountErrorV1::AuthorityMissing)?;
+        .ok_or(QueryRuntimeMountErrorV1::AuthorityMissing)?;
     material
         .scope
         .validate()
-        .map_err(|_| Pr9RuntimeMountErrorV1::ScopeMismatch)?;
+        .map_err(|_| QueryRuntimeMountErrorV1::ScopeMismatch)?;
     if material.scope != *scope {
-        return Err(Pr9RuntimeMountErrorV1::ScopeMismatch);
+        return Err(QueryRuntimeMountErrorV1::ScopeMismatch);
     }
     if material.evaluation.scope_digest != scope.scope_digest {
-        return Err(Pr9RuntimeMountErrorV1::EvaluationStale);
+        return Err(QueryRuntimeMountErrorV1::EvaluationStale);
     }
     if material.evaluation.status != crate::search_eval::DirectEvaluationStatusV1::Pass {
-        return Err(Pr9RuntimeMountErrorV1::EvaluationNotPassed);
+        return Err(QueryRuntimeMountErrorV1::EvaluationNotPassed);
     }
     if material.evaluation.profile_id != material.profile.profile_id
         || material.evaluation.evaluation_result_anchor != material.profile.evaluation_result_anchor
     {
-        return Err(Pr9RuntimeMountErrorV1::EvaluationStale);
+        return Err(QueryRuntimeMountErrorV1::EvaluationStale);
     }
     let keyring = material
         .keyring
-        .ok_or(Pr9RuntimeMountErrorV1::KeyUnavailable)?;
+        .ok_or(QueryRuntimeMountErrorV1::KeyUnavailable)?;
     if keyring.privacy_domain() != privacy_domain {
-        return Err(Pr9RuntimeMountErrorV1::PrivacyDomainMismatch);
+        return Err(QueryRuntimeMountErrorV1::PrivacyDomainMismatch);
     }
-    Ok(Arc::new(Pr9QueryAuthorityV1::new(
+    Ok(Arc::new(QueryAuthorityV1::new(
         material.profile,
         material.diversity,
         material.ranking_revision,
@@ -158,29 +158,29 @@ pub(in crate::daemon) fn prepare_pr9_query_authority(
 
 /// Callable project-open hook: resolve a configured accepted authority and
 /// mount it only for the same exact scope as the already-mounted worktree.
-pub(in crate::daemon) async fn mount_pr9_query_authority_on_project_open(
+pub(in crate::daemon) async fn mount_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    provider: &dyn Pr9AuthorityProviderV1,
-) -> Result<(), Pr9RuntimeMountErrorV1> {
+    provider: &dyn QueryAuthorityProviderV1,
+) -> Result<(), QueryRuntimeMountErrorV1> {
     let latest = registry
         .latest_complete_fresh_for_scope(scope)
         .await
-        .ok_or(Pr9RuntimeMountErrorV1::GenerationUnavailable)?;
+        .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?;
     let privacy_domain = latest.generation.manifest().privacy_domain.clone();
-    let authority = prepare_pr9_query_authority(scope, &privacy_domain, provider)?;
+    let authority = prepare_query_authority(scope, &privacy_domain, provider)?;
     registry
-        .mount_pr9_query_authority(project_root, scope, authority)
+        .mount_query_authority(project_root, scope, authority)
         .await
-        .map_err(|error| Pr9RuntimeMountErrorV1::Mount(error.to_string()))
+        .map_err(|error| QueryRuntimeMountErrorV1::Mount(error.to_string()))
 }
 
-/// Caller-owned, versioned lane policy for one raw PR9 query.
+/// Caller-owned, versioned lane policy for one raw query.
 ///
 /// Query bytes are intentionally private and omitted from `Debug`; they are
 /// consumed immediately by [`RawRetrievalRequestV1::sanitize`].
-pub(in crate::daemon) struct Pr9SearchExecutionRequestV1 {
+pub(in crate::daemon) struct QuerySearchExecutionRequestV1 {
     query: String,
     pub principal: PrincipalId,
     pub authorization_revision: AuthorizationRevision,
@@ -196,8 +196,8 @@ pub(in crate::daemon) struct Pr9SearchExecutionRequestV1 {
     pub cursor: Option<RetrievalCursor>,
 }
 
-impl Pr9SearchExecutionRequestV1 {
-    pub fn new(query: impl Into<String>, policy: Pr9SearchExecutionPolicyV1) -> Self {
+impl QuerySearchExecutionRequestV1 {
+    pub fn new(query: impl Into<String>, policy: QuerySearchExecutionPolicyV1) -> Self {
         Self {
             query: query.into(),
             principal: policy.principal,
@@ -217,7 +217,7 @@ impl Pr9SearchExecutionRequestV1 {
 }
 
 /// Non-secret execution policy supplied by the mounted MCP/application owner.
-pub(in crate::daemon) struct Pr9SearchExecutionPolicyV1 {
+pub(in crate::daemon) struct QuerySearchExecutionPolicyV1 {
     pub principal: PrincipalId,
     pub authorization_revision: AuthorizationRevision,
     pub sanitizer_revision: SanitizerRevision,
@@ -232,49 +232,49 @@ pub(in crate::daemon) struct Pr9SearchExecutionPolicyV1 {
     pub cursor: Option<RetrievalCursor>,
 }
 
-pub(in crate::daemon) struct ExecutedPr9SearchV1 {
+pub(in crate::daemon) struct ExecutedQuerySearchV1 {
     pub generation: CodeGenerationId,
-    pub authorized: AuthorizedPr9FallbackV1,
+    pub authorized: AuthorizedQueryFallbackV1,
     pub sanitized: SanitizedRetrievalRequestV1,
 }
 
 #[derive(Debug, Error)]
-pub(in crate::daemon) enum Pr9SearchExecutionErrorV1 {
-    #[error("PR9 search scope is invalid: {0}")]
+pub(in crate::daemon) enum QuerySearchExecutionErrorV1 {
+    #[error("query search scope is invalid: {0}")]
     InvalidScope(String),
     #[error("no complete current code generation matches the exact admitted scope")]
     GenerationUnavailable,
-    #[error("PR9 query authority is unavailable for the exact admitted scope")]
+    #[error("query authority is unavailable for the exact admitted scope")]
     AuthorityUnavailable,
-    #[error("PR9 search policy is invalid: {0}")]
+    #[error("query search policy is invalid: {0}")]
     InvalidPolicy(String),
-    #[error("PR9 request or production lane boundary failed: {0}")]
+    #[error("query request or production lane boundary failed: {0}")]
     Retrieval(#[from] RetrievalPortError),
-    #[error("PR9 query authorization/composition failed: {0}")]
-    Authority(#[from] Pr9QueryAuthorityErrorV1),
+    #[error("query authorization/composition failed: {0}")]
+    Authority(#[from] QueryAuthorityErrorV1),
 }
 
 impl CodeIndexSchedulerRegistryV1 {
     /// Execute exact, lexical, and graph independently against the newest
     /// complete generation for one exact scope, then pass their typed outcomes
-    /// unchanged into the authenticated PR9 composition authority.
-    pub(in crate::daemon) async fn execute_pr9_search(
+    /// unchanged into the authenticated query composition authority.
+    pub(in crate::daemon) async fn execute_query_search(
         &self,
         scope: &ResolvedScope,
-        input: Pr9SearchExecutionRequestV1,
-    ) -> Result<ExecutedPr9SearchV1, Pr9SearchExecutionErrorV1> {
+        input: QuerySearchExecutionRequestV1,
+    ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1> {
         scope
             .validate()
-            .map_err(|error| Pr9SearchExecutionErrorV1::InvalidScope(error.to_string()))?;
+            .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
         validate_search_policy(&input)?;
         let latest = self
             .latest_complete_ready_for_scope(scope)
             .await
-            .ok_or(Pr9SearchExecutionErrorV1::GenerationUnavailable)?;
+            .ok_or(QuerySearchExecutionErrorV1::GenerationUnavailable)?;
         let authority = self
-            .pr9_query_authority_for_scope(scope)
+            .query_authority_for_scope(scope)
             .await
-            .ok_or(Pr9SearchExecutionErrorV1::AuthorityUnavailable)?;
+            .ok_or(QuerySearchExecutionErrorV1::AuthorityUnavailable)?;
         let generation = latest.generation.manifest().generation_id.clone();
         let request = RetrievalRequest {
             principal: input.principal,
@@ -292,7 +292,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 freshness_digest: FreshnessVectorDigest::new(
                     latest.generation.manifest().snapshot_digest.as_str(),
                 )
-                .map_err(|error| Pr9SearchExecutionErrorV1::InvalidPolicy(error.to_string()))?,
+                .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?,
                 authorization_revision: input.authorization_revision,
                 captured_at: latest.generation.manifest().seal.sealed_at,
             },
@@ -348,14 +348,14 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let lanes = vec![
             CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
-                .map_err(Pr9QueryAuthorityErrorV1::from)?,
+                .map_err(QueryAuthorityErrorV1::from)?,
             CompositionLaneInput::new(RetrieverKind::Lexical, lexical)
-                .map_err(Pr9QueryAuthorityErrorV1::from)?,
+                .map_err(QueryAuthorityErrorV1::from)?,
             CompositionLaneInput::new(RetrieverKind::Graph, graph)
-                .map_err(Pr9QueryAuthorityErrorV1::from)?,
+                .map_err(QueryAuthorityErrorV1::from)?,
         ];
         let authorized = self
-            .compose_pr9_fallback(
+            .compose_query_fallback(
                 scope,
                 request,
                 query_view,
@@ -364,7 +364,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 input.cursor.as_ref(),
             )
             .await?;
-        Ok(ExecutedPr9SearchV1 {
+        Ok(ExecutedQuerySearchV1 {
             generation,
             authorized,
             sanitized,
@@ -373,39 +373,39 @@ impl CodeIndexSchedulerRegistryV1 {
 }
 
 fn validate_search_policy(
-    input: &Pr9SearchExecutionRequestV1,
-) -> Result<(), Pr9SearchExecutionErrorV1> {
+    input: &QuerySearchExecutionRequestV1,
+) -> Result<(), QuerySearchExecutionErrorV1> {
     input
         .authorization_revision
         .validate()
-        .map_err(|error| Pr9SearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
+        .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
     input
         .sanitizer_revision
         .validate()
-        .map_err(|error| Pr9SearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
+        .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
     input
         .normalization_revision
         .validate()
-        .map_err(|error| Pr9SearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
+        .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
     input
         .exact_rule_revision
         .validate()
-        .map_err(|error| Pr9SearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
+        .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
     input
         .lexical_profile_revision
         .validate()
-        .map_err(|error| Pr9SearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
+        .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
     input
         .lexical_score_domain
         .validate()
-        .map_err(|error| Pr9SearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
+        .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?;
     if input.page_size == 0 {
-        return Err(Pr9SearchExecutionErrorV1::InvalidPolicy(
+        return Err(QuerySearchExecutionErrorV1::InvalidPolicy(
             "page size must be positive".to_owned(),
         ));
     }
     if input.graph_max_depth == 0 || input.graph_edge_kinds.is_empty() {
-        return Err(Pr9SearchExecutionErrorV1::InvalidPolicy(
+        return Err(QuerySearchExecutionErrorV1::InvalidPolicy(
             "graph depth and edge-kind policy must be non-empty".to_owned(),
         ));
     }
@@ -415,7 +415,7 @@ fn validate_search_policy(
         .copied()
         .collect::<BTreeSet<_>>();
     if unique_edges.len() != input.graph_edge_kinds.len() {
-        return Err(Pr9SearchExecutionErrorV1::InvalidPolicy(
+        return Err(QuerySearchExecutionErrorV1::InvalidPolicy(
             "graph edge kinds must be unique".to_owned(),
         ));
     }
@@ -482,21 +482,21 @@ mod tests {
     };
 
     use super::{
-        AcceptedPr9EvaluationV1, Pr9AuthorityMaterialV1, Pr9AuthorityProviderErrorV1,
-        Pr9AuthorityProviderV1, Pr9RuntimeMountErrorV1, prepare_pr9_query_authority,
+        AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
+        QueryAuthorityProviderV1, QueryRuntimeMountErrorV1, prepare_query_authority,
     };
     use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 
     struct OneShotProvider {
-        candidates: Mutex<Option<Vec<Pr9AuthorityMaterialV1>>>,
+        candidates: Mutex<Option<Vec<QueryAuthorityMaterialV1>>>,
     }
 
-    impl Pr9AuthorityProviderV1 for OneShotProvider {
+    impl QueryAuthorityProviderV1 for OneShotProvider {
         fn accepted_authorities(
             &self,
             _scope: &ResolvedScope,
             _privacy_domain: &PrivacyDomainId,
-        ) -> Result<Vec<Pr9AuthorityMaterialV1>, Pr9AuthorityProviderErrorV1> {
+        ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1> {
             Ok(self
                 .candidates
                 .lock()
@@ -526,9 +526,9 @@ mod tests {
 
     fn profile() -> FusionProfile {
         FusionProfile {
-            profile_id: id("profile.pr9.accepted.v1"),
-            evaluation_result_anchor: id("evaluation.pr9.accepted.v1"),
-            calibrations: RetrieverKind::PR9_FALLBACK_LANES
+            profile_id: id("profile.query.accepted.v1"),
+            evaluation_result_anchor: id("evaluation.query.accepted.v1"),
+            calibrations: RetrieverKind::QUERY_FALLBACK_LANES
                 .into_iter()
                 .map(|lane| {
                     (
@@ -548,7 +548,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            diversity_policy_id: id("diversity.pr9.accepted.v1"),
+            diversity_policy_id: id("diversity.query.accepted.v1"),
             rerank_policy_id: None,
             retrieval_budget: RetrievalBudget {
                 max_candidates_per_lane: 32,
@@ -561,18 +561,18 @@ mod tests {
     }
 
     fn privacy_domain() -> PrivacyDomainId {
-        id("privacy.pr9.fixture")
+        id("privacy.query.fixture")
     }
 
-    fn material(scope: ResolvedScope) -> Pr9AuthorityMaterialV1 {
+    fn material(scope: ResolvedScope) -> QueryAuthorityMaterialV1 {
         let profile = profile();
-        let evaluation = AcceptedPr9EvaluationV1 {
+        let evaluation = AcceptedQueryEvaluationV1 {
             status: crate::search_eval::DirectEvaluationStatusV1::Pass,
             scope_digest: scope.scope_digest.clone(),
             profile_id: profile.profile_id.clone(),
             evaluation_result_anchor: profile.evaluation_result_anchor.clone(),
         };
-        Pr9AuthorityMaterialV1 {
+        QueryAuthorityMaterialV1 {
             scope,
             evaluation,
             profile: profile.clone(),
@@ -587,11 +587,11 @@ mod tests {
                 per_copy_cluster: None,
                 per_evidence_role: None,
             },
-            ranking_revision: id::<ComponentRevision>("ranking.pr9.accepted.v1"),
+            ranking_revision: id::<ComponentRevision>("ranking.query.accepted.v1"),
             keyring: Some(
                 RetrievalCursorKeyringV1::new(
                     privacy_domain(),
-                    id::<RetrievalCursorKeyId>("retrieval-key.pr9.fixture"),
+                    id::<RetrievalCursorKeyId>("retrieval-key.query.fixture"),
                     1,
                     vec![7_u8; 32],
                     1_000_000,
@@ -608,7 +608,7 @@ mod tests {
             candidates: Mutex::new(Some(vec![material(scope.clone())])),
         };
 
-        let authority = prepare_pr9_query_authority(&scope, &privacy_domain(), &provider)
+        let authority = prepare_query_authority(&scope, &privacy_domain(), &provider)
             .expect("accepted authority");
 
         assert_eq!(authority.profile().profile_id, profile().profile_id);
@@ -621,16 +621,16 @@ mod tests {
             candidates: Mutex::new(Some(Vec::new())),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &privacy_domain(), &missing),
-            Err(Pr9RuntimeMountErrorV1::AuthorityMissing)
+            prepare_query_authority(&scope, &privacy_domain(), &missing),
+            Err(QueryRuntimeMountErrorV1::AuthorityMissing)
         ));
 
         let ambiguous = OneShotProvider {
             candidates: Mutex::new(Some(vec![material(scope.clone()), material(scope.clone())])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &privacy_domain(), &ambiguous),
-            Err(Pr9RuntimeMountErrorV1::AuthorityAmbiguous)
+            prepare_query_authority(&scope, &privacy_domain(), &ambiguous),
+            Err(QueryRuntimeMountErrorV1::AuthorityAmbiguous)
         ));
     }
 
@@ -644,16 +644,16 @@ mod tests {
             candidates: Mutex::new(Some(vec![pending])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(Pr9RuntimeMountErrorV1::EvaluationNotPassed)
+            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
+            Err(QueryRuntimeMountErrorV1::EvaluationNotPassed)
         ));
 
         let provider = OneShotProvider {
             candidates: Mutex::new(Some(vec![material(scope("other"))])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(Pr9RuntimeMountErrorV1::ScopeMismatch)
+            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
+            Err(QueryRuntimeMountErrorV1::ScopeMismatch)
         ));
 
         let mut missing_key = material(active_scope.clone());
@@ -662,8 +662,8 @@ mod tests {
             candidates: Mutex::new(Some(vec![missing_key])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&active_scope, &privacy_domain(), &provider),
-            Err(Pr9RuntimeMountErrorV1::KeyUnavailable)
+            prepare_query_authority(&active_scope, &privacy_domain(), &provider),
+            Err(QueryRuntimeMountErrorV1::KeyUnavailable)
         ));
     }
 
@@ -672,14 +672,14 @@ mod tests {
         let scope = scope("main");
         let mut stale = material(scope.clone());
         stale.evaluation.evaluation_result_anchor =
-            id::<RetrievalAnchorId>("evaluation.pr9.superseded.v1");
+            id::<RetrievalAnchorId>("evaluation.query.superseded.v1");
         let provider = OneShotProvider {
             candidates: Mutex::new(Some(vec![stale])),
         };
 
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &privacy_domain(), &provider),
-            Err(Pr9RuntimeMountErrorV1::EvaluationStale)
+            prepare_query_authority(&scope, &privacy_domain(), &provider),
+            Err(QueryRuntimeMountErrorV1::EvaluationStale)
         ));
 
         let mut stale_scope_evaluation = material(scope.clone());
@@ -689,8 +689,8 @@ mod tests {
             candidates: Mutex::new(Some(vec![stale_scope_evaluation])),
         };
         assert!(matches!(
-            prepare_pr9_query_authority(&scope, &privacy_domain(), &provider),
-            Err(Pr9RuntimeMountErrorV1::EvaluationStale)
+            prepare_query_authority(&scope, &privacy_domain(), &provider),
+            Err(QueryRuntimeMountErrorV1::EvaluationStale)
         ));
     }
 
@@ -702,12 +702,12 @@ mod tests {
         };
 
         assert!(matches!(
-            prepare_pr9_query_authority(
+            prepare_query_authority(
                 &scope,
-                &id::<PrivacyDomainId>("privacy.pr9.other"),
+                &id::<PrivacyDomainId>("privacy.query.other"),
                 &provider,
             ),
-            Err(Pr9RuntimeMountErrorV1::PrivacyDomainMismatch)
+            Err(QueryRuntimeMountErrorV1::PrivacyDomainMismatch)
         ));
     }
 }

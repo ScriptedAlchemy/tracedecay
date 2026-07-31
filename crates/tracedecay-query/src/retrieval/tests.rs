@@ -68,7 +68,7 @@ fn request() -> RetrievalRequest {
 }
 
 fn profile() -> FusionProfile {
-    let lanes = RetrieverKind::PR9_FALLBACK_LANES;
+    let lanes = RetrieverKind::QUERY_FALLBACK_LANES;
     FusionProfile {
         profile_id: id("profile.fixture.v1"),
         evaluation_result_anchor: RetrievalAnchorId::new("evaluation.fixture").unwrap(),
@@ -81,7 +81,7 @@ fn profile() -> FusionProfile {
                 )
             })
             .collect(),
-        score_domain_calibrations: RetrieverKind::PR9_FALLBACK_LANES
+        score_domain_calibrations: RetrieverKind::QUERY_FALLBACK_LANES
             .into_iter()
             .map(|lane| {
                 let score_domain: tracedecay_domain::ScoreDomainId =

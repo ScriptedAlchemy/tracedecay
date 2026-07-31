@@ -1,4 +1,4 @@
-//! PR10 bounded semantic runtime session pool
+//! semantic bounded semantic runtime session pool
 //! (Plan 31, `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md`).
 //!
 //! Bounded embedding session pool. Sessions are keyed by the complete
@@ -17,8 +17,8 @@
 //!
 //! It depends only on the domain projection contract plus its sibling
 //! `fastembed_adapter` port surface. Deadlines are `Duration` values against
-//! the injected clock, bridged from PR9 `RetrievalBudget`.
-#![allow(dead_code)] // PR10 embedding session pool; Plan 31
+//! the injected clock, bridged from query `RetrievalBudget`.
+#![allow(dead_code)] // semantic embedding session pool; Plan 31
 
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;

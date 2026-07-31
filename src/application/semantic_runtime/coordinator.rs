@@ -64,19 +64,20 @@ impl ProductionSemanticActivationCoordinatorV1 {
         }
     }
 
-    pub async fn bootstrap_pr9_profile(
+    pub async fn bootstrap_query_profile(
         &self,
         configuration: ConfigurationCurrentStateV1,
-        accepted_pr9: AcceptedRetrievalProfileV1,
+        accepted_query: AcceptedRetrievalProfileV1,
         runtime: &RetrievalRuntimeCompatibilityV1,
     ) -> Result<(), SemanticActivationCoordinationErrorV1> {
-        if !accepted_pr9.is_exact_pr9_fallback() {
+        if !accepted_query.is_exact_query_fallback() {
             return Err(SemanticActivationCoordinationErrorV1::Rejected);
         }
         let pin = SemanticConfigurationPinV1::from_current(&configuration)
             .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-        let state = RetrievalProfileStateV1::new(configuration.revision_id, accepted_pr9, runtime)
-            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        let state =
+            RetrievalProfileStateV1::new(configuration.revision_id, accepted_query, runtime)
+                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
         self.configuration
             .install_initial_state(&pin, &state)
             .await

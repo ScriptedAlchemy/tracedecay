@@ -134,7 +134,7 @@ pub struct ArtifactPackageMemberV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCompatibilityV1 {
-    /// Runtime family name, e.g. `fastembed-ort` (value chosen during PR10).
+    /// Runtime family name, e.g. `fastembed-ort` (value chosen during SEMANTIC).
     pub runtime: String,
     /// Exact build revision of the runtime the artifact pins.
     pub build_revision: String,

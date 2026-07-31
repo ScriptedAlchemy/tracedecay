@@ -923,10 +923,10 @@ mod tests {
 
     use super::*;
     use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-    use crate::daemon::pr9_authority_provider::tests::accepted_profile;
+    use crate::daemon::query_authority_provider::tests::accepted_profile;
 
     #[tokio::test]
-    async fn exact_pr9_bootstrap_is_explicit_and_required_before_activation() {
+    async fn exact_query_bootstrap_is_explicit_and_required_before_activation() {
         let directory = tempfile::tempdir().unwrap();
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
@@ -956,9 +956,11 @@ mod tests {
             SemanticConfigurationBackendErrorV1::Unavailable
         );
 
-        let accepted =
-            accepted_profile("pr9.bootstrap.pass.v1", &RetrieverKind::PR9_FALLBACK_LANES);
-        assert!(accepted.is_exact_pr9_fallback());
+        let accepted = accepted_profile(
+            "query.bootstrap.pass.v1",
+            &RetrieverKind::QUERY_FALLBACK_LANES,
+        );
+        assert!(accepted.is_exact_query_fallback());
         let compatibility = RetrievalRuntimeCompatibilityV1 {
             retrieval_ceiling: accepted.profile().retrieval_budget,
             semantic: None,
@@ -988,7 +990,7 @@ mod tests {
 
         let stored = store.current_record().await.unwrap();
         assert_eq!(stored.state.active(), &accepted);
-        assert!(stored.state.active().is_exact_pr9_fallback());
+        assert!(stored.state.active().is_exact_query_fallback());
         assert!(stored.receipt.is_none());
     }
 }

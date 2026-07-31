@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    Pr9FallbackSubpayload, PublicRetrieverStatus, RetrieverBatch, RetrieverKind, RetrieverOutcome,
+    PublicRetrieverStatus, QueryFallbackSubpayload, RetrieverBatch, RetrieverKind, RetrieverOutcome,
 };
 use tracedecay_query::retrieval::RetrievalPortError;
 use tracedecay_query::retrieval::semantic::{
@@ -20,11 +20,11 @@ where
     T::try_from(value.to_owned()).expect("valid fixture identity")
 }
 
-fn fallback() -> Arc<Pr9FallbackSubpayload> {
-    let mut fallback = Pr9FallbackSubpayload {
-        profile_id: id("profile.pr9.semantic-contract.v1"),
+fn fallback() -> Arc<QueryFallbackSubpayload> {
+    let mut fallback = QueryFallbackSubpayload {
+        profile_id: id("profile.query.semantic-contract.v1"),
         ordered_candidates: Vec::new(),
-        public_pr9_lane_coverage: BTreeMap::from([
+        public_fallback_lane_coverage: BTreeMap::from([
             (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
             (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
             (RetrieverKind::Graph, PublicRetrieverStatus::Complete),

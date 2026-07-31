@@ -1,6 +1,6 @@
 //! Calibrated semantic-lane admission over the exact-flat retriever.
 //!
-//! This service never edits or reconstructs the PR9 fallback subpayload. It
+//! This service never edits or reconstructs the query fallback subpayload. It
 //! carries the caller's owned `Arc` through unchanged and admits semantic
 //! candidates only under an exact projection/generation/cohort calibration.
 
@@ -9,9 +9,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CalibrationProfileId, CodeGenerationId, ManifestDigest, Pr9FallbackSubpayload, ProjectionKeyV1,
-    RetrieverBatch, RetrieverKind, RetrieverOutcome, SemanticSearchIndexKeyV1,
-    VectorGenerationIdV1, canonical_sha256,
+    CalibrationProfileId, CodeGenerationId, ManifestDigest, ProjectionKeyV1,
+    QueryFallbackSubpayload, RetrieverBatch, RetrieverKind, RetrieverOutcome,
+    SemanticSearchIndexKeyV1, VectorGenerationIdV1, canonical_sha256,
 };
 
 use super::{
@@ -201,16 +201,16 @@ pub enum SemanticQueryServiceOutcomeV1 {
     Augmented {
         semantic_lane: CompositionLaneInput,
         calibration: SemanticCalibrationEvidenceV1,
-        fallback: Arc<Pr9FallbackSubpayload>,
+        fallback: Arc<QueryFallbackSubpayload>,
     },
     Fallback {
         abstention: SemanticAbstentionV1,
-        fallback: Arc<Pr9FallbackSubpayload>,
+        fallback: Arc<QueryFallbackSubpayload>,
     },
 }
 
 impl SemanticQueryServiceOutcomeV1 {
-    pub fn fallback(&self) -> &Arc<Pr9FallbackSubpayload> {
+    pub fn fallback(&self) -> &Arc<QueryFallbackSubpayload> {
         match self {
             Self::Augmented { fallback, .. } | Self::Fallback { fallback, .. } => fallback,
         }
@@ -221,7 +221,7 @@ impl SemanticQueryServiceOutcomeV1 {
 pub enum SemanticQueryServiceError {
     #[error("strict semantic retrieval is unavailable: {0:?}")]
     StrictUnavailable(SemanticAbstentionV1),
-    #[error("the authorized PR9 fallback binding is invalid")]
+    #[error("the authorized query fallback binding is invalid")]
     InvalidFallback,
     #[error("the authenticated semantic continuation is invalid or stale")]
     InvalidCursor,
@@ -245,7 +245,7 @@ where
         &self,
         readiness: SemanticLaneReadinessV1<'_>,
         decision: SemanticQueryDecisionV1,
-        fallback: Arc<Pr9FallbackSubpayload>,
+        fallback: Arc<QueryFallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError> {
         if fallback.validate().is_err() {
             return Err(SemanticQueryServiceError::InvalidFallback);
@@ -355,7 +355,7 @@ where
         &self,
         disposition: SemanticAbstentionDispositionV1,
         abstention: SemanticAbstentionV1,
-        fallback: Arc<Pr9FallbackSubpayload>,
+        fallback: Arc<QueryFallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError> {
         match disposition {
             SemanticAbstentionDispositionV1::UseFallback => {

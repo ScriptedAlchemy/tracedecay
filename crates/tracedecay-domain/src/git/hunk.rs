@@ -78,7 +78,7 @@ pub fn full_hunk_selection_bitmap(line_count: u32) -> Vec<u64> {
 /// header, context and patch digests, and the preview that issued the
 /// reference — never by display ordinal or line number alone.
 ///
-/// PR9 mints these as read-only identity evidence only. Applying them is a
+/// query mints these as read-only identity evidence only. Applying them is a
 /// PR11 daemon mutation path and is not representable here.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

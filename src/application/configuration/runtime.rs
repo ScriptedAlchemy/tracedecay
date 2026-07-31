@@ -232,10 +232,10 @@ impl ProjectConfigurationRuntime {
             .map(|_| ())
     }
 
-    pub(crate) async fn bootstrap_pr9_retrieval_profile(
+    pub(crate) async fn bootstrap_query_retrieval_profile(
         &self,
         configuration: super::ports::ConfigurationCurrentStateV1,
-        accepted_pr9: crate::config::retrieval::AcceptedRetrievalProfileV1,
+        accepted_query: crate::config::retrieval::AcceptedRetrievalProfileV1,
         runtime: &crate::config::retrieval::RetrievalRuntimeCompatibilityV1,
     ) -> std::result::Result<
         (),
@@ -246,7 +246,7 @@ impl ProjectConfigurationRuntime {
             .ok_or(
                 crate::application::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable,
             )?
-            .bootstrap_pr9_profile(configuration, accepted_pr9, runtime)
+            .bootstrap_query_profile(configuration, accepted_query, runtime)
             .await
     }
 

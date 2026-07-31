@@ -1,5 +1,5 @@
 //! SQLite-backed persistence for generation-bound diagnostics (Plan 35,
-//! "Universal managed diagnostics"; pr9/12-diagnostic-persistence authority
+//! "Universal managed diagnostics"; query/12-diagnostic-persistence authority
 //! packet).
 //!
 //! Durable `GenerationDiagnosticV1` records persist in the project store and

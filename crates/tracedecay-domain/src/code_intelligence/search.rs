@@ -1196,7 +1196,7 @@ pub struct ProjectionKeyV1 {
     pub profile_digest: ManifestDigest,
 }
 
-/// The projection families PR9/PR10 recognize.
+/// The projection families query/semantic recognize.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionKindV1 {

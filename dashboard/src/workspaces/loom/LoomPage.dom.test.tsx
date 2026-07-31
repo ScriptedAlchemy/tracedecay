@@ -33,7 +33,7 @@ const SESSIONS = {
     {
       session_id: 'sess-closed',
       provider: 'claude',
-      title: 'Verify PR9 scheduler',
+      title: 'Verify QUERY scheduler',
       started_at: NOW - 10_800,
       last_message_at: NOW - 9000,
       messages: 50,

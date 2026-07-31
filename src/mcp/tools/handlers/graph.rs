@@ -240,7 +240,7 @@ async fn legacy_search_fallback(
     let mut output = json!({
         "results": results,
         "code_generation": Value::Null,
-        "pr9_fallback_digest": Value::Null,
+        "query_fallback_digest": Value::Null,
         "semantic": {
             "mode": "fallback_allowed",
             "status": "unavailable",
@@ -358,7 +358,7 @@ pub(super) async fn handle_search(
         let mut output = json!({
             "results": results,
             "code_generation": Value::Null,
-            "pr9_fallback_digest": Value::Null,
+            "query_fallback_digest": Value::Null,
             "semantic": {
                 "mode": "fallback_allowed",
                 "status": "unavailable",
@@ -424,7 +424,7 @@ pub(super) async fn handle_search(
             let mut output = json!({
                 "results": results,
                 "code_generation": complete.code_generation,
-                "pr9_fallback_digest": &complete.pr9_fallback.digest,
+                "query_fallback_digest": &complete.query_fallback.digest,
                 "semantic": semantic_status_value(semantic_mode, &complete.semantic),
                 "next_cursor": complete.next_cursor
                     .as_ref()
@@ -455,7 +455,7 @@ pub(super) async fn handle_search(
             let output = json!({
                 "results": [],
                 "code_generation": unavailable.code_generation,
-                "pr9_fallback_digest": Value::Null,
+                "query_fallback_digest": Value::Null,
                 "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
                 "status": "unavailable",
                 "reason": reason,

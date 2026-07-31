@@ -11,9 +11,9 @@ use crate::application::semantic_runtime::{
     SemanticEvaluationPublicationSnapshotV1, SemanticRuntimeFuture,
 };
 use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
-use crate::search_eval::pr10_native::{
-    Pr10NativePendingReasonV1, Pr10NativeResourceProvenanceV1, Pr10NativeResourceSampleV1,
-    Pr10NativeStageResultV1,
+use crate::search_eval::semantic_native::{
+    SemanticNativePendingReasonV1, SemanticNativeResourceProvenanceV1,
+    SemanticNativeResourceSampleV1, SemanticNativeStageResultV1,
 };
 use crate::search_eval::{
     CandidateOutputError, ProductionCandidateNativeExecutionAuthorityV1,
@@ -135,7 +135,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
         &self,
         context: ProductionCandidateNativeResourceContextV1<'_>,
         execute_queries: &mut dyn FnMut() -> Result<Vec<u64>, CandidateOutputError>,
-    ) -> Result<Pr10NativeStageResultV1<Pr10NativeResourceSampleV1>, CandidateOutputError> {
+    ) -> Result<SemanticNativeStageResultV1<SemanticNativeResourceSampleV1>, CandidateOutputError>
+    {
         let semantic_resources = self.candidate.compatibility.semantic.as_ref();
         if let Some(required) = semantic_resources {
             let mut prepared = self.prepared_native.lock().map_err(|_| {
@@ -195,8 +196,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
             resources
         } else {
-            return Ok(Pr10NativeStageResultV1::Pending {
-                reason: Pr10NativePendingReasonV1::ResourceMeasurementUnavailable,
+            return Ok(SemanticNativeStageResultV1::Pending {
+                reason: SemanticNativePendingReasonV1::ResourceMeasurementUnavailable,
             });
         };
         if resources.source_generation != *context.code_generation
@@ -222,13 +223,13 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             ));
         }
         let Some((cpu_time_us, peak_rss_bytes)) = process_resources else {
-            return Ok(Pr10NativeStageResultV1::Pending {
-                reason: Pr10NativePendingReasonV1::ResourceMeasurementUnavailable,
+            return Ok(SemanticNativeStageResultV1::Pending {
+                reason: SemanticNativePendingReasonV1::ResourceMeasurementUnavailable,
             });
         };
-        Ok(Pr10NativeStageResultV1::Complete(
-            Pr10NativeResourceSampleV1 {
-                provenance: Pr10NativeResourceProvenanceV1 {
+        Ok(SemanticNativeStageResultV1::Complete(
+            SemanticNativeResourceSampleV1 {
+                provenance: SemanticNativeResourceProvenanceV1 {
                     workload_digest: context.workload_digest.to_owned(),
                     corpus_digest: context.corpus_digest.to_owned(),
                     scale: context.scale.to_owned(),

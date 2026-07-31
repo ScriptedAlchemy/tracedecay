@@ -20,8 +20,8 @@ use thiserror::Error;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
+    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerDispositionV1,
     SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
     WorktreeId, canonical_sha256,
@@ -669,15 +669,15 @@ impl LatestCompleteCodeIndexV1 {
                 .collect(),
             freshness: freshness.clone(),
             exact_retriever_revision: ComponentRevision::new(
-                tracedecay_query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1,
+                tracedecay_query::retrieval::QUERY_EXACT_RETRIEVER_REVISION_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             lexical_retriever_revision: ComponentRevision::new(
-                tracedecay_query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1,
+                tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             exact_score_domain: ScoreDomainId::new(
-                tracedecay_query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
+                tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         };
@@ -688,7 +688,7 @@ impl LatestCompleteCodeIndexV1 {
         let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new(
-                tracedecay_query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
             )
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         );
@@ -783,7 +783,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
             Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
         )>,
     >,
-    /// Optional PR10 hook: schedule `FastEmbed` projection without joining it.
+    /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
@@ -888,7 +888,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(scheduler)
     }
 
-    /// Replace the PR10 `schedule_generation` hook on mount/remount. The hook
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    /// Replace the semantic `schedule_generation` hook on mount/remount. The hook
     /// must return immediately; `FastEmbed` download/indexing never blocks
     /// exact/lexical/graph search. `None` retires a stale runtime.
     pub fn replace_semantic_schedule_hook(
@@ -1044,7 +1048,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
             self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
 
-            // PR10: enqueue FastEmbed projection without waiting on download/index.
+            // SEMANTIC: enqueue FastEmbed projection without waiting on download/index.
             if let Some(schedule) = &self.semantic_schedule {
                 let _scheduled = schedule(&generation);
             }
@@ -1505,8 +1509,8 @@ mod tests;
 mod cadence;
 mod classification;
 pub(crate) mod identity;
-pub(in crate::daemon) mod pr9_runtime;
 pub(in crate::daemon) mod queries;
+pub(in crate::daemon) mod query_runtime;
 mod registry;
 pub(crate) mod semantic_query_runtime;
 

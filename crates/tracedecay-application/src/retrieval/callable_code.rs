@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkId, EphemeralSanitizedQueryViewV1, ExactTechnicalTermKindV1,
-    FileOccurrenceId, Pr9FallbackSubpayload, SourceSpan, SymbolOccurrenceId, UtcMicros,
+    FileOccurrenceId, QueryFallbackSubpayload, SourceSpan, SymbolOccurrenceId, UtcMicros,
 };
 
 use crate::error::ApplicationContractError;
@@ -65,7 +65,7 @@ pub struct CodeQueryPage<T> {
     pub items: Vec<T>,
     pub total: Option<u64>,
     pub next_cursor: Option<OpaqueCursor>,
-    pub pr9_fallback: Option<Pr9FallbackSubpayload>,
+    pub query_fallback: Option<QueryFallbackSubpayload>,
 }
 
 impl<T> CodeQueryPage<T> {
@@ -74,14 +74,14 @@ impl<T> CodeQueryPage<T> {
         items: Vec<T>,
         total: Option<u64>,
         next_cursor: Option<OpaqueCursor>,
-        pr9_fallback: Option<Pr9FallbackSubpayload>,
+        query_fallback: Option<QueryFallbackSubpayload>,
     ) -> Result<Self, ApplicationContractError> {
         let page = Self {
             generation,
             items,
             total,
             next_cursor,
-            pr9_fallback,
+            query_fallback,
         };
         page.validate()?;
         Ok(page)
@@ -97,11 +97,11 @@ impl<T> CodeQueryPage<T> {
                 field: "code query page total",
             });
         }
-        if let Some(fallback) = &self.pr9_fallback {
+        if let Some(fallback) = &self.query_fallback {
             fallback
                 .validate()
                 .map_err(|_| ApplicationContractError::Inconsistent {
-                    field: "PR9 fallback subpayload",
+                    field: "query fallback subpayload",
                 })?;
         }
         Ok(())

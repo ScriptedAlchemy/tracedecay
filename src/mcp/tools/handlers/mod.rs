@@ -2265,7 +2265,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pr9_search_rejects_cross_project_selector() {
+    async fn query_search_rejects_cross_project_selector() {
         let _env_lock = lock_user_data_dir_test_env();
         let dir = TempDir::new().unwrap();
         let _env = SelectorEnv::new(dir.path());

@@ -1,4 +1,4 @@
-# PR9 code-index measurement packet
+# query code-index measurement packet
 
 > **Historical evidence only.** Preserve the workload and measurement
 > provenance in this directory. Current requirements come only from the
@@ -49,9 +49,9 @@ Metrics:
   Tree-sitter source edit exists;
 - invalidated chunks: deleted prior chunks plus changed chunks that name a
   prior digest;
-- embedding batches/chunks: `null` because this PR9 lexical benchmark
+- embedding batches/chunks: `null` because this query lexical benchmark
   deliberately does not invoke semantic inference; it never reports invented
-  zero work for an unmounted PR10 capability;
+  zero work for an unmounted semantic capability;
 - process read/write amplification: observed `/proc/self/io` bytes divided by
   admitted input/output bytes, or `null` when the denominator is zero;
 - invalidation and projection amplification: invalidated chunks or projection

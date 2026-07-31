@@ -82,7 +82,7 @@ pub fn callable_code_handler_descriptors()
         .collect()
 }
 
-/// Application contribution for the generation-bound PR9 callable query
+/// Application contribution for the generation-bound query callable query
 /// family. Only operations with production-owned application dispatch are
 /// advertised on transport surfaces.
 pub fn callable_code_catalog_contribution()
@@ -237,7 +237,7 @@ fn code_query_capability(
             1,
             format!("Query {readable_name}"),
             format!(
-                "Invoke the generation-bound PR9 {readable_name} query without replacing its owning kernel."
+                "Invoke the generation-bound query {readable_name} query without replacing its owning kernel."
             ),
             // Keep examples distinct from primitive-read fixtures ("Read …").
             vec![format!("Query indexed {readable_name}")],

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "workload_id": "pr9-code-index-v1",
+  "workload_id": "query-code-index-v1",
   "harness_revision": "code-index-chunks.v2",
   "seed": 1784509200,
   "repetitions": {

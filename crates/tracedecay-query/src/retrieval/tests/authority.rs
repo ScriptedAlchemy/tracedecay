@@ -8,7 +8,7 @@ use tracedecay_domain::{
 
 use super::{batch, composition_lanes, id, no_caps, profile, request};
 use crate::retrieval::fusion::{QueryDigestAuthenticationError, RetrievalCursorKeyringV1};
-use crate::retrieval::{Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1};
+use crate::retrieval::{QueryAuthorityErrorV1, QueryAuthorityV1};
 
 fn query_view() -> EphemeralSanitizedQueryViewV1 {
     EphemeralSanitizedQueryViewV1::sanitize(
@@ -19,7 +19,7 @@ fn query_view() -> EphemeralSanitizedQueryViewV1 {
     .expect("sanitized query")
 }
 
-fn authority() -> Pr9QueryAuthorityV1 {
+fn authority() -> QueryAuthorityV1 {
     let request = request();
     authority_with_keyring(
         RetrievalCursorKeyringV1::new(
@@ -33,8 +33,8 @@ fn authority() -> Pr9QueryAuthorityV1 {
     )
 }
 
-fn authority_with_keyring(keyring: RetrievalCursorKeyringV1) -> Pr9QueryAuthorityV1 {
-    Pr9QueryAuthorityV1::new(
+fn authority_with_keyring(keyring: RetrievalCursorKeyringV1) -> QueryAuthorityV1 {
+    QueryAuthorityV1::new(
         profile(),
         no_caps(),
         id::<ComponentRevision>("ranking.authority.v1"),
@@ -76,19 +76,19 @@ fn authenticated_foreground_fallback_is_byte_stable_and_lane_bounded() {
     assert_eq!(
         first
             .fallback
-            .public_pr9_lane_coverage
+            .public_fallback_lane_coverage
             .keys()
             .copied()
             .collect::<Vec<_>>(),
-        RetrieverKind::PR9_FALLBACK_LANES
+        RetrieverKind::QUERY_FALLBACK_LANES
     );
     assert_eq!(
         first
-            .pr9_lanes
+            .fallback_lanes
             .iter()
             .map(|lane| lane.lane)
             .collect::<Vec<_>>(),
-        RetrieverKind::PR9_FALLBACK_LANES
+        RetrieverKind::QUERY_FALLBACK_LANES
     );
     assert_eq!(first.page_size, 8);
     first.fallback.validate().expect("canonical fallback");
@@ -149,7 +149,7 @@ fn retained_query_key_verifies_without_fallback_key_guessing() {
             &query,
             &old_digest,
         ),
-        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+        Err(QueryAuthorityErrorV1::QueryAuthentication(
             QueryDigestAuthenticationError::KeyUnavailable,
         ))
     );
@@ -158,7 +158,7 @@ fn retained_query_key_verifies_without_fallback_key_guessing() {
     tampered.mac = QueryMac::new(format!("hmac-sha256:{}", "9".repeat(64))).expect("tampered MAC");
     assert_eq!(
         authority.verify_authenticated_query(&old_key, &request, &query, &tampered),
-        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+        Err(QueryAuthorityErrorV1::QueryAuthentication(
             QueryDigestAuthenticationError::AuthenticationFailed,
         ))
     );
@@ -167,7 +167,7 @@ fn retained_query_key_verifies_without_fallback_key_guessing() {
     wrong_scope.scope.privacy_domain = id("privacy.authority.other");
     assert_eq!(
         authority.verify_authenticated_query(&old_key, &wrong_scope, &query, &old_digest),
-        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+        Err(QueryAuthorityErrorV1::QueryAuthentication(
             QueryDigestAuthenticationError::PrivacyDomainMismatch,
         ))
     );
@@ -199,7 +199,7 @@ fn prepared_cursor_authentication_binds_the_selected_key_id() {
         .expect("selected key verifies");
     assert_eq!(
         authority.verify_prepared_cursor_payload(&alternate_key, &request, payload, &digest,),
-        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+        Err(QueryAuthorityErrorV1::QueryAuthentication(
             QueryDigestAuthenticationError::AuthenticationFailed,
         ))
     );
@@ -229,7 +229,7 @@ fn prepared_cursor_authentication_binds_principal_scope_and_temporal_mode() {
     for mismatch in mismatches {
         assert_eq!(
             authority.verify_prepared_cursor_payload(&active_key, &mismatch, payload, &digest),
-            Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+            Err(QueryAuthorityErrorV1::QueryAuthentication(
                 QueryDigestAuthenticationError::AuthenticationFailed,
             ))
         );
@@ -263,7 +263,7 @@ fn revoked_retained_query_key_is_rejected() {
 
     assert_eq!(
         authority.verify_authenticated_query(&old_key, &request, &query, &old_digest),
-        Err(Pr9QueryAuthorityErrorV1::QueryAuthentication(
+        Err(QueryAuthorityErrorV1::QueryAuthentication(
             QueryDigestAuthenticationError::KeyRevoked,
         ))
     );

@@ -145,7 +145,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
         self.accepted_profile
             .executable_under(&expected.runtime)
             .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
-        let bootstrap_pr9 = self.accepted_profile.is_exact_pr9_fallback();
+        let bootstrap_query = self.accepted_profile.is_exact_query_fallback();
         let profile_digest = self.accepted_profile.profile_digest().clone();
         self.accepted_profiles
             .publish(
@@ -156,7 +156,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
             )
             .await
             .map_err(map_authority_error)?;
-        if bootstrap_pr9 {
+        if bootstrap_query {
             let configuration = current_configuration_state(&self.configuration).await?;
             let accepted = self
                 .accepted_profiles
@@ -164,7 +164,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
                 .await
                 .map_err(map_authority_error)?;
             self.configuration
-                .bootstrap_pr9_retrieval_profile(
+                .bootstrap_query_retrieval_profile(
                     configuration,
                     accepted.accepted_profile,
                     &accepted.runtime,
@@ -281,8 +281,8 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
-    #[allow(dead_code)] // PR9 semantic bootstrap port — preserve authority surface
-    pub(crate) async fn bootstrap_pr9(
+    #[allow(dead_code)] // query semantic bootstrap port — preserve authority surface
+    pub(crate) async fn bootstrap_query(
         &self,
         configuration: ConfigurationCurrentStateV1,
         accepted_profile_digest: &ManifestDigest,
@@ -293,7 +293,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             .await
             .map_err(map_authority_error)?;
         self.configuration
-            .bootstrap_pr9_retrieval_profile(
+            .bootstrap_query_retrieval_profile(
                 configuration,
                 accepted.accepted_profile,
                 &accepted.runtime,
@@ -654,11 +654,11 @@ mod tests {
         let material = load_direct_evaluated_profile_material(
             Path::new(env!("CARGO_MANIFEST_DIR")),
             None,
-            "pr9-fallback",
+            "query-fallback",
         )
         .expect("checked-in evaluated profile");
         let mut candidate = SemanticEvaluationProfileCandidateV1 {
-            evaluated_profile_id: "pr9-fallback".to_owned(),
+            evaluated_profile_id: "query-fallback".to_owned(),
             profile: SemanticEvaluationFusionCandidateV1 {
                 profile_id: material.profile.profile_id.clone(),
                 calibrations: material.profile.calibrations.clone(),

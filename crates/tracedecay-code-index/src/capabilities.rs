@@ -67,7 +67,7 @@ pub const GENERATION_SEAL_SEPARATOR: &str = "tracedecay.code-generation-seal.v1"
 /// The chunk schema revision pinned by this implementation.
 pub const CHUNK_SCHEMA_REVISION_V1: &str = "code-search-chunk.v1";
 
-/// The exact-term kinds the PR9 chunker emits (Plan 25 extraction evidence).
+/// The exact-term kinds the query chunker emits (Plan 25 extraction evidence).
 pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] = &[
     ExactTechnicalTermKindV1::WholeSymbol,
     ExactTechnicalTermKindV1::QualifiedName,
@@ -82,7 +82,7 @@ pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] = &[
     ExactTechnicalTermKindV1::CommitIdentifier,
 ];
 
-/// The edge-authority classes PR9 tree-sitter extraction declares: edges
+/// The edge-authority classes query tree-sitter extraction declares: edges
 /// derived purely from syntax are `SyntaxExact`; unresolved constructs are
 /// `UnknownUnsupported` evidence, never upgraded.
 pub const BASE_EDGE_AUTHORITY_CLASSES: &[EdgeAuthorityV1] = &[
@@ -184,7 +184,7 @@ pub struct BaseCapabilityEmitter<R: LanguageRegistry> {
 }
 
 impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
-    /// Create an emitter with the PR9 base pins: chunk schema
+    /// Create an emitter with the query base pins: chunk schema
     /// `code-search-chunk.v1`, the chunker's exact-term kinds, and the
     /// tree-sitter edge-authority classes.
     pub fn new(
@@ -326,7 +326,7 @@ pub struct BaseCapabilityValidator {
 }
 
 impl BaseCapabilityValidator {
-    /// Create a validator for the PR9 base chunk schema.
+    /// Create a validator for the query base chunk schema.
     pub fn new() -> Self {
         Self {
             chunk_schema_revision: CHUNK_SCHEMA_REVISION_V1.to_owned(),

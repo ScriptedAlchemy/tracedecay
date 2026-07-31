@@ -1,4 +1,4 @@
-//! Daemon-owned admission for project-scoped PR9 MCP reads.
+//! Daemon-owned admission for project-scoped query MCP reads.
 //!
 //! Direct MCP servers never construct this grant. The daemon derives the
 //! principal from its authenticated durable profile identity and binds the
@@ -18,13 +18,14 @@ use tracedecay_domain::{
 
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
 
-pub(crate) const PR9_MCP_READ_CAPABILITY_V1: &str = "capability.application.code-index.search-read";
-const PR9_MCP_GRANT_HORIZON: Duration = Duration::from_hours(24);
-const AUTHORIZATION_REVISION_DOMAIN_V1: &str = "tracedecay.daemon.pr9-mcp-read-authorization.v1";
-const PRINCIPAL_DOMAIN_V1: &str = "tracedecay.daemon.pr9-mcp-profile-principal.v1";
+pub(crate) const QUERY_MCP_READ_CAPABILITY_V1: &str =
+    "capability.application.code-index.search-read";
+const QUERY_MCP_GRANT_HORIZON: Duration = Duration::from_hours(24);
+const AUTHORIZATION_REVISION_DOMAIN_V1: &str = "tracedecay.query-read-authorization.v1";
+const PRINCIPAL_DOMAIN_V1: &str = "tracedecay.query-profile-principal.v1";
 
 #[derive(Clone)]
-pub(crate) struct Pr9McpReadAdmissionV1 {
+pub(crate) struct QueryMcpReadAdmissionV1 {
     project_id: ProjectId,
     scope: ResolvedScope,
     principal: PrincipalId,
@@ -36,14 +37,14 @@ pub(crate) struct Pr9McpReadAdmissionV1 {
 }
 
 #[derive(Clone)]
-pub(crate) struct Pr9McpReadAdmissionProviderV1 {
+pub(crate) struct QueryMcpReadAdmissionProviderV1 {
     identity: LocalProfileIdentityAuthorityV1,
     project_id: ProjectId,
     route_registered: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub(crate) enum Pr9McpAdmissionUnavailableV1 {
+pub(crate) enum QueryMcpAdmissionUnavailableV1 {
     #[error("the MCP route has no daemon-authenticated profile actor")]
     Unauthenticated,
     #[error("the MCP read grant is invalid")]
@@ -60,7 +61,7 @@ pub(crate) enum Pr9McpAdmissionUnavailableV1 {
     Revoked,
 }
 
-impl Pr9McpAdmissionUnavailableV1 {
+impl QueryMcpAdmissionUnavailableV1 {
     pub(crate) const fn reason(self) -> &'static str {
         match self {
             Self::Unauthenticated => "mcp_route_unauthenticated",
@@ -74,14 +75,14 @@ impl Pr9McpAdmissionUnavailableV1 {
     }
 }
 
-pub(crate) fn admit_pr9_mcp_read(
+pub(crate) fn admit_query_mcp_read(
     identity: Option<&LocalProfileIdentityAuthorityV1>,
     project_id: &ProjectId,
     scope: &ResolvedScope,
     route_registered: Arc<AtomicBool>,
-) -> Result<Pr9McpReadAdmissionV1, Pr9McpAdmissionUnavailableV1> {
-    let identity = identity.ok_or(Pr9McpAdmissionUnavailableV1::Unauthenticated)?;
-    admit_pr9_mcp_read_at(
+) -> Result<QueryMcpReadAdmissionV1, QueryMcpAdmissionUnavailableV1> {
+    let identity = identity.ok_or(QueryMcpAdmissionUnavailableV1::Unauthenticated)?;
+    admit_query_mcp_read_at(
         identity.brain_id(),
         identity.profile_id(),
         project_id,
@@ -91,7 +92,7 @@ pub(crate) fn admit_pr9_mcp_read(
     )
 }
 
-impl Pr9McpReadAdmissionProviderV1 {
+impl QueryMcpReadAdmissionProviderV1 {
     pub(crate) fn new(
         identity: LocalProfileIdentityAuthorityV1,
         project_id: ProjectId,
@@ -107,8 +108,8 @@ impl Pr9McpReadAdmissionProviderV1 {
     pub(crate) fn admit_current(
         &self,
         scope: &ResolvedScope,
-    ) -> Result<Pr9McpReadAdmissionV1, Pr9McpAdmissionUnavailableV1> {
-        admit_pr9_mcp_read(
+    ) -> Result<QueryMcpReadAdmissionV1, QueryMcpAdmissionUnavailableV1> {
+        admit_query_mcp_read(
             Some(&self.identity),
             &self.project_id,
             scope,
@@ -121,39 +122,38 @@ impl Pr9McpReadAdmissionProviderV1 {
     }
 }
 
-fn admit_pr9_mcp_read_at(
+fn admit_query_mcp_read_at(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
     project_id: &ProjectId,
     scope: &ResolvedScope,
     issued_at: UtcMicros,
     route_registered: Arc<AtomicBool>,
-) -> Result<Pr9McpReadAdmissionV1, Pr9McpAdmissionUnavailableV1> {
+) -> Result<QueryMcpReadAdmissionV1, QueryMcpAdmissionUnavailableV1> {
     scope
         .validate()
-        .map_err(|_| Pr9McpAdmissionUnavailableV1::InvalidGrant)?;
+        .map_err(|_| QueryMcpAdmissionUnavailableV1::InvalidGrant)?;
     if scope.project_id != *project_id || issued_at.0 <= 0 {
-        return Err(Pr9McpAdmissionUnavailableV1::InvalidGrant);
+        return Err(QueryMcpAdmissionUnavailableV1::InvalidGrant);
     }
-    let expires_at = UtcMicros(
-        issued_at
-            .0
-            .saturating_add(i64::try_from(PR9_MCP_GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX)),
-    );
+    let expires_at =
+        UtcMicros(issued_at.0.saturating_add(
+            i64::try_from(QUERY_MCP_GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX),
+        ));
     if expires_at <= issued_at {
-        return Err(Pr9McpAdmissionUnavailableV1::InvalidGrant);
+        return Err(QueryMcpAdmissionUnavailableV1::InvalidGrant);
     }
-    let capabilities = std::iter::once(PR9_MCP_READ_CAPABILITY_V1)
+    let capabilities = std::iter::once(QUERY_MCP_READ_CAPABILITY_V1)
         .map(CapabilityId::new)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| Pr9McpAdmissionUnavailableV1::InvalidGrant)?;
+        .map_err(|_| QueryMcpAdmissionUnavailableV1::InvalidGrant)?;
     let principal_digest = canonical_sha256(&(PRINCIPAL_DOMAIN_V1, brain_id, profile_id))
-        .map_err(|_| Pr9McpAdmissionUnavailableV1::InvalidGrant)?;
+        .map_err(|_| QueryMcpAdmissionUnavailableV1::InvalidGrant)?;
     let principal = PrincipalId::new(format!(
-        "principal.pr9-mcp.{}",
+        "principal.query-mcp.{}",
         principal_digest.as_str().trim_start_matches("sha256:")
     ))
-    .map_err(|_| Pr9McpAdmissionUnavailableV1::InvalidGrant)?;
+    .map_err(|_| QueryMcpAdmissionUnavailableV1::InvalidGrant)?;
     let revision_digest = canonical_sha256(&(
         AUTHORIZATION_REVISION_DOMAIN_V1,
         brain_id,
@@ -162,13 +162,13 @@ fn admit_pr9_mcp_read_at(
         &scope.scope_digest,
         &capabilities,
     ))
-    .map_err(|_| Pr9McpAdmissionUnavailableV1::InvalidGrant)?;
+    .map_err(|_| QueryMcpAdmissionUnavailableV1::InvalidGrant)?;
     let authorization_revision = AuthorizationRevision::new(format!(
-        "authorization.pr9-mcp.{}",
+        "authorization.query-mcp.{}",
         revision_digest.as_str().trim_start_matches("sha256:")
     ))
-    .map_err(|_| Pr9McpAdmissionUnavailableV1::InvalidGrant)?;
-    Ok(Pr9McpReadAdmissionV1 {
+    .map_err(|_| QueryMcpAdmissionUnavailableV1::InvalidGrant)?;
+    Ok(QueryMcpReadAdmissionV1 {
         project_id: project_id.clone(),
         scope: scope.clone(),
         principal,
@@ -180,7 +180,7 @@ fn admit_pr9_mcp_read_at(
     })
 }
 
-impl Pr9McpReadAdmissionV1 {
+impl QueryMcpReadAdmissionV1 {
     pub(crate) fn search_authority(&self) -> crate::mcp::server::CodeIndexSearchAuthorityV1 {
         crate::mcp::server::CodeIndexSearchAuthorityV1 {
             principal: self.principal.clone(),
@@ -192,8 +192,9 @@ impl Pr9McpReadAdmissionV1 {
         &self,
         scope: &ResolvedScope,
         supplied: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    ) -> Result<crate::mcp::server::CodeIndexSearchAuthorityV1, Pr9McpAdmissionUnavailableV1> {
-        self.authorize_at(scope, supplied, PR9_MCP_READ_CAPABILITY_V1, now_micros())
+    ) -> Result<crate::mcp::server::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1>
+    {
+        self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros())
     }
 
     fn authorize_at(
@@ -202,30 +203,31 @@ impl Pr9McpReadAdmissionV1 {
         supplied: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
         requested_capability: &str,
         observed_at: UtcMicros,
-    ) -> Result<crate::mcp::server::CodeIndexSearchAuthorityV1, Pr9McpAdmissionUnavailableV1> {
+    ) -> Result<crate::mcp::server::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1>
+    {
         if !self.route_registered.load(Ordering::Acquire) {
-            return Err(Pr9McpAdmissionUnavailableV1::Revoked);
+            return Err(QueryMcpAdmissionUnavailableV1::Revoked);
         }
         if observed_at < self.issued_at || observed_at >= self.expires_at {
-            return Err(Pr9McpAdmissionUnavailableV1::Expired);
+            return Err(QueryMcpAdmissionUnavailableV1::Expired);
         }
         if !self
             .capabilities
             .iter()
             .any(|capability| capability.as_str() == requested_capability)
         {
-            return Err(Pr9McpAdmissionUnavailableV1::CapabilityMismatch);
+            return Err(QueryMcpAdmissionUnavailableV1::CapabilityMismatch);
         }
         if scope.project_id != self.project_id
             || scope.scope_digest != self.scope.scope_digest
             || scope != &self.scope
         {
-            return Err(Pr9McpAdmissionUnavailableV1::ScopeMismatch);
+            return Err(QueryMcpAdmissionUnavailableV1::ScopeMismatch);
         }
-        let supplied = supplied.ok_or(Pr9McpAdmissionUnavailableV1::Unauthenticated)?;
+        let supplied = supplied.ok_or(QueryMcpAdmissionUnavailableV1::Unauthenticated)?;
         let expected = self.search_authority();
         if supplied != &expected {
-            return Err(Pr9McpAdmissionUnavailableV1::AuthorizationStale);
+            return Err(QueryMcpAdmissionUnavailableV1::AuthorizationStale);
         }
         Ok(expected)
     }
@@ -258,7 +260,7 @@ mod tests {
         WorktreeId,
     };
 
-    use super::{Pr9McpAdmissionUnavailableV1, admit_pr9_mcp_read_at};
+    use super::{QueryMcpAdmissionUnavailableV1, admit_query_mcp_read_at};
 
     fn id<T>(value: &str) -> T
     where
@@ -278,8 +280,8 @@ mod tests {
         .expect("scope")
     }
 
-    fn admission(scope: &ResolvedScope) -> super::Pr9McpReadAdmissionV1 {
-        admit_pr9_mcp_read_at(
+    fn admission(scope: &ResolvedScope) -> super::QueryMcpReadAdmissionV1 {
+        admit_query_mcp_read_at(
             &id::<BrainId>("brain.fixture"),
             &id::<UserProfileId>("profile.fixture"),
             &scope.project_id,
@@ -302,7 +304,7 @@ mod tests {
             admission.authorize_at(
                 &admitted_scope,
                 Some(&authority),
-                super::PR9_MCP_READ_CAPABILITY_V1,
+                super::QUERY_MCP_READ_CAPABILITY_V1,
                 UtcMicros(11),
             ),
             Ok(authority.clone())
@@ -311,19 +313,19 @@ mod tests {
             admission.authorize_at(
                 &other_project,
                 Some(&authority),
-                super::PR9_MCP_READ_CAPABILITY_V1,
+                super::QUERY_MCP_READ_CAPABILITY_V1,
                 UtcMicros(11),
             ),
-            Err(Pr9McpAdmissionUnavailableV1::ScopeMismatch)
+            Err(QueryMcpAdmissionUnavailableV1::ScopeMismatch)
         );
         assert_eq!(
             admission.authorize_at(
                 &other_worktree,
                 Some(&authority),
-                super::PR9_MCP_READ_CAPABILITY_V1,
+                super::QUERY_MCP_READ_CAPABILITY_V1,
                 UtcMicros(11),
             ),
-            Err(Pr9McpAdmissionUnavailableV1::ScopeMismatch)
+            Err(QueryMcpAdmissionUnavailableV1::ScopeMismatch)
         );
     }
 
@@ -341,36 +343,36 @@ mod tests {
             admission.authorize_at(
                 &scope,
                 Some(&stale),
-                super::PR9_MCP_READ_CAPABILITY_V1,
+                super::QUERY_MCP_READ_CAPABILITY_V1,
                 UtcMicros(11),
             ),
-            Err(Pr9McpAdmissionUnavailableV1::AuthorizationStale)
+            Err(QueryMcpAdmissionUnavailableV1::AuthorizationStale)
         );
         assert_eq!(
             admission.authorize_at(
                 &scope,
                 Some(&authority),
-                super::PR9_MCP_READ_CAPABILITY_V1,
+                super::QUERY_MCP_READ_CAPABILITY_V1,
                 admission.expires_at,
             ),
-            Err(Pr9McpAdmissionUnavailableV1::Expired)
+            Err(QueryMcpAdmissionUnavailableV1::Expired)
         );
         admission.revoke();
         assert_eq!(
             admission.authorize_at(
                 &scope,
                 Some(&authority),
-                super::PR9_MCP_READ_CAPABILITY_V1,
+                super::QUERY_MCP_READ_CAPABILITY_V1,
                 UtcMicros(11),
             ),
-            Err(Pr9McpAdmissionUnavailableV1::Revoked)
+            Err(QueryMcpAdmissionUnavailableV1::Revoked)
         );
     }
 
     #[test]
     fn refreshed_grants_keep_revision_for_same_scope_and_change_it_for_new_scope() {
         let active_scope = scope("project.one", "worktree.one");
-        let refreshed = admit_pr9_mcp_read_at(
+        let refreshed = admit_query_mcp_read_at(
             &id::<BrainId>("brain.fixture"),
             &id::<UserProfileId>("profile.fixture"),
             &active_scope.project_id,
@@ -385,7 +387,7 @@ mod tests {
         assert_ne!(original.expires_at, refreshed.expires_at);
 
         let other_scope = scope("project.one", "worktree.two");
-        let moved = admit_pr9_mcp_read_at(
+        let moved = admit_query_mcp_read_at(
             &id::<BrainId>("brain.fixture"),
             &id::<UserProfileId>("profile.fixture"),
             &other_scope.project_id,
@@ -401,13 +403,13 @@ mod tests {
     fn absent_authenticated_actor_is_unavailable() {
         let scope = scope("project.one", "worktree.one");
         assert!(matches!(
-            super::admit_pr9_mcp_read(
+            super::admit_query_mcp_read(
                 None,
                 &scope.project_id,
                 &scope,
                 Arc::new(AtomicBool::new(true)),
             ),
-            Err(Pr9McpAdmissionUnavailableV1::Unauthenticated)
+            Err(QueryMcpAdmissionUnavailableV1::Unauthenticated)
         ));
     }
 }
