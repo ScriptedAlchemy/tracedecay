@@ -19,6 +19,14 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
 
+fn normalize_plan_detail(detail: &str) -> String {
+    detail
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase()
+}
+
 fn digest(byte: char) -> String {
     format!("sha256:{}", byte.to_string().repeat(64))
 }
@@ -233,17 +241,17 @@ impl RegisteredTemporalRead {
         records
     }
 
-    async fn explain_record_query(&self, query: RecordQuery) -> usize {
+    async fn explain_record_query(&self, query: RecordQuery) -> Vec<String> {
         let explain = format!("EXPLAIN QUERY PLAN {}", query.sql);
         let mut rows = crate::db::engine::QueryExecutor::query(&self.read, &explain, query.params)
             .await
             .expect("record query must parse and plan");
-        let mut detail_count = 0usize;
-        while rows.next().await.expect("plan row").is_some() {
-            detail_count += 1;
-            assert!(detail_count < 512, "record plan must remain finite");
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().await.expect("plan row") {
+            let detail: String = row.get(3).expect("record plan detail");
+            details.push(normalize_plan_detail(&detail));
         }
-        detail_count
+        details
     }
 
     async fn text_column(&self, sql: &str, params: Vec<SqlValue>, column: i32) -> Vec<String> {
@@ -257,6 +265,22 @@ impl RegisteredTemporalRead {
         values
     }
 
+    async fn optional_text_column(
+        &self,
+        sql: &str,
+        params: Vec<SqlValue>,
+        column: i32,
+    ) -> Vec<Option<String>> {
+        let mut rows = crate::db::engine::QueryExecutor::query(&self.read, sql, params)
+            .await
+            .expect("query must execute");
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.expect("query row") {
+            values.push(row.get(column).expect("optional text column"));
+        }
+        values
+    }
+
     async fn explain_query_plan(&self, sql: &str, params: Vec<SqlValue>) -> Vec<String> {
         let explain = format!("EXPLAIN QUERY PLAN {sql}");
         let mut rows = crate::db::engine::QueryExecutor::query(&self.read, &explain, params)
@@ -264,7 +288,8 @@ impl RegisteredTemporalRead {
             .expect("query must plan");
         let mut details = Vec::new();
         while let Some(row) = rows.next().await.expect("plan row") {
-            details.push(row.get(3).expect("plan detail"));
+            let detail: String = row.get(3).expect("plan detail");
+            details.push(normalize_plan_detail(&detail));
         }
         details
     }
@@ -323,10 +348,33 @@ impl HostAdmissionTestRuntimeV1 {
                     'anchor-plan-inside', '{}', '{\"kind\":\"profile\"}', 'fixture'
                 ),
                 (
+                    'anchor-plan-inside-old', '{}', '{\"kind\":\"profile\"}', 'fixture'
+                ),
+                (
+                    'anchor-plan-inside-last', '{}', '{\"kind\":\"profile\"}', 'fixture'
+                ),
+                (
                     'anchor-plan-summary', '{}', '{\"kind\":\"profile\"}', 'fixture'
                 ),
                 (
+                    'anchor-plan-summary-old', '{}', '{\"kind\":\"profile\"}', 'fixture'
+                ),
+                (
+                    'anchor-plan-derived', '{}', '{\"kind\":\"profile\"}', 'fixture'
+                ),
+                (
+                    'anchor-plan-derived-old', '{}', '{\"kind\":\"profile\"}', 'fixture'
+                ),
+                (
                     'anchor-plan-outside', '{}',
+                    '{\"kind\":\"project\",\"project_id\":\"project-outside\"}', 'fixture'
+                ),
+                (
+                    'anchor-plan-summary-outside', '{}',
+                    '{\"kind\":\"project\",\"project_id\":\"project-outside\"}', 'fixture'
+                ),
+                (
+                    'anchor-plan-derived-outside', '{}',
                     '{\"kind\":\"project\",\"project_id\":\"project-outside\"}', 'fixture'
                 );
              INSERT INTO session_occurrences (
@@ -339,35 +387,128 @@ impl HostAdmissionTestRuntimeV1 {
                     'observation-plan-inside', 0, 'anchor-plan-inside',
                     'message-plan-inside', 'turn-plan-inside', 'user', 20,
                     '{\"kind\":\"unknown\"}', '{}',
-                    'needle candidate inside', 'needle candidate inside'
+                    'needle candidate derived needle inside',
+                    'needle candidate derived needle inside'
+                ),
+                (
+                    'session-plan-inside', 1, 'occurrence-plan-inside-old',
+                    'observation-plan-inside', 1, 'anchor-plan-inside-old',
+                    'message-plan-inside-old', 'turn-plan-inside-old', 'assistant', 10,
+                    '{\"kind\":\"unknown\"}', '{}',
+                    'derived needle older member', 'derived needle older member'
+                ),
+                (
+                    'session-plan-inside', 1, 'occurrence-plan-inside-last',
+                    'observation-plan-inside', 2, 'anchor-plan-inside-last',
+                    'message-plan-inside-last', 'turn-plan-inside-last', 'assistant', 5,
+                    '{\"kind\":\"unknown\"}', '{}',
+                    'derived needle last member', 'derived needle last member'
                 ),
                 (
                     'session-plan-outside', 1, 'occurrence-plan-outside',
                     'observation-plan-outside', 0, 'anchor-plan-outside',
                     'message-plan-outside', 'turn-plan-outside', 'user', 30,
                     '{\"kind\":\"unknown\"}', '{}',
-                    'needle candidate outside', 'needle candidate outside'
+                    'needle candidate derived needle outside',
+                    'needle candidate derived needle outside'
                 );
              INSERT INTO session_summary_nodes (
                 summary_id, session_id, summary_anchor_id, summary_text, index_text,
                 source_horizon_json, publication_json, created_at
-             ) VALUES (
-                'summary-plan-inside', 'session-plan-inside', 'anchor-plan-summary',
-                'needle summary inside', 'needle summary inside', '{}',
-                '{\"provider\":\"claude\"}', 25
-             );
+             ) VALUES
+                (
+                    'summary-plan-inside', 'session-plan-inside', 'anchor-plan-summary',
+                    'needle summary inside newest', 'needle summary inside newest', '{}',
+                    '{\"provider\":\"claude\"}', 25
+                ),
+                (
+                    'summary-plan-inside-old', 'session-plan-inside',
+                    'anchor-plan-summary-old',
+                    'needle summary inside older', 'needle summary inside older', '{}',
+                    '{\"provider\":\"claude\"}', 15
+                ),
+                (
+                    'summary-plan-outside', 'session-plan-outside',
+                    'anchor-plan-summary-outside',
+                    'needle summary outside', 'needle summary outside', '{}',
+                    '{\"provider\":\"claude\"}', 35
+                );
              INSERT INTO session_summary_sources (
                 summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES (
-                'summary-plan-inside', 0, 'anchor', 'anchor-plan-inside', NULL
-             );
+             ) VALUES
+                (
+                    'summary-plan-inside', 0, 'anchor', 'anchor-plan-inside', NULL
+                ),
+                (
+                    'summary-plan-inside-old', 0, 'anchor',
+                    'anchor-plan-inside-old', NULL
+                ),
+                (
+                    'summary-plan-outside', 0, 'anchor', 'anchor-plan-outside', NULL
+                );
              INSERT INTO session_summary_availability (
                 session_id, generation, summary_id, availability,
                 source_horizon_json, reason, checked_at
-             ) VALUES (
-                'session-plan-inside', 1, 'summary-plan-inside', 'available',
-                '{}', NULL, 25
-             );",
+             ) VALUES
+                (
+                    'session-plan-inside', 1, 'summary-plan-inside', 'available',
+                    '{}', NULL, 25
+                ),
+                (
+                    'session-plan-inside', 1, 'summary-plan-inside-old', 'available',
+                    '{}', NULL, 15
+                ),
+                (
+                    'session-plan-outside', 1, 'summary-plan-outside', 'available',
+                    '{}', NULL, 35
+                );
+             INSERT INTO session_derived_evidence (
+                session_id, generation, evidence_kind, evidence_id,
+                retrieval_anchor_id, thread_id, first_occurrence_id, last_occurrence_id,
+                algorithm_version, configuration_digest, member_count, member_digest,
+                evidence_json
+             ) VALUES
+                (
+                    'session-plan-inside', 1, 'span', 'derived-plan-inside',
+                    'anchor-plan-derived', NULL,
+                    'occurrence-plan-inside', 'occurrence-plan-inside',
+                    'fixture-v1', 'sha256:derived-inside', 1,
+                    'sha256:derived-inside-members', '{}'
+                ),
+                (
+                    'session-plan-inside', 1, 'span', 'derived-plan-inside-old',
+                    'anchor-plan-derived-old', NULL,
+                    'occurrence-plan-inside-old', 'occurrence-plan-inside-last',
+                    'fixture-v1', 'sha256:derived-inside-old', 2,
+                    'sha256:derived-inside-old-members', '{}'
+                ),
+                (
+                    'session-plan-outside', 1, 'span', 'derived-plan-outside',
+                    'anchor-plan-derived-outside', NULL,
+                    'occurrence-plan-outside', 'occurrence-plan-outside',
+                    'fixture-v1', 'sha256:derived-outside', 1,
+                    'sha256:derived-outside-members', '{}'
+                );
+             INSERT INTO session_derived_evidence_members (
+                session_id, generation, evidence_kind, evidence_id,
+                ordinal, occurrence_id, member_role
+             ) VALUES
+                (
+                    'session-plan-inside', 1, 'span', 'derived-plan-inside',
+                    0, 'occurrence-plan-inside', 'first'
+                ),
+                (
+                    'session-plan-inside', 1, 'span', 'derived-plan-inside-old',
+                    0, 'occurrence-plan-inside-old', 'first'
+                ),
+                (
+                    'session-plan-inside', 1, 'span', 'derived-plan-inside-old',
+                    1, 'occurrence-plan-inside-last', 'last'
+                ),
+                (
+                    'session-plan-outside', 1, 'span', 'derived-plan-outside',
+                    0, 'occurrence-plan-outside', 'first'
+                );",
         )
         .await
         .expect("candidate query fixture");
@@ -1144,7 +1285,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         .await;
     assert!(
         occurrence_fts_plan.iter().any(|detail| {
-            detail.contains("session_occurrences_fts") && detail.contains("VIRTUAL TABLE INDEX")
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
         }),
         "occurrence retrieval must execute through the live FTS operator: {occurrence_fts_plan:?}"
     );
@@ -1174,7 +1315,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     assert!(
         time_plan
             .iter()
-            .any(|detail| detail.contains("idx_session_occurrences_generation_order")),
+            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_GENERATION_ORDER")),
         "session time retrieval must use the live generation-order index: {time_plan:?}"
     );
 
@@ -1194,14 +1335,14 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     assert_eq!(
         read.text_column(SUMMARY_CANDIDATE_QUERY, summary_params.clone(), 0)
             .await,
-        ["summary-plan-inside"]
+        ["summary-plan-inside", "summary-plan-inside-old"]
     );
     let summary_plan = read
         .explain_query_plan(SUMMARY_CANDIDATE_QUERY, summary_params)
         .await;
     assert!(
         summary_plan.iter().any(|detail| {
-            detail.contains("session_summary_nodes_fts") && detail.contains("VIRTUAL TABLE INDEX")
+            detail.contains("SESSION_SUMMARY_NODES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
         }),
         "summary retrieval must execute through the live FTS operator: {summary_plan:?}"
     );
@@ -1231,7 +1372,7 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         .await;
     assert!(
         root_fts_plan.iter().any(|detail| {
-            detail.contains("session_occurrences_fts") && detail.contains("VIRTUAL TABLE INDEX")
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
         }),
         "root retrieval must execute one live FTS store query: {root_fts_plan:?}"
     );
@@ -1263,14 +1404,238 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     assert!(
         root_time_plan
             .iter()
-            .any(|detail| detail.contains("idx_session_occurrences_root_generation_order")),
+            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
         "root time retrieval must use the live root generation-order index: {root_time_plan:?}"
     );
     assert!(
         root_time_plan
             .iter()
-            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+            .all(|detail| !detail.contains("USE TEMP B-TREE")),
         "root time retrieval must preserve index order: {root_time_plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+
+    let root_summary_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("needle summary")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_params.clone(), 0)
+            .await,
+        ["summary-plan-inside", "summary-plan-inside-old"],
+        "root summary retrieval must be ordered and exclude the populated out-of-root summary"
+    );
+    let root_summary_plan = read
+        .explain_query_plan(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_params)
+        .await;
+    assert!(
+        root_summary_plan.iter().any(|detail| {
+            detail.contains("SESSION_SUMMARY_NODES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "root summaries must use the live summary FTS operator: {root_summary_plan:?}"
+    );
+    assert!(
+        root_summary_plan
+            .iter()
+            .any(|detail| detail.contains("IDX_SESSION_SUMMARY_NODES_ROOT_CREATED_ORDER")),
+        "root summaries must use the live root ordering index: {root_summary_plan:?}"
+    );
+    let root_summary_wrong_provider = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("codex".to_string()),
+        SqlValue::Text(fts_phrase("needle summary")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(10),
+    ];
+    assert!(
+        read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_wrong_provider, 0)
+            .await
+            .is_empty(),
+        "root summaries must fail closed for a provider without retained source evidence"
+    );
+    let root_summary_missing_phrase = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("absent summary phrase")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(10),
+    ];
+    assert!(
+        read.text_column(ROOT_SUMMARY_CANDIDATE_QUERY, root_summary_missing_phrase, 0)
+            .await
+            .is_empty(),
+        "root summary retrieval must require a real FTS match"
+    );
+
+    let derived_params = vec![
+        SqlValue::Text("session-plan-inside".to_string()),
+        SqlValue::Integer(1),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("derived needle")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(DERIVED_CANDIDATE_QUERY, derived_params.clone(), 0)
+            .await,
+        ["derived-plan-inside", "derived-plan-inside-old"]
+    );
+    assert_eq!(
+        read.optional_text_column(DERIVED_CANDIDATE_QUERY, derived_params.clone(), 3)
+            .await,
+        [Some("message-plan-inside".to_string()), None],
+        "only singleton derived evidence may inherit its member logical message"
+    );
+    let derived_plan = read
+        .explain_query_plan(DERIVED_CANDIDATE_QUERY, derived_params)
+        .await;
+    assert!(
+        derived_plan.iter().any(|detail| {
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "derived retrieval must search members through the live occurrence FTS operator: {derived_plan:?}"
+    );
+    assert!(
+        derived_plan
+            .iter()
+            .any(|detail| detail.contains("IDX_SESSION_DERIVED_EVIDENCE_SCOPE_ORDER")),
+        "derived retrieval must use the live evidence scope index: {derived_plan:?}"
+    );
+    let derived_wrong_provider = vec![
+        SqlValue::Text("session-plan-inside".to_string()),
+        SqlValue::Integer(1),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Text("codex".to_string()),
+        SqlValue::Text(fts_phrase("derived needle")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(10),
+    ];
+    assert!(
+        read.text_column(DERIVED_CANDIDATE_QUERY, derived_wrong_provider, 0)
+            .await
+            .is_empty(),
+        "derived candidates must fail closed for the wrong provider"
+    );
+    let derived_missing_phrase = vec![
+        SqlValue::Text("session-plan-inside".to_string()),
+        SqlValue::Integer(1),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("absent derived phrase")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(10),
+    ];
+    assert!(
+        read.text_column(DERIVED_CANDIDATE_QUERY, derived_missing_phrase, 0)
+            .await
+            .is_empty(),
+        "derived candidates must require an FTS-matching member"
+    );
+
+    let root_derived_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("derived needle")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params.clone(), 0)
+            .await,
+        ["derived-plan-inside", "derived-plan-inside-old"],
+        "root derived retrieval must be ordered and exclude out-of-root evidence"
+    );
+    assert_eq!(
+        read.optional_text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params.clone(), 3)
+            .await,
+        [Some("message-plan-inside".to_string()), None]
+    );
+    let root_derived_plan = read
+        .explain_query_plan(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params)
+        .await;
+    assert!(
+        root_derived_plan.iter().any(|detail| {
+            detail.contains("SESSION_OCCURRENCES_FTS") && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "root derived retrieval must use one live occurrence FTS operator: {root_derived_plan:?}"
+    );
+    assert!(
+        root_derived_plan
+            .iter()
+            .any(|detail| detail.contains("IDX_SESSION_DERIVED_EVIDENCE_SCOPE_ORDER")),
+        "root derived retrieval must use the live evidence scope index: {root_derived_plan:?}"
+    );
+    let root_derived_wrong_provider = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Text("codex".to_string()),
+        SqlValue::Text(fts_phrase("derived needle")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(10),
+    ];
+    assert!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_wrong_provider, 0)
+            .await
+            .is_empty(),
+        "root derived retrieval must fail closed for the wrong provider"
+    );
+    let root_derived_missing_phrase = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Text("span".to_string()),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("absent derived phrase")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(10),
+    ];
+    assert!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_missing_phrase, 0)
+            .await
+            .is_empty(),
+        "root derived retrieval must require an FTS-matching member"
     );
 }
 
@@ -2101,34 +2466,59 @@ async fn provider_specific_summary_requires_retained_provider_evidence() {
 }
 
 #[tokio::test]
-async fn explain_record_query_stays_bounded_after_hundred_thousand_candidates() {
+async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
     let total = 100_000usize;
     let start = 71_111usize;
     let end = bounded_window_end(total, start, 38);
-    let candidates = (start..end)
-        .map(|ordinal| RankingCandidate {
-            stable_id: format!("exact:occurrence-{ordinal}"),
-            anchor_id: RetrievalAnchorId::new(format!("anchor-{ordinal}")).expect("anchor"),
-            retriever_record_id: format!("occurrence-{ordinal}"),
+    assert_eq!(end - start, 38);
+
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let candidates = [
+        (
+            "occurrence-plan-inside",
+            "anchor-plan-inside",
+            "message-plan-inside",
+            20,
+        ),
+        (
+            "occurrence-plan-inside-old",
+            "anchor-plan-inside-old",
+            "message-plan-inside-old",
+            10,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(occurrence_id, anchor_id, message_id, knowledge_at)| RankingCandidate {
+            stable_id: format!("exact:{occurrence_id}"),
+            anchor_id: RetrievalAnchorId::new(anchor_id).expect("anchor"),
+            retriever_record_id: occurrence_id.to_string(),
             channel: CandidateChannel::ExactMessage,
             raw_score: 1_000,
-            knowledge_at_micros: 1,
-            logical_message: None,
+            knowledge_at_micros: knowledge_at,
+            logical_message: Some(message_id.to_string()),
             turn: None,
-            session: Some("session-snapshot".to_string()),
+            session: Some("session-plan-inside".to_string()),
             source: Some("claude".to_string()),
             evidence_role: Some("user".to_string()),
             exact_ranges: Vec::new(),
-        })
-        .collect::<Vec<_>>();
+        },
+    )
+    .collect::<Vec<_>>();
     let request = PageRequest::for_test(37, 64 * 1024, 8 * 1024, 37, 512);
+    let snapshot = scoped_snapshot_with_mode(1, Some("claude"), TemporalModeV1::Forensic);
     let query = build_record_query(
-        &TemporalRetrievalScope::Session(SessionId::new("session-snapshot").expect("session")),
-        &scoped_snapshot(1, Some("claude")),
+        &TemporalRetrievalScope::Session(SessionId::new("session-plan-inside").expect("session")),
+        &snapshot,
         &candidates,
-        start,
+        0,
         &RecordCursor {
-            candidate: start,
+            candidate: 0,
             kind: 0,
             session_id: String::new(),
             stable_id: String::new(),
@@ -2137,15 +2527,48 @@ async fn explain_record_query_stays_bounded_after_hundred_thousand_candidates() 
         &request,
     )
     .expect("bounded record query");
-    assert_eq!(candidates.len(), 38);
-    assert!(query.params.len() <= candidates.len() * 5 + 14);
+    assert_eq!(
+        read.text_column(&query.sql, query.params.clone(), 2).await,
+        ["occurrence-plan-inside", "occurrence-plan-inside-old"],
+        "the populated record query must preserve candidate keyset order"
+    );
+    let plan = read.explain_record_query(query).await;
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ANCHOR_ORDER")),
+        "record hydration must use the live occurrence-anchor index: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE")),
+        "record hydration must not materialize any temporary B-tree sort: {plan:?}"
+    );
+    assert!(
+        plan.iter().all(|detail| !detail.contains("CORRELATED")),
+        "record hydration must not execute correlated per-candidate work: {plan:?}"
+    );
 
-    let dir = tempdir().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
-        .await
-        .expect("registered profile runtime");
-    let read = runtime.retrieval_read_for_test().await;
-    assert!(read.explain_record_query(query).await > 0);
+    let page_after_first = build_record_query(
+        snapshot.retrieval_scope(),
+        &snapshot,
+        &candidates,
+        0,
+        &RecordCursor {
+            candidate: 0,
+            kind: 0,
+            session_id: "session-plan-inside".to_string(),
+            stable_id: "occurrence-plan-inside".to_string(),
+        },
+        38,
+        &request,
+    )
+    .expect("record keyset query");
+    assert_eq!(
+        read.text_column(&page_after_first.sql, page_after_first.params, 2)
+            .await,
+        ["occurrence-plan-inside-old"],
+        "the record cursor must resume strictly after the first populated row"
+    );
 }
 
 #[test]
