@@ -20,6 +20,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::surface_name;
 
 struct SurfaceSpec {
     capability: &'static str,
@@ -141,13 +142,7 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
         for surface in spec.surfaces.iter().copied() {
             let binding_id = BindingId::new(format!(
                 "binding.{}.{}.{}",
-                match surface {
-                    BindingSurface::Cli => "cli",
-                    BindingSurface::Mcp => "mcp",
-                    BindingSurface::Http => "http",
-                    BindingSurface::Lsp => "lsp",
-                    BindingSurface::Dashboard => "dashboard",
-                },
+                surface_name(surface),
                 spec.operation,
                 "v1"
             ))?;

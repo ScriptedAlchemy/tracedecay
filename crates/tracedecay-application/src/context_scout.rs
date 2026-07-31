@@ -19,6 +19,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::surface_name;
 
 const SCOUT_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Cli,
@@ -80,13 +81,7 @@ pub fn context_scout_surface_catalog_contribution()
         for surface in SCOUT_SURFACES {
             let binding_id = BindingId::new(format!(
                 "binding.{}.{}.v1",
-                match surface {
-                    BindingSurface::Cli => "cli",
-                    BindingSurface::Mcp => "mcp",
-                    BindingSurface::Http => "http",
-                    BindingSurface::Lsp => "lsp",
-                    BindingSurface::Dashboard => "dashboard",
-                },
+                surface_name(surface),
                 spec.operation
             ))?;
             bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {

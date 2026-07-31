@@ -21,6 +21,7 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_COMPACT_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
+use crate::surface_name;
 
 use super::{
     ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
@@ -239,13 +240,7 @@ fn feedback_surface_catalog_contribution_for_handlers(
             for &surface in spec.surfaces {
                 let binding_id = BindingId::new(format!(
                     "binding.{}.{}.{}",
-                    match surface {
-                        BindingSurface::Cli => "cli",
-                        BindingSurface::Mcp => "mcp",
-                        BindingSurface::Http => "http",
-                        BindingSurface::Lsp => "lsp",
-                        BindingSurface::Dashboard => "dashboard",
-                    },
+                    surface_name(surface),
                     spec.operation,
                     "v1"
                 ))?;

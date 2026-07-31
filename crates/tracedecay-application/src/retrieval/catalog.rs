@@ -15,6 +15,7 @@ use tracedecay_tool_catalog::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::surface_name;
 
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";
@@ -221,15 +222,11 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
         let mut binding_ids =
             Vec::with_capacity(surfaces.len() + primitive_lsp_methods(spec.operation).len());
         for &surface in surfaces {
-            let surface_name = match surface {
-                BindingSurface::Cli => "cli",
-                BindingSurface::Mcp => "mcp",
-                BindingSurface::Http => "http",
-                BindingSurface::Lsp => "lsp",
-                BindingSurface::Dashboard => "dashboard",
-            };
-            let binding_id =
-                BindingId::new(format!("binding.{surface_name}.{}.v1", spec.operation))?;
+            let binding_id = BindingId::new(format!(
+                "binding.{}.{}.v1",
+                surface_name(surface),
+                spec.operation
+            ))?;
             bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
                 binding_id: binding_id.clone(),
                 capability_id: capability_id.clone(),
@@ -365,14 +362,10 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         BindingSurface::Mcp,
         BindingSurface::Http,
     ] {
-        let surface_name = match surface {
-            BindingSurface::Cli => "cli",
-            BindingSurface::Mcp => "mcp",
-            BindingSurface::Http => "http",
-            BindingSurface::Lsp => "lsp",
-            BindingSurface::Dashboard => "dashboard",
-        };
-        let binding_id = BindingId::new(format!("binding.{surface_name}.code_symbol_search.v1"))?;
+        let binding_id = BindingId::new(format!(
+            "binding.{}.code_symbol_search.v1",
+            surface_name(surface)
+        ))?;
         bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
             binding_id: binding_id.clone(),
             capability_id: capability_id.clone(),

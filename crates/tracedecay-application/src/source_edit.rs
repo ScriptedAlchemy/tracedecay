@@ -24,7 +24,7 @@ use crate::result::{
     ApplicationProblem, AuthorityReceipt, EffectId, IdempotencyKey, ResultContractRef,
 };
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
-use crate::{RequestAdmission, RequestContext, ResolvedScope};
+use crate::{RequestAdmission, RequestContext, ResolvedScope, surface_name};
 
 const SOURCE_EDIT_EFFECT_REQUEST_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.source-edit-effect-request.v1";
@@ -667,7 +667,7 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         for surface in SOURCE_EDIT_SURFACES {
             let binding_id = BindingId::new(format!(
                 "binding.{}.{operation_name}.v1",
-                source_edit_surface_name(surface)
+                surface_name(surface)
             ))?;
             bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
                 binding_id: binding_id.clone(),
@@ -743,7 +743,7 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
     for surface in SOURCE_EDIT_SURFACES {
         let binding_id = BindingId::new(format!(
             "binding.{}.source-edit-reconcile.v1",
-            source_edit_surface_name(surface)
+            surface_name(surface)
         ))?;
         bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
             binding_id: binding_id.clone(),
@@ -817,14 +817,6 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         retrieval_primitives: Vec::new(),
         bindings,
     })?)
-}
-
-fn source_edit_surface_name(surface: BindingSurface) -> &'static str {
-    match surface {
-        BindingSurface::Cli => "cli",
-        BindingSurface::Mcp => "mcp",
-        _ => unreachable!("source edits bind only CLI and MCP"),
-    }
 }
 
 pub fn source_edit_reconciliation_operation()
