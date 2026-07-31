@@ -7406,10 +7406,7 @@ async fn serve_broker_socket_client(
     if let Some(server) = server {
         if is_mcp_initialize_request(&first_request_line) {
             #[cfg(test)]
-            tests::record_mcp_route(
-                &handshake.client_instance_id,
-                tests::ObservedMcpRoute::Rmcp,
-            );
+            tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
             serve_routed_rmcp_connection(
                 server,
                 transport,
@@ -7803,10 +7800,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         let (server, pending_lines) = server;
         if is_mcp_initialize_request(&first_request_line) {
             #[cfg(test)]
-            tests::record_mcp_route(
-                &handshake.client_instance_id,
-                tests::ObservedMcpRoute::Rmcp,
-            );
+            tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
             serve_routed_rmcp_connection(
                 server,
                 transport,
