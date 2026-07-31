@@ -274,11 +274,13 @@ provable terminal outcome.
    mechanics. An unavailable daemon or capability leaves the operation
    explicitly preview-only or unavailable; no transport falls back to local
    mutation.
-5. **Preserve published compatibility.** Existing supported APIs and any PR12
-   binding callable on the branch under review, together with
-   stored provenance and anchors, supported CLI/MCP names,
+5. **Preserve evidenced published compatibility.** Existing supported APIs
+   proven on `origin/master` or in a published release, together with
+   persisted provenance/anchors proven in live or released storage and
+   supported CLI/MCP names,
    `HunkRef`/receipt behavior, and rendering, remain compatible delegates to
-   the production kernels. Forward migration imports only prior read-only evidence whose typed
+   the production kernels. A PR12 binding merely callable on this branch
+   changes to its final shape in place. Forward migration imports only prior read-only evidence whose typed
    Plan 16 identity, object format, exact ref/commit relationship, and content
    digest validate; unverifiable path/ref/SHA, inferred topology, cached
    conflict, or mutable-log rows remain quarantined. Migration never invents a
