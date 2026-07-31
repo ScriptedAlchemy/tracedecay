@@ -87,9 +87,10 @@ after cutover; it never restores V1 as a writer.
 
 1. The owning daemon acquires a maintenance fence that pauses ingest, sync, and
    other writers for the affected store. Preflight discovers every evidenced
-   released/live V1 family, schema/version, source path, destination scope, required space, and
-   blocking corruption, and returns an actionable outcome when complete
-   migration cannot be proved.
+   released/live V1 family and every potentially persisted branch-era family
+   not yet eliminated by an authorized census, including schema/version, source
+   path, destination scope, required space, and blocking corruption. It returns
+   an actionable outcome when complete migration cannot be proved.
 2. Before any source mutation, the daemon creates and verifies a recoverable
    backup. The only usable copy is never overwritten.
 3. The daemon imports every detected supported family into isolated V2 staging
@@ -114,8 +115,10 @@ after cutover; it never restores V1 as a writer.
    newer disposition, rebuilds affected derivatives, and fences older daemons.
    There is no reverse cutover, dual write, production shadow read, or lazy
    read migration.
-7. When the recovery window and deletion policy are satisfied, PR19 deletes the
-   V1 archive and all migration-only code and reports what was removed.
+7. When the recovery window and deletion policy are satisfied and an authorized
+   registered-store/profile census proves no store remains dependent on the V1
+   archive or migration-only code, PR19 deletes them and reports what was
+   removed.
 
 Before PR16 one local daemon owns the live store. With remote shared Brain,
 exactly one fenced daemon authority owns each mutable shard; migration never
@@ -148,9 +151,10 @@ family corruption remains preserve-and-escalate.
 - Ship preflight, verified backup, maintenance fencing, family-by-family
   staging, durable checkpoints, and restart/resume as one callable daemon
   upgrade path.
-- Migrate all detected supported families whose predecessor is proven released
-  or live. Unknown or corrupt required data blocks the upgrade with Doctor
-  guidance; PR19 has no skipped-family or deferred-family success state.
+- Migrate all detected supported released/live families and every potentially
+  persisted branch-era family not eliminated by the authorized census. Unknown
+  or corrupt required data blocks the upgrade with Doctor guidance; PR19 has no
+  skipped-family or deferred-family success state.
   Pure source-only/internal API/DTO families are finalized in place.
   Wire-visible branch-era families remain until the authorized
   installed-client/host census proves absence; branch-written persisted
@@ -183,9 +187,11 @@ family corruption remains preserve-and-escalate.
   derivative ownership are captured. Restoration replays every newer
   disposition before serving and rebuilds affected derivatives; provenance
   never overrides erasure.
-- Delete obsolete V1 root wiring, direct database clients, temporary adapters,
-  dead flags, migration-only dependencies/features/build inputs, and their
-  dedicated test support after the recovery boundary passes.
+- Delete obsolete V1 root wiring, direct database clients, source-only
+  temporary adapters, and dead flags after the recovery boundary passes.
+  Delete migration-only dependencies/features/build inputs and their dedicated
+  test support only after the authorized registered-store/profile census proves
+  no remaining archive or store depends on them.
 
 ## Replacement and deletion
 
