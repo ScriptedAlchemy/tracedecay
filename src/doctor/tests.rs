@@ -2024,7 +2024,12 @@ fn drifted_host_component_warns_and_keeps_a_clean_exit() {
 
     assert_eq!(counters.issues, 0, "drift must not fail the doctor run");
     assert_eq!(counters.warnings, 1);
-    super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap();
+    super::doctor_result(
+        &counters,
+        Ok(serde_json::json!({})),
+        &super::DatabaseHealth::Healthy,
+    )
+    .unwrap();
 }
 
 /// A contested path is not repairable without an operator decision, so it
@@ -2045,7 +2050,12 @@ fn ownership_conflict_still_fails_the_doctor_run() {
     super::report_host_component_state(&mut counters, &component);
 
     assert_eq!(counters.issues, 1);
-    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap_err();
+    let error = super::doctor_result(
+        &counters,
+        Ok(serde_json::json!({})),
+        &super::DatabaseHealth::Healthy,
+    )
+    .unwrap_err();
     assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
 }
 

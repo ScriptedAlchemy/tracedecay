@@ -6600,13 +6600,13 @@ mod tests {
     fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
         let artifacts = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
-        let manifest = manifest(HostKindV1::OpenCode, b"current");
+        let bundle = manifest(HostKindV1::OpenCode, b"current");
         let mut writer =
             HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
                 .unwrap();
         writer
             .execute(
-                &manifest,
+                &bundle,
                 &execution(
                     HostKindV1::OpenCode,
                     HostBundleLifecycleOpV1::Install,
@@ -6614,7 +6614,7 @@ mod tests {
                     true,
                 ),
                 &content(b"current"),
-                &verifier(&manifest),
+                &verifier(&bundle),
             )
             .unwrap();
 
