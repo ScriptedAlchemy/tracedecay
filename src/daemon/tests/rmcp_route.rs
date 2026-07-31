@@ -120,6 +120,35 @@ fn cancellation(request_id: u64) -> Value {
     })
 }
 
+fn assert_delivered_cancellation(responses: &[Value], request_id: u64, context: &str) {
+    let response = responses
+        .iter()
+        .find(|response| response["id"] == json!(request_id))
+        .unwrap_or_else(|| panic!("{context}: no cancellation response for request {request_id}"));
+    assert!(
+        response.get("result").is_none(),
+        "{context}: cancelled request returned partial success: {response}"
+    );
+    assert_eq!(
+        response["error"]["code"],
+        json!(-32800),
+        "{context}: cancellation response used the wrong error code: {response}"
+    );
+    assert_eq!(
+        response["error"]["data"]["reason_code"],
+        json!("request_cancelled"),
+        "{context}: cancellation response omitted its typed reason: {response}"
+    );
+}
+
+fn assert_response_order(responses: &[Value], expected: &[u64], context: &str) {
+    let ids = responses
+        .iter()
+        .filter_map(|response| response["id"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected, "{context}: response order drifted");
+}
+
 async fn assert_initialized_route_is_rmcp<R, W>(
     mut reader: R,
     mut writer: W,
@@ -168,16 +197,14 @@ async fn assert_initialized_route_is_rmcp<R, W>(
         tokio::join!(read_to_eof(&mut reader), server_task)
     })
     .await
-    .expect("typed cancellation leaked the production RMCP connection task");
+    .expect("cancelled RMCP route did not terminate while the response gate remained held");
     served
         .expect("join production RMCP connection")
         .expect("serve production RMCP connection");
-    assert!(
-        remaining
-            .iter()
-            .filter(|response| response["id"] == json!(2))
-            .all(|response| response.get("result").is_none()),
-        "cancelled pre-registration request returned partial success: {remaining:?}"
+    assert_delivered_cancellation(
+        &remaining,
+        2,
+        "response-gate cancellation before request registration",
     );
     drop(gate);
 }
@@ -203,6 +230,9 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
     )
     .await;
 
+    let response_lifecycle = fixture.server.project_server_response_lifecycle();
+    let response_gate = Arc::clone(response_lifecycle.response_gate());
+    let gate = response_gate.write().await;
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("legacy route socket pair");
     let engine = fixture.engine.clone();
@@ -222,8 +252,15 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
         .await
         .expect("write legacy handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, &blocked_tool_request(4)).await;
     write_line(&mut writer, &ping_request(5)).await;
     writer.shutdown().await.expect("shutdown legacy client");
+    wait_for_mcp_routes(
+        &fixture.handshake.client_instance_id,
+        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Legacy],
+    )
+    .await;
+    drop(gate);
     let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
         .await
         .expect("legacy replay responses timed out");
@@ -231,14 +268,10 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
         .await
         .expect("join legacy route")
         .expect("serve legacy route");
-    wait_for_mcp_routes(
-        &fixture.handshake.client_instance_id,
-        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Legacy],
-    )
-    .await;
-    assert!(
-        responses.iter().any(|response| response["id"] == json!(5)),
-        "legacy replay did not resume queued ping after the tool request: {responses:?}"
+    assert_response_order(
+        &responses,
+        &[4, 5],
+        "Unix non-initialize traffic must remain sequential legacy replay",
     );
 }
 
@@ -287,6 +320,9 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     )
     .await;
 
+    let response_lifecycle = fixture.server.project_server_response_lifecycle();
+    let response_gate = Arc::clone(response_lifecycle.response_gate());
+    let gate = response_gate.write().await;
     let (listener, endpoint) = super::super::transport::BrokerListener::bind(
         &super::super::transport::default_loopback_endpoint(),
     )
@@ -332,20 +368,27 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
         .await
         .expect("write portable legacy handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
-    write_line(&mut writer, &ping_request(4)).await;
+    write_line(&mut writer, &blocked_tool_request(4)).await;
+    write_line(&mut writer, &ping_request(5)).await;
     writer.shutdown().await.expect("shutdown legacy client");
-    let response = read_value(&mut reader, "portable legacy ping response").await;
-    assert_eq!(response["id"], json!(4));
-    read_to_eof(&mut reader).await;
-    legacy_task
-        .await
-        .expect("join portable legacy route")
-        .expect("serve portable legacy route");
     wait_for_mcp_routes(
         &fixture.handshake.client_instance_id,
         &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Legacy],
     )
     .await;
+    drop(gate);
+    let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
+        .await
+        .expect("portable legacy replay responses timed out");
+    legacy_task
+        .await
+        .expect("join portable legacy route")
+        .expect("serve portable legacy route");
+    assert_response_order(
+        &responses,
+        &[4, 5],
+        "portable non-initialize traffic must remain sequential legacy replay",
+    );
 }
 
 struct ControlledCancellationExecutor {
@@ -524,7 +567,7 @@ async fn production_rmcp_cancels_registered_and_pre_registration_requests() {
     assert_eq!(
         executor.pre_cancelled.load(Ordering::SeqCst),
         1,
-        "pre-registration cancellation did not fail closed"
+        "queued request was not cancelled before entering the application executor"
     );
 
     writer
@@ -535,15 +578,10 @@ async fn production_rmcp_cancels_registered_and_pre_registration_requests() {
         tokio::join!(read_to_eof(&mut reader), server_task)
     })
     .await
-    .expect("cancelled production RMCP task leaked");
+    .expect("RMCP connection did not close after both cancellation responses were delivered");
     served
         .expect("join cancelled RMCP task")
         .expect("serve cancelled RMCP task");
-    assert!(
-        responses
-            .iter()
-            .filter(|response| matches!(response["id"].as_u64(), Some(10 | 11)))
-            .all(|response| response.get("result").is_none()),
-        "cancelled RMCP request returned partial success: {responses:?}"
-    );
+    assert_delivered_cancellation(&responses, 10, "registered in-flight cancellation");
+    assert_delivered_cancellation(&responses, 11, "pre-registration cancellation");
 }

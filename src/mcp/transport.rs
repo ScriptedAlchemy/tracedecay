@@ -108,6 +108,8 @@ pub enum ErrorCode {
     MethodNotFound,
     /// Invalid method parameters.
     InvalidParams,
+    /// The request was cancelled before completion.
+    RequestCancelled,
     /// Internal server error.
     InternalError,
 }
@@ -120,6 +122,7 @@ impl ErrorCode {
             Self::InvalidRequest => -32600,
             Self::MethodNotFound => -32601,
             Self::InvalidParams => -32602,
+            Self::RequestCancelled => -32800,
             Self::InternalError => -32603,
         }
     }
@@ -570,6 +573,7 @@ mod tests {
         assert_eq!(ErrorCode::InvalidRequest.as_i32(), -32600);
         assert_eq!(ErrorCode::MethodNotFound.as_i32(), -32601);
         assert_eq!(ErrorCode::InvalidParams.as_i32(), -32602);
+        assert_eq!(ErrorCode::RequestCancelled.as_i32(), -32800);
         assert_eq!(ErrorCode::InternalError.as_i32(), -32603);
     }
 
