@@ -30,6 +30,57 @@ fn missing_manifest_with_stale_registration_is_repairable() {
     assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
 }
 
+#[test]
+fn missing_manifest_with_partial_settings_residue_is_repairable() {
+    use crate::agents::AgentIntegration;
+    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+
+    let home = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    let settings = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    safe_write_json_file(
+        &settings,
+        &json!({
+            "enabledPlugins": { "tracedecay@tracedecay": false },
+            "permissions": { "allow": ["mcp__tracedecay__search"] }
+        }),
+        None,
+    )
+    .unwrap();
+    let state = ClaudeIntegration.host_component_registration(
+        HostBundleComponentV1::Core,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: project.path().to_path_buf(),
+        },
+    );
+    assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
+}
+
+#[test]
+fn missing_manifest_with_project_only_residue_is_repairable() {
+    use crate::agents::AgentIntegration;
+    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+
+    let home = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    safe_write_json_file(
+        &project.path().join(".mcp.json"),
+        &json!({ "mcpServers": { "tracedecay": { "command": "old" } } }),
+        None,
+    )
+    .unwrap();
+    let state = ClaudeIntegration.host_component_registration(
+        HostBundleComponentV1::Core,
+        &HealthcheckContext {
+            home: home.path().to_path_buf(),
+            project_path: project.path().to_path_buf(),
+        },
+    );
+    assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
+}
+
 fn plugin_subdir_names(rel: &str) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("plugin")
@@ -505,7 +556,7 @@ fn migration_removes_config_managed_but_keeps_foreign_entries() {
     )
     .unwrap();
 
-    migrate_off_config_managed(home.path());
+    migrate_off_config_managed(home.path()).unwrap();
 
     let claude_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.path().join(".claude.json")).unwrap())
@@ -546,9 +597,16 @@ fn migration_is_idempotent() {
     )
     .unwrap();
 
-    migrate_off_config_managed(home.path());
+    migrate_off_config_managed(home.path()).unwrap();
     let after_first = std::fs::read_to_string(home.path().join(".claude.json")).ok();
-    migrate_off_config_managed(home.path());
+    let first_contents = after_first
+        .as_deref()
+        .expect("first migration must preserve valid JSON state");
+    assert!(
+        !first_contents.contains("\"tracedecay\""),
+        "first migration must remove tracedecay"
+    );
+    migrate_off_config_managed(home.path()).unwrap();
     let after_second = std::fs::read_to_string(home.path().join(".claude.json")).ok();
     assert_eq!(after_first, after_second);
     assert!(!config_managed_mcp_present(home.path()));
@@ -594,6 +652,7 @@ fn uninstall_permissions_removes_tracedecay_entries() {
                 "Bash",
                 "mcp__tracedecay__search",
                 "mcp__tracedecay__lookup",
+                "mcp__plugin_tracedecay_tracedecay__search",
                 "Read"
             ]
         }

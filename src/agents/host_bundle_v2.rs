@@ -1858,6 +1858,14 @@ pub fn latest_host_component_set_receipt_at(
     Ok(latest.map(|(_, receipt)| receipt))
 }
 
+pub fn latest_host_component_receipt_at(
+    lifecycle_root: &Path,
+    host: HostKindV1,
+    component: HostBundleComponentV1,
+) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
+    read_receipt_at(lifecycle_root, host, component)
+}
+
 fn corrupt_component_result(
     receipt_path: PathBuf,
     host: Option<HostKindV1>,
@@ -3359,6 +3367,17 @@ impl HostBundleWriterV1 {
         Ok(hosts)
     }
 
+    pub fn pending_component_set_journal_operation(
+        &self,
+        host: HostKindV1,
+    ) -> Result<Option<HostBundleLifecycleOpV1>, HostBundleError> {
+        let Some(journal) = self.load_component_set_journal_for(host)? else {
+            return Ok(None);
+        };
+        validate_component_set_journal(&journal)?;
+        Ok(Some(journal.operation))
+    }
+
     fn write_journal(&self, journal: &HostBundleJournalV1) -> Result<(), HostBundleError> {
         validate_journal(journal)?;
         let bytes = serde_json::to_vec(journal).map_err(|_| HostBundleError::ReceiptCorrupted)?;
@@ -3682,13 +3701,30 @@ impl HostBundleWriterV1 {
         {
             return Err(HostBundleError::WrongTarget);
         }
+        let previous = latest_host_component_set_receipt_at(
+            &self.lifecycle_root_path,
+            component_receipt.host,
+        )?;
+        let mut component_manifests = previous
+            .as_ref()
+            .map(|receipt| receipt.component_manifests.clone())
+            .unwrap_or_default();
+        component_manifests.retain(|previous| previous.component != manifest.component);
+        component_manifests.push(manifest.clone());
+        component_manifests.sort_by_key(|manifest| manifest.component);
+        let mut component_receipts = previous
+            .map(|receipt| receipt.component_receipts)
+            .unwrap_or_default();
+        component_receipts.retain(|previous| previous.component != component_receipt.component);
+        component_receipts.push(component_receipt.clone());
+        component_receipts.sort_by_key(|receipt| receipt.component);
         let receipt = HostComponentSetReceiptV1 {
             schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
             operation_id: component_receipt.operation_id,
             host: component_receipt.host,
             operation: component_receipt.operation,
-            component_manifests: vec![manifest.clone()],
-            component_receipts: vec![component_receipt.clone()],
+            component_manifests,
+            component_receipts,
             confirmed_plan_digest: None,
             base_registration_revision: None,
             current_registration_revision: None,
@@ -4276,6 +4312,12 @@ fn component_set_receipt_from_prepared(
     let component_receipts = prepared
         .iter()
         .map(|component| {
+            if component.plan.mutations.is_empty()
+                && let Some(previous_receipt) = &component.previous_receipt
+                && previous_receipt.manifest_digest == component.manifest.canonical_digest()?
+            {
+                return Ok(previous_receipt.clone());
+            }
             Ok(HostBundleInstallReceiptV1 {
                 schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
                 operation_id: request.operation_id,
@@ -4346,8 +4388,6 @@ fn component_set_receipt_matches(
         let receipt_matches = receipt.component_receipts.iter().any(|component_receipt| {
             component_receipt.host == component.manifest.host
                 && component_receipt.component == component.manifest.component
-                && component_receipt.operation_id == request.operation_id
-                && component_receipt.operation == request.lifecycle.operation
                 && component_receipt.manifest_digest == manifest_digest
                 && component_receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed
         });
@@ -4404,8 +4444,6 @@ fn validate_component_set_receipt(
         if component_receipt.host != receipt.host
             || manifest.host != receipt.host
             || manifest.canonical_digest()? != component_receipt.manifest_digest
-            || component_receipt.operation_id != receipt.operation_id
-            || component_receipt.operation != receipt.operation
             || component_receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed
             || receipt.component_receipts[..index]
                 .iter()
@@ -5408,6 +5446,79 @@ mod tests {
             writer.pending_component_set_journal_hosts().unwrap(),
             vec![HostKindV1::OpenCode],
             "quarantining one host leaves every other host's journal intact"
+        );
+    }
+
+    #[test]
+    fn unchanged_companion_receipt_keeps_original_operation_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = component_set(HostKindV1::OpenCode, b"core-v1", b"agent-v1");
+        let initial_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 81);
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = ArtifactOnlyTestRegistration;
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &initial,
+                &initial_request,
+                &ComponentSetVerifier::from_set(&initial),
+                &mut registration,
+            )
+            .unwrap();
+
+        let core_only_change = component_set(HostKindV1::OpenCode, b"core-v2", b"agent-v1");
+        let update_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Update, 82);
+        let receipt = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &core_only_change,
+                &update_request,
+                &ComponentSetVerifier::from_set(&core_only_change),
+                &mut registration,
+            )
+            .unwrap();
+
+        let core = receipt
+            .component_receipts
+            .iter()
+            .find(|receipt| receipt.component == HostBundleComponentV1::Core)
+            .unwrap();
+        let companion = receipt
+            .component_receipts
+            .iter()
+            .find(|receipt| receipt.component == HostBundleComponentV1::Agent)
+            .unwrap();
+        assert_eq!(core.operation_id, [82; 16]);
+        assert_eq!(core.operation, HostBundleLifecycleOpV1::Update);
+        assert_eq!(companion.operation_id, [81; 16]);
+        assert_eq!(companion.operation, HostBundleLifecycleOpV1::Install);
+
+        let mut metadata_only_change = core_only_change.clone();
+        metadata_only_change.components[1]
+            .manifest
+            .configuration_snapshot_id = "first-party.v2".to_string();
+        let metadata_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Update, 83);
+        let receipt = HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &metadata_only_change,
+                &metadata_request,
+                &ComponentSetVerifier::from_set(&metadata_only_change),
+                &mut registration,
+            )
+            .unwrap();
+        let metadata_updated = receipt
+            .component_receipts
+            .iter()
+            .find(|receipt| receipt.component == HostBundleComponentV1::Agent)
+            .unwrap();
+        assert_eq!(metadata_updated.operation_id, [83; 16]);
+        assert_eq!(
+            metadata_updated.manifest_digest,
+            metadata_only_change.components[1]
+                .manifest
+                .canonical_digest()
+                .unwrap()
         );
     }
 

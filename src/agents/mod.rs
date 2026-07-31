@@ -371,6 +371,15 @@ pub trait AgentIntegration {
         self.host_registration_paths(home)
     }
 
+    fn host_component_registration_paths_at(
+        &self,
+        components: &[host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        _project_path: &Path,
+    ) -> Vec<PathBuf> {
+        self.host_component_registration_paths(components, home)
+    }
+
     /// Re-activate host-native registration for already-deployed component
     /// assets without rendering or copying those assets again.
     fn activate_deployed_host_registration(&self, _ctx: &InstallContext) -> Result<()> {
@@ -709,11 +718,15 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
 /// - File exists but cannot be read (permissions, I/O error).
 /// - Staging file cannot be written (disk full, permissions).
 /// - Staging file cannot be renamed to `.bak` (cross-device, permissions).
+pub fn config_backup_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.bak", path.display()))
+}
+
 pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
     }
-    let backup_path = PathBuf::from(format!("{}.bak", path.display()));
+    let backup_path = config_backup_path(path);
     let staging_path = PathBuf::from(format!("{}.bak.new", path.display()));
 
     // Read original content
@@ -724,7 +737,6 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
             path.display()
         ),
     })?;
-
     // Write to staging file
     std::fs::write(&staging_path, &content).map_err(|e| {
         std::fs::remove_file(&staging_path).ok();
@@ -736,6 +748,14 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
             ),
         }
     })?;
+    let backup_metadata =
+        capture_host_file_metadata(&staging_path).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to inspect backup staging file {}: {error}",
+                staging_path.display()
+            ),
+        })?;
+    persist_host_config_write_intent(&backup_path, &content, Some(&backup_metadata))?;
 
     // Atomic rename staging → .bak
     std::fs::rename(&staging_path, &backup_path).map_err(|e| {
@@ -785,22 +805,14 @@ pub fn restore_config_backup(original: &Path, backup: &Path) {
 ///
 /// # Strategy
 ///
-/// 1. Serialize → validate → write to a **new** sibling file (`.new`).
-///    The original file is never opened for writing.
-/// 2. `rename(new, original)` — on POSIX this is an atomic replace.
-///    The old content disappears in a single syscall; there is no window
-///    where the file is half-written.
-/// 3. If rename fails (e.g. cross-device mount), the `.new` file is
-///    cleaned up and the original is left **untouched**. No copy fallback
-///    is attempted because copy is non-atomic and can leave the target
-///    corrupted on interruption.
+/// Serialize and re-validate, then use the shared durable atomic writer to
+/// replace the target, preserve its permissions, and sync its parent entry.
 ///
 /// # Error conditions
 /// - Serialization failure (should not happen with well-formed Values).
 /// - Re-parse validation failure (internal bug).
 /// - Cannot create parent directory.
-/// - Cannot write the `.new` file (permissions, disk full).
-/// - Cannot rename `.new` → target (cross-device, permissions).
+/// - Atomic staging or publication failure (permissions, disk full).
 ///
 /// In every error case the original file remains intact.
 pub fn safe_write_json_file(
@@ -838,17 +850,22 @@ pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) 
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub(crate) struct HostFileMetadataIdentityV1 {
+pub struct HostFileMetadataIdentityV1 {
     readonly: bool,
     unix_mode: Option<u32>,
     posix_acl_supported: bool,
     posix_acl_access: Option<Vec<u8>>,
 }
 
-pub(crate) fn capture_host_file_metadata(
-    path: &Path,
-) -> std::io::Result<HostFileMetadataIdentityV1> {
-    let permissions = std::fs::metadata(path)?.permissions();
+pub fn capture_host_file_metadata(path: &Path) -> std::io::Result<HostFileMetadataIdentityV1> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
+        return Err(std::io::Error::other(format!(
+            "unsafe host metadata path: {}",
+            path.display()
+        )));
+    }
+    let permissions = metadata.permissions();
     #[cfg(unix)]
     let unix_mode = {
         use std::os::unix::fs::PermissionsExt;
@@ -873,11 +890,18 @@ pub(crate) fn capture_host_file_metadata(
     })
 }
 
-pub(crate) fn restore_host_file_metadata(
+pub fn restore_host_file_metadata(
     path: &Path,
     state: &HostFileMetadataIdentityV1,
 ) -> std::io::Result<()> {
-    let mut permissions = std::fs::metadata(path)?.permissions();
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
+        return Err(std::io::Error::other(format!(
+            "unsafe host metadata path: {}",
+            path.display()
+        )));
+    }
+    let mut permissions = metadata.permissions();
     #[cfg(unix)]
     if let Some(mode) = state.unix_mode {
         use std::os::unix::fs::PermissionsExt;
@@ -885,9 +909,26 @@ pub(crate) fn restore_host_file_metadata(
     }
     #[cfg(not(unix))]
     permissions.set_readonly(state.readonly);
+    let current = std::fs::symlink_metadata(path)?;
+    if current.file_type().is_symlink()
+        || current.file_type() != metadata.file_type()
+        || !(current.is_file() || current.is_dir())
+    {
+        return Err(std::io::Error::other(format!(
+            "host metadata path changed type: {}",
+            path.display()
+        )));
+    }
     std::fs::set_permissions(path, permissions)?;
     #[cfg(target_os = "linux")]
     if state.posix_acl_supported {
+        let current = std::fs::symlink_metadata(path)?;
+        if current.file_type().is_symlink() || !(current.is_file() || current.is_dir()) {
+            return Err(std::io::Error::other(format!(
+                "host metadata path changed type: {}",
+                path.display()
+            )));
+        }
         match &state.posix_acl_access {
             Some(acl) => xattr::set(path, "system.posix_acl_access", acl)?,
             None => {
@@ -904,8 +945,19 @@ pub(crate) fn restore_host_file_metadata(
 ///
 /// The shared durable writer syncs bytes and the parent entry. When replacing
 /// an existing host config, restore its exact permission bits and durably flush
-/// that metadata before returning.
+/// that metadata before returning. This authority is shared by every host:
+/// existing config symlinks are always refused so no integration can redirect
+/// a lifecycle write outside its inventoried path.
 pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>) -> Result<()> {
+    safe_write_bytes_file_with_metadata(path, contents, backup, None)
+}
+
+pub fn safe_write_bytes_file_with_metadata(
+    path: &Path,
+    contents: &[u8],
+    backup: Option<&Path>,
+    replacement_metadata: Option<&HostFileMetadataIdentityV1>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("cannot create directory {}: {e}", parent.display()),
@@ -924,15 +976,18 @@ pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>
             });
         }
     };
-    persist_host_config_write_intent(path, contents, metadata.as_ref())?;
+    let publish_metadata = replacement_metadata.or(metadata.as_ref());
     if let Err(e) = tracedecay_application::atomic_write_prepared(
         path,
         "host-config",
         contents,
         |temporary| {
-            if let Some(metadata) = &metadata {
+            if let Some(metadata) = publish_metadata {
                 restore_host_file_metadata(temporary, metadata)?;
             }
+            let expected_metadata = capture_host_file_metadata(temporary)?;
+            persist_host_config_write_intent(path, contents, Some(&expected_metadata))
+                .map_err(std::io::Error::other)?;
             Ok(())
         },
         tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
@@ -951,7 +1006,11 @@ pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>
         });
     }
     #[cfg(feature = "test-transport")]
-    if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
+    if (std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
+        && !path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.ends_with(".bak") || name.ends_with(".tracedecay-original")))
         || std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH")
             .is_some_and(|expected| Path::new(&expected) == path)
     {
@@ -992,7 +1051,14 @@ pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf
 
 pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
     persist_host_config_remove_intent(path).map_err(std::io::Error::other)?;
-    std::fs::remove_file(path)
+    std::fs::remove_file(path)?;
+    #[cfg(feature = "test-transport")]
+    if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_REMOVE_PATH")
+        .is_some_and(|expected| Path::new(&expected) == path)
+    {
+        std::process::abort();
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -3017,5 +3083,24 @@ mod local_install_safety_tests {
             err.to_string().contains("symlink"),
             "error should clearly identify the symlink risk: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_host_writer_refuses_symlinked_config_for_every_integration() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("operator-config.json");
+        let config = dir.path().join("host-config.json");
+        std::fs::write(&outside, b"operator bytes").unwrap();
+        symlink(&outside, &config).unwrap();
+
+        let error = safe_write_bytes_file(&config, b"tracedecay bytes", None).unwrap_err();
+        assert!(
+            error.to_string().contains("unsafe host metadata path"),
+            "shared writer must surface its cross-host symlink refusal: {error}"
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"operator bytes");
     }
 }
