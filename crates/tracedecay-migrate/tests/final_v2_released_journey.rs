@@ -5,14 +5,15 @@ use std::{
 
 use tracedecay_migrate::{
     CutoverPublicationReceipt, DerivedRebuildFamily, DurableMigrationCheckpoint,
-    ExactMigrationSourceIdentity, FINAL_LCM_SCHEMA_VERSION, FINAL_PROFILE_IDENTITY_SCHEMA_VERSION,
-    FINAL_PROJECT_SCHEMA_VERSION, FINAL_REPOSITORY_IDENTITY_SCHEMA_VERSION,
-    FINAL_STORE_MANIFEST_SCHEMA_VERSION, FINAL_V2_SCHEMA_ID, FinalV2ExecutionJournal,
-    FinalV2ExecutionPhase, FinalV2ExecutionRequest, FinalV2FaultInjector, FinalV2FaultPoint,
-    FinalV2JournalPort, FinalV2MigrationRuntime, FinalV2PreservationReceipt, FinalV2SchemaEvidence,
-    FinalV2TransformReceipt, LAST_RELEASED_SCHEMA_ID, PublicationCasGrant,
-    ReadOnlyReleasedSchemaInspection, ReleasedDurableFamily, ReleasedSchemaFixture,
-    ReleasedStoreKind, ReleasedV0067Fixture, VerifiedBackupIdentity,
+    ExactMigrationSourceIdentity, ExactMigrationSourceIdentityRequest, FINAL_LCM_SCHEMA_VERSION,
+    FINAL_PROFILE_IDENTITY_SCHEMA_VERSION, FINAL_PROJECT_SCHEMA_VERSION,
+    FINAL_REPOSITORY_IDENTITY_SCHEMA_VERSION, FINAL_STORE_MANIFEST_SCHEMA_VERSION,
+    FINAL_V2_SCHEMA_ID, FinalV2ExecutionJournal, FinalV2ExecutionPhase, FinalV2ExecutionRequest,
+    FinalV2FaultInjector, FinalV2FaultPoint, FinalV2JournalPort, FinalV2MigrationRuntime,
+    FinalV2PreservationReceipt, FinalV2SchemaEvidence, FinalV2TransformReceipt,
+    LAST_RELEASED_SCHEMA_ID, PublicationCasGrant, ReadOnlyReleasedSchemaInspection,
+    ReleasedDurableFamily, ReleasedSchemaFixture, ReleasedStoreKind, ReleasedV0067Fixture,
+    VerifiedBackupIdentity,
     execute_final_v2_migration_with_faults,
 };
 use tracedecay_store::{
@@ -261,16 +262,16 @@ fn source_identity(fixture: &ReleasedV0067Fixture) -> ExactMigrationSourceIdenti
         incarnation,
         LocatorDigest::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
     );
-    ExactMigrationSourceIdentity::new(
-        fixture.profile_id(),
-        fixture.repository_id(),
-        fixture.project_id(),
-        fixture.store_id(),
-        binding,
-        locator,
-        [3; 32],
-        LAST_RELEASED_SCHEMA_ID,
-    )
+    ExactMigrationSourceIdentity::new(ExactMigrationSourceIdentityRequest {
+        profile_id: fixture.profile_id().to_owned(),
+        repository_id: fixture.repository_id().to_owned(),
+        project_id: fixture.project_id().to_owned(),
+        store_id: fixture.store_id().to_owned(),
+        runtime_binding: binding,
+        verified_locator: locator,
+        material_digest: [3; 32],
+        schema_id: LAST_RELEASED_SCHEMA_ID.to_owned(),
+    })
     .unwrap()
 }
 
