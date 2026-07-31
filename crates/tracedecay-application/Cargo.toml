@@ -6,7 +6,19 @@ license = "MIT"
 description = "Transport-neutral application contracts for TraceDecay V2"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# Mounts the native `gix` historical-blob reader beside its port. Off by
+# default so the crate stays a pure contract surface for consumers that only
+# need the typed values.
+native-git = ["dep:gix"]
+
 [dependencies]
+gix = { version = "0.81", default-features = false, features = [
+    "revision",
+    "blob-diff",
+    "sha1",
+    "status",
+], optional = true }
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

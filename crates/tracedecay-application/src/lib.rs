@@ -129,6 +129,8 @@ pub use git::{
     git_surface_catalog_contribution, git_surface_handler_descriptors,
     is_canonical_repository_relative_path,
 };
+#[cfg(feature = "native-git")]
+pub use git::NativeHistoricalBlobReaderV1;
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,

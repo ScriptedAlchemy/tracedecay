@@ -33,7 +33,7 @@ use serde::Serialize;
 pub use tracedecay_application::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
-    GitIntelligenceError, GitReadPort,
+    GitIntelligenceError, GitReadPort, NativeHistoricalBlobReaderV1,
 };
 // Path-shape predicate shared with the adapter's own validation, not part of the
 // read contract. It was `pub(crate)` before the contracts moved to application,
@@ -199,115 +199,21 @@ impl NativeGitIntelligence {
 
     /// Read one exact commit/path blob through the mounted Plan 36 authority.
     ///
-    /// This path is native `gix`: it opens no subprocess and exposes no
-    /// revision expression, traversal, ref mutation, or object write surface.
+    /// The `gix` read itself lives beside its port in
+    /// [`tracedecay_application::NativeHistoricalBlobReaderV1`] so extracted
+    /// crates mount the same production read. It opens no subprocess and
+    /// exposes no revision expression, traversal, ref mutation, or object
+    /// write surface.
     pub fn historical_blob(
         &self,
         request: &GitHistoricalBlobRequestV1,
     ) -> Result<GitHistoricalBlobV1, GitIntelligenceError> {
-        if request.max_bytes == 0 || request.max_bytes > GIT_HISTORICAL_BLOB_MAX_BYTES {
-            return Err(GitIntelligenceError::HistoricalBlobBoundExceeded {
-                bound: GIT_HISTORICAL_BLOB_MAX_BYTES,
-                actual: request.max_bytes,
-            });
-        }
-        validate_historical_path(&request.path)?;
-        let repo = gix::open(&self.repo_root).map_err(|error| {
-            GitIntelligenceError::NotARepository(format!("{}: {error}", self.repo_root.display()))
-        })?;
-        let oid =
-            gix::hash::ObjectId::from_hex(request.commit.as_str().as_bytes()).map_err(|error| {
-                GitIntelligenceError::MalformedOutput {
-                    operation: "historical_blob",
-                    detail: error.to_string(),
-                }
-            })?;
-        let commit = repo
-            .find_object(oid)
-            .map_err(|error| GitIntelligenceError::MalformedOutput {
-                operation: "historical_blob",
-                detail: error.to_string(),
-            })?
-            .try_into_commit()
-            .map_err(|error| GitIntelligenceError::MalformedOutput {
-                operation: "historical_blob",
-                detail: error.to_string(),
-            })?;
-        let tree = commit
-            .tree()
-            .map_err(|error| GitIntelligenceError::MalformedOutput {
-                operation: "historical_blob",
-                detail: error.to_string(),
-            })?;
-        let Some(entry) = tree
-            .lookup_entry_by_path(Path::new(&request.path))
-            .map_err(|error| GitIntelligenceError::MalformedOutput {
-                operation: "historical_blob",
-                detail: error.to_string(),
-            })?
-        else {
-            return Ok(GitHistoricalBlobV1 {
-                repository: self.repository.clone(),
-                worktree: self.worktree.clone(),
-                commit: request.commit.clone(),
-                path: request.path.clone(),
-                blob_oid: None,
-                bytes: None,
-            });
-        };
-        if !entry.mode().is_blob_or_symlink() {
-            return Ok(GitHistoricalBlobV1 {
-                repository: self.repository.clone(),
-                worktree: self.worktree.clone(),
-                commit: request.commit.clone(),
-                path: request.path.clone(),
-                blob_oid: None,
-                bytes: None,
-            });
-        }
-        let size = repo
-            .find_header(entry.object_id())
-            .map_err(|error| GitIntelligenceError::MalformedOutput {
-                operation: "historical_blob",
-                detail: error.to_string(),
-            })?
-            .size();
-        if request.include_bytes && size > request.max_bytes {
-            return Err(GitIntelligenceError::HistoricalBlobBoundExceeded {
-                bound: request.max_bytes,
-                actual: size,
-            });
-        }
-        let blob_oid = GitOidV1::new(entry.object_id().to_hex().to_string())?;
-        if !request.include_bytes {
-            return Ok(GitHistoricalBlobV1 {
-                repository: self.repository.clone(),
-                worktree: self.worktree.clone(),
-                commit: request.commit.clone(),
-                path: request.path.clone(),
-                blob_oid: Some(blob_oid),
-                bytes: None,
-            });
-        }
-        let mut blob = entry
-            .object()
-            .map_err(|error| GitIntelligenceError::MalformedOutput {
-                operation: "historical_blob",
-                detail: error.to_string(),
-            })?
-            .try_into_blob()
-            .map_err(|error| GitIntelligenceError::MalformedOutput {
-                operation: "historical_blob",
-                detail: error.to_string(),
-            })?;
-        Ok(GitHistoricalBlobV1 {
-            repository: self.repository.clone(),
-            worktree: self.worktree.clone(),
-            commit: request.commit.clone(),
-            path: request.path.clone(),
-            blob_oid: Some(blob_oid),
-            bytes: Some(blob.take_data()),
-        })
+        NativeHistoricalBlobReaderV1::new(
+            self.repo_root.clone(),
+            self.repository.clone(),
+            self.worktree.clone(),
+        )
+        .read(request)
     }
 
     /// Spawn `git <args>` under the structural read-only guard.

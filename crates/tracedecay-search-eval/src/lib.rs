@@ -1,3 +1,12 @@
+//! Search-quality evaluator for the production retrieval kernel.
+//!
+//! Candidate generation, direct (locked-quality) evaluation, and native
+//! semantic measurement over a checked-in workload and corpus. The evaluator
+//! mounts the production code-index owner and retrieval kernel directly; the
+//! only capability it cannot own is the authoritative repository identity of
+//! the checkout under evaluation, which the composing binary injects as an
+//! [`AdmittedCorpusScopeFn`].
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,15 +15,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::timeutil::nearest_rank;
-
-#[path = "candidate_output.rs"]
 pub mod candidate_output;
-#[path = "semantic_native.rs"]
 pub mod semantic_native;
 
 pub use candidate_output::{
-    CandidateOutputError, CandidateWorkloadV1, DirectEvaluatedProfileMaterialV1,
+    AdmittedCorpusScopeFn, CandidateOutputError, CandidateWorkloadV1,
+    DirectEvaluatedProfileMaterialV1,
     GenerateCandidateOutputsOptions, GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1,
     OptionalStageMeasurementsV1, ProductionCandidateNativeExecutionAuthorityV1,
     ProductionCandidateNativeGenerationResourcesV1, ProductionCandidateNativeQueryContextV1,
@@ -23,9 +29,21 @@ pub use candidate_output::{
     compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
     direct_evaluated_profile_material, generate_candidate_outputs,
     generate_candidate_outputs_with_native, load_candidate_workload,
-    load_direct_evaluated_profile_material, retrieve_partition_query_bytes,
-    validate_workload_for_tuning, write_generate_outputs,
+    load_direct_evaluated_profile_material, no_admitted_corpus_scope,
+    retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
 };
+
+/// Returns the nearest-rank percentile from an ascending sample.
+///
+/// The caller owns sorting so repeated percentile reads can share one sort.
+/// Empty samples and percentiles outside `1..=100` return `None`.
+pub fn nearest_rank(sorted: &[u64], percentile: usize) -> Option<u64> {
+    if sorted.is_empty() || !(1..=100).contains(&percentile) {
+        return None;
+    }
+    let rank = percentile.saturating_mul(sorted.len()).div_ceil(100);
+    sorted.get(rank.saturating_sub(1)).copied()
+}
 
 const DEFAULT_WORKLOAD: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
@@ -327,6 +345,7 @@ pub fn compare_direct(
     repo_root: &Path,
     workload_path: Option<&Path>,
     profile_ids: Option<&[String]>,
+    admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<DirectEvaluationReportV1, SearchEvalError> {
     let path = workload_path.map_or_else(|| default_workload_path(repo_root), Path::to_path_buf);
     let workload = load_candidate_workload(&path)?;
@@ -334,6 +353,7 @@ pub fn compare_direct(
         repo_root,
         workload_path: Some(&path),
         profile_ids,
+        admitted_scope,
     })?;
     evaluate_generated_outputs(repo_root, &workload, &generated)
 }
@@ -348,6 +368,7 @@ pub fn evaluate_default_activation_candidate(
     repo_root: &Path,
     evaluated_profile_id: &str,
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
+    admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<DirectActivationEvaluationV1, SearchEvalError> {
     let (workload_path, workload) = load_authoritative_default_workload(repo_root)?;
     let profile_ids = activation_profile_chain(&workload, evaluated_profile_id)?;
@@ -356,6 +377,7 @@ pub fn evaluate_default_activation_candidate(
             repo_root,
             workload_path: Some(&workload_path),
             profile_ids: Some(&profile_ids),
+            admitted_scope,
         },
         authority,
     )?;
@@ -1305,7 +1327,7 @@ mod tests {
         aggregate_profile_status, aggregate_quality, evaluate_query,
         load_authoritative_default_workload, p99_latency_us, ratio_metric,
     };
-    use crate::search_eval::candidate_output::{
+    use crate::candidate_output::{
         HistoricalQueryExecutionV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
         QueryCandidateRowV1, RankedCandidateRowV1, WorkloadQueryV1,
     };

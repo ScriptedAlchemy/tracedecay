@@ -368,7 +368,12 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 let _measurement = RESOURCE_MEASUREMENT_LOCK_V1
                     .lock()
                     .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-                evaluate_default_activation_candidate(&repo_root, &evaluated_profile_id, &authority)
+                evaluate_default_activation_candidate(
+                    &repo_root,
+                    &evaluated_profile_id,
+                    &authority,
+                    crate::search_eval::root_admitted_corpus_scope,
+                )
                     .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)
             })
             .await

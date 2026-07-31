@@ -5556,6 +5556,7 @@ dependencies = [
  "tracedecay-query",
  "tracedecay-rusqlite-parity",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-search-eval",
  "tracedecay-sessions",
  "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
@@ -5596,6 +5597,7 @@ dependencies = [
 name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
+ "gix",
  "schemars",
  "serde",
  "serde_json",
@@ -5794,6 +5796,23 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-domain",
  "tracedecay-tool-catalog",
+]
+
+[[package]]
+name = "tracedecay-search-eval"
+version = "0.1.0"
+dependencies = [
+ "gix",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tracedecay-application",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-query",
 ]
 
 [[package]]
