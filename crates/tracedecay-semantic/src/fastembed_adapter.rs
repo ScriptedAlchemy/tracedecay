@@ -56,7 +56,7 @@ use tracedecay_domain::{
 use super::artifact_store::AdmittedArtifactV1;
 use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1, Sha256DigestHex};
 use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
-use super::root_adapter::SemanticResourceCeilings;
+use crate::SemanticResourceCeilings;
 
 /// Typed failure of one embedding operation or runtime admission (Plan 31:
 /// load failure, OOM, corruption, revocation, or incompatible pins disables
@@ -149,7 +149,7 @@ impl fmt::Display for RuntimeFailureV1 {
 
 /// Exact signed-manifest pin that failed projection/artifact admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ProjectionArtifactPinV1 {
+pub enum ProjectionArtifactPinV1 {
     ArtifactIdentity,
     ManifestIdentity,
     ProfileKind,
@@ -252,7 +252,7 @@ impl VerifiedEmbeddingArtifactV1 {
         self.max_threads
     }
 
-    pub(super) fn resident_byte_ceiling(&self) -> u64 {
+    pub fn resident_byte_ceiling(&self) -> u64 {
         self.resident_byte_ceiling
     }
 
@@ -281,12 +281,12 @@ impl VerifiedEmbeddingArtifactV1 {
 /// admitted domain projection. Construction exhaustively checks every pin the
 /// manifest and projection share before compatibility or session open.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AdmittedProjectionArtifactV1 {
+pub struct AdmittedProjectionArtifactV1 {
     runtime_artifact: VerifiedEmbeddingArtifactV1,
 }
 
 impl AdmittedProjectionArtifactV1 {
-    pub(super) fn admit(
+    pub fn admit(
         artifact: &AdmittedArtifactV1,
         projection: &AdmittedEmbeddingProjectionKeyV1,
     ) -> Result<Self, ProjectionArtifactPinV1> {
@@ -413,7 +413,7 @@ impl AdmittedProjectionArtifactV1 {
         })
     }
 
-    pub(super) fn from_lifecycle_install(
+    pub fn from_lifecycle_install(
         model: &CatalogedFastEmbedModelV1,
         install_path: &Path,
         chunker_revision: ChunkerRevision,
@@ -475,7 +475,7 @@ impl AdmittedProjectionArtifactV1 {
         })
     }
 
-    pub(super) fn lifecycle_projection(
+    pub fn lifecycle_projection(
         model: &CatalogedFastEmbedModelV1,
         chunker_revision: ChunkerRevision,
         privacy_domain: PrivacyDomainId,
@@ -541,7 +541,7 @@ impl AdmittedProjectionArtifactV1 {
         Ok(projection)
     }
 
-    pub(crate) fn projection(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
+    pub fn projection(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
         &self.runtime_artifact.projection
     }
 
@@ -549,20 +549,20 @@ impl AdmittedProjectionArtifactV1 {
         &self.runtime_artifact
     }
 
-    pub(super) fn resident_byte_ceiling(&self) -> u64 {
+    pub fn resident_byte_ceiling(&self) -> u64 {
         self.runtime_artifact.resident_byte_ceiling()
     }
 
-    pub(super) fn max_batch_bytes(&self) -> u32 {
+    pub fn max_batch_bytes(&self) -> u32 {
         self.runtime_artifact.max_batch_bytes()
     }
 
-    pub(super) fn max_batch_texts(&self) -> u32 {
+    pub fn max_batch_texts(&self) -> u32 {
         self.runtime_artifact.max_batch_texts()
     }
 
     #[cfg(test)]
-    pub(super) fn with_test_max_batch_bytes(mut self, max_batch_bytes: u32) -> Self {
+    pub fn with_test_max_batch_bytes(mut self, max_batch_bytes: u32) -> Self {
         self.runtime_artifact.max_batch_bytes = max_batch_bytes;
         self
     }
@@ -814,7 +814,7 @@ impl CancellationSignal for ScriptedCancellation {
 /// One warmed embedding session bound to one verified artifact descriptor
 /// (Plan 31: compatible warmed sessions are pooled under bounded memory,
 /// concurrency, idle, and cancellation policy).
-pub(super) trait EmbeddingSession: Send {
+pub trait EmbeddingSession: Send {
     /// The authority this session was opened from (echo surface).
     fn authority(&self) -> &AdmittedProjectionArtifactV1;
     /// Estimated resident bytes, used by the pool's memory-ceiling
@@ -835,7 +835,7 @@ pub(super) trait EmbeddingSession: Send {
 /// → create session → embed bounded sanitized batches). The only production
 /// implementation will be the `FastEmbed` adapter in this module; every other
 /// crate depends on this trait surface, never on `FastEmbed` runtime types.
-pub(super) trait EmbeddingRuntime {
+pub trait EmbeddingRuntime {
     type Session: EmbeddingSession;
 
     /// Conservative resident-byte reservation made before session loading.
@@ -888,7 +888,7 @@ fn validate_batch_limits(
 /// support, and this adapter uses only `FastEmbed`'s local-byte constructor.
 #[cfg(feature = "semantic-fastembed")]
 #[derive(Default)]
-pub(super) struct FastEmbedEmbeddingRuntime;
+pub struct FastEmbedEmbeddingRuntime;
 
 /// Feature-disabled stand-in: keeps every consumer type-compatible while the
 /// `semantic-fastembed` dependency is compiled out. Every operation fails
@@ -896,12 +896,12 @@ pub(super) struct FastEmbedEmbeddingRuntime;
 /// documented fallback states instead of the crate failing to build.
 #[cfg(not(feature = "semantic-fastembed"))]
 #[derive(Default)]
-pub(super) struct FastEmbedEmbeddingRuntime;
+pub struct FastEmbedEmbeddingRuntime;
 
 /// Uninhabited session type for the feature-disabled runtime: `open_session`
 /// always fails, so no session value can ever exist.
 #[cfg(not(feature = "semantic-fastembed"))]
-pub(super) enum UnavailableEmbeddingSession {}
+pub enum UnavailableEmbeddingSession {}
 
 #[cfg(not(feature = "semantic-fastembed"))]
 impl EmbeddingSession for UnavailableEmbeddingSession {
@@ -1026,7 +1026,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
 }
 
 #[cfg(feature = "semantic-fastembed")]
-pub(super) struct FastEmbedEmbeddingSession {
+pub struct FastEmbedEmbeddingSession {
     authority: AdmittedProjectionArtifactV1,
     embedding: TextEmbedding,
 }
@@ -1181,7 +1181,7 @@ pub struct FakeRuntimeCounters {
 /// vector, so all pool/session behavior is testable offline.
 #[cfg(test)]
 #[derive(Debug)]
-pub(super) struct FakeEmbeddingRuntime {
+pub struct FakeEmbeddingRuntime {
     resident_bytes_per_session: u64,
     open_failure: Option<RuntimeFailureKindV1>,
     compatibility_failure: Option<RuntimeFailureKindV1>,
@@ -1197,7 +1197,7 @@ impl Default for FakeEmbeddingRuntime {
 
 #[cfg(test)]
 impl FakeEmbeddingRuntime {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             resident_bytes_per_session: 1024 * 1024,
             open_failure: None,
@@ -1206,22 +1206,22 @@ impl FakeEmbeddingRuntime {
         }
     }
 
-    pub(super) fn with_resident_bytes_per_session(mut self, bytes: u64) -> Self {
+    pub fn with_resident_bytes_per_session(mut self, bytes: u64) -> Self {
         self.resident_bytes_per_session = bytes;
         self
     }
 
-    pub(super) fn with_open_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
+    pub fn with_open_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
         self.open_failure = Some(kind);
         self
     }
 
-    pub(super) fn with_compatibility_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
+    pub fn with_compatibility_failure(mut self, kind: RuntimeFailureKindV1) -> Self {
         self.compatibility_failure = Some(kind);
         self
     }
 
-    pub(super) fn counters(&self) -> Arc<FakeRuntimeCounters> {
+    pub fn counters(&self) -> Arc<FakeRuntimeCounters> {
         Arc::clone(&self.counters)
     }
 }

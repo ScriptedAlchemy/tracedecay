@@ -29,9 +29,7 @@ use super::manifest::{ArtifactMemberRoleV1, ModelArtifactManifestV1};
 use super::model_catalog::{
     CatalogErrorV1, CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1, catalog_package_digest,
 };
-use super::root_adapter::{
-    DEFAULT_FASTEMBED_MODEL_ID, RerankCompatibilityPinsV1, SemanticRuntimeStateV1 as Runtime,
-};
+use crate::{DEFAULT_FASTEMBED_MODEL_ID, RerankCompatibilityPinsV1};
 
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
 const INSTALL_META_SCHEMA_V1: &str = "tracedecay.fastembed.model-install.v1";
@@ -450,7 +448,7 @@ impl SemanticModelLifecycleOwnerV1 {
     /// Re-admit the independently evaluated reranker selected by exact
     /// compatibility pins. No catalog lookup, network access, or ambient
     /// cache participates in this mount.
-    pub(crate) fn mount_reranker(
+    pub fn mount_reranker(
         &self,
         pins: RerankCompatibilityPinsV1,
     ) -> Result<super::rerank_adapter::ProductionCodeRerankAuthorityV1, ModelLifecycleErrorV1> {
@@ -572,11 +570,11 @@ impl SemanticModelLifecycleOwnerV1 {
         self.reranker_artifact_status()
     }
 
-    pub(crate) fn mounted_shared() -> Option<Arc<Self>> {
+    pub fn mounted_shared() -> Option<Arc<Self>> {
         SHARED_LIFECYCLE_OWNER.get().cloned().flatten()
     }
 
-    pub(crate) fn run_daemon_artifact_gc(
+    pub fn run_daemon_artifact_gc(
         &self,
         now_unix: u64,
     ) -> Result<Vec<GcReceiptV1>, ModelLifecycleErrorV1> {
@@ -1596,94 +1594,13 @@ fn verify_member_file(path: &Path, length: u64, sha256: &str) -> bool {
     hex::encode(hasher.finalize()) == sha256
 }
 
-/// Resolve the lifecycle store root under the user data directory.
-pub fn default_lifecycle_root() -> Option<PathBuf> {
-    super::root_adapter::default_lifecycle_root()
-}
-
-/// Map lifecycle state into the Doctor/status semantic runtime state surface.
-pub fn lifecycle_to_runtime_state(state: &SemanticModelLifecycleStateV1) -> Runtime {
-    match state {
-        SemanticModelLifecycleStateV1::SelectedNotDownloaded {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::SelectedNotDownloaded {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        SemanticModelLifecycleStateV1::Downloading {
-            model_id,
-            artifact_digest,
-            bytes_received,
-            bytes_total,
-            ..
-        } => Runtime::Downloading {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-            bytes_received: *bytes_received,
-            bytes_total: *bytes_total,
-        },
-        SemanticModelLifecycleStateV1::Verifying {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::Verifying {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        // Lifecycle Ready means the package is locally complete. Semantic
-        // search influence still requires a Current activation receipt.
-        SemanticModelLifecycleStateV1::Installed {
-            model_id,
-            artifact_digest,
-            ..
-        }
-        | SemanticModelLifecycleStateV1::Ready {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::Installed {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        // Vector-generation Indexing requires a configuration pin +
-        // generation id. Acquisition-phase indexing is reported as Loading
-        // until the semantic owner publishes an activation receipt.
-        SemanticModelLifecycleStateV1::Loading {
-            model_id,
-            artifact_digest,
-            ..
-        }
-        | SemanticModelLifecycleStateV1::Indexing {
-            model_id,
-            artifact_digest,
-            ..
-        } => Runtime::Loading {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-        },
-        SemanticModelLifecycleStateV1::Failed {
-            model_id,
-            artifact_digest,
-            detail,
-            retryable,
-            ..
-        } => Runtime::Failed {
-            model_id: model_id.clone(),
-            artifact_digest: artifact_digest.clone(),
-            detail: detail.clone(),
-            retryable: *retryable,
-        },
-    }
-}
-
-/// Process-wide lifecycle owner under the user semantic-models root.
-pub fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
+/// Process-wide lifecycle owner beneath the caller-resolved semantic-models
+/// root. The root binary owns user-data-directory discovery and passes the
+/// already-resolved root in; the first successful call wins for the process.
+pub fn shared_lifecycle_owner(lifecycle_root: &Path) -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
     SHARED_LIFECYCLE_OWNER
         .get_or_init(|| {
-            let root = default_lifecycle_root()?;
-            SemanticModelLifecycleOwnerV1::open_default(root)
+            SemanticModelLifecycleOwnerV1::open_default(lifecycle_root.to_path_buf())
                 .ok()
                 .map(Arc::new)
         })
@@ -1692,10 +1609,11 @@ pub fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
 
 /// Apply config selection and queue explicitly enabled background acquisition.
 pub fn apply_config_and_queue_startup(
+    lifecycle_root: &Path,
     selected_model: Option<&str>,
     auto_download: bool,
 ) -> Option<SemanticModelLifecycleStatusV1> {
-    let owner = shared_lifecycle_owner()?;
+    let owner = shared_lifecycle_owner(lifecycle_root)?;
     let _ = owner.select_model(selected_model, auto_download);
     let _ = owner.enqueue_startup_acquisition_if_needed();
     Some(owner.status())

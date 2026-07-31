@@ -433,30 +433,9 @@ impl SemanticRollbackReceiptV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SemanticFallbackReasonV1 {
-    ConfigurationUnavailable,
-    RuntimeUnavailable,
-    ArtifactUnavailable,
-    IncompatibleRuntime,
-    ResourceCeilingExceeded,
-    CorruptArtifact,
-    Indexing,
-    RuntimeFailure,
-    RollbackInProgress,
-    InvalidRuntimeStatus,
-    /// Selected catalog model has not been downloaded yet.
-    SelectedNotDownloaded,
-    /// Daemon-owned model acquisition is in progress.
-    Downloading,
-    /// Downloaded bytes are being verified against catalog pins.
-    Verifying,
-    /// Model is installed but not yet loaded into the runtime.
-    Loading,
-    /// Model acquisition or load failed; exact/lexical/graph remain available.
-    ModelFailed,
-}
+/// Why the semantic lane is unavailable or degraded. Defined by the semantic
+/// runtime crate, which produces the reasons this projection reports.
+pub use tracedecay_semantic::SemanticFallbackReasonV1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]

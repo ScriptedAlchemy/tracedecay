@@ -22,6 +22,10 @@ use super::candidate_output::{CandidateWorkloadV1, ProfileSpecV1, ResourceSample
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageError, FusionStageInput,
 };
+/// Deterministic local executor admitted from one verified artifact. The trait
+/// now lives beside its supertrait in the query kernel; this re-export keeps
+/// the evaluator's contract surface stable for existing callers.
+pub use tracedecay_query::retrieval::rerank::AdmittedNativeRerankExecutorV1;
 use tracedecay_query::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1,
     LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
@@ -195,11 +199,6 @@ pub struct SemanticNativeRerankInputV1<'a> {
     pub views: &'a mut dyn EphemeralRerankViewSourceV1,
     pub executor: &'a dyn AdmittedNativeRerankExecutorV1,
     pub control: &'a dyn RerankExecutionControlV1,
-}
-
-/// Deterministic local executor admitted from one verified artifact.
-pub trait AdmittedNativeRerankExecutorV1: DeterministicLocalRerankExecutorV1 {
-    fn artifact_manifest_digest(&self) -> &ManifestDigest;
 }
 
 /// Raw measured work returned by the admitted reranker.

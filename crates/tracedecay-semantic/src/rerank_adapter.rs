@@ -25,16 +25,16 @@ use tracedecay_query::retrieval::rerank::{
 
 use super::artifact_store::AdmittedArtifactV1;
 use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1};
-use super::root_adapter::{AdmittedNativeRerankExecutorV1, RerankCompatibilityPinsV1};
+use crate::RerankCompatibilityPinsV1;
+use tracedecay_query::retrieval::rerank::AdmittedNativeRerankExecutorV1;
 
-pub(super) const RERANK_IMPLEMENTATION_REVISION_V1: &str = "rerank.fastembed.production.v1";
-pub(super) const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str =
-    "tracedecay.rerank-runtime-compatibility.v1";
+pub const RERANK_IMPLEMENTATION_REVISION_V1: &str = "rerank.fastembed.production.v1";
+pub const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str = "tracedecay.rerank-runtime-compatibility.v1";
 const CODE_CHUNK_ANCHOR_PREFIX: &str = "code-chunk:";
 const CODE_SYMBOL_ANCHOR_PREFIX: &str = "code-symbol:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RerankArtifactAdmissionErrorV1 {
+pub enum RerankArtifactAdmissionErrorV1 {
     IncompatiblePins,
     IncompatibleArtifact,
 }
@@ -80,7 +80,7 @@ impl AdmittedRerankArtifactV1 {
     }
 }
 
-pub(super) fn validate_reranker_manifest_pins(
+pub fn validate_reranker_manifest_pins(
     manifest: &super::manifest::ModelArtifactManifestV1,
     pins: &RerankCompatibilityPinsV1,
 ) -> Result<super::manifest::ResourceCeilingV1, RerankArtifactAdmissionErrorV1> {
@@ -126,7 +126,7 @@ pub(super) fn validate_reranker_manifest_pins(
 /// Real, locally loaded rerank executor. One warmed session is retained under
 /// a fail-fast mutex: concurrent demand returns typed unavailability instead
 /// of waiting or opening an unbounded second model.
-pub(crate) struct FastEmbedRerankExecutorV1 {
+pub struct FastEmbedRerankExecutorV1 {
     authority: Arc<AdmittedRerankArtifactV1>,
     session: Mutex<Option<FastEmbedRerankSessionV1>>,
 }
@@ -139,7 +139,7 @@ impl FastEmbedRerankExecutorV1 {
         }
     }
 
-    pub(crate) fn compatibility(&self) -> &RerankCompatibilityPinsV1 {
+    pub fn compatibility(&self) -> &RerankCompatibilityPinsV1 {
         &self.authority.pins
     }
 }
@@ -334,13 +334,13 @@ fn supported_reranker_model(upstream: &str, artifact_id: &str) -> Option<Reranke
 }
 
 /// Request-local source authority over one immutable code generation.
-pub(crate) struct GenerationBoundCodeRerankViewsV1<'a> {
+pub struct GenerationBoundCodeRerankViewsV1<'a> {
     generation: &'a CodeIndexPublishedGenerationV1,
     query: &'a EphemeralSanitizedQueryViewV1,
 }
 
 impl<'a> GenerationBoundCodeRerankViewsV1<'a> {
-    pub(crate) fn new(
+    pub fn new(
         generation: &'a CodeIndexPublishedGenerationV1,
         query: &'a EphemeralSanitizedQueryViewV1,
     ) -> Self {
@@ -392,7 +392,7 @@ impl EphemeralRerankViewSourceV1 for GenerationBoundCodeRerankViewsV1<'_> {
     }
 }
 
-pub(crate) fn resolve_generation_chunk<'a>(
+pub fn resolve_generation_chunk<'a>(
     generation: &'a CodeIndexPublishedGenerationV1,
     anchor: &str,
 ) -> Option<&'a CodeSearchChunkV1> {
@@ -468,21 +468,18 @@ fn decode_views<'a>(
 
 /// Mounted production authority: exact compatibility pins plus the admitted
 /// executor that [`BoundedRerankRuntimeV1`] invokes after fusion.
-pub(crate) trait MountedRerankExecutorV1:
-    AdmittedNativeRerankExecutorV1 + Send + Sync
-{
-}
+pub trait MountedRerankExecutorV1: AdmittedNativeRerankExecutorV1 + Send + Sync {}
 
 impl<T> MountedRerankExecutorV1 for T where T: AdmittedNativeRerankExecutorV1 + Send + Sync {}
 
 #[derive(Clone)]
-pub(crate) struct ProductionCodeRerankAuthorityV1 {
+pub struct ProductionCodeRerankAuthorityV1 {
     pins: RerankCompatibilityPinsV1,
     executor: Arc<dyn MountedRerankExecutorV1>,
 }
 
 impl ProductionCodeRerankAuthorityV1 {
-    pub(super) fn from_admitted(
+    pub fn from_admitted(
         artifact: AdmittedArtifactV1,
         pins: RerankCompatibilityPinsV1,
     ) -> Result<Self, RerankArtifactAdmissionErrorV1> {
@@ -494,22 +491,22 @@ impl ProductionCodeRerankAuthorityV1 {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_executor_for_tests(
+    pub fn from_executor_for_tests(
         pins: RerankCompatibilityPinsV1,
         executor: Arc<dyn MountedRerankExecutorV1>,
     ) -> Self {
         Self { pins, executor }
     }
 
-    pub(crate) fn compatibility(&self) -> &RerankCompatibilityPinsV1 {
+    pub fn compatibility(&self) -> &RerankCompatibilityPinsV1 {
         &self.pins
     }
 
-    pub(crate) fn executor(&self) -> &dyn AdmittedNativeRerankExecutorV1 {
+    pub fn executor(&self) -> &dyn AdmittedNativeRerankExecutorV1 {
         self.executor.as_ref()
     }
 
-    pub(crate) fn execute(
+    pub fn execute(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
         query: &EphemeralSanitizedQueryViewV1,

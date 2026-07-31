@@ -18,7 +18,7 @@ use super::runtime_service::{SemanticGenerationPointerV1, SemanticRuntimeService
 use super::session_pool::SessionAcquireError;
 
 /// Owned factory for request-scoped query embedders.
-pub(super) struct PooledSemanticQueryEmbedderFactory<R: EmbeddingRuntime> {
+pub struct PooledSemanticQueryEmbedderFactory<R: EmbeddingRuntime> {
     runtime: Arc<SemanticRuntimeService<R>>,
     query_in_flight: Arc<AtomicBool>,
 }
@@ -27,11 +27,11 @@ impl<R> PooledSemanticQueryEmbedderFactory<R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
-    pub(super) fn new(runtime: Arc<SemanticRuntimeService<R>>) -> Arc<Self> {
+    pub fn new(runtime: Arc<SemanticRuntimeService<R>>) -> Arc<Self> {
         Self::new_with_admission(runtime, Arc::new(AtomicBool::new(false)))
     }
 
-    pub(super) fn new_with_admission(
+    pub fn new_with_admission(
         runtime: Arc<SemanticRuntimeService<R>>,
         query_in_flight: Arc<AtomicBool>,
     ) -> Arc<Self> {
@@ -41,11 +41,11 @@ where
         })
     }
 
-    pub(super) fn runtime(&self) -> &Arc<SemanticRuntimeService<R>> {
+    pub fn runtime(&self) -> &Arc<SemanticRuntimeService<R>> {
         &self.runtime
     }
 
-    pub(super) fn create<'a>(
+    pub fn create<'a>(
         self: &Arc<Self>,
         cancellation: Arc<dyn CancellationSignal + 'a>,
     ) -> PooledSemanticQueryEmbedder<'a, R> {
@@ -79,7 +79,7 @@ impl Drop for SemanticQueryPermitV1<'_> {
 ///
 /// A warmed runtime prepared for a future generation is never returned until
 /// all three request identities match the scheduler's current pointer.
-pub(super) struct CurrentSemanticQueryRuntimeV1<R: EmbeddingRuntime> {
+pub struct CurrentSemanticQueryRuntimeV1<R: EmbeddingRuntime> {
     pointer: SemanticGenerationPointerV1,
     factory: Arc<PooledSemanticQueryEmbedderFactory<R>>,
 }
@@ -88,14 +88,14 @@ impl<R> CurrentSemanticQueryRuntimeV1<R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
-    pub(super) fn new(
+    pub fn new(
         pointer: SemanticGenerationPointerV1,
         runtime: Arc<SemanticRuntimeService<R>>,
     ) -> Self {
         Self::new_with_admission(pointer, runtime, Arc::new(AtomicBool::new(false)))
     }
 
-    pub(super) fn new_with_admission(
+    pub fn new_with_admission(
         pointer: SemanticGenerationPointerV1,
         runtime: Arc<SemanticRuntimeService<R>>,
         query_in_flight: Arc<AtomicBool>,
@@ -109,7 +109,7 @@ where
         }
     }
 
-    pub(super) fn factory_for(
+    pub fn factory_for(
         &self,
         source_generation: &CodeGenerationId,
         vector_generation: &VectorGenerationIdV1,
@@ -126,7 +126,7 @@ where
 
 /// Request-scoped adapter that obtains one bounded warmed session and emits
 /// exactly one ephemeral query vector.
-pub(super) struct PooledSemanticQueryEmbedder<'a, R: EmbeddingRuntime> {
+pub struct PooledSemanticQueryEmbedder<'a, R: EmbeddingRuntime> {
     factory: Arc<PooledSemanticQueryEmbedderFactory<R>>,
     cancellation: Arc<dyn CancellationSignal + 'a>,
 }
@@ -227,7 +227,7 @@ mod tests {
 
     use super::super::fastembed_adapter::{FakeEmbeddingRuntime, ManualCancellation};
     use super::super::runtime_service::{SemanticRuntimeService, SharedEmbeddingRuntimeFactory};
-    use super::super::session_pool::tests::{authority, config};
+    use super::super::session_pool::test_support::{authority, config};
     use super::*;
     use tracedecay_query::retrieval::semantic::{
         SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
