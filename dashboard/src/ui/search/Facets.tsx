@@ -102,12 +102,3 @@ export function FacetGroup({
     </section>
   );
 }
-
-/** Inline dot-separated metadata, aligned to a shared baseline. */
-export function MetaRow({ children }: { children: ReactNode }) {
-  return (
-    <span className="flex min-w-0 shrink-0 items-center gap-2 text-2xs text-text-muted">
-      {children}
-    </span>
-  );
-}

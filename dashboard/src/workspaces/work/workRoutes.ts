@@ -100,19 +100,3 @@ export const WORK_ACCEPT_TASK_ROUTE = {
   request: AcceptTaskCommandSchema,
   response: WorkProjectionSchema,
 } as const satisfies WorkRoute<unknown, unknown>;
-
-/** Every command route, for the checks that must hold across all of them. */
-export const WORK_COMMAND_ROUTES = [
-  WORK_CREATE_ROUTE,
-  WORK_REPLAN_DEPENDENCIES_ROUTE,
-  WORK_REVIEW_PROPOSAL_ROUTE,
-  WORK_ACCEPT_PROPOSAL_ROUTE,
-  WORK_ADMIT_EXECUTION_ROUTE,
-  WORK_ATTACH_RUNTIME_EVIDENCE_ROUTE,
-  WORK_ACCEPT_TASK_ROUTE,
-] as const;
-
-export const WORK_READ_ROUTES = [
-  WORK_SNAPSHOT_ROUTE,
-  WORK_DELTA_ROUTE,
-] as const;
