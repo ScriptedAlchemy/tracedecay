@@ -10,6 +10,13 @@ typed navigation/diagnostic operations, and the versioned TraceDecay context
 extension. Callable behavior must remain intact; declarations, file layouts,
 and protocol fixture inventories are not milestones.
 
+Standard LSP 3.17 compatibility and explicit negotiation with independently
+deployed clients remain real external protocol obligations. The TraceDecay
+context-extension schemas themselves are unreleased and absent from
+`origin/master` and established live persistence, so PR12/PR13 revise their
+final shape in place; experimental version tags, branch fixtures, and planned
+SDK consumers do not require parallel readers or a version bump.
+
 The daemon gateway/session/broker and the application LSP runtime are the
 canonical implementation path. Existing structs, files, protocol fixtures, and
 compile packets are evidence, not a contract spine to recreate. PR13 must make
@@ -261,9 +268,13 @@ review, CI, proximity, or evidence data.
 ## Replacement and deletion
 
 - Delete bypass LSP implementations after parity; any bounded compatibility
-  name delegates to the daemon gateway and retains its PR19 removal condition.
+  name with `origin/master` or published-release evidence delegates to the
+  daemon gateway and retains its PR19 removal condition. Branch-local names
+  are replaced in place.
 - Remove reserved future fields and predeclared PR17/PR18 variants from PR13
-  wire schemas. Later callable features revise the schema when they ship.
+  wire schemas. Later callable features revise the unreleased schema in place;
+  a new contract revision is required only after release or live-persistence
+  evidence establishes a predecessor.
 - Remove duplicate architecture/ownership prose, exact source-file and
   fixture inventories, standalone worktree milestone gates, generated protocol
   matrices that restate negotiation code, and placeholder benchmark packets.
