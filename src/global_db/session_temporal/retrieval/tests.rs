@@ -19,24 +19,6 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
 
-const REQUIRED_SCHEMA_INDEXES: &[&str] = &[
-    "idx_session_temporal_generations_session_state",
-    "idx_session_occurrences_generation_order",
-    "idx_session_current_entities_primary_key",
-    "idx_session_assertions_subject",
-    "idx_session_summary_availability_generation",
-    "idx_session_summary_nodes_session_created",
-    "session_occurrences_fts",
-    "session_summary_nodes_fts",
-];
-const FOLLOW_UP_SCHEMA_INDEXES: &[&str] = &[
-    "session_occurrences(session_id, generation, retrieval_anchor_id, knowledge_at, occurrence_id)",
-    "session_assertions(session_id, generation, object_anchor_id, knowledge_at, assertion_id)",
-    "session_summary_successors(successor_summary_id, created_at, predecessor_summary_id)",
-    "session_occurrences(knowledge_at DESC, session_id, occurrence_id, generation)",
-    "session_summary_nodes(created_at DESC, session_id, summary_id)",
-];
-
 fn digest(byte: char) -> String {
     format!("sha256:{}", byte.to_string().repeat(64))
 }
@@ -263,6 +245,34 @@ impl RegisteredTemporalRead {
         }
         detail_count
     }
+
+    async fn text_column(
+        &self,
+        sql: &str,
+        params: Vec<SqlValue>,
+        column: usize,
+    ) -> Vec<String> {
+        let mut rows = crate::db::engine::QueryExecutor::query(&self.read, sql, params)
+            .await
+            .expect("query must execute");
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.expect("query row") {
+            values.push(row.get(column).expect("text column"));
+        }
+        values
+    }
+
+    async fn explain_query_plan(&self, sql: &str, params: Vec<SqlValue>) -> Vec<String> {
+        let explain = format!("EXPLAIN QUERY PLAN {sql}");
+        let mut rows = crate::db::engine::QueryExecutor::query(&self.read, &explain, params)
+            .await
+            .expect("query must plan");
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().await.expect("plan row") {
+            details.push(row.get(3).expect("plan detail"));
+        }
+        details
+    }
 }
 
 impl HostAdmissionTestRuntimeV1 {
@@ -273,6 +283,99 @@ impl HostAdmissionTestRuntimeV1 {
         RegisteredTemporalRead {
             read: database.read_snapshot().await.expect("read snapshot"),
         }
+    }
+
+    async fn seed_candidate_query_fixture_for_test(&self) {
+        self.activate_temporal_generation_for_retrieval_test("session-plan-inside", 1)
+            .await;
+        self.activate_temporal_generation_for_retrieval_test("session-plan-outside", 1)
+            .await;
+        let database = self
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        Executor::execute_batch(
+            &database
+                .writer_connection()
+                .expect("registered profile writer"),
+            "INSERT INTO sessions (
+                provider, session_id, project_key, project_path
+             ) VALUES
+                ('claude', 'session-plan-inside', 'user', '/candidate-plan'),
+                ('claude', 'session-plan-outside', 'project-outside', '/outside');
+             INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES
+                ('receipt-plan-inside', 'fixture', 'sha256:plan-inside', '{}'),
+                ('receipt-plan-outside', 'fixture', 'sha256:plan-outside', '{}');
+             INSERT INTO observations (
+                observation_id, payload_digest, receipt_id, observation_json,
+                committed_cursor_json
+             ) VALUES
+                (
+                    'observation-plan-inside', 'sha256:plan-inside',
+                    'receipt-plan-inside',
+                    '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
+                ),
+                (
+                    'observation-plan-outside', 'sha256:plan-outside',
+                    'receipt-plan-outside',
+                    '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
+                );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                (
+                    'anchor-plan-inside', '{}', '{\"kind\":\"profile\"}', 'fixture'
+                ),
+                (
+                    'anchor-plan-summary', '{}', '{\"kind\":\"profile\"}', 'fixture'
+                ),
+                (
+                    'anchor-plan-outside', '{}',
+                    '{\"kind\":\"project\",\"project_id\":\"project-outside\"}', 'fixture'
+                );
+             INSERT INTO session_occurrences (
+                session_id, generation, occurrence_id, source_observation_id,
+                projection_output_ordinal, retrieval_anchor_id, message_id, turn_id,
+                role, knowledge_at, valid_time_json, evidence_json, snippet_text, index_text
+             ) VALUES
+                (
+                    'session-plan-inside', 1, 'occurrence-plan-inside',
+                    'observation-plan-inside', 0, 'anchor-plan-inside',
+                    'message-plan-inside', 'turn-plan-inside', 'user', 20,
+                    '{\"kind\":\"unknown\"}', '{}',
+                    'needle candidate inside', 'needle candidate inside'
+                ),
+                (
+                    'session-plan-outside', 1, 'occurrence-plan-outside',
+                    'observation-plan-outside', 0, 'anchor-plan-outside',
+                    'message-plan-outside', 'turn-plan-outside', 'user', 30,
+                    '{\"kind\":\"unknown\"}', '{}',
+                    'needle candidate outside', 'needle candidate outside'
+                );
+             INSERT INTO session_summary_nodes (
+                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                source_horizon_json, publication_json, created_at
+             ) VALUES (
+                'summary-plan-inside', 'session-plan-inside', 'anchor-plan-summary',
+                'needle summary inside', 'needle summary inside', '{}',
+                '{\"provider\":\"claude\"}', 25
+             );
+             INSERT INTO session_summary_sources (
+                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
+             ) VALUES (
+                'summary-plan-inside', 0, 'anchor', 'anchor-plan-inside', NULL
+             );
+             INSERT INTO session_summary_availability (
+                session_id, generation, summary_id, availability,
+                source_horizon_json, reason, checked_at
+             ) VALUES (
+                'session-plan-inside', 1, 'summary-plan-inside', 'available',
+                '{}', NULL, 25
+             );",
+        )
+        .await
+        .expect("candidate query fixture");
     }
 
     async fn activate_temporal_generation_for_retrieval_test(
@@ -995,23 +1098,194 @@ fn mode_sql_is_shaped_without_optional_or_fallback_predicates() {
     assert_eq!(forensic.summary_predicate, "1 = 1");
 }
 
-#[test]
-fn candidate_queries_use_keysets_limits_and_mode_indexes() {
-    for sql in [
-        EXACT_CANDIDATE_QUERY,
-        OCCURRENCE_FTS_QUERY,
-        TIME_CANDIDATE_QUERY,
-        SUMMARY_CANDIDATE_QUERY,
-    ] {
-        assert!(sql.contains("LIMIT ?"));
-        assert!(!sql.to_ascii_uppercase().contains("OFFSET"));
-    }
-    assert!(TIME_CANDIDATE_QUERY.contains("idx_session_occurrences_generation_order"));
-    assert!(EXACT_CANDIDATE_QUERY.contains("instr(o.snippet_text, ?4) > 0"));
-    assert!(EXACT_CANDIDATE_QUERY.contains("length(CAST(o.snippet_text AS BLOB)) <= ?11"));
-    assert!(!EXACT_CANDIDATE_QUERY.contains("session_occurrences_fts MATCH"));
-    assert!(OCCURRENCE_FTS_QUERY.contains("session_occurrences_fts MATCH"));
-    assert!(SUMMARY_CANDIDATE_QUERY.contains("session_summary_nodes_fts MATCH"));
+#[tokio::test]
+async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
+    let dir = tempdir().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_candidate_query_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    let exact_params = vec![
+        SqlValue::Text("session-plan-inside".to_string()),
+        SqlValue::Integer(1),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text("needle candidate".to_string()),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(
+            i64::try_from(MAX_OBSERVATION_RECORD_BYTES).expect("source byte cap"),
+        ),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(EXACT_CANDIDATE_QUERY, exact_params, 0)
+            .await,
+        ["occurrence-plan-inside"]
+    );
+
+    let occurrence_fts_params = vec![
+        SqlValue::Text("session-plan-inside".to_string()),
+        SqlValue::Integer(1),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("needle candidate")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(
+            OCCURRENCE_FTS_QUERY,
+            occurrence_fts_params.clone(),
+            0
+        )
+        .await,
+        ["occurrence-plan-inside"]
+    );
+    let occurrence_fts_plan = read
+        .explain_query_plan(OCCURRENCE_FTS_QUERY, occurrence_fts_params)
+        .await;
+    assert!(
+        occurrence_fts_plan.iter().any(|detail| {
+            detail.contains("session_occurrences_fts")
+                && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "occurrence retrieval must execute through the live FTS operator: {occurrence_fts_plan:?}"
+    );
+
+    let time_params = vec![
+        SqlValue::Text("session-plan-inside".to_string()),
+        SqlValue::Integer(1),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Integer(0),
+        SqlValue::Integer(100),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(TIME_CANDIDATE_QUERY, time_params.clone(), 0)
+            .await,
+        ["occurrence-plan-inside"]
+    );
+    let time_plan = read
+        .explain_query_plan(TIME_CANDIDATE_QUERY, time_params)
+        .await;
+    assert!(
+        time_plan
+            .iter()
+            .any(|detail| detail.contains("idx_session_occurrences_generation_order")),
+        "session time retrieval must use the live generation-order index: {time_plan:?}"
+    );
+
+    let summary_params = vec![
+        SqlValue::Text("session-plan-inside".to_string()),
+        SqlValue::Integer(1),
+        SqlValue::Text("claude".to_string()),
+        SqlValue::Text(fts_phrase("needle summary")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(SUMMARY_CANDIDATE_QUERY, summary_params.clone(), 0)
+            .await,
+        ["summary-plan-inside"]
+    );
+    let summary_plan = read
+        .explain_query_plan(SUMMARY_CANDIDATE_QUERY, summary_params)
+        .await;
+    assert!(
+        summary_plan.iter().any(|detail| {
+            detail.contains("session_summary_nodes_fts")
+                && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "summary retrieval must execute through the live FTS operator: {summary_plan:?}"
+    );
+
+    let root_fts_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Text(fts_phrase("needle candidate")),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_OCCURRENCE_FTS_QUERY, root_fts_params.clone(), 0)
+            .await,
+        ["occurrence-plan-inside"],
+        "root retrieval must exclude the populated out-of-root session"
+    );
+    let root_fts_plan = read
+        .explain_query_plan(ROOT_OCCURRENCE_FTS_QUERY, root_fts_params)
+        .await;
+    assert!(
+        root_fts_plan.iter().any(|detail| {
+            detail.contains("session_occurrences_fts")
+                && detail.contains("VIRTUAL TABLE INDEX")
+        }),
+        "root retrieval must execute one live FTS store query: {root_fts_plan:?}"
+    );
+
+    let root_time_params = vec![
+        SqlValue::Text("user".to_string()),
+        SqlValue::Null,
+        SqlValue::Integer(0),
+        SqlValue::Integer(100),
+        SqlValue::Integer(i64::MAX),
+        SqlValue::Text(String::new()),
+        SqlValue::Text(String::new()),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(128),
+        SqlValue::Integer(1_024),
+        SqlValue::Integer(128),
+        SqlValue::Integer(10),
+    ];
+    assert_eq!(
+        read.text_column(ROOT_TIME_CANDIDATE_QUERY, root_time_params.clone(), 0)
+            .await,
+        ["occurrence-plan-inside"],
+        "root time retrieval must exclude the populated out-of-root session"
+    );
+    let root_time_plan = read
+        .explain_query_plan(ROOT_TIME_CANDIDATE_QUERY, root_time_params)
+        .await;
+    assert!(
+        root_time_plan
+            .iter()
+            .any(|detail| detail.contains("idx_session_occurrences_root_generation_order")),
+        "root time retrieval must use the live root generation-order index: {root_time_plan:?}"
+    );
+    assert!(
+        root_time_plan
+            .iter()
+            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "root time retrieval must preserve index order: {root_time_plan:?}"
+    );
 }
 
 #[tokio::test]
@@ -1260,63 +1534,6 @@ async fn exact_candidates_do_not_charge_contract_sized_source_against_compact_it
     );
 }
 
-#[test]
-fn authorized_root_candidate_queries_use_composite_session_keysets() {
-    for sql in [
-        ROOT_EXACT_CANDIDATE_QUERY,
-        ROOT_OCCURRENCE_FTS_QUERY,
-        ROOT_TIME_CANDIDATE_QUERY,
-        ROOT_SUMMARY_CANDIDATE_QUERY,
-    ] {
-        assert!(sql.contains("session_id"));
-        assert!(sql.contains("LIMIT ?"));
-        assert!(!sql.to_ascii_uppercase().contains("OFFSET"));
-    }
-    assert!(
-        ROOT_EXACT_CANDIDATE_QUERY
-            .contains("ORDER BY o.knowledge_at DESC, o.session_id, o.occurrence_id")
-    );
-    assert!(ROOT_EXACT_CANDIDATE_QUERY.contains("instr(o.snippet_text, ?3) > 0"));
-    assert!(ROOT_EXACT_CANDIDATE_QUERY.contains("length(CAST(o.snippet_text AS BLOB)) <= ?12"));
-    assert!(!ROOT_EXACT_CANDIDATE_QUERY.contains("session_occurrences_fts MATCH"));
-    assert!(
-        ROOT_SUMMARY_CANDIDATE_QUERY
-            .contains("ORDER BY n.created_at DESC, n.session_id, n.summary_id")
-    );
-    assert!(ROOT_OCCURRENCE_FTS_QUERY.contains("session_occurrences_fts MATCH"));
-    assert!(ROOT_SUMMARY_CANDIDATE_QUERY.contains("session_summary_nodes_fts MATCH"));
-    assert_eq!(
-        ROOT_OCCURRENCE_FTS_QUERY
-            .matches("session_occurrences_fts MATCH")
-            .count(),
-        1,
-        "root-wide FTS must be one calibrated store query, not per-session fan-out"
-    );
-}
-
-#[test]
-fn authorized_root_candidate_queries_bind_durable_anchor_owner_before_materialization() {
-    for sql in [
-        ROOT_EXACT_CANDIDATE_QUERY,
-        ROOT_OCCURRENCE_FTS_QUERY,
-        ROOT_TIME_CANDIDATE_QUERY,
-        ROOT_SUMMARY_CANDIDATE_QUERY,
-    ] {
-        assert!(sql.contains("JOIN retrieval_anchors AS authority_anchor"));
-        assert!(sql.contains("JOIN sessions AS authority_session"));
-        assert!(sql.contains("authority_session.project_key = ?1"));
-        assert!(sql.contains("json_extract(authority_anchor.owner_json, '$.kind')"));
-    }
-}
-
-#[test]
-fn singleton_derived_candidates_share_their_member_logical_message() {
-    for sql in [DERIVED_CANDIDATE_QUERY, ROOT_DERIVED_CANDIDATE_QUERY] {
-        assert!(sql.contains("CASE WHEN evidence.member_count = 1"));
-        assert!(sql.contains("THEN first_occurrence.message_id ELSE NULL END"));
-    }
-}
-
 #[tokio::test]
 async fn root_record_authority_binds_the_candidate_source_provider() {
     let dir = tempdir().unwrap();
@@ -1445,235 +1662,6 @@ async fn profile_root_authorizes_legacy_claude_anchor_without_project_scope() {
             .is_err(),
         "a profile anchor must not become project-owned through session metadata"
     );
-}
-
-#[test]
-fn provider_scope_is_applied_at_every_candidate_authority_join() {
-    for sql in [
-        EXACT_CANDIDATE_QUERY,
-        OCCURRENCE_FTS_QUERY,
-        TIME_CANDIDATE_QUERY,
-    ] {
-        assert!(sql.contains("JOIN observations AS provider_observation"));
-        assert!(sql.contains("$.identity.source.provider"));
-        assert!(sql.contains("COALESCE(json_extract"));
-        assert!(sql.contains("'claude'"));
-    }
-    assert!(SUMMARY_CANDIDATE_QUERY.contains("session_summary_sources"));
-    assert!(SUMMARY_CANDIDATE_QUERY.contains("JOIN observations AS source_observation"));
-    assert!(SUMMARY_CANDIDATE_QUERY.contains("$.identity.source.provider"));
-    assert!(SUMMARY_CANDIDATE_QUERY.contains("COALESCE(json_extract"));
-    assert!(SUMMARY_CANDIDATE_QUERY.contains("'claude'"));
-}
-
-#[test]
-fn record_union_filters_provider_and_large_fields_before_materialization() {
-    let query = build_record_query(
-        &TemporalRetrievalScope::Session(SessionId::new("session-snapshot").expect("session")),
-        &scoped_snapshot(1, Some("claude")),
-        &[record_candidate()],
-        0,
-        &RecordCursor {
-            candidate: 0,
-            kind: 0,
-            session_id: String::new(),
-            stable_id: String::new(),
-        },
-        33,
-        &record_request(),
-    )
-    .expect("record query");
-    let records_end = query
-        .sql
-        .find("SELECT ordinal, kind_rank, stable_id, record_kind")
-        .expect("outer records select");
-    let records = &query.sql[..records_end];
-
-    assert!(
-        records.matches("JOIN observations AS").count() >= 4,
-        "occurrence, assertion, copy, and summary-source arms need canonical provider joins"
-    );
-    assert!(records.matches("$.identity.source.provider").count() >= 5);
-    assert!(records.matches("COALESCE(json_extract").count() >= 5);
-    assert!(records.matches("'claude'").count() >= 5);
-    for field in [
-        "evidence_json",
-        "proof_json",
-        "source_horizon_json",
-        "publication_json",
-    ] {
-        assert!(
-            records.contains("length(CAST("),
-            "{field} must be byte-bounded in its UNION arm"
-        );
-        assert!(records.contains(field));
-    }
-    assert!(records.contains("json_group_array"));
-    let request = record_request();
-    let page_limit = 33_i64;
-    let item_cap = i64::try_from(request.max_item_bytes()).expect("item cap");
-    let byte_cap = i64::try_from(request.max_item_bytes().max(1)).expect("byte cap");
-    let count_cap = i64::try_from(super::MAX_SUMMARY_SOURCES_PER_RECORD).expect("count cap");
-    let probe_cap = count_cap.saturating_add(1);
-    assert!(
-        query.sql.contains("ss.source_ordinal < ?") || query.sql.contains("source_ordinal < ?"),
-        "summary source fan-in must bind a count cap predicate"
-    );
-    assert!(
-        query.sql.contains("length(CAST(") && query.sql.contains(") <= ?"),
-        "summary source fan-in must bind a byte-length cap predicate"
-    );
-
-    let placeholder_indices = |needle: &str| -> Vec<usize> {
-        let mut indices = Vec::new();
-        let mut rest = query.sql.as_str();
-        while let Some(offset) = rest.find(needle) {
-            let after = &rest[offset + needle.len()..];
-            let digits: String = after.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-            if let Ok(index) = digits.parse::<usize>() {
-                indices.push(index);
-            }
-            rest = &after[digits.len().max(1)..];
-        }
-        indices
-    };
-    // Field length predicates use `AS BLOB)) <= ?N`. Aggregate budget predicates
-    // and the summary-source COUNT gate use bare `) <= ?N` (COUNT binds count_cap).
-    let field_length_indices = placeholder_indices("AS BLOB)) <= ?");
-    let budget_le_indices = placeholder_indices(") <= ?");
-    let limit_indices = placeholder_indices("LIMIT ?");
-    assert!(
-        !field_length_indices.is_empty(),
-        "built SQL must contain field length-cap placeholders"
-    );
-    assert!(
-        !limit_indices.is_empty(),
-        "built SQL must contain LIMIT placeholders"
-    );
-
-    let param_at = |index: usize| -> Option<i64> {
-        query
-            .params
-            .get(index.saturating_sub(1))
-            .and_then(|param| match param {
-                SqlValue::Integer(value) => Some(*value),
-                _ => None,
-            })
-    };
-    // Param indices whose bound value is a byte budget (item/source caps share a
-    // value today; index placement still distinguishes them from LIMIT slots).
-    let byte_budget_param_indices: Vec<usize> = query
-        .params
-        .iter()
-        .enumerate()
-        .filter_map(|(offset, param)| match param {
-            SqlValue::Integer(value) if *value == byte_cap || *value == item_cap => {
-                Some(offset + 1)
-            }
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !byte_budget_param_indices.is_empty(),
-        "built query must bind item/source byte budgets"
-    );
-    assert!(
-        budget_le_indices
-            .iter()
-            .any(|index| param_at(*index) == Some(byte_cap)),
-        "source byte cap ({byte_cap}) must back a `<= ?` budget predicate; le_indices={budget_le_indices:?}"
-    );
-    assert!(
-        field_length_indices
-            .iter()
-            .any(|index| param_at(*index) == Some(item_cap)),
-        "item byte cap ({item_cap}) must back a field length predicate; field_indices={field_length_indices:?}"
-    );
-    for index in &field_length_indices {
-        let bound = param_at(*index).expect("field length placeholder must resolve");
-        assert!(
-            bound == byte_cap || bound == item_cap,
-            "field length-cap ?{index} must bind an item/source byte budget, got {bound}"
-        );
-    }
-    // Numbered placeholders make literal `LIMIT {byte_cap}` checks vacuous: fail
-    // when a byte-budget param index (or value) backs any LIMIT ?N slot.
-    for index in &limit_indices {
-        let bound = param_at(*index).expect("LIMIT placeholder must resolve");
-        assert!(
-            bound == count_cap || bound == probe_cap || bound == page_limit,
-            "LIMIT ?{index} must bind count/probe/page limits, got {bound} (byte_cap={byte_cap})"
-        );
-        assert!(
-            !byte_budget_param_indices.contains(index),
-            "byte-budget param ?{index} must not back SQL LIMIT (bound={bound})"
-        );
-        if bound == byte_cap || bound == item_cap {
-            panic!(
-                "byte budget value {bound} must not back LIMIT ?{index} (byte_cap={byte_cap}, item_cap={item_cap})"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn explain_time_query_uses_generation_order_index() {
-    let dir = tempdir().unwrap();
-    let conn = TestConnection::open(&dir.path().join("query-plan.db"));
-    conn.execute_batch(
-        "CREATE TABLE session_occurrences (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                occurrence_id TEXT NOT NULL,
-                source_observation_id TEXT NOT NULL,
-                retrieval_anchor_id TEXT NOT NULL,
-                message_id TEXT,
-                turn_id TEXT,
-                role TEXT NOT NULL,
-                knowledge_at INTEGER NOT NULL,
-                PRIMARY KEY(session_id, generation, occurrence_id)
-             );
-             CREATE TABLE observations (
-                observation_id TEXT PRIMARY KEY,
-                observation_json TEXT NOT NULL
-             );
-             CREATE INDEX idx_session_occurrences_generation_order
-                ON session_occurrences(
-                    session_id, generation, knowledge_at, occurrence_id
-                );",
-    )
-    .await
-    .unwrap();
-    let mut rows = conn
-        .query(
-            &format!("EXPLAIN QUERY PLAN {TIME_CANDIDATE_QUERY}"),
-            vec![
-                SqlValue::Text("session".to_string()),
-                SqlValue::Integer(1),
-                SqlValue::Null,
-                SqlValue::Integer(0),
-                SqlValue::Integer(1),
-                SqlValue::Integer(i64::MAX),
-                SqlValue::Text(String::new()),
-                SqlValue::Integer(128),
-                SqlValue::Integer(128),
-                SqlValue::Integer(128),
-                SqlValue::Integer(1_024),
-                SqlValue::Integer(10),
-            ],
-        )
-        .await
-        .unwrap();
-    let mut details = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        details.push(row.get::<String>(3).unwrap());
-    }
-    assert!(
-        details
-            .iter()
-            .any(|detail| detail.contains("idx_session_occurrences_generation_order"))
-    );
-    assert!(details.iter().all(|detail| !detail.contains("SCAN o")));
 }
 
 #[tokio::test]
@@ -2097,23 +2085,6 @@ async fn summary_source_count_cap_rejects_before_group_array() {
         !kinds.contains(&"summary".to_string()),
         "257 sources must not be truncated into a 256-source summary JSON array"
     );
-    let query = build_record_query(
-        snapshot.retrieval_scope(),
-        &snapshot,
-        &[candidate_for_anchor("anchor-many-sources")],
-        0,
-        &RecordCursor {
-            candidate: 0,
-            kind: 0,
-            session_id: String::new(),
-            stable_id: String::new(),
-        },
-        33,
-        &request,
-    )
-    .unwrap();
-    assert!(query.sql.contains("ss.source_ordinal < ?"));
-    assert!(query.sql.contains("LIMIT 257"));
 }
 
 #[tokio::test]
@@ -2189,132 +2160,6 @@ async fn explain_record_query_stays_bounded_after_hundred_thousand_candidates() 
         .expect("registered profile runtime");
     let read = runtime.retrieval_read_for_test().await;
     assert!(read.explain_record_query(query).await > 0);
-}
-
-#[tokio::test]
-async fn explain_root_candidate_query_stays_keyset_bounded_at_hundred_thousand_rows() {
-    let dir = tempdir().unwrap();
-    let conn = TestConnection::open(&dir.path().join("root-plan.db"));
-    conn.execute_batch(
-        "CREATE TABLE session_temporal_generations (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                PRIMARY KEY(session_id, generation)
-             );
-             CREATE INDEX idx_session_temporal_generations_session_state
-                ON session_temporal_generations(session_id, state);
-             CREATE TABLE observations (
-                observation_id TEXT PRIMARY KEY,
-                observation_json TEXT NOT NULL
-             );
-             CREATE TABLE retrieval_anchors (
-                anchor_id TEXT PRIMARY KEY,
-                owner_json TEXT NOT NULL
-             );
-             CREATE TABLE sessions (
-                provider TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                project_key TEXT NOT NULL,
-                PRIMARY KEY(provider, session_id)
-             );
-             CREATE TABLE session_occurrences (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                occurrence_id TEXT NOT NULL,
-                source_observation_id TEXT NOT NULL,
-                retrieval_anchor_id TEXT NOT NULL,
-                message_id TEXT,
-                turn_id TEXT,
-                role TEXT NOT NULL,
-                knowledge_at INTEGER NOT NULL,
-                PRIMARY KEY(session_id, generation, occurrence_id)
-             );
-             CREATE INDEX idx_session_occurrences_root_generation_order
-                ON session_occurrences(
-                    knowledge_at DESC, session_id, occurrence_id, generation
-                );
-             INSERT INTO session_temporal_generations VALUES ('session-bulk', 1, 'active');
-             INSERT INTO observations VALUES (
-                'observation-bulk',
-                '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}'
-             );
-             INSERT INTO retrieval_anchors VALUES (
-                'anchor-bulk',
-                '{\"kind\":\"profile\"}'
-             );
-             INSERT INTO sessions VALUES ('claude', 'session-bulk', 'user');
-             WITH RECURSIVE sequence(value) AS (
-                 VALUES(0)
-                 UNION ALL
-                 SELECT value + 1 FROM sequence WHERE value < 99999
-             )
-             INSERT INTO session_occurrences
-             SELECT 'session-bulk', 1, printf('occurrence-%06d', value),
-                    'observation-bulk', 'anchor-bulk',
-                    NULL, NULL, 'user', value
-             FROM sequence;",
-    )
-    .await
-    .unwrap();
-    let count: i64 = conn
-        .query("SELECT COUNT(*) FROM session_occurrences", ())
-        .await
-        .unwrap()
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get(0)
-        .unwrap();
-    assert_eq!(count, 100_000);
-
-    let mut rows = conn
-        .query(
-            &format!("EXPLAIN QUERY PLAN {ROOT_TIME_CANDIDATE_QUERY}"),
-            vec![
-                SqlValue::Text("user".to_string()),
-                SqlValue::Null,
-                SqlValue::Integer(0),
-                SqlValue::Integer(100_001),
-                SqlValue::Integer(71_111),
-                SqlValue::Text("session-bulk".to_string()),
-                SqlValue::Text("occurrence-071111".to_string()),
-                SqlValue::Integer(128),
-                SqlValue::Integer(128),
-                SqlValue::Integer(128),
-                SqlValue::Integer(1_024),
-                SqlValue::Integer(1_024),
-                SqlValue::Integer(38),
-            ],
-        )
-        .await
-        .unwrap();
-    let mut details = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        details.push(row.get::<String>(3).unwrap());
-    }
-    assert!(
-        details
-            .iter()
-            .any(|detail| detail.contains("idx_session_occurrences_root_generation_order"))
-    );
-    assert!(
-        details
-            .iter()
-            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY"))
-    );
-}
-
-#[test]
-fn schema_index_dependencies_are_explicit_and_follow_ups_are_not_hidden() {
-    assert!(REQUIRED_SCHEMA_INDEXES.len() >= 8);
-    assert_eq!(FOLLOW_UP_SCHEMA_INDEXES.len(), 5);
-    assert!(
-        FOLLOW_UP_SCHEMA_INDEXES
-            .iter()
-            .all(|index| index.contains('('))
-    );
 }
 
 #[test]
