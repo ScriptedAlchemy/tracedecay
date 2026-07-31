@@ -46,124 +46,44 @@ coordination/source-local query and LCM read context, Loom time boundaries,
 Delivery, Doctor, storage telemetry, asset serving, and feedback observation
 wiring also exist.
 
-**Suite status correction (2026-07-27).** The Rust `dashboard_api_test` suite
-now completes successfully: 58 tests run, 58 passed, on two consecutive
-`cargo nextest run --test dashboard_api_test --all-features` runs. Settings
-CAS, Delivery, Explorer routes, Doctor, storage telemetry, Loom, and asset
-serving are therefore no longer blocked on that suite, and the earlier
-"implemented but unverified" qualification attached to it is withdrawn. Two
-narrower verification limits it used to carry are also closed: the Loom suite
-declares `mod loom;` and its temporal test executes, and the dashboard's
-project-settings write is exercised against the installed production client by
-`dashboard_project_settings_commit_through_the_daemon_control_plane`
-(`tests/pr11_pr12_runtime_acceptance.rs`), which starts the dashboard inside a
-real daemon and asserts the commit, the advanced revision, the durable re-read,
-and CAS rejection of the superseded revision.
+**Verification correction (2026-07-27).** Direct backend and frontend coverage
+now reaches Settings CAS, Delivery, Explorer routes, Doctor, storage telemetry,
+Loom, asset serving, and every dashboard workspace. The daemon-hosted Settings
+journey exercises the installed production client, durable reread, and
+stale-revision rejection. Historical suite names, command lines, scan counts,
+and route matrices are run evidence rather than plan invariants.
 
-Acceptance is still open, and this correction claims only what executed. A
-focused frontend suite, `typecheck`, `contracts:check`, and both accessibility
-gates (`axe:audit` and `axe:explorer`) have completed successfully at this
-checkpoint with zero reported axe violations, page errors, or state-assertion
-failures. The six viewport/theme combinations `axe:audit` covered when this
-paragraph was written are superseded by the widened matrix and route coverage
-recorded below. Exact file/test/scan counts remain run output rather than a plan
-invariant. Both gates are declared by the `dashboard-accessibility` CI job,
-which has not yet executed; `visual:audit`, `visual:topography`, and
-`live:sweep` remain developer-run.
+Acceptance remains open on the product gaps below. Unavailable data must stay
+truthful rather than being replaced with fabricated values.
 
-**Audited open gaps (2026-07-27).** A gate-by-gate and workspace-by-workspace
-audit against the requirements below found these still unmet. They are
-recorded so acceptance is not claimed early. They are capability/test gaps, not
-permission to replace unavailable data with fabricated values.
-
-- **PR14 / Plan 11 owner:** the runtime performance budgets — LCP, frame p95,
-  and heap retention — remain absent. MSW HTTP fault coverage, the ast-grep
-  renderer boundary gate, the SSE churn bounds, the transfer budgets, and the
-  virtualization mount ceiling have all since landed and are no longer open.
-- **PR14 / Plan 11 owner:** the 200 ms p95 input budget is unasserted and will
-  stay that way here. It cannot be measured deterministically in jsdom, which
-  has no layout or paint, so a jsdom timing assertion would be a gate attesting
-  to something it never checked. It belongs in Playwright against a real engine,
-  alongside the runtime budgets above.
-- **PR14 / Plan 11 owner:** Code still lacks diagnostics, affected tests, code
+- **Plan 11 owner:** the runtime performance budgets — LCP, frame p95,
+  input latency, and heap retention — remain open. HTTP fault coverage,
+  renderer semantic separation, SSE churn bounds, transfer budgets, and the
+  virtualization mount ceiling are delivered.
+- **Plan 11 owner:** browser input latency is measured in a real layout
+  and paint engine; jsdom timing cannot establish this product requirement.
+- **Plan 11 owner:** Code still lacks diagnostics, affected tests, code
   health, and branch-aware freshness; Agents lacks its PR14 subagent/handoff
   context; Sessions lacks raw-message drill-down, compaction boundaries, and
   replay; Knowledge lacks contradictions, supersession, and curation;
   Observatory lacks hook hints, event flow, and latency; Automations lacks its
   existing-runtime run history and artifacts; Costs lacks a latency breakdown;
   and Loom's zoom/brush/playback helpers are not wired into its UI.
-- **PR14 / Plan 11 owner:** `redacted` and `locked` are defined in `StateChip`
+- **Plan 11 owner:** `redacted` and `locked` are defined in `StateChip`
   but no workspace currently exercises them with supplied backend state.
-- **PR15 / Plan 16 owner:** Explorer's multi-project/repository/worktree pivots
+- **Plan 16 owner:** Explorer's multi-project/repository/worktree pivots
   remain future multi-root work; PR14 still owns the single-root time pivot.
-- **Owners: PR17 / Plans 24 and 32; PR18 for public handoff:**
+- **Owners: Plans 24 and 32; Plan 17 for public handoff:**
   `RequestCancel` and `RequestExternalHandoff` authority-negative coverage
   belongs to the executable Work/handoff journey and does not block the PR14
   twelve-workspace checkpoint.
 
-**Accessibility matrix and route coverage closed (2026-07-27).** The viewport
-matrix is no longer partial: the audit covers the full specified set — the added
-390×844, 1024×768, and 1280×720 viewports, 200% and 400% zoom,
-`prefers-contrast: more`, and forced colors. `666ff456d` then closed the route
-half of the same gap, which was the more serious one. The gate had scenarios for
-7 of the 12 workspaces, so its zeros under-reported by construction: a page no
-scenario visits cannot report a violation. Settings, Knowledge, Delivery, Loom,
-and Agents now have scenarios, each driving its surface into the state where it
-makes a truth claim and asserting against that claim rather than navigating and
-scanning. `/settings` joins the 30-combination matrix tier because its trapped
-pane is a 400% zoom condition; the other four sit on the showcase tier, and each
-new route also carries a canary. Current run output is 46 scenarios and 486
-scans, with `axe:explorer` unchanged at 72. Per the convention above, those
-counts are run output rather than a plan invariant, and they supersede the 460
-figure this section carried earlier.
-
-**Trapped panes and touch targets closed (2026-07-27).** Both items this section
-listed as open are fixed, by two commits rather than one.
-
-`15ef9f578` fixed the original pair. A `flex-1` scroll container has an
-automatic minimum size of zero, so whenever its siblings claimed more height
-than the viewport could give, it resolved to `height: 0` — clipping every row
-and removing the scrollbar that would reach them, while the caption above went
-on counting them. That hit Explorer's results pane, Code's hub list, and
-Settings' configuration pane; a `--pane-min-height` floor refuses the division
-and `main#td-main` scrolls instead. The same commit fixed the undersized
-controls: the 44 px minimum was already a token referenced nowhere, and
-`html { font-size: 14px }` made Tailwind's rem spacing lie, so `min-h-11` and
-`size-11` were written for 44 and rendered 38.5. Controls now size from
-`--touch-target-min`, with compact instrument bezels keeping their drawn size
-inside a transparent 44 px hit area rather than being redrawn as slabs. The root
-font size is unchanged and remains documented in `tokens.css`.
-
-`c42e18917` fixed the four genuine WCAG touch-target defects that only became
-visible once the gate reached all twelve workspaces: seven 13×13 native
-checkboxes on `/settings` including the review dialog, the 23×23 dialog close
-button, and Loom's row-select buttons, now 44 px in both axes. A native checkbox
-paints at 13×13 and does not grow with padding, so the new `.td-check` primitive
-makes the input itself the 44×44 target and draws its bezel in `::before`; the
-tick is a rotated border rather than a background or box-shadow, both of which
-forced colors erases, so the checked state survives the forced palette with no
-`forced-color-adjust` opt-out. The same commit gave accessible names to the five
-internal scrollers that announced nothing, which is what this plan's
-labelled-region licence for internal scrolling actually requires.
-
-**Observed run output and its limits (2026-07-27).** A full `npm run axe:audit`
-exited 0 with zero axe violations, zero plan failures, zero assertion failures,
-420 seeded canary detections proving the scans ran live, and a forced-colors
-opt-out count of zero. `typecheck`, `boundary:check`, and Vitest at 69 files and
-715 tests also passed.
-
-All of that is local. CI has not executed the `dashboard-accessibility` job at
-all — it is dark pending the master merge integration — so none of these
-closures is CI-validated; see the verification-status section of
-[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md). One concrete risk to watch
-on the first CI run: the job's 30-minute timeout was sized against the old
-matrix — its own comment reasons from two themes by three widths to a roughly
-14-minute estimate — and the gate now runs 46 scenarios. Local wall time is
-6m14s, a slower 4-vCPU runner is estimated near 19 minutes, and the margin is
-therefore about 1.6×, which is thin enough to watch rather than assume. If it
-overruns, the levers are `AXE_CONCURRENCY` or splitting the audit from the
-explorer run. Narrowing the matrix to fit the timeout is not a lever — that
-would restore exactly the under-reporting `666ff456d` removed.
+**Accessibility and route coverage closed (2026-07-27).** Direct browser
+journeys now visit every workspace in the state where it makes a truth claim
+and cover the required narrow/desktop viewports, zoom, contrast, forced-colors,
+keyboard, and touch behavior. Trapped panes, undersized targets, unnamed
+internal scrollers, and forced-colors checkbox state are fixed. Exact scenario,
+scan, test, and canary counts are intentionally not plan requirements.
 
 **Transfer budgets and list bounds closed (2026-07-27).** The two payload
 ceilings this plan states are now measured and enforced by
@@ -852,7 +772,7 @@ representative-tier frame p95 above 33 ms in each of five consecutive
 one-second windows falls back within one second without losing URL, scope,
 filters, selection, evidence, temporal frame, or legal actions.
 
-## Responsive, accessibility, performance, and usability gates
+## Responsive, accessibility, performance, and usability journeys
 
 **Approved acceptance — desktop-first, not desktop-only (2026-07-28).**
 Desktop visual review and golden baselines use 1280×720 and 1440×900. Narrow
@@ -1019,10 +939,10 @@ not mandatory recreation.
   and PR17 Work.
 - Unit, DOM, accessibility, and smoke tests cover critical journeys and all state classes.
 - Performance tests bound initial payloads, long lists, graph rendering, and live-update churn.
-- The aggregate frontend acceptance path executes contract, DOM,
-  accessibility, responsive, renderer/semantic parity, authority-negative,
-  performance, SSE, and end-to-end behavior and reports nonzero case/state
-  counts.
+- Direct frontend journeys exercise contract, DOM, accessibility, responsive,
+  renderer/semantic parity, authority-negative, performance, SSE, and
+  end-to-end behavior. Missing, skipped, or unvisited required states remain
+  unresolved.
 - Representative graph-size acceptance measures interaction latency for zoom,
   pan, filter, search, brushing, linked selection, clustering, playback, and
   evidence expansion. Renderer parity compares semantic selection, scope,
@@ -1075,10 +995,10 @@ not mandatory recreation.
 - No independent Kanban/task store, developer-plan executor, orchestration lab,
   workflow JavaScript, generated inventory, browser-side model scoring, or
   backend policy duplication remains.
-- AST/import-boundary tests fail if renderer or Kanban code computes identity,
-  rank, semantic clusters, causality, readiness, critical path, health,
-  severity, coverage, routes, legal actions, or remediation; persists a board,
-  task/runtime state, expanded evidence, or adapter layout; treats lane/order/
-  process exit/heartbeat/provider output as canonical state; silently rebases a
-  stale link/proposal; or changes semantics/actions between visual and
-  table/text renderers.
+- Direct production-caller tests prove renderer and Kanban code consume supplied
+  application results rather than computing identity, rank, semantic clusters,
+  causality, readiness, critical path, health, severity, coverage, routes,
+  legal actions, or remediation. They prove the browser persists no board,
+  task/runtime state, or expanded evidence; never treats lane/order/process
+  output as canonical state; rejects stale links/proposals; and preserves the
+  same semantics and actions across visual and table/text renderers.

@@ -1,8 +1,12 @@
 # LCM external payload retention & GC — triage decision
 
-> Historical triage record. References to `dashboard/build.mjs` and legacy LCM
-> plugin bundles describe the pre-single-app frontend and are not current build
-> instructions; current production assets come from `dashboard/app-dist`.
+> **Archived triage record — not implementation authority.** This document
+> preserves historical decomposition and safety rationale. Current requirements
+> come only from the `docs/plans/tracedecay-v2/` hierarchy; exact source
+> anchors, case counts, implementation order, and gate matrices below are not
+> rebuild instructions. The payload integrity, containment, and fail-closed
+> deletion semantics remain product safety boundaries and must be validated
+> through current runtime behavior.
 
 Status: **triage complete**. This is the decision record and single entry point for the
 LCM external-payload retention/GC effort. It does not re-specify anything — the four

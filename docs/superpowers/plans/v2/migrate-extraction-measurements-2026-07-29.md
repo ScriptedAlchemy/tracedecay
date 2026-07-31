@@ -1,5 +1,14 @@
 # `tracedecay-migrate` extraction receipts — 2026-07-29
 
+> **Archived provenance — not current requirements.** This document preserves
+> historical measurements and results verbatim where useful. Current scope and
+> acceptance come only from
+> [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its branch/worktree/SHA protocol, Gate A/B,
+> timing/JUnit receipts, exact test names/counts, generated-byte/source-shape
+> checks, PR closure gates, or platform gate lattice.
+
 Scope: the migration near-leaf slice of
 [Plan 12](../../../plans/tracedecay-v2/12-root-compatibility-migration.md)
 ("The final root package owns composition, daemon lifecycle, discovery, upgrade
@@ -85,7 +94,7 @@ Receipt 2 is the same-host, same-target-dir, same-session root leaf control. It
 agrees with the Gate A root leaf figures (25.76s / 27.16s) taken in the other
 worktree, which supports treating the pair as comparable.
 
-### Verdict against the Gate A leaf criterion (≥20% or ≥8s)
+### Historical verdict against the Gate A leaf criterion (≥20% or ≥8s)
 
 **PASS.** A migration planning/checkpoint edit rechecks in 0.61s instead of
 participating in a 28.13s root leaf recheck — 97.8% / 27.5s better than the

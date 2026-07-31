@@ -1,5 +1,14 @@
 # Gate A focused-test relink receipt — 2026-07-29 (addendum)
 
+> **Archived provenance — not current requirements.** This document preserves
+> historical measurements and results verbatim where useful. Current scope and
+> acceptance come only from
+> [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its branch/worktree/SHA protocol, Gate A/B,
+> timing/JUnit receipts, exact test names/counts, generated-byte/source-shape
+> checks, PR closure gates, or platform gate lattice.
+
 Addendum to `docs/superpowers/plans/v2/gate-a-measurements-2026-07-29.md`,
 closing verdict 4 ("Focused tests do not relink the full root" — FAIL at
 61.33s) for the query crate after relocating the query-focused suites into
@@ -70,7 +79,7 @@ Gate A criterion 4 re-measurement (query crate, after relocation):
 4. Touch reverted by inverse edit; `git status` on
    `crates/tracedecay-query/src/` clean.
 
-## Verdict vs Gate A criterion 4
+## Historical verdict vs Gate A criterion 4
 
 PASS for the query crate. A one-line edit inside `crates/tracedecay-query`
 rebuilds only `tracedecay-query` (2.14s wall vs 61.33s FAIL before

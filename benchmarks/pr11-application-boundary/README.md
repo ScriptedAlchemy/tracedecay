@@ -1,5 +1,11 @@
 # PR11 application-boundary compile measurement
 
+> **Historical evidence only.** Preserve the measurement provenance in this
+> directory. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy; exact commands, timings, snapshots,
+> receipts, attestations, PR packets, and gate fields below are not rebuild
+> instructions. Validate current application-boundary behavior directly.
+
 `compile-baseline.json` pins the application-owner compile command and the
 allowed authority boundary. Its timing is explicitly labeled as a historical
 measurement, not a CI budget.

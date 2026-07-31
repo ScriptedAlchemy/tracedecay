@@ -549,14 +549,14 @@ impl RemoteExactObservationQueryServiceV1 {
             return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed);
         }
         let publication_authorization = self.authorization.authorize(
-            &scope,
+            &command.scope,
             &request.body.scope,
             request.body.observation_id(),
             &request.body.expected_authority,
             publication_observed_at,
         )?;
         publication_authorization.validate_for(
-            &scope,
+            &command.scope,
             &request.body.scope,
             request.body.observation_id(),
             &request.body.expected_authority,

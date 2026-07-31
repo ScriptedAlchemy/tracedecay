@@ -1,5 +1,11 @@
 # PR12 transport-boundary direct test fixture
 
+> **Historical evidence only.** Preserve the real fixture and provenance in
+> this directory. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy; exact commands, test names/counts,
+> snapshots, receipts, attestations, PR packets, and gate fields below are not
+> rebuild instructions. Validate current transport behavior directly.
+
 This directory supplies a checked-in real fixture to the direct product test
 for the callable PR12 application boundary. It is not an acceptance packet,
 snapshot, gate manifest, or separate evidence authority. Product acceptance

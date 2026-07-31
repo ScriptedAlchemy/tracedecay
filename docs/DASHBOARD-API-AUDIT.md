@@ -1,9 +1,10 @@
 # Dashboard API Audit — Routes & Inline SQL Hotspots
 
-> Historical pre-refactor audit. Its module sizes, line numbers, and
-> `libsql::Connection` state describe the audited revision and are retained as
-> evidence of the old design. Current dashboard queries use the database engine
-> executor abstraction backed by the `rusqlite` runtime.
+> **Archived audit — not implementation authority.** This document preserves
+> pre-refactor evidence. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy. Its module sizes, line numbers,
+> libSQL-era source shape, preserve list, and refactor gates are not rebuild
+> instructions; validate current dashboard routes and payloads directly.
 
 Audit of the standalone `tracedecay dashboard` HTTP backend, focusing on the
 three route modules named in the task:
