@@ -128,6 +128,10 @@ compiles.
   separate release-dogfood mode for local iteration.
 - Resolve conflicts and integrate parallel work from relevant transcripts,
   plans, and Git history so intent—not whichever side is newer—wins.
+- Before final review, checkpoint the lane, merge the latest explicit clean-main
+  floor, and compare patch IDs plus owned paths. Drop duplicate or superseded
+  work instead of carrying parallel implementations; regenerate canonical
+  outputs after the merge rather than hand-merging generated files.
 
 ## Learned Workspace Facts
 
